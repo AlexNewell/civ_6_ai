@@ -1,0 +1,656 @@
+# Source of truth for GitHub labels, milestones and issues. Created by scripts/seed_github.py.
+# An issue's id prefix sets its milestone and phase/track label. Dependencies are issue ids.
+# Keep personal details out: this repo may become public.
+
+labels:
+  - {name: "phase:1", color: "1d76db", description: "Deterministic bot"}
+  - {name: "phase:2", color: "1d76db", description: "Strategist"}
+  - {name: "phase:3", color: "1d76db", description: "Cheap-tier bake-off"}
+  - {name: "phase:4", color: "1d76db", description: "Reach M1"}
+  - {name: "phase:5", color: "1d76db", description: "Improvement loop"}
+  - {name: "phase:6", color: "1d76db", description: "Puppeted opponents"}
+  - {name: "phase:7", color: "1d76db", description: "Human vs LLM"}
+  - {name: "track:t", color: "5319e7", description: "Game toolchain"}
+  - {name: "track:e", color: "5319e7", description: "Evaluator and data"}
+  - {name: "track:s", color: "5319e7", description: "Puppeteering spike"}
+  - {name: "type:feature", color: "0e8a16", description: "Buildable work"}
+  - {name: "type:epic", color: "b60205", description: "Large task to split into smaller issues"}
+  - {name: "type:spike", color: "fbca04", description: "Time-boxed feasibility investigation"}
+  - {name: "type:research", color: "c5def5", description: "Measurement or analysis"}
+  - {name: "needs:user", color: "d93f0b", description: "Requires an action only the repo owner can take"}
+  - {name: "parallel-ok", color: "bfdadc", description: "Can run alongside sibling tasks"}
+
+milestones:
+  - id: T
+    title: "Track T: Game toolchain (G0)"
+    description: "G0: a script reads state, moves a unit and ends a turn; the governor test proves the hard stop."
+  - id: "1"
+    title: "Phase 1: Deterministic bot (G1)"
+    description: "G1: three unattended full games complete with zero LLM calls."
+  - id: E
+    title: "Track E: Evaluator and data"
+    description: "Objective scoring, baselines and fast scenarios."
+  - id: S
+    title: "Track S: Puppeteering spike (G2)"
+    description: "G2: a scripted bot plays a puppet with the built-in AI fully suppressed for 50 turns."
+  - id: "2"
+    title: "Phase 2: Strategist"
+    description: "A rarely called frontier model steers deterministic policy within the per-game cap."
+  - id: "3"
+    title: "Phase 3: Cheap-tier bake-off"
+    description: "Choose the routine-decision tier by measured quality per dollar."
+  - id: "4"
+    title: "Phase 4: Reach M1"
+    description: "M1: at least 8 standard games complete unattended, none above $1.00, with mean rank 3 of 6 or better, or at least 2 wins."
+  - id: "5"
+    title: "Phase 5: Improvement loop"
+    description: "Evaluator-driven code improvement between games."
+  - id: "6"
+    title: "Phase 6: Puppeted opponents"
+    description: "Five fair LLM opponents in one game. Needs a budget review first."
+  - id: "7"
+    title: "Phase 7: Human vs LLM"
+    description: "A human can play and enjoy a game against LLM opponents."
+
+issues:
+  # Track T
+  - id: T.1
+    title: Set up Civ VI tooling
+    type: feature
+    needs_user: true
+    goal: Prepare the game so external tooling can connect.
+    scope: Install the Civ VI SDK from Steam, launch the game, enable the Tuner option, disable Auto End Turn and use windowed mode. Create an Anthropic API key and set a Console spend limit.
+    acceptance:
+      - Game listens on the tuner port after a restart.
+      - "`.env` holds the API key and is confirmed untracked."
+      - Console spend limit is set.
+    depends: []
+    budget: none
+  - id: T.2
+    title: Pin civ6-mcp and verify connection, state read and write
+    type: feature
+    goal: Prove the game can be read and controlled from this project.
+    scope: Add civ6-mcp pinned to a commit SHA, starting from upstream main at dd2019056371b92ea4854e879ddf05a8cad95e8a, and drive its GameState in-process from a verification script. Record the game build.
+    acceptance:
+      - Script reads game state, moves a unit and ends a turn in a live game.
+      - Pinned SHA and game build are documented.
+    depends: [T.1]
+    budget: none
+  - id: T.3
+    title: Spend ledger and budget governor
+    type: feature
+    parallel: true
+    goal: Make the per-game cap impossible to exceed in code.
+    scope: Pricing config, per-call ledger from actual API usage, and a pre-call check using worst-case cost. Applies per player and per game. Callers fall back to deterministic play when blocked.
+    acceptance:
+      - A call whose worst-case cost would pass the cap is blocked in tests.
+      - API failure and cap exhaustion both return a fallback signal, never an exception that stalls a game.
+      - Ledger totals match usage fixtures.
+    depends: []
+    budget: none
+  - id: T.4
+    title: Standard T1 save set
+    type: feature
+    goal: Create reproducible starting positions.
+    scope: Fixed saves for the standard setup of 6 players, Small map, Quick speed, Prince and Gathering Storm, stored outside git, with seeds and settings recorded in a tracked manifest.
+    acceptance:
+      - At least 3 saves exist and load through the toolchain.
+      - Manifest records seeds, settings and game build with no personal data.
+    depends: [T.2]
+    budget: none
+
+  # Phase 1
+  - id: "1.1"
+    title: Orchestrator turn loop on GameState
+    type: feature
+    goal: Run the single process that owns the one tuner connection.
+    scope: Connect, detect turn state, run ordered handlers and end the turn, with a do-nothing handler set first.
+    acceptance:
+      - Loop plays 20 consecutive turns on a standard save without manual input.
+      - Each turn is logged with timing.
+    depends: [T.2, T.3, T.4]
+    budget: none
+  - id: "1.2"
+    title: Blocker resolver
+    type: epic
+    goal: Clear everything that can stop a turn from ending.
+    scope: Diplomacy pop-ups, World Congress, era choices, policies, governors, great people and other turn blockers. Split into sub-issues as blockers are catalogued.
+    acceptance:
+      - Blocker catalogue is documented with a handler for each type.
+      - A full game has no unresolved turn block lasting beyond the timeout.
+    depends: ["1.1"]
+    budget: none
+  - id: "1.3"
+    title: Scheduled monitors and escalation event bus
+    type: feature
+    parallel: true
+    goal: Ensure strategic checks can't be forgotten.
+    scope: Fixed-schedule victory, threat and resource monitors, emitting typed events such as war declared, city lost and rival victory warning.
+    acceptance:
+      - Monitors run on schedule in a 50-turn test.
+      - Each event type has a test that triggers it.
+    depends: ["1.1"]
+    budget: none
+  - id: "1.4"
+    title: Compact typed state layer
+    type: feature
+    parallel: true
+    goal: Give each domain a small, structured view of the game.
+    scope: Typed models for cities, units, research, empire and rivals, using only what the player can legally see.
+    acceptance:
+      - Domain policies can be tested from fixtures with no running game.
+      - Serialised city state stays under an agreed token limit.
+    depends: ["1.1"]
+    budget: none
+  - id: "1.5"
+    title: City production policy
+    type: feature
+    parallel: true
+    goal: Choose city builds without LLM calls.
+    scope: Remove dominated options, apply priorities and accept empire policy weights.
+    acceptance:
+      - No city sits idle in a 100-turn test.
+      - Unit tests cover early, mid and threatened cities.
+    depends: ["1.2", "1.3", "1.4"]
+    budget: none
+  - id: "1.6"
+    title: Builder policy
+    type: feature
+    parallel: true
+    goal: Automate improvements and repairs.
+    scope: Score tasks using upstream builder advice, with strategic resources, repairs and luxuries prioritised.
+    acceptance:
+      - No builder sits idle while useful work exists in a 100-turn test.
+      - Unit tests cover priority ordering.
+    depends: ["1.2", "1.3", "1.4"]
+    budget: none
+  - id: "1.7"
+    title: Research and civics policy
+    type: feature
+    parallel: true
+    goal: Keep research and civics on a sensible path.
+    scope: Prerequisite-aware target values, eureka and inspiration awareness and policy weights.
+    acceptance:
+      - Research and civics are never empty in a full game.
+      - Unit tests cover target changes.
+    depends: ["1.2", "1.3", "1.4"]
+    budget: none
+  - id: "1.8"
+    title: Exploration and settling policy
+    type: feature
+    parallel: true
+    goal: Expand and explore reliably.
+    scope: Scout routing, settle-site selection with upstream advisors, and settler escort rules.
+    acceptance:
+      - Reaches at least 4 cities by turn 100 on standard saves.
+      - Settlers avoid known threats in tests.
+    depends: ["1.2", "1.3", "1.4"]
+    budget: none
+  - id: "1.9"
+    title: "Military: defence, healing and combat targeting"
+    type: epic
+    parallel: true
+    goal: Protect the empire and fight with calculated decisions.
+    scope: Threat assessment, garrisoning, healing, retreat, target selection by expected outcome, and army composition. Split into sub-issues.
+    acceptance:
+      - Survives early barbarian and AI pressure on standard saves.
+      - Attacks use calculated odds with tests.
+    depends: ["1.2", "1.3", "1.4"]
+    budget: none
+  - id: "1.10"
+    title: Government, policies and governors
+    type: feature
+    parallel: true
+    goal: Keep empire-wide choices filled and reasonable.
+    scope: Government changes, policy-card selection and governor assignment.
+    acceptance:
+      - No empty policy slots for more than 5 turns in a full game.
+      - Unlocked governor titles are always spent.
+    depends: ["1.2", "1.3", "1.4"]
+    budget: none
+  - id: "1.11"
+    title: Trade, religion and great people
+    type: feature
+    parallel: true
+    goal: Use secondary game systems instead of ignoring them.
+    scope: Trade route scoring, pantheon and religion choices, and great person recruitment.
+    acceptance:
+      - Trade capacity stays filled in a full game.
+      - Pantheon is chosen when available.
+    depends: ["1.2", "1.3", "1.4"]
+    budget: none
+  - id: "1.12"
+    title: Basic diplomacy and World Congress rules
+    type: feature
+    parallel: true
+    goal: Handle diplomacy safely with simple rules.
+    scope: Friendship, delegation and deal rules, and World Congress voting. Avoid known diplomatic-victory failure patterns from CivBench.
+    acceptance:
+      - Every incoming proposal gets a rule-based response.
+      - World Congress votes complete with no manual input.
+    depends: ["1.2", "1.3", "1.4"]
+    budget: none
+  - id: "1.13"
+    title: "Unattended runner: watchdog, crash recovery and overnight queue"
+    type: feature
+    parallel: true
+    goal: Run queued games safely without supervision.
+    scope: Launch and load, stall detection, crash restart from autosave, game-over capture and a run queue. Outputs stay outside git.
+    acceptance:
+      - Recovers from a forced game crash in a test.
+      - A queued game produces a complete run record unattended.
+    depends: ["1.2"]
+    budget: none
+
+  # Track E
+  - id: E.1
+    title: Ingest CivBench dataset and extract baselines
+    type: research
+    parallel: true
+    goal: Get a frontier baseline without paying for frontier games.
+    scope: Scripted, gitignored download of the public dataset. Extract decisions, outcomes and available cost figures. Credit CC BY 4.0 attribution.
+    acceptance:
+      - Fetch script is repeatable and commits no data.
+      - Baseline summary is written to docs.
+    depends: []
+    budget: none
+  - id: E.2
+    title: Metric library
+    type: feature
+    parallel: true
+    goal: Score every run objectively.
+    scope: Rank, yields, tech pace, cities, kill ratio, errors and cost per decision, working on both our runs and CivBench data.
+    acceptance:
+      - Metrics are unit-tested against fixtures.
+      - One command scores a run.
+    depends: [E.1]
+    budget: none
+  - id: E.3
+    title: Short mid-game scenario battery
+    type: feature
+    parallel: true
+    goal: Test strategy in minutes, given only a few full games a week.
+    scope: Saved mid-game situations such as a war start, a rival nearing victory or a settling choice, each with a scoring rule.
+    acceptance:
+      - At least 5 scenarios run unattended.
+      - The battery finishes in under 30 minutes.
+    depends: [T.4]
+    budget: none
+  - id: E.4
+    title: Results report with confidence intervals
+    type: feature
+    parallel: true
+    goal: Avoid conclusions drawn from noise.
+    scope: Compare two run sets with effect sizes and intervals.
+    acceptance:
+      - A report compares two labelled run sets.
+      - Sample-size warnings appear for small sets.
+    depends: [E.2]
+    budget: none
+
+  # Track S
+  - id: S.1
+    title: "Lua mod: intercept and hold an AI turn"
+    type: spike
+    parallel: true
+    goal: Find out whether an AI player's turn can be held for external control.
+    scope: Minimal gameplay mod hooking turn events and exposing a readiness flag through the tuner.
+    acceptance:
+      - Tuner can see a held AI turn and release it.
+      - Findings on event timing are written up.
+    depends: [T.2]
+    budget: none
+  - id: S.2
+    title: Suppress the built-in AI and measure leaks
+    type: spike
+    goal: Find out how completely the built-in AI can be silenced.
+    scope: Units, city production, research, civics and diplomacy. Record everything it still does on its own.
+    acceptance:
+      - A 50-turn run lists every remaining AI action by type.
+      - Each leak has a workaround or is marked unresolved.
+    depends: [S.1]
+    budget: none
+  - id: S.3
+    title: Issue every core action for a puppet
+    type: spike
+    parallel: true
+    goal: Confirm a puppet can legally do what a player can.
+    scope: Move, attack, found city, build, produce, purchase, promote, research and diplomacy through GameCore or local-player switching.
+    acceptance:
+      - A pass or fail table covers every action.
+      - Switching restores the local player after errors.
+    depends: [S.1]
+    budget: none
+  - id: S.4
+    title: Scale to 5 puppets beside a human
+    type: spike
+    goal: Measure whether the experience is tolerable.
+    scope: Scripted puppets in all five AI slots while a human plays. Record time per turn and visible glitches.
+    acceptance:
+      - Timing is reported against the under-2-minute target.
+      - Visible artefacts are catalogued.
+    depends: [S.2, S.3]
+    budget: none
+  - id: S.5
+    title: Fog-of-war-safe read layer prototype
+    type: spike
+    parallel: true
+    goal: Prevent opponents from cheating by accident.
+    scope: Reads limited to what a given player has revealed or can currently see.
+    acceptance:
+      - Tests prove hidden units and tiles are not returned.
+    depends: [S.1]
+    budget: none
+  - id: S.6
+    title: Puppeteering go/no-go report
+    type: research
+    goal: Decide G2 with evidence.
+    scope: Summarise findings, run the 50-turn gate and, on no-go, set out options including a design where the LLM only steers the built-in AI.
+    acceptance:
+      - G2 result is recorded with evidence.
+      - On no-go, work stops pending an owner decision.
+    depends: [S.4, S.5]
+    budget: none
+
+  # Phase 2
+  - id: "2.1"
+    title: Policy document schema
+    type: feature
+    goal: Define how strategy controls deterministic play.
+    scope: Typed schema for victory target, posture, expansion and weights, with each domain policy reading it and safe defaults.
+    acceptance:
+      - Changing a weight changes behaviour in unit tests.
+      - Invalid documents are rejected and defaults are kept.
+    depends: ["1.5", "1.6", "1.7", "1.8", "1.9", "1.10", "1.11", "1.12", "1.13"]
+    budget: none
+  - id: "2.2"
+    title: Persistent task DB with deadlines
+    type: feature
+    parallel: true
+    goal: Turn stated intentions into tracked work.
+    scope: Tasks with targets, deadlines, priorities and dependencies, checked in software every turn and surviving restarts.
+    acceptance:
+      - Overdue tasks raise an event.
+      - State survives a process restart.
+    depends: ["2.1"]
+    budget: none
+  - id: "2.3"
+    title: Strategist call with structured output
+    type: feature
+    goal: Let a frontier model update strategy rarely and safely.
+    scope: Compact prompt, structured policy output, cadence and escalation triggers, all routed through the governor. Runs in the background, so play never waits on it.
+    acceptance:
+      - Strategist updates policy in a live game within the cap.
+      - A failed or blocked call leaves the game playing normally.
+    depends: ["1.3", "2.1", T.3]
+    budget: capped test games
+  - id: "2.4"
+    title: Reply store and replay mode
+    type: feature
+    parallel: true
+    goal: Reproduce games despite non-deterministic models.
+    scope: Store each model reply outside git, keyed by request, and replay without API calls. Seed deterministic layers.
+    acceptance:
+      - A replay makes zero external calls and produces identical decisions.
+    depends: ["2.3"]
+    budget: none
+  - id: "2.5"
+    title: Measure real per-call and per-game cost
+    type: research
+    parallel: true
+    goal: Replace budget estimates with measurements.
+    scope: Tokens, thinking, cache hits and calls per game from real runs, then update the per-bucket budget.
+    acceptance:
+      - Budget table in docs reflects measured data.
+      - Decision recorded on whether the cap supports the planned cadence.
+    depends: ["2.3"]
+    budget: capped test games
+  - id: "2.6"
+    title: Sonnet 5.5 vs Opus 5.5 at the same dollar cap
+    type: research
+    goal: Pick the strategist model by results.
+    scope: Compare fewer Opus calls with more Sonnet calls on the same scenarios at equal spend.
+    acceptance:
+      - Report with evaluator results names the default model.
+    depends: ["2.5", E.2]
+    budget: capped test games
+
+  # Phase 3
+  - id: "3.1"
+    title: Build a replay corpus
+    type: feature
+    goal: Compare cheap models without live games.
+    scope: Bounded decisions from CivBench and our bot, with state, legal options and outcome labels where available. Stored outside git.
+    acceptance:
+      - Corpus covers at least 5 decision types.
+      - Build is scripted and repeatable.
+    depends: [E.1, "1.4"]
+    budget: none
+  - id: "3.2"
+    title: "Router interface: code, cheap tier, strategist"
+    type: feature
+    parallel: true
+    goal: Send each decision to the cheapest layer that can handle it.
+    scope: Provider-neutral interface, routing rules, confidence thresholds and per-decision logging through the governor.
+    acceptance:
+      - Providers can be swapped by config.
+      - Every routed decision records its layer and cost.
+    depends: ["1.4", T.3]
+    budget: none
+  - id: "3.3"
+    title: Benchmark Haiku 5.5
+    type: research
+    parallel: true
+    goal: Measure the cloud cheap-tier candidate.
+    scope: Run the corpus through the Batch API and record agreement, outcome quality, latency and cost.
+    acceptance:
+      - Results are scored by the shared rubric.
+    depends: ["3.1", "3.2"]
+    budget: offline batch run
+  - id: "3.4"
+    title: Benchmark local models
+    type: research
+    parallel: true
+    goal: Find out if a local tier is viable on consumer hardware.
+    scope: llama.cpp with 3B-8B tool-oriented models, offline first, then with Civ VI running, recording memory use and game performance.
+    acceptance:
+      - Results are scored by the shared rubric.
+      - A clear verdict on live-play viability is recorded.
+    depends: ["3.1", "3.2"]
+    budget: none
+  - id: "3.5"
+    title: Benchmark Jev
+    type: research
+    parallel: true
+    needs_user: true
+    goal: Measure a bounded decision model and its confidence calibration.
+    scope: Convert the corpus to choice, score and yes-no questions. Confirm official pricing and data handling first. Requires a TypeSafe account.
+    acceptance:
+      - Results are scored by the shared rubric.
+      - Confidence thresholds are measured, not assumed.
+    depends: ["3.1", "3.2"]
+    budget: offline batch run
+  - id: "3.6"
+    title: Pick a cheap tier and integrate live
+    type: feature
+    goal: Adopt the best tier by decision quality per dollar.
+    scope: Compare results, choose per decision type and integrate behind the router.
+    acceptance:
+      - Decision is recorded with data.
+      - A live game stays within the cheap-tier budget.
+    depends: ["3.3", "3.4", "3.5"]
+    budget: capped test games
+
+  # Phase 4
+  - id: "4.1"
+    title: Tuning rounds
+    type: feature
+    goal: Close the gap to M1 using evidence.
+    scope: Repeat evaluator review, targeted fix and scenario test. Each round names one weakness and records its result.
+    acceptance:
+      - Scenario scores are at or above M1 readiness.
+      - Each round has a short recorded result.
+    depends: ["2.2", "2.4", "2.6", "3.6", E.3, E.4]
+    budget: capped test games
+  - id: "4.2"
+    title: Formal M1 benchmark and report
+    type: research
+    goal: Prove the first milestone.
+    scope: At least 8 standard games with frozen code and published metrics.
+    acceptance:
+      - All games complete unattended.
+      - No game exceeds $1.00 in external calls.
+      - Mean rank is 3 of 6 or better, or at least 2 wins.
+    depends: ["4.1"]
+    budget: capped test games
+
+  # Phase 5
+  - id: "5.1"
+    title: Telemetry-driven failure analysis
+    type: feature
+    parallel: true
+    goal: Find the most valuable weakness automatically.
+    scope: Reports ranking lost value by domain, using metrics first and LLM summary where it earns its cost.
+    acceptance:
+      - A report names the top 3 weaknesses with evidence.
+    depends: ["4.2"]
+    budget: capped test games
+  - id: "5.2"
+    title: Candidate policy sandbox
+    type: feature
+    goal: Test generated code safely.
+    scope: Isolated candidate modules with unit tests, scenario tests and resource limits. Never loaded in a live game.
+    acceptance:
+      - A failing candidate can't reach production.
+    depends: ["5.1"]
+    budget: none
+  - id: "5.3"
+    title: First Claude-written policy improvement
+    type: feature
+    goal: Prove code generation can beat the incumbent.
+    scope: One narrow change to one policy, compared against the incumbent on fixed scenarios.
+    acceptance:
+      - The change is proved better, or the failed attempt is documented.
+    depends: ["5.2"]
+    budget: capped test games
+  - id: "5.4"
+    title: Automated promotion pipeline
+    type: feature
+    goal: Run generate, score and promote without manual steps.
+    scope: Candidates move through scenarios, then overnight confirmation games. Promotion happens only between games.
+    acceptance:
+      - A candidate runs from creation to a promote or reject decision unattended.
+    depends: ["5.3", "5.5"]
+    budget: capped test games
+  - id: "5.5"
+    title: Versioned policy registry and rollback
+    type: feature
+    parallel: true
+    goal: Know what produced each result and undo regressions.
+    scope: Version every policy, tag each run with its versions and support one-command rollback.
+    acceptance:
+      - Any run traces to exact policy versions.
+      - Rollback is tested.
+    depends: ["5.2"]
+    budget: none
+
+  # Phase 6
+  - id: "6.1"
+    title: Vendor civ6-mcp and add player_id support
+    type: epic
+    goal: Let the game layer act for any player.
+    scope: Vendor under third_party with its MIT licence, then add player_id across about 66 builder call sites.
+    acceptance:
+      - Reads and actions target a chosen player.
+      - Licence and upstream SHA are retained.
+    depends: [S.6, "4.2"]
+    budget: needs budget review
+  - id: "6.2"
+    title: Production puppet mod and coordinator
+    type: feature
+    goal: Turn the spike into a dependable turn cycle.
+    scope: Hardened mod and a coordinator that sequences each opponent's turn over the one connection.
+    acceptance:
+      - A 100-turn game cycles all puppets with no stall.
+    depends: ["6.1"]
+    budget: needs budget review
+  - id: "6.3"
+    title: Enforced fog-of-war reads
+    type: feature
+    parallel: true
+    goal: Guarantee opponents only know what they can legally see.
+    scope: Make visibility filtering mandatory for puppets. Cheat-level APIs are unavailable to them.
+    acceptance:
+      - Tests prove no read path bypasses the filter.
+    depends: ["6.1", S.5]
+    budget: needs budget review
+  - id: "6.4"
+    title: One LLM puppet vs built-in AI
+    type: feature
+    goal: Check that puppet play matches local-player strength.
+    scope: Run the full bot as a puppet on standard saves and compare with M1 results.
+    acceptance:
+      - Results are comparable to M1 within the per-game cap.
+    depends: ["6.2", "6.3"]
+    budget: needs budget review
+  - id: "6.5"
+    title: Five LLM puppets in one game
+    type: feature
+    goal: Run all opponents at once within the cap.
+    scope: Separate ledgers per player, identical code and config, and complete games.
+    acceptance:
+      - A full game finishes with each puppet at or below $1.00.
+    depends: ["6.4"]
+    budget: needs budget review
+  - id: "6.6"
+    title: Meet the opponent latency target
+    type: feature
+    goal: Keep a human from waiting too long between turns.
+    scope: Batched Lua, faster state reads and background strategist calls during the human's turn.
+    acceptance:
+      - All five opponents finish in under 2 minutes at median, late game included.
+    depends: ["6.5"]
+    budget: needs budget review
+
+  # Phase 7
+  - id: "7.1"
+    title: One-command setup and launch
+    type: feature
+    parallel: true
+    goal: Make a game easy to start.
+    scope: Setup checks, configuration and launch with clear errors.
+    acceptance:
+      - A clean setup reaches a playable game by following the docs.
+    depends: ["6.6"]
+    budget: none
+  - id: "7.2"
+    title: Human-turn experience polish
+    type: feature
+    parallel: true
+    goal: Hide the machinery from the human.
+    scope: Remove visible switching artefacts, stray pop-ups and other interruptions.
+    acceptance:
+      - A full playtest logs no visible puppet artefacts.
+    depends: ["6.6"]
+    budget: none
+  - id: "7.3"
+    title: Human strength and fairness playtest
+    type: research
+    needs_user: true
+    goal: Find out if opponents are fair and fun.
+    scope: Full games played by a human, recording strength, fairness, wait times and enjoyment.
+    acceptance:
+      - Written playtest report covers strength, fairness and waits.
+    depends: ["7.1", "7.2"]
+    budget: needs budget review
+  - id: "7.4"
+    title: Decide difficulty calibration and release options
+    type: research
+    needs_user: true
+    goal: Choose what comes next.
+    scope: Decide on difficulty settings, sharing, licence and whether to make the repo public.
+    acceptance:
+      - Decision is recorded in docs/decisions.md.
+      - If going public, a licence is chosen and the public-ready check passes.
+    depends: ["7.3"]
+    budget: none

@@ -1,0 +1,86 @@
+# Decisions
+
+Project decisions and why they were made. Add new ones as the work teaches us more.
+
+## What shaped the plan
+
+| Finding | Consequence |
+|---|---|
+| Frontier-only CivBench games cost about $31-229 each and take 2-8 hours. | A $1 cap needs a 97-99.5% reduction, so most turns must make no LLM call and a deterministic bot comes first. |
+| FireTuner is hard-disabled in all multiplayer modes, including hot-seat. | Opponents must "puppeteer" AI slots in single-player. |
+| Puppeteering is an unimplemented upstream proposal with open questions. | The long-term goal is unproven, so Track S tests it early. |
+| The tuner allows one connection, and upstream recommends one orchestrator process for multi-agent play. | The game AI runs in-process against civ6-mcp's `GameState`, with no per-model MCP tool loop. |
+| GameCore can read every player's state. | Fog-of-war filtering must be enforced, or opponents can cheat by accident. |
+| Claude Haiku 5.5 costs $0.10 input and $0.50 output per million tokens. | It is a viable cloud option for routine decisions. |
+| Consumer PCs share limited memory between the game and a local model. | Local models are benchmarked offline first and may not be viable during live play. |
+
+## Budget
+
+- The $1 cap counts every external model call in a game, per player. Local inference counts as $0.
+- A code-enforced governor blocks any call whose worst-case cost would exceed the cap.
+- At the cap, or if an API is down, the player continues deterministically. A game never stalls.
+- Every call is logged using actual API usage.
+
+Estimated split, to be replaced with measurements in issue 2.5:
+
+| Bucket | Allocation | Assumption | Buys |
+|---|---|---|---|
+| Strategist | $0.65 | 6k input, 1.5k output, $0.027 per Sonnet call | About 24 Sonnet calls (every 20 turns plus about 8 events), or 12 Opus |
+| Cheap tier | $0.25 | Haiku, 1.5k input, 100 output, $0.0002 per call | About 1,250 calls, under 4 per turn |
+| Crisis reserve | $0.10 | Late-game escalations | About 3 Sonnet calls |
+
+Prompt caching is left out of these figures. Strategist calls will often be more than 5 minutes apart, so cache hits can't be assumed. Prices were taken from Anthropic's reference on 2026-10-06 and should be rechecked before use.
+
+## Models
+
+- The strategist defaults to Sonnet 5.5, with Opus 5.5 as a measured comparison. Fable-class models are out of scope.
+- Model IDs and prices live in config.
+- Haiku 5.5, local models and Jev compete for the routine-decision tier on measured quality per dollar.
+- The baseline comes from the public CivBench dataset, so no expensive frontier-only games are needed.
+
+## Game
+
+- Standard setup: 6 players, Small map, Quick speed (about 330 turns), Prince, Gathering Storm, fixed T1 saves.
+- Game build 15296837 is pinned as far as Steam allows, and each result records its build.
+
+## Opponents
+
+- Every LLM player uses identical code, prompts and config.
+- Strict fairness: own fog of war only, no cheat APIs, and no resource bonuses added by this project.
+- Latency target: under 2 minutes for all five opponents combined. Strategist calls run in the background during the human's turn.
+- **Determinism has a limit.** Identical inputs can't guarantee identical play, because Claude responses aren't reproducible on request. Deterministic layers are seeded and model replies are stored, so any game can be replayed exactly.
+
+## Dependencies
+
+- [civ6-mcp](https://github.com/lmwilki/civ6-mcp) (MIT) is pinned to a commit SHA, then vendored under `third_party/` in Phase 6, because a GitHub fork of a public repo can't be private.
+- [`archi-max/jev-civ6`](https://github.com/archi-max/jev-civ6) (MIT) is a usable reference.
+- [`Roarpeng/jev-civ6`](https://github.com/Roarpeng/jev-civ6) has no licence, so it is read for ideas only and no code is copied.
+
+## Public-ready rules
+
+Making a repo public exposes all of its history and issues, so these rules apply from the first commit.
+
+**Never in git or issues:**
+
+- Email addresses, real names beyond the GitHub handle, or game and service account names.
+- Absolute local paths or usernames. Code uses env vars and relative paths; docs use placeholders.
+- API keys and tokens. They live only in an untracked `.env`.
+- Personal schedules or spending details beyond the project's per-game cap.
+- Game saves, logs, telemetry and stored model replies, which can contain player names and local paths.
+- Civ VI assets or binaries, and downloaded datasets.
+
+**Enforcement:**
+
+- Commits use a GitHub noreply address.
+- `gitleaks` runs in CI and as a pre-commit hook.
+- [`scripts/check_public_ready.py`](../scripts/check_public_ready.py) checks files and commit metadata. Personal strings go in the untracked `.local/public-ready-patterns.txt`.
+- Test fixtures must be synthetic or scrubbed.
+
+No licence is chosen yet. That decision is part of issue 7.4, or comes sooner if the repo goes public first.
+
+## Sources
+
+- [civ6-mcp repository](https://github.com/lmwilki/civ6-mcp), including `docs/agent-vs-agent.md`, `docs/observability.md` and `docs/paper/scenario-spec.md`
+- [CivBench paper, arXiv 2609.02459](https://arxiv.org/abs/2609.02459)
+- [CivBench dataset](https://huggingface.co/datasets/lmwilkin/civbench)
+- [Original research report](research/reducing-frontier-model-cost.md)

@@ -1,0 +1,35 @@
+# Secrets and local-only settings
+.env
+.env.*
+!.env.example
+.local/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+
+# Game data, telemetry and stored model replies: may hold player names or local paths
+data/
+runs/
+logs/
+*.Civ6Save
+*.Civ6Replay
+*.jsonl
+*.parquet
+*.eval
+
+# Upstream datasets are fetched by script, never committed
+datasets/
+
+# OS and editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/

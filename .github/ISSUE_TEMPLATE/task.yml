@@ -1,0 +1,30 @@
+name: Task
+description: A roadmap task. Keep personal details out; this repo may become public.
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+    validations:
+      required: true
+  - type: input
+    id: depends
+    attributes:
+      label: Depends on
+  - type: input
+    id: budget
+    attributes:
+      label: Budget
+      description: Expected external model spend, for example "none" or "capped test games".

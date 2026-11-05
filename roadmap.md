@@ -10,6 +10,7 @@ Issues are generated from [`.github/roadmap-issues.yaml`](.github/roadmap-issues
 |---|---|
 | Phase 0: Repo setup | Done |
 | Track T: Game toolchain | Done |
+| Phase 1: Deterministic bot | In progress |
 | Everything else | Not started |
 
 ## Sequence

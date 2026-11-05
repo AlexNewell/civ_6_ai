@@ -1,0 +1,37 @@
+# Model prices in USD per million tokens, as strings so they parse to exact Decimals.
+# Standard first-party API rates with global inference. Recheck against `source` before use.
+checked = 2026-11-05
+source = "https://platform.claude.com/docs/en/about-claude/pricing"
+
+[budget]
+cap_usd_per_player_per_game = "1.00"
+
+[models."claude-opus-5-5"]
+input = "4.00"
+cache_write_5m = "5.00"
+cache_write_1h = "8.00"
+cache_read = "0.20"
+output = "20.00"
+
+[models."claude-sonnet-5-5"]
+input = "2.00"
+cache_write_5m = "2.50"
+cache_write_1h = "4.00"
+cache_read = "0.10"
+output = "10.00"
+
+[models."claude-haiku-5-5"]
+input = "0.10"
+cache_write_5m = "0.125"
+cache_write_1h = "0.20"
+cache_read = "0.01"
+output = "0.50"
+# Over this many prompt tokens, including cached ones, the whole request pays the rates below.
+long_prompt_threshold = 100000
+
+[models."claude-haiku-5-5".long_prompt]
+input = "0.50"
+cache_write_5m = "0.625"
+cache_write_1h = "1.00"
+cache_read = "0.05"
+output = "2.50"

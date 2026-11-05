@@ -21,7 +21,9 @@ LOCAL_PATTERNS = ROOT / ".local" / "public-ready-patterns.txt"
 PATH_PATTERN = re.compile(
     r"(?:[A-Za-z]:[\\/]+Users[\\/]+|/[a-z]/Users/|/Users/|/home/)[A-Za-z0-9_.-]+",
 )
-EMAIL_PATTERN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
+EMAIL_PATTERN = re.compile(
+    r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}(?![A-Za-z0-9])"
+)
 ALLOWED_EMAIL = re.compile(
     r"^(?:noreply@anthropic\.com|noreply@github\.com"
     r"|[A-Za-z0-9+._-]+@users\.noreply\.github\.com)$",

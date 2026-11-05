@@ -18,7 +18,8 @@ from civ_mcp.lua import SENTINEL
 MANIFEST = Path(__file__).parent.parent / "config" / "standard_saves.json"
 LOAD_TIMEOUT_SECONDS = 600
 POLL_SECONDS = 2
-STATUS_CHECKS = 10
+STATUS_CHECKS = 60
+STATUS_POLL_SECONDS = 0.5
 PREFIX = "SAVEINFO|"
 
 LOAD_LUA = """
@@ -114,18 +115,24 @@ async def request_load(connection: GameConnection, name: str) -> None:
     await connection.execute_in_state(
         state, LOAD_LUA.format(name=name, leave=leave, sentinel=SENTINEL)
     )
+    await wait_for_teardown(connection, state)
+
+
+async def wait_for_teardown(connection: GameConnection, state: int) -> None:
+    """Return once Civ tears down the open Lua state, the only proof that the load has started."""
     for _ in range(STATUS_CHECKS):
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(STATUS_POLL_SECONDS)
         try:
             lines = await connection.execute_in_state(
                 state, STATUS_LUA.format(sentinel=SENTINEL), timeout=2
             )
-        except (ConnectionError, LuaError, OSError, TimeoutError):
-            return  # The load has already torn down this Lua state.
-        if "NOT_FOUND" in lines:
-            raise FileNotFoundError(f"Civ doesn't list a save called {name}")
-        if "FOUND" in lines:
+        except TimeoutError:  # Must come first, because it's a kind of OSError.
+            continue
+        except (ConnectionError, LuaError, OSError):
             return
+        if "NOT_FOUND" in lines:
+            raise FileNotFoundError("Civ doesn't list this save")
+    raise TimeoutError("Civ never started loading the save")
 
 
 async def read_when_loaded(connection: GameConnection, turn_must_be: int) -> dict[str, str]:

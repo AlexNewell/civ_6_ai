@@ -4,7 +4,23 @@ version = "0.0.0"
 description = "Low-cost LLM opponents for Civilization VI."
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "civ6-mcp",
+    # civ6-mcp closes game crash dialogs with this, and skips that silently if it's missing.
+    "pywin32>=311; sys_platform == 'win32'",
+]
+
+[tool.uv.sources]
+civ6-mcp = { git = "https://github.com/lmwilki/civ6-mcp", rev = "dd2019056371b92ea4854e879ddf05a8cad95e8a" }
+
+[tool.uv]
+# Used by civ6-mcp's server only, which this project never runs. See docs/decisions.md.
+# Remove the anthropic line when this project first depends on it.
+override-dependencies = [
+    "anthropic; sys_platform == 'never'",
+    "fastapi; sys_platform == 'never'",
+    "mcp; sys_platform == 'never'",
+]
 
 [dependency-groups]
 dev = [

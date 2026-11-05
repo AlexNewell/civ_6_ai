@@ -75,6 +75,7 @@ Making a repo public exposes all of its history and issues, so these rules apply
 **Enforcement:**
 
 - Commits use a GitHub noreply address.
+- Merges done on GitHub can use the account's email, so CI scans a PR's own commits and history stays noreply only if the account keeps its email private.
 - `gitleaks` runs in CI and as a pre-commit hook.
 - [`scripts/check_public_ready.py`](../scripts/check_public_ready.py) checks files and commit metadata. Personal strings go in the untracked `.local/public-ready-patterns.txt`.
 - Test fixtures must be synthetic or scrubbed.

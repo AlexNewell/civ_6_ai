@@ -65,6 +65,8 @@ A review of the pinned commit found nothing malicious, but these rules apply:
 - Never run `civ_mcp.server`. It opens an unauthenticated dashboard on all network interfaces, moves the mouse and can close the game.
 - `load_game_save` can restart the game and click through its menus if Lua can't find the save.
 - `end_turn` deletes older `0_MCP_*` saves, so project saves must not use that prefix.
+- civ6-mcp assumes the default Documents folder. If Windows has moved it, `0_MCP_*` saves are never pruned, so set the save folder before running full games. See issue #5.
+- Loading a save over Lua stops on Civ's loading screen until someone clicks, and the tuner stays closed until then. Unattended runs need a way past this. See issue #17.
 - Strings sent to Lua aren't escaped, so model-chosen names must be validated first. Never expose its raw Lua method to a model, because that would bypass fog of war.
 - [`archi-max/jev-civ6`](https://github.com/archi-max/jev-civ6) (MIT) is a usable reference.
 - [`Roarpeng/jev-civ6`](https://github.com/Roarpeng/jev-civ6) has no licence, so it is read for ideas only and no code is copied.

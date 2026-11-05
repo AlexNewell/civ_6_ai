@@ -1,0 +1,49 @@
+{
+  "game_build": "15296837",
+  "other_setup": {
+    "disaster_intensity": 2,
+    "world_settings": "All standard",
+    "game_modes": "None",
+    "victory_conditions": "All on",
+    "leaders": "Random, full pool"
+  },
+  "settings": {
+    "ruleset": "RULESET_EXPANSION_2",
+    "difficulty": "DIFFICULTY_PRINCE",
+    "game_speed": "GAMESPEED_QUICK",
+    "start_era": "ERA_ANCIENT",
+    "map_size": "MAPSIZE_SMALL",
+    "map_script": "Continents.lua",
+    "major_players": "6",
+    "city_states": "9"
+  },
+  "saves": [
+    {
+      "name": "STD_T1_01",
+      "recorded": {
+        "game_seed": "1282768033",
+        "map_seed": "1282768034",
+        "civilization": "CIVILIZATION_MAYA",
+        "leader": "LEADER_LADY_SIX_SKY"
+      }
+    },
+    {
+      "name": "STD_T1_02",
+      "recorded": {
+        "game_seed": "-1052431239",
+        "map_seed": "-1052431238",
+        "civilization": "CIVILIZATION_KHMER",
+        "leader": "LEADER_JAYAVARMAN"
+      }
+    },
+    {
+      "name": "STD_T1_03",
+      "recorded": {
+        "game_seed": "-451617601",
+        "map_seed": "-451617600",
+        "civilization": "CIVILIZATION_BYZANTIUM",
+        "leader": "LEADER_BASIL"
+      }
+    }
+  ]
+}

@@ -75,7 +75,7 @@ Making a repo public exposes all of its history and issues, so these rules apply
 
 **Never in git or issues:**
 
-- Email addresses, real names beyond the GitHub handle, or game and service account names.
+- Email addresses, or game and service account names. The owner's name is fine, because the GitHub handle already shows it.
 - Absolute local paths or usernames. Code uses env vars and relative paths; docs use placeholders.
 - API keys and tokens. They live only in an untracked `.env`.
 - Personal schedules or spending details beyond the project's per-game cap.

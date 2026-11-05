@@ -4,7 +4,13 @@ from dataclasses import dataclass
 
 import pytest
 
-from civ6_ai.orchestrator import DoNothing, Orchestrator, StopReason, TurnLog, classify_end_turn
+from civ6_ai.orchestrator import (
+    DoNothing,
+    Orchestrator,
+    StopReason,
+    TurnLog,
+    stop_reason_in_report,
+)
 
 
 @dataclass
@@ -53,19 +59,17 @@ def play(game, handlers, turns, tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("result", "after", "expected"),
+    ("report", "expected"),
     [
-        ("Turn 5 -> 6", 6, None),
-        ("Cannot end turn — resolve these blockers:", 5, StopReason.BLOCKED),
-        ("End turn blocked (turn 5): diplomacy", 5, StopReason.BLOCKED),
-        ("Turn 5 -> 6", 5, StopReason.BLOCKED),
-        ("HANG:5:save|End turn requested", 5, StopReason.HUNG),
-        ("GAME OVER — DEFEAT. Someone won.", 5, StopReason.GAME_OVER),
-        ("RUN ABORTED — save scumming threshold exceeded.", 5, StopReason.RUN_ABORTED),
+        ("Turn 5 -> 6", None),
+        ("Cannot end turn — resolve these blockers:", None),
+        ("HANG:5:save|End turn requested", StopReason.HUNG),
+        ("GAME OVER — DEFEAT. Someone won.", StopReason.GAME_OVER),
+        ("RUN ABORTED — save scumming threshold exceeded.", StopReason.RUN_ABORTED),
     ],
 )
-def test_classify_end_turn(result, after, expected):
-    assert classify_end_turn(result, 5, after) is expected
+def test_stop_reason_in_report(report, expected):
+    assert stop_reason_in_report(report) is expected
 
 
 def test_plays_requested_turns_and_logs_each_with_timing(tmp_path):
@@ -121,6 +125,27 @@ def test_defeat_during_the_ai_turn_stops_before_reading_the_game(tmp_path):
     assert reason is StopReason.GAME_OVER
     assert [record.turn for record in turn_log.records] == [1, 2]
     assert game.calls.count("handler") == 2
+
+
+@pytest.mark.parametrize(
+    ("report", "expected"),
+    [("HANG:5:save|stuck", StopReason.HUNG), ("RUN ABORTED — stop", StopReason.RUN_ABORTED)],
+)
+def test_terminal_report_stops_without_touching_the_game_again(tmp_path, report, expected):
+    class StuckGame(FakeGame):
+        async def check_game_over(self):
+            if self.calls:
+                raise AssertionError("queried a game that can't answer")
+            return None
+
+        async def get_game_overview(self):
+            if self.calls:
+                raise AssertionError("queried a game that can't answer")
+            return await super().get_game_overview()
+
+    reason, turn_log = play(StuckGame(results=[report]), [DoNothing()], 20, tmp_path)
+    assert reason is expected
+    assert turn_log.records[-1].stop_reason == expected
 
 
 def test_normal_turns_keep_the_end_turn_report(tmp_path):

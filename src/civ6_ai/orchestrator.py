@@ -48,18 +48,19 @@ class StopReason(StrEnum):
     RUN_ABORTED = "run_aborted"  # civ6-mcp refused to continue the run.
 
 
-def classify_end_turn(result: str, turn_before: int, turn_after: int) -> StopReason | None:
-    """Return why the run must stop after `end_turn`, or None if the turn advanced.
+_REPORT_PREFIXES = {
+    "GAME OVER": StopReason.GAME_OVER,
+    "RUN ABORTED": StopReason.RUN_ABORTED,
+    "HANG:": StopReason.HUNG,
+}
 
-    civ6-mcp reports these outcomes in its return text, not by raising.
-    """
-    if result.startswith("GAME OVER"):
-        return StopReason.GAME_OVER
-    if result.startswith("RUN ABORTED"):
-        return StopReason.RUN_ABORTED
-    if result.startswith("HANG:"):
-        return StopReason.HUNG
-    return None if turn_after > turn_before else StopReason.BLOCKED
+
+def stop_reason_in_report(report: str) -> StopReason | None:
+    """Return the stop reason in `end_turn`'s text. civ6-mcp reports these without raising."""
+    for prefix, reason in _REPORT_PREFIXES.items():
+        if report.startswith(prefix):
+            return reason
+    return None
 
 
 @dataclass(frozen=True)
@@ -115,11 +116,7 @@ class Orchestrator:
         result = await self._game.end_turn()
         end_turn_seconds = time.perf_counter() - end_turn_started
 
-        # A defeat lands during the AI's turn, and normal reads can fail on the defeat screen.
-        if result.startswith("GAME OVER") or await self._game.check_game_over() is not None:
-            reason = StopReason.GAME_OVER
-        else:
-            reason = classify_end_turn(result, turn, await self._read_turn())
+        reason = stop_reason_in_report(result) or await self._check_after_end_turn(turn)
 
         self._log.write(
             TurnRecord(
@@ -133,6 +130,13 @@ class Orchestrator:
             )
         )
         return reason
+
+    async def _check_after_end_turn(self, turn_before: int) -> StopReason | None:
+        """Confirm the turn advanced. Only called when the report shows the game can be read."""
+        # A defeat lands during the AI's turn, and normal reads can fail on the defeat screen.
+        if await self._game.check_game_over() is not None:
+            return StopReason.GAME_OVER
+        return None if await self._read_turn() > turn_before else StopReason.BLOCKED
 
     async def _run_handlers(self) -> tuple[dict[str, float], dict[str, str]]:
         """Run each handler, timing it. A failing handler must not stop the turn from ending."""

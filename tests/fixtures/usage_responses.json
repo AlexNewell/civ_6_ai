@@ -1,0 +1,62 @@
+{
+  "note": "Synthetic. Costs and totals are worked out by hand from pricing.toml, not by the code.",
+  "calls": [
+    {
+      "player_id": "p1",
+      "model": "claude-sonnet-5-5",
+      "usage": {"input_tokens": 6000, "output_tokens": 1500},
+      "cost_usd": "0.027"
+    },
+    {
+      "player_id": "p1",
+      "model": "claude-sonnet-5-5",
+      "usage": {
+        "input_tokens": 200,
+        "output_tokens": 1000,
+        "cache_creation_input_tokens": 5000,
+        "cache_read_input_tokens": 0,
+        "cache_creation": {"ephemeral_5m_input_tokens": 5000, "ephemeral_1h_input_tokens": 0}
+      },
+      "cost_usd": "0.0229"
+    },
+    {
+      "player_id": "p1",
+      "model": "claude-sonnet-5-5",
+      "usage": {
+        "input_tokens": 200,
+        "output_tokens": 1000,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 5000
+      },
+      "cost_usd": "0.0109"
+    },
+    {
+      "player_id": "p2",
+      "model": "claude-opus-5-5",
+      "usage": {
+        "input_tokens": 6000,
+        "output_tokens": 1500,
+        "cache_creation_input_tokens": 1000,
+        "cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 1000}
+      },
+      "cost_usd": "0.062"
+    },
+    {
+      "player_id": "p2",
+      "model": "claude-haiku-5-5",
+      "usage": {"input_tokens": 1500, "output_tokens": 100},
+      "cost_usd": "0.0002"
+    },
+    {
+      "player_id": "p2",
+      "model": "claude-haiku-5-5",
+      "usage": {
+        "input_tokens": 90000,
+        "output_tokens": 100,
+        "cache_read_input_tokens": 20000
+      },
+      "cost_usd": "0.04625"
+    }
+  ],
+  "totals_usd": {"p1": "0.0608", "p2": "0.10845"}
+}

@@ -11,7 +11,7 @@ Project decisions and why they were made. Add new ones as the work teaches us mo
 | Puppeteering is an unimplemented upstream proposal with open questions. | The long-term goal is unproven, so Track S tests it early. |
 | The tuner allows one connection, and upstream recommends one orchestrator process for multi-agent play. | The game AI runs in-process against civ6-mcp's `GameState`, with no per-model MCP tool loop. |
 | GameCore can read every player's state. | Fog-of-war filtering must be enforced, or opponents can cheat by accident. |
-| Claude Haiku 5.5 costs $0.10 input and $0.50 output per million tokens. | It is a viable cloud option for routine decisions. |
+| Claude Haiku 5.5 costs $0.10 input and $0.50 output per million tokens, for prompts up to 100,000 tokens. Above that, the whole request costs five times as much. | It is a viable cloud option for routine decisions, provided prompts stay small. |
 | Consumer PCs share limited memory between the game and a local model. | Local models are benchmarked offline first and may not be viable during live play. |
 
 ## Budget
@@ -20,6 +20,9 @@ Project decisions and why they were made. Add new ones as the work teaches us mo
 - A code-enforced governor blocks any call whose worst-case cost would exceed the cap.
 - At the cap, or if an API is down, the player continues deterministically. A game never stalls.
 - Every call is logged using actual API usage.
+- A failed call that may still have been billed, such as a timeout, stays charged at its worst case. Only a definite API rejection is refunded.
+- Spend is written to disk before each request, so a crash or restart can't reset a player's budget. If the ledger can't be read or written, calls are blocked.
+- The cap relies on callers declaring a true input limit, measured with token counting, and making one request with SDK retries and refusal fallbacks turned off. These rules are in [`governor.py`](../src/civ6_ai/budget/governor.py).
 
 Estimated split, to be replaced with measurements in issue 2.5:
 
@@ -29,7 +32,7 @@ Estimated split, to be replaced with measurements in issue 2.5:
 | Cheap tier | $0.25 | Haiku, 1.5k input, 100 output, $0.0002 per call | About 1,250 calls, under 4 per turn |
 | Crisis reserve | $0.10 | Late-game escalations | About 3 Sonnet calls |
 
-Prompt caching is left out of these figures. Strategist calls will often be more than 5 minutes apart, so cache hits can't be assumed. Prices were taken from Anthropic's reference on 2026-10-06 and should be rechecked before use.
+Prompt caching is left out of these figures. Strategist calls will often be more than 5 minutes apart, so cache hits can't be assumed. Prices live in [`pricing.toml`](../src/civ6_ai/budget/pricing.toml), last checked against Anthropic's pricing page on 2026-11-05. Recheck them before use.
 
 ## Models
 
@@ -72,6 +75,7 @@ Making a repo public exposes all of its history and issues, so these rules apply
 **Enforcement:**
 
 - Commits use a GitHub noreply address.
+- Merges done on GitHub can use the account's email, so CI scans a PR's own commits and history stays noreply only if the account keeps its email private.
 - `gitleaks` runs in CI and as a pre-commit hook.
 - [`scripts/check_public_ready.py`](../scripts/check_public_ready.py) checks files and commit metadata. Personal strings go in the untracked `.local/public-ready-patterns.txt`.
 - Test fixtures must be synthetic or scrubbed.

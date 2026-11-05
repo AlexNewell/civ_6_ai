@@ -9,6 +9,7 @@ Issues are generated from [`.github/roadmap-issues.yaml`](.github/roadmap-issues
 | Stage | Status |
 |---|---|
 | Phase 0: Repo setup | Done |
+| Track T: Game toolchain | In progress |
 | Everything else | Not started |
 
 ## Sequence

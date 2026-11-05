@@ -10,7 +10,9 @@ WINDOWS_PATH = "C:" + "\\Users\\" + "someone\\saves"
 POSIX_PATH = "/home/" + "someone/saves"
 
 
-@pytest.mark.parametrize("text", [PERSON_EMAIL, WINDOWS_PATH, POSIX_PATH])
+@pytest.mark.parametrize(
+    "text", [PERSON_EMAIL, "person" + "@" + "mail.example.co.uk", WINDOWS_PATH, POSIX_PATH]
+)
 def test_flags_personal_text(text):
     assert cpr.scan_text(text, [])
 
@@ -22,6 +24,7 @@ def test_flags_personal_text(text):
         "1+someone" + "@" + "users.noreply.github.com",
         "C:" + "\\Users\\" + "<you>\\saves",
         "C:" + "\\Users\\" + "you\\saves",
+        "uses: astral-sh/setup-uv" + "@" + "v10.3.3",
     ],
 )
 def test_allows_safe_text(text):

@@ -25,6 +25,7 @@ override-dependencies = [
 [dependency-groups]
 dev = [
     "pre-commit>=4.0",
+    "pyarrow>=26.0.1",
     "pytest>=8.0",
     "pyyaml>=6.0",
     "ruff>=0.8",

@@ -39,7 +39,9 @@ Prompt caching is left out of these figures. Strategist calls will often be more
 - The strategist defaults to Sonnet 5.5, with Opus 5.5 as a measured comparison. Fable-class models are out of scope.
 - Model IDs and prices live in config.
 - Haiku 5.5, local models and Jev compete for the routine-decision tier on measured quality per dollar.
-- The baseline comes from the public CivBench dataset, so no expensive frontier-only games are needed.
+- The baseline comes from the public CivBench dataset, so no expensive frontier-only games are needed. See [`civbench-baselines.md`](civbench-baselines.md), which `scripts/fetch_civbench.py` and `scripts/summarise_civbench.py` rebuild.
+- Baselines use `civbench/civbench-v1`, the release the paper links. The earlier `lmwilkin/civbench` repo has no parquet tables or Inspect logs.
+- CivBench scenarios don't match our standard game, so baselines are a reference level and M1 is still measured on our own games.
 
 ## Game
 
@@ -98,5 +100,5 @@ No licence is chosen yet. That decision is part of issue 7.4, or comes sooner if
 
 - [civ6-mcp repository](https://github.com/lmwilki/civ6-mcp), including `docs/agent-vs-agent.md`, `docs/observability.md` and `docs/paper/scenario-spec.md`
 - [CivBench paper, arXiv 2609.02459](https://arxiv.org/abs/2609.02459)
-- [CivBench dataset](https://huggingface.co/datasets/lmwilkin/civbench)
+- [CivBench dataset](https://huggingface.co/datasets/civbench/civbench-v1)
 - [Original research report](research/reducing-frontier-model-cost.md)

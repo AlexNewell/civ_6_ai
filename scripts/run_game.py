@@ -15,7 +15,7 @@ from pathlib import Path
 from civ_mcp.connection import GameConnection
 from civ_mcp.game_state import GameState
 
-from civ6_ai.orchestrator import DoNothing, Orchestrator, TurnLog
+from civ6_ai.orchestrator import DoNothing, Orchestrator, StopReason, TurnLog
 from civ6_ai.saves import use_real_save_dirs
 
 ROOT = Path(__file__).parent.parent
@@ -52,10 +52,10 @@ async def run(turns: int) -> int:
     print(f"{name}: played {len(records)} turns in {total:.0f}s, stopped: {reason}")
     if records:
         print(f"Slowest turn: {max(record.total_seconds for record in records):.1f}s")
-        if records[-1].detail:
+        if reason != StopReason.TURN_LIMIT:
             print(f"Last result: {records[-1].detail}")
     print(f"Log: {turn_log.path.relative_to(ROOT)}")
-    return 0 if len(records) == turns and records[-1].stop_reason is None else 1
+    return 0 if reason == StopReason.TURN_LIMIT else 1
 
 
 def main() -> int:

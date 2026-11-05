@@ -15,10 +15,14 @@ class Overview:
 class FakeGame:
     """Advances one turn per `end_turn`, unless a scripted result says otherwise."""
 
-    def __init__(self, results=()):
+    def __init__(self, results=(), defeated_on_turn=None):
         self.turn = 1
         self.results = list(results)
+        self.defeated_on_turn = defeated_on_turn
         self.calls = []
+
+    async def check_game_over(self):
+        return "defeat" if self.turn == self.defeated_on_turn else None
 
     async def get_game_overview(self):
         return Overview(self.turn)
@@ -102,6 +106,26 @@ def test_blocked_turn_stops_without_retrying(tmp_path):
     assert reason is StopReason.BLOCKED
     assert game.calls == ["end_turn"]
     assert "Cannot end turn" in turn_log.records[-1].detail
+
+
+def test_defeat_during_the_ai_turn_stops_before_reading_the_game(tmp_path):
+    class DefeatScreen(FakeGame):
+        async def get_game_overview(self):
+            if self.turn == self.defeated_on_turn:
+                raise RuntimeError("Lua can't read the defeat screen")
+            return await super().get_game_overview()
+
+    game = DefeatScreen(defeated_on_turn=3)
+    handlers = [Recording("handler")]
+    reason, turn_log = play(game, handlers, 20, tmp_path)
+    assert reason is StopReason.GAME_OVER
+    assert [record.turn for record in turn_log.records] == [1, 2]
+    assert game.calls.count("handler") == 2
+
+
+def test_normal_turns_keep_the_end_turn_report(tmp_path):
+    _, turn_log = play(FakeGame(), [DoNothing()], 1, tmp_path)
+    assert turn_log.records[0].detail == "Turn 1 -> 2"
 
 
 def test_game_over_stops_without_reading_the_finished_game(tmp_path):

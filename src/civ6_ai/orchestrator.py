@@ -16,6 +16,8 @@ MAX_DETAIL_LENGTH = 300
 class Game(Protocol):
     """The part of civ6-mcp's `GameState` that the turn loop uses."""
 
+    async def check_game_over(self): ...
+
     async def get_game_overview(self): ...
 
     async def end_turn(self) -> str: ...
@@ -102,6 +104,10 @@ class Orchestrator:
         return StopReason.TURN_LIMIT
 
     async def _play_turn(self) -> StopReason | None:
+        # A defeat lands during the AI's turn, and normal reads can fail on the defeat screen.
+        if await self._game.check_game_over() is not None:
+            return StopReason.GAME_OVER
+
         started = time.perf_counter()
         turn = await self._read_turn()
         seconds, errors = await self._run_handlers()
@@ -123,7 +129,7 @@ class Orchestrator:
                 end_turn_seconds=end_turn_seconds,
                 total_seconds=time.perf_counter() - started,
                 stop_reason=reason,
-                detail=result[:MAX_DETAIL_LENGTH] if reason else "",
+                detail=result[:MAX_DETAIL_LENGTH],
             )
         )
         return reason

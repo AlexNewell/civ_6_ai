@@ -82,6 +82,7 @@ Parallel with Phase 1.
 - [`E.2`](https://github.com/AlexNewell/civ_6_ai/issues/19) Metric library
 - [`E.3`](https://github.com/AlexNewell/civ_6_ai/issues/20) Short mid-game scenario battery
 - [`E.4`](https://github.com/AlexNewell/civ_6_ai/issues/21) Results report with confidence intervals
+- [`E.5`](https://github.com/AlexNewell/civ_6_ai/issues/62) First-city timing study
 
 ## Track S: Puppeteering spike
 

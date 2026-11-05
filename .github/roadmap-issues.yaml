@@ -287,6 +287,18 @@ issues:
       - Sample-size warnings appear for small sets.
     depends: [E.2]
     budget: none
+  - id: E.5
+    title: First-city timing study
+    type: research
+    parallel: true
+    goal: Work out when delaying the first city beats founding it at once.
+    scope: Founding at once starts compounding science and population, moving exposes the Settler to barbarians, and a turn or two may reach a much better site. Replay starting saves with different settle delays, across more starts than the standard three, scoring late-game results as well as early yields.
+    acceptance:
+      - At least 3 settle delays are compared with repeat runs across varied starts.
+      - A report gives effect sizes with intervals and the start conditions that favour waiting.
+      - The 1.8 settling rule is updated from the evidence, or the report says the evidence is too weak.
+    depends: ["1.8", E.2, E.4]
+    budget: none
 
   # Track S
   - id: S.1

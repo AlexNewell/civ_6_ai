@@ -104,9 +104,8 @@ class Orchestrator:
         return StopReason.TURN_LIMIT
 
     async def _play_turn(self) -> StopReason | None:
-        # A defeat lands during the AI's turn, and normal reads can fail on the defeat screen.
         if await self._game.check_game_over() is not None:
-            return StopReason.GAME_OVER
+            return StopReason.GAME_OVER  # The run was started on a game that's already over.
 
         started = time.perf_counter()
         turn = await self._read_turn()
@@ -116,10 +115,11 @@ class Orchestrator:
         result = await self._game.end_turn()
         end_turn_seconds = time.perf_counter() - end_turn_started
 
-        turn_after = turn
-        if not result.startswith("GAME OVER"):
-            turn_after = await self._read_turn()
-        reason = classify_end_turn(result, turn, turn_after)
+        # A defeat lands during the AI's turn, and normal reads can fail on the defeat screen.
+        if result.startswith("GAME OVER") or await self._game.check_game_over() is not None:
+            reason = StopReason.GAME_OVER
+        else:
+            reason = classify_end_turn(result, turn, await self._read_turn())
 
         self._log.write(
             TurnRecord(

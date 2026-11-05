@@ -55,7 +55,17 @@ Prompt caching is left out of these figures. Strategist calls will often be more
 
 ## Dependencies
 
-- [civ6-mcp](https://github.com/lmwilki/civ6-mcp) (MIT) is pinned to a commit SHA, then vendored under `third_party/` in Phase 6, because a GitHub fork of a public repo can't be private.
+- [civ6-mcp](https://github.com/lmwilki/civ6-mcp) (MIT) is pinned to commit `dd2019056371b92ea4854e879ddf05a8cad95e8a` (v1.1.11), then vendored under `third_party/` in Phase 6, because a GitHub fork of a public repo can't be private.
+- Only civ6-mcp's `GameState` code is used. Its base dependencies serve its server, so `pyproject.toml` overrides them away, and `pywin32` is added directly because the crash-dialog handling needs it.
+
+### Rules for using civ6-mcp
+
+A review of the pinned commit found nothing malicious, but these rules apply:
+
+- Never run `civ_mcp.server`. It opens an unauthenticated dashboard on all network interfaces, moves the mouse and can close the game.
+- `load_game_save` can restart the game and click through its menus if Lua can't find the save.
+- `end_turn` deletes older `0_MCP_*` saves, so project saves must not use that prefix.
+- Strings sent to Lua aren't escaped, so model-chosen names must be validated first. Never expose its raw Lua method to a model, because that would bypass fog of war.
 - [`archi-max/jev-civ6`](https://github.com/archi-max/jev-civ6) (MIT) is a usable reference.
 - [`Roarpeng/jev-civ6`](https://github.com/Roarpeng/jev-civ6) has no licence, so it is read for ideas only and no code is copied.
 
@@ -65,7 +75,7 @@ Making a repo public exposes all of its history and issues, so these rules apply
 
 **Never in git or issues:**
 
-- Email addresses, real names beyond the GitHub handle, or game and service account names.
+- Email addresses, or game and service account names. The owner's name is fine, because the GitHub handle already shows it.
 - Absolute local paths or usernames. Code uses env vars and relative paths; docs use placeholders.
 - API keys and tokens. They live only in an untracked `.env`.
 - Personal schedules or spending details beyond the project's per-game cap.

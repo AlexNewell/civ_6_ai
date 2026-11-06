@@ -411,6 +411,10 @@ class VictoryMonitor:
 
     async def check(self, game: MonitorGame, overview) -> list[Event]:
         progress = await game.get_victory_progress()
+        if not progress.players and overview.num_cities == 0:
+            # The game doesn't count a player with no city as alive, so the read lists nobody,
+            # not even us. There is nothing to compare until the first city is founded.
+            return []
         civs = await game.get_diplomacy()
         if not civs or not progress.players:
             raise IncompleteRead("no civs in victory or diplomacy read")

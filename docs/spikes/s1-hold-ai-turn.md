@@ -89,3 +89,11 @@ files, saves or Documents folders were created or edited.
   built-in AI takes its turn.
 - S.3 must still show that a puppet can act while the hold is active.
 - S.5 only needs this for choosing where reads are taken.
+
+## Note on the release context
+
+The scheduled release first ran in the last context of `--poll`. The live `ui_event` and `pause`
+runs used `--poll GameCore InGame`, so the release did run in InGame, the same context that took
+the hold. The recorded results therefore stand. The driver now always releases in `--hold-context`,
+so a default poll list can no longer send the release to the wrong state. Not re-run live after
+this change.

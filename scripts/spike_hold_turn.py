@@ -184,6 +184,9 @@ class Spike:
                     print(f"Not hooked: {line}")
 
     async def remove(self) -> None:
+        """Release any hold and unhook. Does nothing when no game is open."""
+        if self.connection.ingame_index is None:
+            return
         await self.lua("InGame", REMOVE_LUA.format(release=RELEASE_BODY, sentinel=SENTINEL))
 
     async def read_log(self) -> list[Event]:
@@ -234,7 +237,7 @@ async def run_turn(spike: Spike, args: argparse.Namespace) -> list[dict]:
             held_at = time.time()
         due = held_at is not None and time.time() - held_at >= args.release_after
         if due and not released and last.get("hold") == "held":
-            await spike.lua(args.poll[-1], RELEASE_LUA.format(sentinel=SENTINEL))
+            await spike.lua(args.hold_context, RELEASE_LUA.format(sentinel=SENTINEL))
             polls.append({"sent": time.time(), "action": "release_sent"})
             released = True
         if last.get("turn") not in (None, before["turn"]) and last.get("local_active") == "true":
@@ -309,8 +312,10 @@ async def run(args: argparse.Namespace) -> int:
         print(f"After: {await spike.status()}")
         return 0
     finally:
-        await spike.remove()
-        await connection.disconnect()
+        try:
+            await spike.remove()
+        finally:
+            await connection.disconnect()
 
 
 def main() -> int:

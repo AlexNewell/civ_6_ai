@@ -1,7 +1,12 @@
+import argparse
+import asyncio
+
 import pytest
 
+import spike_hold_turn
 from spike_hold_turn import (
     Event,
+    Spike,
     fill_hooks,
     first_of_player,
     moves_by_player,
@@ -61,3 +66,67 @@ def test_fill_hooks_rejects_bad_input(context, target):
 
 def test_parse_status():
     assert parse_status(["S1STAT|turn|5", "junk", "S1STAT|seed|-1"]) == {"turn": "5", "seed": "-1"}
+
+
+class FakeConnection:
+    gamecore_index = 3
+    ingame_index = 119
+
+    def __init__(self, ingame_index=119):
+        self.ingame_index = ingame_index
+        self.calls = []
+
+    async def execute_in_state(self, state, code, timeout):
+        self.calls.append((state, code))
+        return []
+
+
+def test_remove_does_nothing_without_a_game():
+    connection = FakeConnection(ingame_index=None)
+    asyncio.run(Spike(connection).remove())
+    assert connection.calls == []
+
+
+def test_remove_runs_in_ingame_when_a_game_is_open():
+    connection = FakeConnection()
+    asyncio.run(Spike(connection).remove())
+    assert [state for state, _ in connection.calls] == [119]
+
+
+def test_scheduled_release_uses_the_holding_context(monkeypatch):
+    connection = FakeConnection()
+    spike = Spike(connection)
+    clock = {"now": 0.0}
+
+    def fake_time():
+        clock["now"] += 1.0
+        return clock["now"]
+
+    async def no_sleep(_):
+        return None
+
+    polls = iter(
+        [
+            {"hold": "held", "turn": "5", "local_active": "false"},
+            {"hold": "held", "turn": "5", "local_active": "false"},
+            {"hold": "held", "turn": "5", "local_active": "false"},
+            {"hold": "released", "turn": "6", "local_active": "true"},
+        ]
+    )
+
+    async def fake_poll(_spike, context):
+        return next(polls)
+
+    async def fake_status():
+        return {"turn": "5"}
+
+    monkeypatch.setattr(spike_hold_turn.time, "time", fake_time)
+    monkeypatch.setattr(spike_hold_turn.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(spike_hold_turn, "poll_once", fake_poll)
+    monkeypatch.setattr(spike, "status", fake_status)
+    args = argparse.Namespace(
+        poll=["GameCore"], hold_context="InGame", release_after=2, timeout=100
+    )
+    asyncio.run(spike_hold_turn.run_turn(spike, args))
+    released_in = [state for state, code in connection.calls if "hold.release = true" in code]
+    assert released_in == [119]

@@ -51,6 +51,7 @@ class ProductionWeights:
     military: float = 1.0  # Land units beyond the garrison a city needs.
     expansion: float = 1.0  # Settlers.
     builders: float = 1.0  # Builders, which improve tiles.
+    trade: float = 1.0  # Traders, while the empire has route capacity no trader fills.
     wonders: float = 0.5
     target_cities: int = 6  # Stop building settlers at this many cities.
     army_per_city: float = 1.5  # Combat units wanted per city before military stops scoring.
@@ -72,6 +73,8 @@ class ProductionContext:
     settlers: int = 0
     recon: int = 0
     army: int = 0
+    traders: int = 0  # Traders that exist, on a route or not, plus those being built.
+    trade_capacity: int = 0  # Routes the empire can run at once.
 
     def after_choosing(self, item: str, unknown_combat: bool = False) -> "ProductionContext":
         """Count a pick, so two cities don't both build the one builder the empire needs."""
@@ -92,6 +95,8 @@ def _counted_as(item: str) -> tuple[str, ...]:
         return ("settlers",)
     if kind == "UNIT_SCOUT":
         return ("recon",)
+    if kind == "UNIT_TRADER":
+        return ("traders",)
     stats = COMBAT_UNITS.get(item)
     if stats is not None and stats[4] != "RECON":
         return ("army",)
@@ -102,7 +107,9 @@ def build_context(
     empire: Empire, units: Iterable[Unit], in_progress: Iterable[str] = ()
 ) -> ProductionContext:
     """Count what exists plus what cities are already building, so picks don't double up."""
-    ctx = ProductionContext(turn=empire.turn, num_cities=empire.num_cities)
+    ctx = ProductionContext(
+        turn=empire.turn, num_cities=empire.num_cities, trade_capacity=empire.trade_capacity
+    )
     for unit in units:
         ctx = ctx.after_choosing(
             unit.unit_type, unknown_combat=unit.is_combat and unit.unit_type not in COMBAT_UNITS
@@ -134,7 +141,7 @@ _UNPLANNED_WORDS = (
     "SIEGE_TOWER",
 )
 _UNKNOWN_UNIT_SCORE = 0.3
-_CIVILIAN_UNITS = frozenset({"UNIT_BUILDER", "UNIT_SETTLER", "UNIT_SCOUT"})
+_CIVILIAN_UNITS = frozenset({"UNIT_BUILDER", "UNIT_SETTLER", "UNIT_SCOUT", "UNIT_TRADER"})
 
 
 def _upgrades_of(item: str) -> set[str]:
@@ -289,6 +296,12 @@ def _unit_score(
         if wanted <= 0 or threatened:
             return 0.0
         return (6.0 + 2.0 * min(wanted, 3) + len(city.unimproved_resources)) * w.builders
+    if kind == "UNIT_TRADER":
+        # Every route slot needs a trader. Traders already on a route count, since they fill a slot.
+        wanted = ctx.trade_capacity - ctx.traders
+        if wanted <= 0 or threatened:
+            return 0.0
+        return (7.0 + min(wanted, 3)) * w.trade
     if kind == "UNIT_SCOUT":
         return 5.0 if ctx.recon == 0 and ctx.turn <= _EARLY_TURNS else 0.0
     # Military. Strength comes from the game's own numbers, so the best unit offered wins.

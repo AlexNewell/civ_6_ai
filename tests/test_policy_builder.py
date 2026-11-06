@@ -16,6 +16,7 @@ from civ6_ai.policies.builder import (
 )
 from civ6_ai.policies.settling import hex_line
 from civ6_ai.state import BuilderJob
+from civ6_ai.state.reader import build_unit
 from fixtures.civ_state import BARBARIANS, FakeGame, overview, resources, threat_info, unit_info
 
 W = BuilderWeights()
@@ -511,3 +512,16 @@ def test_claim_resumes_when_the_threat_leaves():
     game = ActionGame([task(x=30, y=10)], [worker(x=12, y=10)])
     run(policy, game)
     assert game.actions == [("move", 1, 30, 10)] and 1 not in policy._holds
+
+
+def test_veto_keeps_a_claim_on_a_different_job():
+    policy = BuilderPolicy()
+    unit = build_unit(worker(x=12, y=10, valid_improvements=["IMPROVEMENT_FARM"]))
+    claim = (30, 10, "IMPROVEMENT_FARM")
+    policy._claims[1] = claim
+    vetoed = job("urgent", 12, 10, "IMPROVEMENT_MINE")
+    assert not asyncio.run(policy._work_on(ActionGame(), unit, vetoed, 1.0, 5))
+    assert policy._claims[1] == claim
+    policy._claims[1] = (12, 10, "IMPROVEMENT_MINE")
+    assert not asyncio.run(policy._work_on(ActionGame(), unit, vetoed, 1.0, 5))
+    assert 1 not in policy._claims

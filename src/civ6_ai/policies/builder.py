@@ -295,7 +295,8 @@ class BuilderPolicy:
             and job.improvement not in unit.valid_improvements
         ):
             self._set_aside[key] = turn + self.settings.retry_turns  # True for any builder.
-            self._claims.pop(unit.unit_id, None)
+            if self._claims.get(unit.unit_id) == key:
+                del self._claims[unit.unit_id]
             record("failed", "the game does not offer this improvement here")
             return False
         return await self._build(game, unit, job, record, key, turn)
@@ -350,7 +351,8 @@ class BuilderPolicy:
 
     def _give_up(self, unit: Unit, key: _Key, turn: int) -> None:
         self._set_aside[key] = turn + self.settings.retry_turns
-        self._claims.pop(unit.unit_id, None)
+        if self._claims.get(unit.unit_id) == key:
+            del self._claims[unit.unit_id]
         self._travel.pop(unit.unit_id, None)
         self._work.pop(unit.unit_id, None)
 

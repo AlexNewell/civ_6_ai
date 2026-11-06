@@ -156,6 +156,38 @@ def test_a_short_city_read_is_neither_kept_nor_passed_on():
     asyncio.run(go())
 
 
+def test_a_mismatch_drops_the_overview_too_so_a_wrong_one_cannot_stick():
+    game = WiredGame()
+    game.overview_cities = 5  # A wrong count: the cities read is complete.
+    shared = bot.SharedReads(game)
+
+    async def go():
+        with pytest.raises(IncompleteRead):
+            await shared.get_cities()
+        game.overview_cities = None  # The next overview read is right.
+        cities, _ = await shared.get_cities()
+        assert len(cities) == 1
+
+    asyncio.run(go())
+
+
+def test_cities_are_not_kept_without_a_real_overview():
+    game = WiredGame()
+
+    async def no_overview():
+        return None
+
+    game.get_game_overview = no_overview
+    shared = bot.SharedReads(game)
+
+    async def go():
+        await shared.get_cities()
+        await shared.get_cities()
+        assert game.reads.count("get_cities") == 2
+
+    asyncio.run(go())
+
+
 def test_settling_does_not_act_on_an_empty_city_read(tmp_path):
     game = WiredGame()
     game.units = [replace(unit(), unit_type="UNIT_SETTLER")]

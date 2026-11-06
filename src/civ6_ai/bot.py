@@ -24,7 +24,7 @@ from civ6_ai.orchestrator import Handler, Orchestrator, TurnLog
 from civ6_ai.policies import research
 from civ6_ai.policies.production import CityProductionPolicy
 from civ6_ai.policies.settling import SettlingPolicy
-from civ6_ai.state.reader import check_cities_complete
+from civ6_ai.state.reader import IncompleteRead, check_cities_complete
 
 SETTLING_LOGGER = "civ6_ai.policies.settling"
 _DECISION_PREFIX = "settle_decision "
@@ -79,8 +79,16 @@ class SharedReads:
             return self._kept[name]
         value = await read()
         if name == "get_cities":
-            # Raises on a short read, so it is neither kept nor passed on.
-            check_cities_complete(value[0], await self.get_game_overview())
+            # Kept only once checked against a real overview. On a mismatch either read may be the
+            # short one, so both are dropped and the next ask reads them again.
+            overview = await self.get_game_overview()
+            if overview is None:
+                return value
+            try:
+                check_cities_complete(value[0], overview)
+            except IncompleteRead:
+                self._kept.pop("get_game_overview", None)
+                raise
         if not _is_empty(value):
             self._kept[name] = value  # An empty answer may be a timeout, so ask again next time.
         return value

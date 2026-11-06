@@ -215,6 +215,23 @@ class Governor:
 
 
 @dataclass(frozen=True)
+class Government:
+    """The government, its policy slots and the governors, without the rest of the empire."""
+
+    government: str  # `GOVERNMENT_CHIEFDOM`, or `NONE` before one is chosen.
+    policy_slots: tuple[PolicySlot, ...]
+    unlocked_policies: tuple[Policy, ...]
+    governor_points: int
+    can_appoint_governor: bool
+    governors: tuple[Governor, ...]
+    appointable_governors: tuple[str, ...]
+
+    @property
+    def empty_policy_slots(self) -> tuple[PolicySlot, ...]:
+        return tuple(slot for slot in self.policy_slots if slot.policy is None)
+
+
+@dataclass(frozen=True)
 class Belief:
     belief_type: str
     name: str

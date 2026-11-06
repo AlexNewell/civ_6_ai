@@ -21,6 +21,7 @@ from civ6_ai.state.models import (
     Empire,
     Exploration,
     FogEdge,
+    Government,
     Governor,
     KnownResource,
     LockedResearch,
@@ -329,6 +330,33 @@ def build_research(status: lq.TechCivicStatus) -> Research:
         civics_done=status.completed_civic_count,
         locked_techs=_locked(status.locked_techs or ()),
         locked_civics=_locked(status.locked_civics or ()),
+    )
+
+
+def build_government(government: lq.GovernmentStatus, governors: lq.GovernorStatus) -> Government:
+    return Government(
+        government=government.government_type,
+        policy_slots=tuple(
+            PolicySlot(slot.slot_index, slot.slot_type, _policy_in(slot))
+            for slot in government.slots
+        ),
+        unlocked_policies=tuple(
+            Policy(policy.policy_type, policy.name, policy.slot_type)
+            for policy in government.available_policies
+        ),
+        governor_points=governors.points_available,
+        can_appoint_governor=governors.can_appoint,
+        governors=tuple(
+            Governor(
+                governor_type=governor.governor_type,
+                city_id=None if governor.assigned_city_id < 0 else governor.assigned_city_id,
+                established=governor.is_established,
+                turns_to_establish=governor.turns_to_establish,
+                promotions=tuple(p.promotion_type for p in governor.available_promotions),
+            )
+            for governor in governors.appointed
+        ),
+        appointable_governors=tuple(g.governor_type for g in governors.available_to_appoint),
     )
 
 
@@ -677,6 +705,11 @@ async def read_empire(game: GameReads) -> Empire:
         await game.get_pantheon_status(),
         await game.get_city_states(),
     )
+
+
+async def read_government(game: GameReads) -> Government:
+    """Policies and governors only. Cheap enough to repeat after each action."""
+    return build_government(await game.get_policies(), await game.get_governors())
 
 
 async def read_rivals(game: GameReads) -> tuple[Rival, ...]:

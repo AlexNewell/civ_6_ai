@@ -485,3 +485,89 @@ def test_an_escort_that_cannot_move_does_not_stall_the_pair_for_good():
     )
     run(policy, last)
     assert last.actions == [("move", 7, 14, 6)]
+
+
+def test_a_blocked_move_counts_as_a_failure():
+    settings = SettlingSettings(max_move_failures=1, retry_turns=5)
+    policy = SettlingPolicy(settings)
+    game = make_game([settler()], cities=[alpha()], sites=[site(14, 10, food=40)], turn=1)
+
+    async def blocked(unit_index, x, y):
+        game.actions.append(("move", unit_index, x, y))
+        return f"MOVING_TO|{x},{y}|from:10,10|now_at:10,10|BLOCKED (water)"
+
+    game.move_unit = blocked
+    run(policy, game)
+    assert policy.decisions[-1].reason == "move refused, trying again later"
+    again = make_game([settler()], cities=[alpha()], sites=[site(14, 10, food=40)], turn=2)
+    run(policy, again)
+    assert again.actions == []
+    assert policy.decisions[-1].candidates[0].rejected == "recent moves to it were refused"
+
+
+def test_a_blocked_scout_move_sets_the_frontier_aside():
+    scout = unit_info(unit_id=3, unit_index=3, x=10, y=12, **SCOUT)
+    game = make_game([scout], cities=[alpha()], strategic=FOG, turn=1)
+
+    async def blocked(unit_index, x, y):
+        game.actions.append(("move", unit_index, x, y))
+        return f"MOVING_TO|{x},{y}|BLOCKED (no path)"
+
+    game.move_unit = blocked
+    policy = SettlingPolicy()
+    run(policy, game)
+    assert [a[0] for a in game.actions].count("move") == 2  # Both frontiers were tried.
+    assert policy._bad_frontiers
+
+
+def test_a_failed_automation_is_tried_again_next_turn():
+    scout = unit_info(unit_id=3, unit_index=3, x=10, y=12, **SCOUT)
+    policy = SettlingPolicy()
+    first = make_game([scout], turn=1)
+
+    async def refused(unit_index):
+        first.actions.append(("explore", unit_index))
+        return "Error: CANNOT_AUTOMATE|Unit cannot auto-explore"
+
+    first.automate_explore = refused
+    run(policy, first)
+    second = make_game([scout], turn=2)
+    run(policy, second)
+    assert second.actions == [("explore", 3)]
+
+
+def test_dead_scouts_release_their_frontier():
+    scout = unit_info(unit_id=3, unit_index=3, x=10, y=12, **SCOUT)
+    policy = SettlingPolicy()
+    only = lq.StrategicMapData([lq.FogBoundary("Alpha", 10, 10, [-1, -1, -1, 4, -1, -1])], [])
+    run(policy, make_game([scout], cities=[alpha()], strategic=only, turn=1))
+    assert policy._scout_targets
+    other = unit_info(unit_id=4, unit_index=4, x=10, y=12, **SCOUT)
+    game = make_game([other], cities=[alpha()], strategic=only, turn=2)
+    run(policy, game)
+    assert game.actions == [("move", 4, 10, 13)]
+    assert list(policy._scout_targets) == [4]
+
+
+def test_claims_survive_a_settler_that_has_no_moves_left():
+    policy = SettlingPolicy()
+    run(policy, make_game([settler()], cities=[alpha()], sites=[site(14, 10, food=40)], turn=1))
+    assert policy._site_claims
+    resting = settler(moves_remaining=0.0)
+    run(policy, make_game([resting], cities=[alpha()], sites=[site(14, 10, food=40)], turn=2))
+    assert policy._site_claims
+
+
+def test_first_city_does_not_retry_a_tile_where_founding_failed():
+    policy = SettlingPolicy()
+    sites = [site(15, 10, food=30)]
+    first = make_game([settler()], sites=sites, turn=1)
+    first.failing = {"found"}
+    run(policy, first)
+    assert [a[0] for a in first.actions] == ["found", "move"]
+    second = make_game([settler()], sites=sites, turn=2)
+    run(policy, second)
+    assert second.actions == [("move", 7, 15, 10)]
+    skipped = [d for d in policy.decisions if d.action == "found_skipped"]
+    assert skipped
+    assert "already failed" in skipped[0].reason

@@ -23,6 +23,7 @@ from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from typing import Protocol
 
+from civ6_ai.blockers import action_succeeded, move_succeeded
 from civ6_ai.state import (
     Exploration,
     GameReads,
@@ -169,10 +170,6 @@ class SettlingGame(GameReads, Protocol):
     async def automate_explore(self, unit_index: int) -> str: ...
 
 
-def _succeeded(result: str) -> bool:
-    return not result.startswith(("Error", "ERR:"))
-
-
 def neighbours(x: int, y: int, map_width: int | None = STANDARD_MAP_WIDTH) -> list[tuple[int, int]]:
     offsets = _ODD_ROW_NEIGHBOURS if y & 1 else _EVEN_ROW_NEIGHBOURS
     found = [(x + dx, y + dy) for dx, dy in offsets]
@@ -285,9 +282,7 @@ class SettlingPolicy:
         danger = _Danger(threats, self.settings.map_width)
         city_tiles = [(c.x, c.y) for c in cities]
         claimed: set[int] = set()
-        present = {u.unit_id for u in settlers}
-        self._site_claims = {k: v for k, v in self._site_claims.items() if k in present}
-        self._holds = {k: v for k, v in self._holds.items() if k in present}
+        self._forget_gone_units(units, turn)
         if settlers:
             rival_tiles = [
                 (city.x, city.y)
@@ -310,6 +305,16 @@ class SettlingPolicy:
                 )
         for scout in scouts:
             await self._explore(game, scout, exploration, danger, turn)
+
+    def _forget_gone_units(self, units: Iterable[Unit], turn: int) -> None:
+        """Drop what is kept per unit once the unit is gone, and any expired set-asides."""
+        alive = {u.unit_id for u in units}  # Including units with no moves left this turn.
+        self._site_claims = {k: v for k, v in self._site_claims.items() if k in alive}
+        self._holds = {k: v for k, v in self._holds.items() if k in alive}
+        self._scout_targets = {k: v for k, v in self._scout_targets.items() if k in alive}
+        self._automated = {k: v for k, v in self._automated.items() if k in alive}
+        self._set_aside = {k: v for k, v in self._set_aside.items() if v >= turn}
+        self._bad_frontiers = {k: v for k, v in self._bad_frontiers.items() if v >= turn}
 
     # ----- settlers -----
 
@@ -462,9 +467,17 @@ class SettlingPolicy:
             c.rejected is None for c in candidates if (c.x, c.y) == (settler.x, settler.y)
         ):
             found_here, reason = True, "standing on an acceptable site"
+        if found_here and (settler.x, settler.y) in self._failed_sites:
+            record(
+                "found_skipped",
+                "founding already failed on this tile, so looking for another site",
+                (settler.x, settler.y),
+            )
+            found_here = False
+            options = usable
         if found_here:
             result = await game.found_city(settler.unit_index)
-            if _succeeded(result):
+            if action_succeeded(result):
                 record("found", reason, (settler.x, settler.y), result)
                 self._site_claims.pop(settler.unit_id, None)
                 self._holds.pop(settler.unit_id, None)
@@ -508,19 +521,19 @@ class SettlingPolicy:
             claimed.add(escort.unit_id)
             if (escort.x, escort.y) != (settler.x, settler.y):
                 result = await game.move_unit(escort.unit_index, settler.x, settler.y)
-                action = "escort_gather" if _succeeded(result) else "hold"
+                action = "escort_gather" if move_succeeded(result) else "hold"
                 record(action, "route is threatened, so the escort joins first", goal, result)
                 return False
             result = await game.move_unit(escort.unit_index, *step)
-            if not _succeeded(result):
+            if not move_succeeded(result):
                 record("hold", "the escort could not move", goal, result)
                 return False
             result = await game.move_unit(settler.unit_index, *step)
-            moved = _succeeded(result)
+            moved = move_succeeded(result)
             record("escort_move", "route is threatened, so the escort leads", goal, result)
             return moved
         result = await game.move_unit(settler.unit_index, *goal)
-        moved = _succeeded(result)
+        moved = move_succeeded(result)
         if moved:
             self._move_failures.pop(goal, None)
         else:
@@ -558,7 +571,7 @@ class SettlingPolicy:
             city_tiles, key=lambda c: (hex_distance(settler.x, settler.y, *c, s.map_width), c)
         )
         result = await game.move_unit(settler.unit_index, *nearest)
-        if _succeeded(result):
+        if move_succeeded(result):
             record("flee", "hostile unit close, retreating to the nearest city", nearest, result)
             return True
         return False
@@ -604,7 +617,7 @@ class SettlingPolicy:
             if tried == _MAX_SCOUT_TRIES:
                 break
             tried += 1
-            if _succeeded(await game.move_unit(scout.unit_index, *target)):
+            if move_succeeded(await game.move_unit(scout.unit_index, *target)):
                 self._scout_targets[scout.unit_id] = target
                 return
             self._bad_frontiers[target] = turn + s.retry_turns
@@ -613,5 +626,8 @@ class SettlingPolicy:
             return  # Wait a turn for the hostile unit to move on.
         last = self._automated.get(scout.unit_id)
         if last is None or turn - last >= s.automate_retry_turns:
-            self._automated[scout.unit_id] = turn
-            await game.automate_explore(scout.unit_index)
+            result = await game.automate_explore(scout.unit_index)
+            if action_succeeded(result):
+                self._automated[scout.unit_id] = turn
+            else:
+                log.warning("Scout %s could not be automated: %s", scout.unit_id, result)

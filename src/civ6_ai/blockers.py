@@ -132,6 +132,16 @@ def _succeeded(result: str) -> bool:
     return not result.startswith(("Error", "ERR:"))
 
 
+def action_succeeded(result: str) -> bool:
+    """Public form of `_succeeded`, for policies that act on the game."""
+    return _succeeded(result)
+
+
+def move_succeeded(result: str) -> bool:
+    """A move can be accepted yet go nowhere. civ6-mcp then adds `|BLOCKED (reason)`."""
+    return _succeeded(result) and "BLOCKED" not in result
+
+
 async def leave_to_end_turn(game: BlockerGame, blocker: Blocker) -> bool:
     """Do nothing, because `end_turn` clears this type itself."""
     return True
@@ -338,7 +348,7 @@ async def _step_aside(game: BlockerGame, unit: Any) -> bool:
     for dx, dy in _NEIGHBOUR_OFFSETS:
         x, y = unit.x + dx, unit.y + dy
         result = await game.move_unit(unit.unit_index, x, y)
-        if _succeeded(result) and "BLOCKED" not in result:
+        if move_succeeded(result):
             return True
     return False
 

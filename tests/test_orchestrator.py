@@ -166,3 +166,36 @@ def test_game_over_stops_without_reading_the_finished_game(tmp_path):
     game = FinishedGame(results=["GAME OVER — VICTORY! You won."])
     reason, _ = play(game, [DoNothing()], 20, tmp_path)
     assert reason is StopReason.GAME_OVER
+
+
+class PopupHeldGame(FakeGame):
+    """The turn ends, but the UI keeps reading the old turn until a popup is dismissed.
+
+    Seen live on turn 1: the report said "Turn 1 -> 2" while the game screen showed a natural
+    disaster popup and the UI context still answered turn 1.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.held = False
+
+    async def get_game_overview(self):
+        return Overview(self.turn - 1 if self.held else self.turn)
+
+    async def end_turn(self):
+        result = await super().end_turn()
+        self.held = True
+        return result
+
+    async def dismiss_popup(self):
+        self.calls.append("dismiss_popup")
+        self.held = False
+        return "Dismissed: NaturalDisasterPopup"
+
+
+def test_popup_holding_the_turn_is_dismissed_instead_of_stopping(tmp_path):
+    game = PopupHeldGame()
+    reason, turn_log = play(game, [DoNothing()], 2, tmp_path)
+    assert reason is StopReason.TURN_LIMIT
+    assert game.calls.count("dismiss_popup") == 2
+    assert [record.stop_reason for record in turn_log.records] == [None, None]

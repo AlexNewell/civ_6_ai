@@ -5,9 +5,18 @@ Order within a turn:
 1. `Monitors` read the turn first, so they see it before anything acts on it.
 2. `SettlingPolicy` moves settlers and scouts, which changes cities and units.
 3. `ResearchPolicy` keeps a tech and a civic in progress.
-4. `CityProductionPolicy` gives idle cities something to build, after settling may have founded one.
-5. `BlockerResolver` goes last, because it clears what is left and skips any idle units. It also
-   gets the production and research policies for their blockers, with its defaults as fallback.
+4. `GovernmentPolicy` changes government, fills policy slots and spends governor points. It runs
+   after research, whose completed civics decide which governments are open.
+5. `CityProductionPolicy` gives idle cities something to build, after settling may have founded one.
+6. `BuilderPolicy` sends builders to work. Settling moves only settlers, scouts and combat escorts,
+   so no unit is ordered twice.
+7. `SecondaryPolicy` runs pantheon, religion, great people and trade routes. It comes after
+   production, so a trader built earlier is routed this turn, and moves only great people and
+   traders, which no other handler touches.
+8. `BlockerResolver` goes last, because it clears what is left and skips any idle units. It gets
+   the blocker policies of production, research, government and secondary, with its defaults as
+   fallback. The government policy is one instance, shared by its handler and its blocker table,
+   so its limits on government changes hold across both.
 """
 
 import json
@@ -22,7 +31,10 @@ from civ6_ai.defeat import is_defeated
 from civ6_ai.monitors import EventBus, Monitors
 from civ6_ai.orchestrator import Handler, Orchestrator, TurnLog
 from civ6_ai.policies import research
+from civ6_ai.policies.builder import BuilderPolicy
+from civ6_ai.policies.government import GovernmentPolicy
 from civ6_ai.policies.production import CityProductionPolicy
+from civ6_ai.policies.secondary import SecondaryPolicy
 from civ6_ai.policies.settling import SettlingPolicy
 from civ6_ai.state.reader import IncompleteRead, check_cities_complete
 
@@ -139,14 +151,28 @@ class SettleDecisionLog(logging.Handler):
 def build_orchestrator(game: Any, bus: EventBus, turn_log: TurnLog) -> Orchestrator:
     """Wire the handlers to a game. `game` is civ6-mcp's `GameState`, or a fake with its reads."""
     production = CityProductionPolicy()
-    resolver = BlockerResolver(
-        {**production.blocker_policies(), **research.blocker_policies()},
-    )
+    government = GovernmentPolicy()  # One instance, so handler and blockers share its bounds.
+    secondary = SecondaryPolicy()
+    tables = [
+        production.blocker_policies(),
+        research.blocker_policies(),
+        government.blocker_policies(),
+        secondary.blocker_policies(),
+    ]
+    merged: dict[str, Any] = {}
+    for table in tables:
+        if overlap := merged.keys() & table.keys():
+            raise ValueError(f"Two policies claim the same blocker: {sorted(overlap)}")
+        merged.update(table)
+    resolver = BlockerResolver(merged)
     handlers: list[Handler] = [
         Monitors(bus),
         SettlingPolicy(),
         research.ResearchPolicy(),
+        government,
         production,
+        BuilderPolicy(),
+        secondary,
         resolver,
     ]
     shared = ResolvingGame(SharedReads(game), resolver)

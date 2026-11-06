@@ -686,3 +686,14 @@ def test_prophets_are_not_spent_once_founding_is_given_up():
     before = len(acted(game, "activate"))
     run(policy, game)
     assert len(acted(game, "activate")) == before
+
+
+def test_prophets_are_not_recruited_when_no_religion_can_be_founded():
+    people = [person(1, "Great Prophet", "Moses"), person(2, "Great Writer", "Homer")]
+    assert [p.individual_id for p in rank_recruits(people, W, prophets=False)] == [2]
+    game = make_game(people=people, religion=religion_status(has_religion=True))
+    run(SecondaryPolicy(), game)
+    assert [a[1] for a in acted(game, "recruit")] == [2]
+    open_game = make_game(people=people, religion=religion_status())
+    run(SecondaryPolicy(), open_game)
+    assert 1 in [a[1] for a in acted(open_game, "recruit")]

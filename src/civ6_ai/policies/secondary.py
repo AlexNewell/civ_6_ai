@@ -237,7 +237,10 @@ _UNKNOWN_GP_CLASS = 0.5
 
 
 def rank_recruits(
-    people: Iterable[Any], weights: SecondaryWeights, refused: frozenset[int] = frozenset()
+    people: Iterable[Any],
+    weights: SecondaryWeights,
+    refused: frozenset[int] = frozenset(),
+    prophets: bool = True,
 ) -> list[Any]:
     """People we can recruit now, best class first. Claimed people and zero-weight classes are out.
 
@@ -256,6 +259,7 @@ def rank_recruits(
         and p.claimant == _UNCLAIMED
         and p.individual_id not in refused
         and class_weight(p) > 0
+        and (prophets or p.class_name != "Great Prophet")
     ]
     return sorted(
         wanted, key=lambda p: (-class_weight(p), p.cost, p.individual_name, p.individual_id)
@@ -297,6 +301,7 @@ class SecondaryPolicy:
     _pantheon_retry: int = field(default=-1, init=False, repr=False)
     _found_attempts: int = field(default=0, init=False, repr=False)
     _prophet_turn: int | None = field(default=None, init=False, repr=False)
+    _can_found: bool = field(default=True, init=False, repr=False)
 
     async def run(self, game: SecondaryGame) -> None:
         """Run every part so one failing doesn't strand the rest, then raise the first error."""
@@ -308,7 +313,7 @@ class SecondaryPolicy:
                 if step == "pantheon":
                     await self._pantheon(game, turn)
                 elif step == "religion":
-                    can_found = await self._religion(game, turn)
+                    can_found = self._can_found = await self._religion(game, turn)
                 elif step == "recruit":
                     await self._recruit(game)
                 elif step == "activate":
@@ -399,7 +404,12 @@ class SecondaryPolicy:
         """Recruit until nothing is left, reading again after each one, because points are spent."""
         refused: set[int] = set()
         for _ in range(MAX_RECRUITS):
-            people = rank_recruits(await game.get_great_people(), self.weights, frozenset(refused))
+            people = rank_recruits(
+                await game.get_great_people(),
+                self.weights,
+                frozenset(refused),
+                prophets=self._can_found,  # A prophet is only worth points if it will be used.
+            )
             if not people:
                 return
             person = people[0]

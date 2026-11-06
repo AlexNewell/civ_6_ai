@@ -271,10 +271,17 @@ class ThreatMonitor:
         ]
 
     def _wars(self, turn: int, civs: list) -> list[Event]:
-        """A civ missing from a short read keeps its last state, so it can't fake a new war."""
+        """Fire when a civ we've seen goes to war with us, including at first contact.
+
+        Unmet civs are listed too, so they're recorded as at peace. The first read, or the first
+        after `reset()`, has no record and so only sets the baseline: wars already running aren't
+        new. A civ missing from a short read keeps its last state, and one first seen only when
+        already met is a baseline, so neither can fake a new war.
+        """
         events: list[Event] = []
         for civ in civs:
             if not civ.has_met:
+                self._at_war.setdefault(civ.player_id, False)
                 continue
             if civ.is_at_war and self._at_war.get(civ.player_id) is False:
                 events.append(WarDeclared(turn, civ.player_id, civ.civ_name))

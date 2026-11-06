@@ -288,6 +288,36 @@ def test_a_short_diplomacy_read_cant_fake_a_new_war():
     assert check(monitor, game) == []
 
 
+def test_first_contact_while_at_war_fires():
+    game = FakeGame()
+    monitor = ThreatMonitor()
+    check(monitor, game)
+    game.civs[2].has_met = True
+    game.civs[2].is_at_war = True
+    assert check(monitor, game) == [WarDeclared(2, 3, "Unmet")]
+    assert check(monitor, game) == []
+
+
+def test_wars_already_running_on_the_first_read_are_a_baseline():
+    game = FakeGame()
+    set_at_war(game)
+    monitor = ThreatMonitor()
+    assert check(monitor, game) == []
+    assert check(monitor, game) == []
+
+
+def test_loading_a_save_mid_war_doesnt_fire_for_the_running_war():
+    game = FakeGame()
+    monitors = Monitors(EventBus())
+    events = collect(monitors._bus)
+    game.turn = 20
+    asyncio.run(monitors.run(game))
+    set_at_war(game)
+    game.turn = 10
+    asyncio.run(monitors.run(game))
+    assert not [event for event in events if isinstance(event, WarDeclared)]
+
+
 def test_unmet_civs_are_ignored():
     game = FakeGame()
     monitor = ThreatMonitor()

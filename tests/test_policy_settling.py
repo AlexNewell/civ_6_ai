@@ -362,3 +362,126 @@ def test_frontier_points_step_back_from_the_unrevealed_tile():
     fog = lq.StrategicMapData([lq.FogBoundary("Alpha", 10, 10, [-1, 5, -1, 4, -1, 3])], [])
     points = frontier_points(build_exploration(fog, []))
     assert points == [(14, 6), (10, 13), (8, 8)]
+
+
+FOG = lq.StrategicMapData([lq.FogBoundary("Alpha", 10, 10, [-1, 5, -1, 4, -1, -1])], [])
+
+
+def test_a_threat_near_a_scout_route_only_blocks_that_turn():
+    scout = unit_info(unit_id=3, unit_index=3, x=10, y=12, **SCOUT)
+    policy = SettlingPolicy()
+    blocked = make_game(
+        [scout], cities=[alpha()], strategic=FOG, threats=[barbarian(10, 15)], turn=5
+    )
+    run(policy, blocked)
+    assert blocked.actions == [("move", 3, 14, 6)]  # The other frontier is still open.
+    only = lq.StrategicMapData([lq.FogBoundary("Alpha", 10, 10, [-1, -1, -1, 4, -1, -1])], [])
+    waiting = make_game(
+        [scout], cities=[alpha()], strategic=only, threats=[barbarian(10, 15)], turn=6
+    )
+    run(policy, waiting)
+    assert waiting.actions == []  # Waits instead of blacklisting the frontier or auto-exploring.
+    clear = make_game([scout], cities=[alpha()], strategic=only, turn=7)
+    run(policy, clear)
+    assert clear.actions == [("move", 3, 10, 13)]
+
+
+def test_refused_scout_moves_set_a_frontier_aside_only_for_a_while():
+    scout = unit_info(unit_id=3, unit_index=3, x=10, y=12, **SCOUT)
+    only = lq.StrategicMapData([lq.FogBoundary("Alpha", 10, 10, [-1, -1, -1, 4, -1, -1])], [])
+    policy = SettlingPolicy(SettlingSettings(retry_turns=5, automate_retry_turns=3))
+    refused = make_game([scout], cities=[alpha()], strategic=only, turn=1)
+    refused.failing = {"move"}
+    run(policy, refused)
+    assert refused.actions == [("move", 3, 10, 13), ("explore", 3)]
+    later = make_game([scout], cities=[alpha()], strategic=only, turn=3)
+    run(policy, later)
+    assert later.actions == []  # Set aside, and automation was only just tried.
+    again = make_game([scout], cities=[alpha()], strategic=only, turn=4)
+    run(policy, again)
+    assert again.actions == [("explore", 3)]  # An idle scout is handed over again.
+    open_again = make_game([scout], cities=[alpha()], strategic=only, turn=7)
+    run(policy, open_again)
+    assert open_again.actions == [("move", 3, 10, 13)]
+
+
+def test_refused_moves_set_a_site_aside_for_a_while_not_for_good():
+    settings = SettlingSettings(max_move_failures=2, retry_turns=5)
+    policy = SettlingPolicy(settings)
+    sites = [site(14, 10, food=40)]
+    for turn in (1, 2):
+        game = make_game([settler()], cities=[alpha()], sites=sites, turn=turn)
+        game.failing = {"move"}
+        run(policy, game)
+        assert game.actions == [("move", 7, 14, 10)]
+    skipped = make_game([settler()], cities=[alpha()], sites=sites, turn=3)
+    run(policy, skipped)
+    assert skipped.actions == []
+    assert policy.decisions[-1].candidates[0].rejected == "recent moves to it were refused"
+    retry = make_game([settler()], cities=[alpha()], sites=sites, turn=8)
+    run(policy, retry)
+    assert retry.actions == [("move", 7, 14, 10)]
+
+
+def test_two_settlers_do_not_target_the_same_site():
+    other = unit_info(unit_id=8, unit_index=8, x=10, y=11, **SETTLER)
+    sites = [site(14, 10, food=40), site(15, 10, food=39), site(10, 15, food=20)]
+    game = make_game([settler(), other], cities=[alpha()], sites=sites)
+    policy = SettlingPolicy()
+    run(policy, game)
+    first, second = game.actions
+    assert first == ("move", 7, 14, 10)
+    assert second == ("move", 8, 10, 15)  # 15,10 is within 4 tiles of the reserved 14,10.
+    reasons = {(c.x, c.y): c.rejected for c in policy.decisions[1].candidates}
+    assert reasons[15, 10] == "reserved by another settler"
+
+
+def test_a_city_founded_this_turn_blocks_nearby_sites_for_the_next_settler():
+    on_site = settler(x=14, y=10)
+    other = unit_info(unit_id=8, unit_index=8, x=14, y=11, **SETTLER)
+    sites = [site(14, 10, food=40), site(15, 10, food=39), site(10, 15, food=20)]
+    game = make_game([on_site, other], cities=[alpha()], sites=sites)
+    policy = SettlingPolicy()
+    run(policy, game)
+    assert game.actions == [("found", 7), ("move", 8, 10, 15)]
+
+
+def test_a_held_settler_gives_up_waiting_after_a_bounded_number_of_turns():
+    settings = SettlingSettings(threat_radius=2, max_hold_turns=3)
+    policy = SettlingPolicy(settings)
+    sites = [site(14, 6, food=40)]
+    for turn in (1, 2, 3):
+        game = make_game(
+            [settler(y=14)], cities=[alpha()], threats=[barbarian(13, 10)], sites=sites, turn=turn
+        )
+        run(policy, game)
+        assert game.actions == []
+    final = make_game(
+        [settler(y=14)], cities=[alpha()], threats=[barbarian(13, 10)], sites=sites, turn=4
+    )
+    run(policy, final)
+    assert final.actions == [("move", 7, 14, 6)]
+    assert "without an escort" in policy.decisions[-1].reason
+
+
+def test_an_escort_that_cannot_move_does_not_stall_the_pair_for_good():
+    settings = SettlingSettings(threat_radius=2, max_hold_turns=2)
+    policy = SettlingPolicy(settings)
+    sites = [site(14, 6, food=40)]
+    escort = unit_info(unit_id=9, unit_index=9, x=10, y=14)
+    for turn in (1, 2):
+        game = make_game(
+            [settler(y=14), escort],
+            cities=[alpha()],
+            threats=[barbarian(13, 10)],
+            sites=sites,
+            turn=turn,
+        )
+        game.failing = {"move"}
+        run(policy, game)
+        assert policy.decisions[-1].action == "hold"
+    last = make_game(
+        [settler(y=14), escort], cities=[alpha()], threats=[barbarian(13, 10)], sites=sites, turn=3
+    )
+    run(policy, last)
+    assert last.actions == [("move", 7, 14, 6)]

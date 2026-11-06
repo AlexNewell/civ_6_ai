@@ -287,10 +287,12 @@ class FakeGame:
 
     async def appoint_governor(self, governor_type):
         self.clear(BlockerType.GOVERNOR_APPOINTMENT)
+        self.clear(BlockerType.GOVERNOR_OPPORTUNITY)
         return self.did("appoint_governor", governor_type)
 
     async def promote_governor(self, governor_type, promotion_type):
         self.clear(BlockerType.GOVERNOR_APPOINTMENT)
+        self.clear(BlockerType.GOVERNOR_OPPORTUNITY)
         return self.did("promote_governor", governor_type, promotion_type)
 
     async def get_units(self):
@@ -744,6 +746,18 @@ def test_governor_point_promotes_when_nobody_can_be_appointed():
 
     resolve(game)
 
+    assert game.called("promote_governor") == [("promote_governor", "GOV_B", "PROMO_A")]
+
+
+def test_a_governor_title_opportunity_is_spent_like_an_appointment():
+    # Live, turn 62: "New Governor Title Available" listed ENDTURN_BLOCKING_GOVERNOR_OPPORTUNITY
+    # with a point to spend and one governor unassigned with promotions on offer.
+    promotion = lq.GovernorPromotion("PROMO_A", "A", "")
+    appointed = lq.AppointedGovernor("GOV_B", "B", -1, "Unassigned", False, 0, [promotion])
+    game = FakeGame([BlockerType.GOVERNOR_OPPORTUNITY])
+    game.governors = governor_status(can_appoint=False, available=(), appointed=[appointed])
+
+    assert resolve(game) == []
     assert game.called("promote_governor") == [("promote_governor", "GOV_B", "PROMO_A")]
 
 

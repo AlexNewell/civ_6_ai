@@ -667,3 +667,15 @@ def test_a_refused_switch_keeps_counting_the_build():
     picks = [c[2] for c in game.set_calls if c[0] == 2]
     assert "UNIT_SETTLER" not in picks
     assert picks[-1] == "BUILDING_LIBRARY"
+
+
+def test_a_long_siege_by_barbarians_does_not_stop_expansion_once_defended():
+    # Live, turns 9 to 25: barbarians camped beside the capital and never attacked. The capital
+    # built six defenders and, as threatened, never scored a settler or builder again.
+    camp = [threat(unit_type="UNIT_WARRIOR", x=11, y=10, distance=1) for _ in range(4)]
+    c = city(threats=camp, population=3)
+    assert len(c.threats) == 4
+    held = ProductionContext(turn=25, num_cities=1, army=6, recon=1)
+    assert best(c, MENU, held) == "UNIT_SETTLER"
+    thin = ProductionContext(turn=25, num_cities=1, army=2, recon=1)
+    assert best(c, MENU, thin) in {"UNIT_WARRIOR", "BUILDING_WALLS"}

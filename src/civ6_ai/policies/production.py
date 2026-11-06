@@ -269,12 +269,28 @@ def is_defence(option: ProductionChoice) -> bool:
     return option.category == "BUILDING" and _short(option.item) in _DEFENSIVE_BUILDINGS
 
 
+_MAX_DEFENDERS_PER_CITY = 3
+
+
+def is_pressed(city: City, ctx: ProductionContext) -> bool:
+    """Threatened and short of defenders, so defence outranks expansion.
+
+    A threat that sits next to a garrisoned city for turns (barbarians camping live on turn 9 to
+    25) must not stop settlers and builders forever. Once there are enough defenders, the
+    threat only keeps the usual military scoring.
+    """
+    if not city.is_threatened:
+        return False
+    wanted = min(len(city.threats) + 1, _MAX_DEFENDERS_PER_CITY) * max(1, ctx.num_cities)
+    return ctx.army < wanted
+
+
 def _unit_score(
     option: ProductionChoice, city: City, ctx: ProductionContext, w: ProductionWeights
 ) -> float:
     item = option.item
     kind = canonical(item)
-    threatened = city.is_threatened
+    threatened = is_pressed(city, ctx)
     if kind == "UNIT_SETTLER":
         if (
             threatened
@@ -316,7 +332,7 @@ def _building_score(
         # Needs a tile, which `_start` finds when the game asks for one.
         return 0.0 if city.is_threatened else _WONDER_VALUE * w.wonders
     if name in _DEFENSIVE_BUILDINGS:
-        if city.is_threatened and not city.has_walls:
+        if is_pressed(city, ctx) and not city.has_walls:
             return 17.0 + len(city.threats)
         return 0.0  # Unthreatened, walls are an expense with no return.
     if name in _TRAINING_BUILDINGS:

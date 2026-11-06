@@ -65,7 +65,7 @@ These have no entry in `BlockerType`, because the bot never sees them.
 
 ## Things that look like blockers
 
-- **Choosing a religion:** civ6-mcp has hints for `NOTIFICATION_CHOOSE_RELIGION` and `NOTIFICATION_CHOOSE_BELIEF` but no blocking type. They follow a Great Prophet's activation, which no default does, so they're left to the religion policy.
+- **Choosing a religion:** civ6-mcp has hints for `NOTIFICATION_CHOOSE_RELIGION` and `NOTIFICATION_CHOOSE_BELIEF` but no blocking type. They follow a Great Prophet's activation, which no default does, so they're left to the religion policy. [`SecondaryPolicy`](../src/civ6_ai/policies/secondary.py) founds the religion on that notification or the turn after it activates a prophet, and can take over `PANTHEON` and `GREAT_PERSON_CLAIM` through `blocker_policies()`.
 - **Choosing a first government:** no type names this. `CONSIDER_GOVERNMENT_CHANGE` only keeps what's there, so changing government is left to a policy.
 
 ## Unknown blockers

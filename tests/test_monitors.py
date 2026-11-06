@@ -612,6 +612,14 @@ def test_an_empty_victory_read_is_a_failure():
         check(VictoryMonitor(), game)
 
 
+def test_no_city_yet_is_not_a_failed_victory_read():
+    """Live: before the first city the game lists no players at all, not even us."""
+    game = FakeGame()
+    game.cities = []
+    game.victory = VictoryProgress(players=[])
+    assert check(VictoryMonitor(), game) == []
+
+
 def test_omniscient_fields_never_reach_an_event():
     """Sets every field that ignores fog of war to a marker, then triggers every event."""
     marker = 7654321

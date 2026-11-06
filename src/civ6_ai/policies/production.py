@@ -17,7 +17,7 @@ from dataclasses import dataclass, fields, replace
 from typing import Any, Protocol
 
 from civ6_ai.blockers import Blocker, BlockerGame, BlockerType
-from civ6_ai.policies.game_data import COMBAT_UNITS, UPGRADES, WONDERS
+from civ6_ai.policies.game_data import COMBAT_UNITS, REPLACES, UPGRADES, WONDERS
 from civ6_ai.state import City, Empire, ProductionChoice, Unit
 from civ6_ai.state import read_cities as _read_cities
 from civ6_ai.state import read_empire as _read_empire
@@ -79,12 +79,18 @@ class ProductionContext:
         return replace(self, **{kind: getattr(self, kind) + 1 for kind in kinds})
 
 
+def canonical(item: str) -> str:
+    """The standard unit a unique unit replaces, so it is treated as that unit."""
+    return REPLACES.get(item, item)
+
+
 def _counted_as(item: str) -> tuple[str, ...]:
-    if item == "UNIT_BUILDER":
+    kind = canonical(item)
+    if kind == "UNIT_BUILDER":
         return ("builders",)
-    if item == "UNIT_SETTLER":
+    if kind == "UNIT_SETTLER":
         return ("settlers",)
-    if item == "UNIT_SCOUT":
+    if kind == "UNIT_SCOUT":
         return ("recon",)
     stats = COMBAT_UNITS.get(item)
     if stats is not None and stats[4] != "RECON":
@@ -93,17 +99,16 @@ def _counted_as(item: str) -> tuple[str, ...]:
 
 
 def build_context(
-    empire: Empire, units: Iterable[Unit], cities: Iterable[City] = ()
+    empire: Empire, units: Iterable[Unit], in_progress: Iterable[str] = ()
 ) -> ProductionContext:
-    """Count what exists plus what busy cities are already building, so picks don't double up."""
+    """Count what exists plus what cities are already building, so picks don't double up."""
     ctx = ProductionContext(turn=empire.turn, num_cities=empire.num_cities)
     for unit in units:
         ctx = ctx.after_choosing(
             unit.unit_type, unknown_combat=unit.is_combat and unit.unit_type not in COMBAT_UNITS
         )
-    for city in cities:
-        if city.building is not None:
-            ctx = ctx.after_choosing(city.building)
+    for item in in_progress:
+        ctx = ctx.after_choosing(item)
     return ctx
 
 
@@ -249,7 +254,7 @@ def drop_dominated(
             if any(better in offered for better in _upgrades_of(option.item)):
                 continue  # The game offers its upgrade, which does the same job better.
             if option.item not in COMBAT_UNITS and (
-                option.item not in _CIVILIAN_UNITS
+                canonical(option.item) not in _CIVILIAN_UNITS
                 and any(word in option.item for word in _UNPLANNED_WORDS)
             ):
                 continue
@@ -268,8 +273,9 @@ def _unit_score(
     option: ProductionChoice, city: City, ctx: ProductionContext, w: ProductionWeights
 ) -> float:
     item = option.item
+    kind = canonical(item)
     threatened = city.is_threatened
-    if item == "UNIT_SETTLER":
+    if kind == "UNIT_SETTLER":
         if (
             threatened
             or city.pop < _SETTLER_MIN_POP
@@ -278,12 +284,12 @@ def _unit_score(
         ):
             return 0.0
         return 14.0 * w.expansion
-    if item == "UNIT_BUILDER":
+    if kind == "UNIT_BUILDER":
         wanted = max(1, ctx.num_cities) - ctx.builders
         if wanted <= 0 or threatened:
             return 0.0
         return (6.0 + 2.0 * min(wanted, 3) + len(city.unimproved_resources)) * w.builders
-    if item == "UNIT_SCOUT":
+    if kind == "UNIT_SCOUT":
         return 5.0 if ctx.recon == 0 and ctx.turn <= _EARLY_TURNS else 0.0
     # Military. Strength comes from the game's own numbers, so the best unit offered wins.
     stats = COMBAT_UNITS.get(item)
@@ -471,23 +477,30 @@ class CityProductionPolicy:
         already building a defender or walls is left alone, so a switch never repeats.
         """
         cities = await _read_cities(game)
-        wanting = [c for c in cities if c.is_idle or _should_switch(c)]
-        if not wanting:
+        switching = [c for c in cities if _should_switch(c)]
+        idle = [c for c in cities if c.is_idle]
+        if not switching and not idle:
             return []
-        busy = [c for c in cities if not c.is_idle]
-        context = build_context(await _read_empire(game), await _read_units(game), busy)
-        unfinished = []
-        for city in sorted(wanting, key=lambda c: (not c.is_threatened, c.city_id)):
+        empire, units = await _read_empire(game), await _read_units(game)
+        building = {c.city_id: c.building for c in cities if c.building is not None}
+        # First the switches, which only ever choose defence. Each one replaces what the city was
+        # building, and a refused switch leaves it building, so the count below stays true.
+        for city in sorted(switching, key=lambda c: c.city_id):
             options = await _read_production(game, city.city_id)
-            if city.is_idle:
-                picked = await choose_for_city(game, city, options, context, self.weights)
-                if picked is None:
-                    unfinished.append(city.name)
-            else:
-                picked = await choose_for_city(
-                    game, city, options, context, self.weights, only_defence=True
-                )
+            context = build_context(empire, units, building.values())
+            picked = await choose_for_city(
+                game, city, options, context, self.weights, only_defence=True
+            )
             if picked is not None:
+                building[city.city_id] = picked.item
+        context = build_context(empire, units, building.values())
+        unfinished = []
+        for city in sorted(idle, key=lambda c: (not c.is_threatened, c.city_id)):
+            options = await _read_production(game, city.city_id)
+            picked = await choose_for_city(game, city, options, context, self.weights)
+            if picked is None:
+                unfinished.append(city.name)
+            else:
                 context = context.after_choosing(picked.item)
         return unfinished
 

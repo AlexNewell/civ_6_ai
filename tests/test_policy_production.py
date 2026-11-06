@@ -184,9 +184,8 @@ def test_wonders_use_the_wonders_weight():
 
 
 def test_context_counts_what_busy_cities_are_building():
-    busy = [city(currently_building="UNIT_SETTLER"), city(currently_building="UNIT_BUILDER")]
     empire = run(read_empire(fx.FakeGame()))
-    ctx = build_context(empire, [], busy)
+    ctx = build_context(empire, [], ["UNIT_SETTLER", "UNIT_BUILDER"])
     assert (ctx.settlers, ctx.builders) == (1, 1)
     grown = city(population=4)
     assert score(option("UNIT", "UNIT_SETTLER", 8), grown, ctx, ProductionWeights()) == 0.0
@@ -599,3 +598,71 @@ def test_two_cities_do_not_both_start_a_settler():
     game = ScriptedGame(cities=infos, production=options)
     run(CityProductionPolicy().run(game))
     assert [c[:3] for c in game.set_calls] == [(2, "BUILDING", "BUILDING_LIBRARY")]
+
+
+def test_a_unique_replacement_counts_as_the_unit_it_replaces():
+    empire = run(read_empire(fx.FakeGame(overview=fx.overview(turn=5))))
+    ctx = build_context(empire, [], ["UNIT_CREE_OKIHTCITAW"])
+    assert (ctx.recon, ctx.army) == (1, 0)
+    fresh = ProductionContext(turn=5, num_cities=1)
+    c = city()
+    unique = option("UNIT", "UNIT_CREE_OKIHTCITAW", 3)
+    scout = option("UNIT", "UNIT_SCOUT", 3)
+    assert score(unique, c, fresh, ProductionWeights()) == score(
+        scout, c, fresh, ProductionWeights()
+    )
+    assert score(unique, c, fresh, ProductionWeights()) > 0
+    assert score(unique, c, ctx, ProductionWeights()) == 0.0
+
+
+def test_a_dropped_settler_does_not_block_another_city():
+    infos = [
+        fx.city_info(
+            city_id=1,
+            name="A",
+            currently_building="UNIT_SETTLER",
+            production_turns_left=6,
+            population=4,
+        ),
+        fx.city_info(city_id=2, name="B", x=40, y=40, currently_building="nothing", population=4),
+    ]
+    options = [
+        lq.ProductionOption("UNIT", "UNIT_WARRIOR", 40, 4, -1),
+        lq.ProductionOption("UNIT", "UNIT_SETTLER", 80, 8, -1),
+    ]
+    # Only city A is threatened, because the barbarian is next to it and far from B.
+    game = ScriptedGame(cities=infos, production=options, threats=[fx.threat_info(x=12, y=11)])
+    game.data["overview"] = fx.overview(num_cities=2)
+    run(CityProductionPolicy().run(game))
+    picks = {c[0]: c[2] for c in game.set_calls}
+    assert picks[1] == "UNIT_WARRIOR"
+    assert picks[2] == "UNIT_SETTLER"
+
+
+def test_a_refused_switch_keeps_counting_the_build():
+    infos = [
+        fx.city_info(
+            city_id=1,
+            name="A",
+            currently_building="UNIT_SETTLER",
+            production_turns_left=6,
+            population=4,
+        ),
+        fx.city_info(city_id=2, name="B", x=40, y=40, currently_building="nothing", population=4),
+    ]
+    options = [
+        lq.ProductionOption("UNIT", "UNIT_WARRIOR", 40, 4, -1),
+        lq.ProductionOption("UNIT", "UNIT_SETTLER", 80, 8, -1),
+        lq.ProductionOption("BUILDING", "BUILDING_LIBRARY", 90, 9, -1),
+    ]
+    game = ScriptedGame(
+        refuse={"UNIT_WARRIOR": "Error: nope"},
+        cities=infos,
+        production=options,
+        threats=[fx.threat_info(x=12, y=11)],
+    )
+    game.data["overview"] = fx.overview(num_cities=2)
+    run(CityProductionPolicy().run(game))
+    picks = [c[2] for c in game.set_calls if c[0] == 2]
+    assert "UNIT_SETTLER" not in picks
+    assert picks[-1] == "BUILDING_LIBRARY"

@@ -104,6 +104,25 @@ READ_AUDIT = {
     "get_pantheon_status": ReadAudit(
         Verdict.LEGAL, "Options leave out pantheons taken by any civ, met or not."
     ),
+    "get_trade_destinations": ReadAudit(
+        Verdict.FLAGGED,
+        "Lists cities the game accepts a route to. If it accepts none, civ6-mcp falls back to "
+        "every living civ's cities, met or not, and the parser drops the warning that says so. "
+        "Foreign destinations are therefore kept only for met civs and city-states, and "
+        "religion_in, pressure_in and dest_yields of a foreign city are never used.",
+        ("religion_in", "pressure_in"),
+    ),
+    "get_religion_founding_status": ReadAudit(
+        Verdict.LEGAL,
+        "Own religion. Religions and pantheon beliefs taken by any civ are left out of the "
+        "options, as the game's own founding screen does.",
+    ),
+    "get_great_people": ReadAudit(
+        Verdict.LEGAL,
+        "The game's Great People screen: who has claimed each person, and our own points. "
+        "Rival points are not read.",
+    ),
+    "get_gp_advisor": ReadAudit(Verdict.LEGAL, "Own unit and own cities."),
     "get_city_states": ReadAudit(Verdict.LEGAL, "Met city-states only."),
     "list_city_production": ReadAudit(Verdict.LEGAL, "Own city."),
     "get_builder_tasks": ReadAudit(

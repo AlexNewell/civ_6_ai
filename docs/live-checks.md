@@ -89,6 +89,23 @@ What was verified against a running Civ VI game, and what wasn't reached. Newest
 | Diplomacy session handling | In part: "Turn paused - AI diplomatic proposal from Sumeria [deal]" on turn 80 was cleared and the retry went through. |
 | Unknown blocker types | `ENDTURN_BLOCKING_GOVERNOR_OPPORTUNITY` was logged unresolved on turns 62 to 79 (stop 5). |
 
+## Pending: government, policies and governors (issue 1.10)
+
+Written against civ6-mcp's source at the pin, not yet run live.
+
+| Check | Status |
+|---|---|
+| `change_government` reply contains `GOVERNMENT_CHANGED` on success and `GOV_LOCKED` for a locked one | Not run. The policy tries every better government best first, so the first turn costs up to 12 calls, then one pass per completed civic. A read of unlocked governments would replace this. |
+| A government change applies only on a later turn, so slots read stale in the same turn | Not run. The policy skips filling slots on the turn it changes government. |
+| Policy cards survive or empty on a government change, and a refill is free | Not run. |
+| Whether slotting or swapping a card costs gold outside a new civic | Not run. The policy never swaps a filled slot. |
+| `set_policies` for one slot returns `POLICIES_SET`; a wildcard slot accepts cards of any type | Not run. |
+| `appoint_governor` returns `APPOINTED` or `APPOINT_REQUESTED`, and the point drops by the next read | Not run. A point that doesn't drop stops the loop for the turn. |
+| `assign_governor` returns `ASSIGNED`; a governor left unassigned stays so after the idle blocker is dismissed | Not run. |
+| Governor promotion list includes ones with unmet prerequisites (`PREREQ_NOT_MET`) | Not run. The policy falls through to the next promotion. |
+| Default rank, card and governor priorities are sensible in play | Not tuned. |
+| No policy slot empty for more than 5 turns in a full game | Not run. |
+
 ## Run 1: blocker resolver and monitors (issues 1.2 and 1.3)
 
 - **Build:** this repo at `3f4a4c8` plus the fix below, civ6-mcp pinned at `dd20190`.

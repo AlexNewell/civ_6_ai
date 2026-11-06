@@ -215,7 +215,7 @@ def test_dominated_options_are_dropped():
         option("DISTRICT", "DISTRICT_CITY_CENTER"),  # Already there.
         option("DISTRICT", "DISTRICT_SPACEPORT"),
         option("PROJECT", "PROJECT_BUILD_ROCKET"),
-        option("UNIT", "UNIT_TRADER"),
+        option("UNIT", "UNIT_MISSIONARY"),
         option("UNIT", "UNIT_SLINGER"),
         option("UNIT", "UNIT_ARCHER"),
         option("BUILDING", "BUILDING_X", is_repair=True),  # No coordinates to repair at.

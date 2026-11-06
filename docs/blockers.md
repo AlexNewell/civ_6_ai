@@ -41,7 +41,7 @@ All of these come from civ6-mcp's blocking query, run through `execute_lua` in t
 | `ENDTURN_BLOCKING_GOVERNOR_APPOINTMENT` | Appoints the first available governor that's accepted, or promotes the first one with a promotion on offer. |
 | `ENDTURN_BLOCKING_GOVERNOR_OPPORTUNITY` | Same as an appointment. Seen live on turn 62, when a governor title became available: the turn still ended, but the type had no handler and raised `UnresolvedBlockers` every turn. |
 | `ENDTURN_BLOCKING_GOVERNOR_IDLE` | Left to `end_turn`, which dismisses it. The governor stays unassigned until a policy places it. |
-| `ENDTURN_BLOCKING_UNIT_PROMOTION` | Asks each combat unit for its options and takes the first. Stale notifications are left to `end_turn`. |
+| `ENDTURN_BLOCKING_UNIT_PROMOTION` | Asks each combat unit for its options and takes the first. Stale notifications are left to `end_turn`. `MilitaryPolicy.blocker_policies()` takes this over with a preference list and keeps the default as the fallback. It also spends promotions every turn from the non-blocking `NOTIFICATION_UNIT_PROMOTION_AVAILABLE`. |
 | `ENDTURN_BLOCKING_PANTHEON` | Chooses the first belief offered. |
 | `ENDTURN_BLOCKING_COMMEMORATION_AVAILABLE` | Chooses the first dedications, up to the number allowed. This is the era choice. |
 | `ENDTURN_BLOCKING_GIVE_INFLUENCE_TOKEN` | Sends each envoy to the first city-state that accepts it. With no envoys left it's stale, and `end_turn` clears it. |

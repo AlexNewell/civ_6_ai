@@ -2,6 +2,25 @@
 
 What was verified against a running Civ VI game, and what wasn't reached. Newest run first. Run 2 updates the status of earlier checks it reached.
 
+## To check live: military policy (issue 13, first slice)
+
+Written offline against civ6-mcp's source, so none of this has run in a game yet.
+
+| Check | Status |
+|---|---|
+| Damage rule `24 * e^(0.04 * strength difference)` matches the "your HP: a -> b" line of a melee attack and the damage dealt by a ranged one | Not reached |
+| `assumed_defender_bonus` (6) covers fortification and terrain on barbarian units that stand on hills or fortified | Not reached |
+| The damage roll stays within `damage_variance` (20%) | Not reached |
+| `NOTIFICATION_UNIT_PROMOTION_AVAILABLE` is the notification type that was listed from turn 80, and `get_unit_promotions` then lists options | Not reached |
+| The promotion names in `promotion_preference` exist (`PROMOTION_GARRISON`, `PROMOTION_TORTOISE`, ...); unknown names are skipped for the first offered | Not reached |
+| `heal_unit` and `fortify_unit` answer as read in the source (`HEALING|HP:..`, `FORTIFIED`, `ALREADY_FORTIFIED`, `Error: CANNOT_HEAL`) | Not reached |
+| A refused `attack_unit` answers with the combat estimate followed by `Error: ...`, which `attack_landed` treats as a failure | Not reached |
+| A move into a city to garrison it answers `now_at:x,y` equal to the city tile when it arrives | Not reached |
+| `get_map_area` shows `IMPROVEMENT_BARBARIAN_CAMP` on a visible camp tile, and melee units stepping onto an emptied camp clear it | Not reached |
+| A melee unit that kills its target does not move onto the tile (so a city garrison stays put) | Not reached |
+| Ranged units are not hit back by melee defenders, and ranged defenders do hit back (`assess_attack` assumes both) | Not reached |
+| `Unit.targets` lists only targets in range with line of sight, and ranged units fire at adjacent targets | Not reached |
+
 ## Run 2: the wired bot from turn 1 (issues 6 and 12)
 
 - **Build:** the `live-t1-run` branch (main at `61f6759` plus the fixes below), civ6-mcp pinned at `dd20190`.
@@ -24,7 +43,7 @@ What was verified against a running Civ VI game, and what wasn't reached. Newest
 3. **Barbarians next to the capital blocked all expansion (turns 9 to 30).** A threatened city scored settlers and builders as zero and defenders and walls high with no limit, so the capital built six defenders and nothing else. Fix: defence only outranks expansion while the empire has fewer defenders than `min(threats + 1, 3)` per city. Test `test_a_long_siege_by_barbarians_does_not_stop_expansion_once_defended`.
 4. **The settler found no site for 25 turns.** Nothing explored: the starting warrior is not a scout and the first scout scored 5, below a settler, so the revealed map was about 30 tiles. Fixes: the first scout scores 15 (test `test_the_first_scout_comes_before_a_settler`); a scout waits 2 turns for a camp to leave and then goes, because every route out passed within 2 tiles of the camp (test `test_a_scout_stops_waiting_for_a_camp_that_never_leaves`); and a settler with a combat unit on its tile now ignores "hostile unit near the site", which had rejected every site while the settler stood on the best one with its escort (test `test_an_escorted_settler_founds_though_a_hostile_unit_shadows_it`). It founded the next turn.
 5. **`ENDTURN_BLOCKING_GOVERNOR_OPPORTUNITY` (turn 62 on).** The notification reads "New Governor Title Available". The turn still ended, so the game doesn't treat it as a hard block, but the type had no handler and raised `UnresolvedBlockers` every turn (about 3s). It is now handled like an appointment (test `test_a_governor_title_opportunity_is_spent_like_an_appointment`). Not confirmed live that this spends the point: the game still had `points_available=1` and an unassigned governor at turn 80, and no handler error followed on turns 80 to 99.
-6. **Seen, not fixed:** the starting warrior and slingers stay in the capital all game; builders are made but never given work (no builder policy); 625 gold is unspent at turn 100; a trade route sits idle; a unit promotion notification is listed from turn 80 on. A settler escort step onto a tile holding our scout was refused with `STACKING_CONFLICT|Friendly UNIT_SCOUT already on (65,26). Cannot stack same formation class.` The pair held for a turn and went on.
+6. **Seen, not fixed:** the starting warrior and slingers stay in the capital all game; builders are made but never given work (the builder policy was not wired yet; it now is, see below); 625 gold is unspent at turn 100; a trade route sits idle; a unit promotion notification is listed from turn 80 on. A settler escort step onto a tile holding our scout was refused with `STACKING_CONFLICT|Friendly UNIT_SCOUT already on (65,26). Cannot stack same formation class.` The pair held for a turn and went on.
 
 ### Checks for the wired bot (PR 74)
 
@@ -89,7 +108,11 @@ What was verified against a running Civ VI game, and what wasn't reached. Newest
 | Diplomacy session handling | In part: "Turn paused - AI diplomatic proposal from Sumeria [deal]" on turn 80 was cleared and the retry went through. |
 | Unknown blocker types | `ENDTURN_BLOCKING_GOVERNOR_OPPORTUNITY` was logged unresolved on turns 62 to 79 (stop 5). |
 
-## Pending: government, policies and governors (issue 1.10)
+## Pending: builders, government, trade, religion and great people (issues 1.6, 1.10 and 1.11)
+
+`BuilderPolicy`, `GovernmentPolicy` and `SecondaryPolicy` are now handlers in `build_orchestrator`, and the resolver uses their blocker policies. A fake-game test runs a full turn through every handler. None of this has run live yet: the checks below, and the builder and secondary behaviour in play, are the live acceptance.
+
+### Government, policies and governors (issue 1.10)
 
 Written against civ6-mcp's source at the pin, not yet run live.
 

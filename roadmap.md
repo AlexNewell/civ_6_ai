@@ -10,7 +10,9 @@ Issues are generated from [`.github/roadmap-issues.yaml`](.github/roadmap-issues
 |---|---|
 | Phase 0: Repo setup | Done |
 | Track T: Game toolchain | Done |
-| Phase 1: Deterministic bot | In progress |
+| Phase 1: Deterministic bot | In progress. Merged: 1.1-1.8. 1.10 and 1.11 are wired into the bot and merged, pending live acceptance. 1.9, 1.12 and 1.13 are not started |
+| Track E: Evaluator and data | In progress |
+| Track S: Puppeteering spike | In progress |
 | Everything else | Not started |
 
 ## Sequence

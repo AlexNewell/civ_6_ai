@@ -19,7 +19,7 @@ different settings and compare the choices.
 import json
 import logging
 import math
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import asdict, dataclass, field
 from typing import Protocol
 
@@ -169,6 +169,66 @@ class SettlingGame(GameReads, Protocol):
     async def found_city(self, unit_index: int) -> str: ...
 
     async def automate_explore(self, unit_index: int) -> str: ...
+
+
+def find_escort(
+    settler: Unit,
+    units: Iterable[Unit],
+    city_tiles: Iterable[tuple[int, int]],
+    claimed: Collection[int],
+    radius: int,
+    map_width: int | None = STANDARD_MAP_WIDTH,
+) -> Unit | None:
+    """The nearest combat unit that can leave to escort `settler`, or None.
+
+    Never a scout, a ship, a unit in `claimed`, or the only combat unit in a city.
+    """
+    city_tiles = set(city_tiles)
+    combat = [u for u in units if u.is_combat and u.can_move and u.unit_id not in claimed]
+    garrisons: dict[tuple[int, int], int] = {}
+    for u in combat:
+        garrisons[u.x, u.y] = garrisons.get((u.x, u.y), 0) + 1
+    usable = [
+        u
+        for u in combat
+        if u.unit_type != SCOUT
+        and not any(word in u.unit_type for word in _SEA_UNITS)
+        and not ((u.x, u.y) in city_tiles and garrisons[u.x, u.y] == 1)
+        and hex_distance(u.x, u.y, settler.x, settler.y, map_width) <= radius
+    ]
+    usable.sort(key=lambda u: (hex_distance(u.x, u.y, settler.x, settler.y, map_width), u.unit_id))
+    return usable[0] if usable else None
+
+
+def units_reserved_for_settling(
+    units: Iterable[Unit],
+    city_tiles: Iterable[tuple[int, int]],
+    radius: int = SettlingSettings.escort_search_radius,
+    map_width: int | None = STANDARD_MAP_WIDTH,
+) -> frozenset[int]:
+    """Ids of the units settling may use: scouts, and the escort each settler would take.
+
+    Other policies must leave these alone. A settler counts whether or not it has moves left,
+    because settling may already have moved it and its escort this turn. Every combat unit that
+    shares a tile with a settler outside a city is an escort on the road, so it is reserved too.
+    This is the one definition of who an escort is, and `SettlingPolicy` picks with the same
+    `find_escort`, so the two can't drift apart.
+    """
+    units = list(units)
+    city_tiles = list(city_tiles)
+    reserved = {u.unit_id for u in units if u.unit_type == SCOUT}
+    settlers = sorted((u for u in units if u.unit_type == SETTLER), key=lambda u: u.unit_id)
+    settler_tiles = {(s.x, s.y) for s in settlers} - set(city_tiles)
+    escorts = [u for u in units if u.is_combat and (u.x, u.y) in settler_tiles]
+    reserved |= {u.unit_id for u in escorts}
+    on_road = {(u.x, u.y) for u in escorts if u.unit_type != SCOUT}
+    for settler in settlers:
+        if (settler.x, settler.y) in on_road:
+            continue  # Already travelling with an escort, as `_settle` also reads it.
+        escort = find_escort(settler, units, city_tiles, reserved, radius, map_width)
+        if escort is not None:
+            reserved.add(escort.unit_id)
+    return frozenset(reserved)
 
 
 def neighbours(x: int, y: int, map_width: int | None = STANDARD_MAP_WIDTH) -> list[tuple[int, int]]:
@@ -567,22 +627,7 @@ class SettlingPolicy:
 
     def _find_escort(self, settler, units, city_tiles, claimed, danger) -> Unit | None:
         s = self.settings
-        combat = [u for u in units if u.is_combat and u.can_move and u.unit_id not in claimed]
-        garrisons: dict[tuple[int, int], int] = {}
-        for u in combat:
-            garrisons[u.x, u.y] = garrisons.get((u.x, u.y), 0) + 1
-        usable = [
-            u
-            for u in combat
-            if u.unit_type != SCOUT
-            and not any(word in u.unit_type for word in _SEA_UNITS)
-            and not ((u.x, u.y) in city_tiles and garrisons[u.x, u.y] == 1)
-            and hex_distance(u.x, u.y, settler.x, settler.y, s.map_width) <= s.escort_search_radius
-        ]
-        usable.sort(
-            key=lambda u: (hex_distance(u.x, u.y, settler.x, settler.y, s.map_width), u.unit_id)
-        )
-        return usable[0] if usable else None
+        return find_escort(settler, units, city_tiles, claimed, s.escort_search_radius, s.map_width)
 
     async def _flee(self, game, settler, city_tiles, record) -> bool:
         s = self.settings

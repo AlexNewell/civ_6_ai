@@ -207,7 +207,7 @@ def build_city(
         is_capital="PALACE" in info.buildings,
         garrison_unit=info.garrison_unit or None,
         districts=tuple(districts),
-        buildings=tuple(info.buildings),
+        buildings=tuple(b.removeprefix("BUILDING_") for b in info.buildings),
         pillaged_buildings=tuple(b.removeprefix("BUILDING_") for b in info.pillaged_buildings),
         pillaged_improvements=tuple(_tile_items(info.pillaged_improvements)),
         unimproved_resources=tuple(
@@ -622,7 +622,10 @@ async def _rival_city_visibility(
         if civ.has_met:
             for city in civ.visible_cities:
                 tiles = await game.get_map_area(city.x, city.y, 0)
-                visible[city.x, city.y] = any(t.visibility == "visible" for t in tiles)
+                # Fail closed: only the city's own plot counts, never a visible neighbour.
+                visible[city.x, city.y] = any(
+                    t.visibility == "visible" and (t.x, t.y) == (city.x, city.y) for t in tiles
+                )
     return visible
 
 

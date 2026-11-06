@@ -49,7 +49,7 @@ def city_info(**changes) -> lq.CityInfo:
         garrison_unit="UNIT_WARRIOR",
         unimproved_resources=["IRON@12,10", "HORSES@8,9"],
         pillaged_improvements=[],
-        buildings=["PALACE", "BUILDING_MONUMENT"],
+        buildings=["PALACE", "MONUMENT"],
     )
     return lq.CityInfo(**{**base, **changes})
 

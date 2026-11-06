@@ -365,3 +365,21 @@ def test_token_estimate_is_documented_bytes_over_three():
 def test_public_names_are_exported():
     for name in state.__all__:
         assert hasattr(state, name)
+
+
+def test_visible_neighbour_does_not_reveal_a_fogged_rival_city():
+    neighbour = fx.tile(x=31, y=30)
+    game = fx.FakeGame(tiles={(20, 10): [fx.tile()], (30, 30): [neighbour]})
+    (rival,) = run(reader.read_rivals(game))
+    assert [c.name for c in rival.visible_cities] == ["Roma"]
+
+
+def test_building_names_share_one_form():
+    info = fx.city_info(
+        buildings=["PALACE", "BUILDING_MONUMENT", "GRANARY"],
+        pillaged_buildings=["BUILDING_MONUMENT"],
+    )
+    city = reader.build_city(info, (), set())
+    assert city.buildings == ("PALACE", "MONUMENT", "GRANARY")
+    assert set(city.pillaged_buildings) <= set(city.buildings)
+    assert city.is_capital

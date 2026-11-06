@@ -68,7 +68,8 @@ class ActionGame(FakeGame):
     """Records builder actions. `replies` overrides what an action answers, by action name."""
 
     def __init__(self, jobs=(), builders=(), owned=(), **overrides):
-        super().__init__(units=list(builders), overview=overview(turn=5), threats=[], **overrides)
+        overrides.setdefault("threats", [])
+        super().__init__(units=list(builders), overview=overview(turn=5), **overrides)
         self.data["builder_tasks"] = list(jobs)
         self.owned = list(owned)
         self.actions: list[tuple] = []
@@ -472,3 +473,41 @@ def test_no_builder_idles_while_work_exists_over_100_turns(seed):
         game.end_turn()
     assert game.completed >= 20
     assert not policy._failures
+
+
+def test_veto_applies_to_every_builder():
+    game = ActionGame(
+        [task(x=10, y=10)],
+        [worker(1, x=10, y=10, valid_improvements=["IMPROVEMENT_MINE"]), worker(2, x=15, y=10)],
+    )
+    run(BuilderPolicy(), game)
+    assert game.actions == []  # Builder 2 does not walk to a refused tile.
+
+
+def test_claim_survives_a_passing_hostile_unit_but_not_for_ever():
+    policy = BuilderPolicy(BuilderSettings(max_hold_turns=2))
+    run(policy, ActionGame([task(x=30, y=10)], [worker(x=10, y=10)]))
+    claim = policy._claims[1]
+    near = [threat_info(x=31, y=10, owner_id=BARBARIANS)]
+    game = ActionGame([task(x=30, y=10)], [worker(x=12, y=10)], threats=near)
+    for turn in (6, 7):
+        game.data["overview"] = overview(turn=turn)
+        run(policy, game)
+        assert game.actions == [] and policy._claims[1] == claim
+    game.data["overview"] = overview(turn=8)
+    run(policy, game)
+    assert 1 not in policy._claims  # Bounded.
+    clear = ActionGame([task(x=30, y=10)], [worker(x=12, y=10)])
+    run(policy, clear)
+    assert clear.actions == [("move", 1, 30, 10)]
+
+
+def test_claim_resumes_when_the_threat_leaves():
+    policy = BuilderPolicy()
+    run(policy, ActionGame([task(x=30, y=10)], [worker(x=10, y=10)]))
+    near = [threat_info(x=31, y=10, owner_id=BARBARIANS)]
+    run(policy, ActionGame([task(x=30, y=10)], [worker(x=12, y=10)], threats=near))
+    assert policy._claims[1][:2] == (30, 10) and policy._holds[1] == 1
+    game = ActionGame([task(x=30, y=10)], [worker(x=12, y=10)])
+    run(policy, game)
+    assert game.actions == [("move", 1, 30, 10)] and 1 not in policy._holds

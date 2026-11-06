@@ -75,6 +75,7 @@ class BuilderSettings:
     retry_turns: int = 10  # How long a job that failed is set aside.
     max_travel_turns: int = 20  # Turns walking to one job before it is given up.
     max_work_turns: int = 15  # Turns spent on one job before it is given up.
+    max_hold_turns: int = 5  # Turns an idle builder keeps its claim while the job is unsafe.
     map_width: int | None = STANDARD_MAP_WIDTH
 
 
@@ -141,6 +142,7 @@ class BuilderPolicy:
     # Per builder: the job, how many turns spent on it, and the last turn counted.
     _travel: dict[int, tuple[_Key, int, int]] = field(default_factory=dict, init=False, repr=False)
     _work: dict[int, tuple[_Key, int, int]] = field(default_factory=dict, init=False, repr=False)
+    _holds: dict[int, int] = field(default_factory=dict, init=False, repr=False)
 
     async def run(self, game: BuilderGame) -> None:
         units = await _read_units(game, self.settings.map_width)
@@ -157,10 +159,13 @@ class BuilderPolicy:
         free_ids = {u.unit_id for u in free}
         held = {key[:2] for uid, key in self._claims.items() if uid not in free_ids}
         available: dict[tuple[int, int], BuilderJob] = {}
+        unsafe: set[_Key] = set()
         for job in sorted(jobs, key=self._job_order):  # One job per tile: the best one.
-            if (job.x, job.y) not in held and not self._unsafe(job, threats):
+            if self._unsafe(job, threats):
+                unsafe.add(_key(job))  # Skipped for now, but a claim on it is kept for a while.
+            elif (job.x, job.y) not in held:
                 available.setdefault((job.x, job.y), job)
-        await self._assign(game, free, available, turn)
+        await self._assign(game, free, available, turn, unsafe)
 
     # ----- bookkeeping -----
 
@@ -169,6 +174,7 @@ class BuilderPolicy:
         self._claims = {k: v for k, v in self._claims.items() if k in alive}
         self._travel = {k: v for k, v in self._travel.items() if k in alive}
         self._work = {k: v for k, v in self._work.items() if k in alive}
+        self._holds = {k: v for k, v in self._holds.items() if k in alive}
 
     def _forget_finished_jobs(self, jobs: list[BuilderJob], turn: int) -> None:
         live = {_key(j) for j in jobs}
@@ -201,6 +207,7 @@ class BuilderPolicy:
         free: list[Unit],
         available: dict[tuple[int, int], BuilderJob],
         turn: int,
+        unsafe: set[_Key],
     ) -> None:
         s = self.settings
         attempts = {u.unit_id: 0 for u in free}
@@ -231,10 +238,21 @@ class BuilderPolicy:
             else:
                 tried.add((unit.unit_id, tile))
                 attempts[unit.unit_id] += 1
+                if self._set_aside.get(_key(job), -1) >= turn:
+                    del available[tile]  # Refused for every builder, not just this one.
         for unit in free:
             if unit.unit_id not in done:
                 reason = "no job on offer" if not available else "every job tried was refused"
-                self._claims.pop(unit.unit_id, None)
+                claim = self._claims.get(unit.unit_id)
+                holds = self._holds.get(unit.unit_id, 0) + 1
+                if claim in unsafe and holds <= s.max_hold_turns:
+                    self._holds[unit.unit_id] = (
+                        holds  # A hostile unit passing must not cost the walk.
+                    )
+                    reason = "job is near a hostile unit, holding the claim"
+                else:
+                    self._claims.pop(unit.unit_id, None)
+                    self._holds.pop(unit.unit_id, None)
                 self._record(BuilderDecision(turn, unit.unit_id, unit.x, unit.y, "idle", reason))
 
     async def _work_on(
@@ -264,6 +282,7 @@ class BuilderPolicy:
                 record("failed", "move refused", result)
                 return False
             self._claims[unit.unit_id] = key
+            self._holds.pop(unit.unit_id, None)
             reached = _NOW_AT.search(result)
             if not reached or (int(reached.group(1)), int(reached.group(2))) != target:
                 record("move", "heading for the job", result)
@@ -275,7 +294,8 @@ class BuilderPolicy:
             and not job.is_repair
             and job.improvement not in unit.valid_improvements
         ):
-            self._fail(key, turn)
+            self._set_aside[key] = turn + self.settings.retry_turns  # True for any builder.
+            self._claims.pop(unit.unit_id, None)
             record("failed", "the game does not offer this improvement here")
             return False
         return await self._build(game, unit, job, record, key, turn)
@@ -291,6 +311,7 @@ class BuilderPolicy:
             action, result = "improve", await game.improve_tile(unit.unit_index, job.improvement)
         if action_succeeded(result):
             self._claims[unit.unit_id] = key
+            self._holds.pop(unit.unit_id, None)
             self._failures.pop(key, None)
             record(action, "working on the job", result)
             return True

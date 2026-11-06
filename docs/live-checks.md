@@ -2,6 +2,25 @@
 
 What was verified against a running Civ VI game, and what wasn't reached. Newest run first. Run 2 updates the status of earlier checks it reached.
 
+## To check live: military policy (issue 13, first slice)
+
+Written offline against civ6-mcp's source, so none of this has run in a game yet.
+
+| Check | Status |
+|---|---|
+| Damage rule `24 * e^(0.04 * strength difference)` matches the "your HP: a -> b" line of a melee attack and the damage dealt by a ranged one | Not reached |
+| `assumed_defender_bonus` (6) covers fortification and terrain on barbarian units that stand on hills or fortified | Not reached |
+| The damage roll stays within `damage_variance` (20%) | Not reached |
+| `NOTIFICATION_UNIT_PROMOTION_AVAILABLE` is the notification type that was listed from turn 80, and `get_unit_promotions` then lists options | Not reached |
+| The promotion names in `promotion_preference` exist (`PROMOTION_GARRISON`, `PROMOTION_TORTOISE`, ...); unknown names are skipped for the first offered | Not reached |
+| `heal_unit` and `fortify_unit` answer as read in the source (`HEALING|HP:..`, `FORTIFIED`, `ALREADY_FORTIFIED`, `Error: CANNOT_HEAL`) | Not reached |
+| A refused `attack_unit` answers with the combat estimate followed by `Error: ...`, which `attack_landed` treats as a failure | Not reached |
+| A move into a city to garrison it answers `now_at:x,y` equal to the city tile when it arrives | Not reached |
+| `get_map_area` shows `IMPROVEMENT_BARBARIAN_CAMP` on a visible camp tile, and melee units stepping onto an emptied camp clear it | Not reached |
+| A melee unit that kills its target does not move onto the tile (so a city garrison stays put) | Not reached |
+| Ranged units are not hit back by melee defenders, and ranged defenders do hit back (`assess_attack` assumes both) | Not reached |
+| `Unit.targets` lists only targets in range with line of sight, and ranged units fire at adjacent targets | Not reached |
+
 ## Run 2: the wired bot from turn 1 (issues 6 and 12)
 
 - **Build:** the `live-t1-run` branch (main at `61f6759` plus the fixes below), civ6-mcp pinned at `dd20190`.

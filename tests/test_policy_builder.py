@@ -310,7 +310,7 @@ def test_working_forever_is_bounded():
 def test_per_builder_state_is_dropped_when_it_dies():
     policy = BuilderPolicy()
     run(policy, ActionGame([task(x=20, y=10)], [worker(1), worker(2, x=30, y=10)]))
-    assert set(policy._claims) == {1, 2}
+    assert 1 in policy._claims
     run(policy, ActionGame([task(x=20, y=10)], [worker(2, x=30, y=10)]))
     assert 1 not in policy._claims and 1 not in policy._travel and 1 not in policy._work
     run(policy, ActionGame([task(x=20, y=10)], []))

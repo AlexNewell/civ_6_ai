@@ -104,7 +104,9 @@ def test_one_turn_runs_handlers_in_order_and_acts(tmp_path):
     assert reason is StopReason.TURN_LIMIT
     assert list(record.handler_seconds) == [
         "monitors",
+        "diplomacy",
         "settling",
+        "military",
         "research",
         "government",
         "city_production",
@@ -155,6 +157,53 @@ def test_government_policy_is_one_instance_shared_by_handler_and_blockers(tmp_pa
     monkeypatch.setattr(bot, "GovernmentPolicy", Counting)
     bot.build_orchestrator(WiredGame(), EventBus(), TurnLog(tmp_path / "game.jsonl"))
     assert len(made) == 1
+
+
+@pytest.mark.parametrize("attribute", ["MilitaryPolicy", "DiplomacyPolicy"])
+def test_military_and_diplomacy_are_one_instance_each_shared_by_handler_and_blockers(
+    tmp_path, monkeypatch, attribute
+):
+    made = []
+    original = getattr(bot, attribute)
+
+    class Counting(original):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            made.append(self)
+
+    monkeypatch.setattr(bot, attribute, Counting)
+    orchestrator = bot.build_orchestrator(WiredGame(), EventBus(), TurnLog(tmp_path / "g.jsonl"))
+    assert len(made) == 1
+    handlers = [h for h in orchestrator._handlers if h is made[0]]
+    assert len(handlers) == 1
+
+
+def test_a_policy_claiming_a_blocker_another_owns_is_refused(tmp_path, monkeypatch):
+    class Greedy(bot.DiplomacyPolicy):
+        def blocker_policies(self):
+            return {**super().blocker_policies(), "ENDTURN_BLOCKING_UNIT_PROMOTION": None}
+
+    monkeypatch.setattr(bot, "DiplomacyPolicy", Greedy)
+    with pytest.raises(ValueError, match="same blocker"):
+        bot.build_orchestrator(WiredGame(), EventBus(), TurnLog(tmp_path / "g.jsonl"))
+
+
+def test_an_open_proposal_is_answered_by_the_diplomacy_policy_before_the_turn_ends(tmp_path):
+    game = WiredGame()
+    game.sessions = [
+        lq.DiplomacySession(
+            session_id=1,
+            other_player_id=1,
+            other_civ_name="Rome",
+            other_leader_name="Trajan",
+            choices=[],
+            dialogue_text="Greetings",
+        )
+    ]
+    reason, record = play_one_turn(game, tmp_path)
+    assert reason is StopReason.TURN_LIMIT
+    assert game.called("diplomacy_respond")[0][2] == "POSITIVE"
+    assert not record.handler_errors
 
 
 def test_pantheon_and_great_person_blockers_go_to_the_secondary_policy(tmp_path):
@@ -342,6 +391,14 @@ class _Recorder:
         "recruit_great_person",
         "activate_great_person",
         "make_trade_route",
+        "attack_unit",
+        "fortify_unit",
+        "heal_unit",
+        "promote_unit",
+        "diplomacy_respond",
+        "respond_to_deal",
+        "vote_world_congress",
+        "execute_lua",
     ],
 )
 def test_the_new_policies_actions_clear_shared_reads(action):
@@ -371,6 +428,10 @@ def test_the_new_policies_actions_clear_shared_reads(action):
         "get_trade_destinations",
         "get_city_states",
         "get_notifications",
+        "get_unit_promotions",
+        "get_diplomacy_sessions",
+        "get_pending_deals",
+        "get_world_congress",
     ],
 )
 def test_the_new_policies_plain_reads_do_not_clear_shared_reads(read):

@@ -9,8 +9,11 @@ What it does with each incoming proposal (see `respond`):
   plus `min_net_value`. Never accepted, whatever the price: any alliance, any joint war, and any
   city of ours. A strategic resource or gold given for nothing prices below zero, so it is refused.
   A deal whose items civ6-mcp cannot name (delegations, embassies, research agreements) has no
-  price, and is accepted if `accept_unreadable_deals` is set, because everything it can name that
-  matters is checked first.
+  price. civ6-mcp's query drops every item it has no name for, which hides every agreement but
+  open borders, joint war and alliance (a third-party war or pact could be one). So before any
+  acceptance a raw read lists every item of the deal, and a deal is refused if the raw count
+  differs from the parsed count or the read fails. Only a deal with no parsed item at all can be
+  accepted, and only if `accept_unreadable_deals` is set (off by default).
 - Conversations with no deal: a first meeting or a delegation gets a friendly answer. Friendship
   is accepted unless we are at war with them, they are denounced, or nothing is known about them.
   Alliances, war talk and demands to stop something are refused.
@@ -115,7 +118,7 @@ class DiplomacyWeights:
     city_value: float = 2000.0  # Only ever counted for a city they give. Ours is never given.
     open_borders_value: float = 5.0  # Each way, so an even swap prices as even.
     min_net_value: float = 0.0  # A deal must return at least what it takes plus this.
-    accept_unreadable_deals: bool = True
+    accept_unreadable_deals: bool = False
     strategic_resources: tuple[str, ...] = DEFAULT_STRATEGICS
     # Conversations.
     friendship_blocked_states: tuple[str, ...] = ("DENOUNCED", "WAR")
@@ -245,11 +248,79 @@ def judge_deal(deal: Any, weights: DiplomacyWeights) -> Judgement:
     given = sum(_item_value(item, weights) for item in deal.items_from_us)
     if not deal.items_from_them and not deal.items_from_us:
         if weights.accept_unreadable_deals:
-            return Judgement(True, "it has no item that costs us anything we can read")
+            return Judgement(True, "it has no item we can read")
         return Judgement(False, "its items cannot be read")
     if received - given < weights.min_net_value:
         return Judgement(False, f"it returns {received:g} for {given:g}", received, given)
     return Judgement(True, f"it returns {received:g} for {given:g}", received, given)
+
+
+# Lists every item of a pending deal, raw, found the way civ6-mcp's `build_pending_deals_query`
+# finds it. That query drops each item it has no name for, so it hides every agreement but open
+# borders, joint war and alliance. A hidden one could be a third-party war or a defensive pact.
+# Only calls the query itself makes are used, and no agreement name is guessed.
+_RAW_DEAL_LUA = """
+local me = Game.GetLocalPlayer()
+local i = @PLAYER@
+local sid = DiplomacyManager.FindOpenSessionID(me, i)
+if sid and sid >= 0 then
+    local ok, deal = pcall(function()
+        return DealManager.GetWorkingDeal(DealDirection.INCOMING, me, i)
+    end)
+    if ok and deal then
+        local count = deal:GetItemCount() or 0
+        print("RAWDEAL|" .. i .. "|" .. count)
+        for item in deal:Items() do
+            local function get(f) local k, v = pcall(f); return k and tostring(v) or "?" end
+            print("RAWITEM|" .. i .. "|" .. get(function() return item:GetFromPlayerID() end)
+                .. "|" .. get(function() return item:GetType() end)
+                .. "|" .. get(function() return item:GetSubType() end)
+                .. "|" .. get(function() return item:GetValueType() end)
+                .. "|" .. get(function() return item:GetAmount() end)
+                .. "|" .. get(function() return item:GetDuration() end))
+        end
+    end
+end
+print("@SENTINEL@")
+"""
+
+
+def build_raw_deal_lua(player_id: int) -> str:
+    return _RAW_DEAL_LUA.replace("@PLAYER@", str(int(player_id))).replace("@SENTINEL@", SENTINEL)
+
+
+def parse_raw_deal(output: str, player_id: int) -> list[str] | None:
+    """The raw item lines of the deal, or None if the read does not account for itself.
+
+    The `RAWDEAL` line states the item count, and the items listed must match it.
+    """
+    count: int | None = None
+    items: list[str] = []
+    for line in output.splitlines():
+        parts = line.strip().split("|")
+        if parts[0] == "RAWDEAL" and len(parts) == 3 and parts[1] == str(player_id):
+            count = int(parts[2]) if parts[2].isdigit() else None
+        elif parts[0] == "RAWITEM" and len(parts) == 8 and parts[1] == str(player_id):
+            items.append("|".join(parts[2:]))
+    if count is None or count != len(items):
+        return None
+    return items
+
+
+def hidden_items_reason(deal: Any, raw: list[str] | None, weights: DiplomacyWeights) -> str | None:
+    """Why a deal must be refused for what civ6-mcp's query hid, or None if it hid nothing.
+
+    The raw count must equal the parsed count. The one exception is a deal with no parsed item at
+    all, which `accept_unreadable_deals` may accept.
+    """
+    if raw is None:
+        return "its items could not be read in full"
+    parsed = len(deal.items_from_them) + len(deal.items_from_us)
+    if parsed == len(raw):
+        return None
+    if parsed == 0 and weights.accept_unreadable_deals:
+        return None
+    return f"{len(raw) - parsed} of its {len(raw)} items are hidden"
 
 
 def deal_signature(deal: Any) -> tuple:
@@ -724,6 +795,9 @@ class DiplomacyPolicy:
             accept, reason = judgement.accept, judgement.reason
             if signature in self._refused:
                 accept, reason = False, "it was refused before"
+        unverified = False
+        if accept and deal is not None:
+            reason, accept, unverified = await self._verify_items(game, player_id, deal, reason)
         bounded = not self._within_bounds(signature)
         if bounded:
             accept, reason = False, "the bound for this turn is reached"
@@ -731,11 +805,31 @@ class DiplomacyPolicy:
             "Deal from player %s %s: %s", player_id, "accepted" if accept else "refused", reason
         )
         result = await game.respond_to_deal(player_id, accept)
-        if not accept and not bounded:  # A bound is no judgement of the offer, so it is not kept.
+        if (
+            not accept and not bounded and not unverified
+        ):  # A bound is no judgement of the offer, so it is not kept.
             self._remember_refusal(signature)
         if not action_succeeded(result):
             log.warning("The game refused our answer to the deal: %s", result)
             await self._exit(game, player_id)
+
+    async def _verify_items(
+        self, game: DiplomacyGame, player_id: int, deal: Any, reason: str
+    ) -> tuple[str, bool, bool]:
+        """Check an acceptable deal against the raw items. Returns reason, accept, unverified."""
+        raw: list[str] | None = None
+        try:
+            output = await game.execute_lua(build_raw_deal_lua(player_id), "ingame")
+            raw = parse_raw_deal(output, player_id)
+        except ConnectionError:
+            raise
+        except Exception:
+            log.warning("Reading the raw items of the deal failed", exc_info=True)
+        log.info("Raw items of the deal from player %s: %s", player_id, raw)
+        problem = hidden_items_reason(deal, raw, self.weights)
+        if problem is None:
+            return reason, True, False
+        return problem, False, raw is None  # A failed read says nothing about the offer.
 
     async def _answer_talk(self, game: DiplomacyGame, session: Any) -> None:
         player_id = session.other_player_id
@@ -803,7 +897,11 @@ class DiplomacyPolicy:
         )
         output = await game.execute_lua(build_voter_lua(strip, self.weights), "ingame")
         if "OK:WC_VOTER_REGISTERED" not in output:
-            log.warning("The World Congress voter was not registered: %s", output[:200])
+            log.warning(
+                "The World Congress voter was not registered, so civ6-mcp's default voter runs. "
+                "It can give a rival Diplomatic Victory Points: %s",
+                output[:200],
+            )
             return False
         return True
 

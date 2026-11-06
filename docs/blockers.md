@@ -68,7 +68,7 @@ These have no entry in `BlockerType`, because the bot never sees them.
 
 [`DiplomacyPolicy`](../src/civ6_ai/policies/diplomacy.py) takes over `DIPLOMACY_SESSION`, `TRADE_DEAL`, `WORLD_CONGRESS_VOTE` and `WORLD_CONGRESS_SESSION` through `blocker_policies()`. The defaults above stay behind it as a fallback.
 
-- **Sessions and deals:** both types run one function that prices each pending deal, accepts a fair one, refuses the rest, answers conversations by rule and closes every session. In the retry pass that allows diplomacy only, it makes no query beyond the sessions and deals themselves.
+- **Sessions and deals:** both types run one function that prices each pending deal, checks it against a raw read of every item (civ6-mcp's query hides items it has no name for, so any mismatch or failed read refuses the deal), accepts a fair one, refuses the rest, answers conversations by rule and closes every session. In the retry pass that allows diplomacy only, it makes no query beyond the sessions, the deals and one raw read of each deal it would accept.
 - **World Congress vote (before the session):** replaces civ6-mcp's default voter with a handler that reads each resolution as it arrives. It votes only on Diplomatic Victory Points, and leaves other resolutions unvoted, which spends no favor. If it cannot register, the default voter runs.
 - **World Congress session (already open):** the same rules in Python, then the submit always runs.
 

@@ -4,6 +4,7 @@ The text of the leaders' words and of the resolutions is invented, because no ga
 """
 
 import asyncio
+import re
 from dataclasses import replace
 
 import pytest
@@ -77,6 +78,8 @@ class Game:
         self.fail = {}  # Method name -> exception to raise.
         self.victory = fx.victory()
         self.congress = None
+        self.hidden = {}  # Player -> items the parsed deal does not show.
+        self.raw_fail = False
         self.lua_result = f"OK:WC_VOTER_REGISTERED\n{SENTINEL}"
 
     def _maybe_fail(self, name):
@@ -138,8 +141,21 @@ class Game:
         return "OK:VOTED"
 
     async def execute_lua(self, code, context="gamecore"):
+        if "RAWDEAL" in code:
+            return self._raw_deal(code)
         self.lua.append((code, context))
         return self.lua_result
+
+    def _raw_deal(self, code):
+        self.calls.append(("raw_deal",))
+        if self.raw_fail:
+            raise ValueError("lua failed")
+        player = int(re.search(r"local i = (\d+)", code).group(1))
+        deal = next(d for d in self.deals if d.other_player_id == player)
+        count = len(deal.items_from_them) + len(deal.items_from_us) + self.hidden.get(player, 0)
+        lines = [f"RAWDEAL|{player}|{count}"]
+        lines += [f"RAWITEM|{player}|{player}|1|0|-1|0|0"] * count
+        return "\n".join([*lines, SENTINEL])
 
     def answers(self):
         return [c for c in self.calls if c[0] in ("respond", "deal")]
@@ -269,11 +285,11 @@ def test_open_borders_both_ways_is_accepted_and_one_way_from_us_is_not():
     assert not judge_deal(ours, W).accept
 
 
-def test_a_deal_of_unreadable_items_follows_the_flag():
+def test_a_deal_of_unreadable_items_follows_the_flag_which_is_off_by_default():
     # civ6-mcp leaves out items it cannot name, such as delegations, so none are listed.
     empty = deal_from()
-    assert judge_deal(empty, W).accept
-    assert not judge_deal(empty, replace(W, accept_unreadable_deals=False)).accept
+    assert not judge_deal(empty, W).accept
+    assert judge_deal(empty, replace(W, accept_unreadable_deals=True)).accept
 
 
 def test_the_signature_is_the_same_for_the_same_offer_in_any_order():
@@ -714,6 +730,7 @@ def test_the_resolver_uses_the_policy_in_the_diplomacy_only_pass_without_other_r
         "get_pending_deals",
         "deal",
         "respond",
+        "raw_deal",  # The one extra read, of the deal itself.
     }
 
 
@@ -750,3 +767,91 @@ def test_the_vote_paths_cannot_call_each_other_forever():
     run(DiplomacyPolicy().queue_voter(game, Blocker(BlockerType.WORLD_CONGRESS_VOTE)))
     run(DiplomacyPolicy().vote_in_open_session(game, Blocker(BlockerType.WORLD_CONGRESS_SESSION)))
     assert game.reads == 2
+
+
+# --- Hidden items -------------------------------------------------------------------------------
+
+
+def priced_offer():
+    return offer(GOLD_100)
+
+
+def test_a_priced_deal_with_one_hidden_item_is_refused_and_the_raw_items_are_logged(caplog):
+    session, deal = priced_offer()
+    game = Game([session], [deal])
+    game.hidden[ROME] = 1
+    with caplog.at_level("INFO"):
+        run(DiplomacyPolicy().run(game))
+    assert game.answers() == [("deal", ROME, False)]
+    assert "Raw items of the deal from player 1" in caplog.text
+
+
+def test_a_failed_raw_read_refuses_the_deal_and_does_not_remember_it():
+    session, deal = priced_offer()
+    game = Game([session], [deal])
+    game.raw_fail = True
+    policy = DiplomacyPolicy()
+    run(policy.run(game))
+    assert game.answers() == [("deal", ROME, False)]
+    assert not policy._refused
+
+
+def test_a_failed_raw_read_refuses_even_with_the_flag():
+    session, deal = offer()
+    game = Game([session], [deal])
+    game.raw_fail = True
+    run(DiplomacyPolicy(DiplomacyWeights(accept_unreadable_deals=True)).run(game))
+    assert game.answers() == [("deal", ROME, False)]
+
+
+def test_a_fully_readable_deal_is_unchanged():
+    session, deal = priced_offer()
+    game = Game([session], [deal])
+    run(DiplomacyPolicy().run(game))
+    assert game.answers() == [("deal", ROME, True)]
+    assert ("raw_deal",) in game.calls
+
+
+def test_a_deal_with_no_parsed_item_needs_the_flag_even_though_the_raw_items_exist():
+    for flag, expected in ((False, False), (True, True)):
+        session, deal = offer()
+        game = Game([session], [deal])
+        game.hidden[ROME] = 2
+        run(DiplomacyPolicy(DiplomacyWeights(accept_unreadable_deals=flag)).run(game))
+        assert game.answers() == [("deal", ROME, expected)], flag
+
+
+def test_a_hidden_item_beside_parsed_ones_is_refused_even_with_the_flag():
+    session, deal = priced_offer()
+    game = Game([session], [deal])
+    game.hidden[ROME] = 1
+    run(DiplomacyPolicy(DiplomacyWeights(accept_unreadable_deals=True)).run(game))
+    assert game.answers() == [("deal", ROME, False)]
+
+
+def test_the_raw_read_parses_real_line_shapes_and_rejects_a_short_one():
+    head = "RAWDEAL|1|2"
+    one, two = "RAWITEM|1|1|2|3|4|5|6", "RAWITEM|1|0|2|3|4|5|6"
+    ok = "\n".join([head, one, two, SENTINEL])
+    assert len(dp.parse_raw_deal(ok, 1)) == 2
+    assert dp.parse_raw_deal("\n".join([head, one]), 1) is None
+    assert dp.parse_raw_deal(SENTINEL, 1) is None  # No session or no deal.
+    assert dp.parse_raw_deal(ok, 2) is None
+
+
+def test_the_raw_read_uses_only_calls_the_pending_deals_query_makes():
+    code = dp.build_raw_deal_lua(3)
+    query = lqd.build_pending_deals_query()
+    assert "local i = 3" in code
+    for call in (
+        "FindOpenSessionID",
+        "GetWorkingDeal(DealDirection.INCOMING",
+        "GetFromPlayerID",
+        "GetSubType",
+        "GetValueType",
+        "GetAmount",
+        "GetDuration",
+        "deal:Items()",
+    ):
+        assert call in query and call in code
+    assert "DealAgreementTypes" not in code

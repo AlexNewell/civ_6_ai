@@ -4,7 +4,7 @@ Experiments in building Civilization VI opponents powered by LLMs, for no more t
 
 Most decisions are handled by deterministic code, routine judgment calls by a cheap model tier, and rare strategic ones by a frontier Claude model. Early work pits one LLM player against the built-in AI. The long-term goal is a set of LLM opponents for a human player.
 
-**Status:** planning and setup. Nothing plays the game yet.
+**Status:** Phase 1, the deterministic bot. The turn loop and policies for settling, research, government, production, builders, trade and religion, defence and diplomacy are built and tested offline. Live acceptance is still in progress.
 
 - [Roadmap](roadmap.md)
 - [Decisions and public-ready rules](docs/decisions.md)

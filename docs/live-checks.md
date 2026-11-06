@@ -24,7 +24,7 @@ Written offline against civ6-mcp's source, so none of this has run in a game yet
 ## Run 2: the wired bot from turn 1 (issues 6 and 12)
 
 - **Build:** the `live-t1-run` branch (main at `61f6759` plus the fixes below), civ6-mcp pinned at `dd20190`.
-- **Game:** standard save `STD_T1_01`, identified by seed. Maya, Prince. Played from turn 1 to turn 100 (99 turn ends logged over 8 sessions; the first session stopped after one turn, stop 1).
+- **Game:** standard save `STD_T1_01`, identified by seed. Maya, Prince. Played from turn 1 to turn 100 (98 turn lines logged over 13 session files, with no line for turn 40; the first session stopped after one turn, stop 1).
 - **Time per turn:** median 25.6s, and 28.2s on average over the 87 turns where `end_turn` took under a minute. Handlers averaged about 15s (monitors 1.2s, settling 5.3s, research 0.5s, production 2.8s, resolver 4.7s) and a normal `end_turn` took 11 to 13s. Settling spikes to 20 to 65s on turns where a settler or scout travels far. Some `end_turn` calls took 79 to 97s, usually around an autosave or a diplomacy retry.
 - **Two `end_turn` calls took 583s (turns 81 and 96).** Both returned a normal `Turn N -> N+1` report with no blocker and no handler error, so `end_turn` waited out its full polling time and the AI turn then finished. Cause not found, because nothing could be read while the bot held the one tuner connection. Turn 80 had ended with "Turn paused - AI diplomatic proposal from Sumeria [deal]" and one retry. For turn 96, a natural disaster popup had been dismissed on turn 95. This looks like a `HANG:` that recovered by itself.
 - **`0_MCP_*` saves:** 8 left (`0_MCP_0093` to `0_MCP_0100`), 9.9 MB. Older ones were pruned.

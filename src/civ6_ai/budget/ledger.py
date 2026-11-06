@@ -43,6 +43,7 @@ class LedgerEntry:
     outcome: Outcome
     usage: Usage | None
     detail: str = ""
+    turn: int | None = None  # The game turn the call was made on, if the caller said.
 
 
 class Ledger:
@@ -76,6 +77,7 @@ class Ledger:
         tier: str,
         model: str,
         worst_case_usd: Decimal,
+        turn: int | None = None,
     ) -> str | None:
         """Open a call if its worst case fits under the cap, returning its id or None."""
         with self._lock:
@@ -92,6 +94,7 @@ class Ledger:
                 "tier": tier,
                 "model": model,
                 "worst_case_usd": str(worst_case_usd),
+                "turn": turn,
             }
             self._append(event)  # Before the memory update, so a failed write opens nothing.
             self._open[event["call_id"]] = event
@@ -158,6 +161,7 @@ class Ledger:
             outcome=Outcome(event["outcome"]),
             usage=Usage(**event["usage"]) if event["usage"] else None,
             detail=event["detail"],
+            turn=opened.get("turn"),  # Ledgers written before turns were recorded have none.
         )
         self._entries.append(entry)
         return entry

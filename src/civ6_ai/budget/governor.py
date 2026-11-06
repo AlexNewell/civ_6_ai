@@ -9,6 +9,10 @@ The cap holds as long as the `send` function a caller passes in keeps these prom
   hidden SDK retry could be billed, and don't enable server-side refusal fallbacks, because
   top-level `usage` only covers the final attempt.
 - Requests use standard global inference, the rate in `pricing.toml`. US-only inference costs more.
+- `game_id` is the game's id as `scripts/cost_report.py` assigns it, and the ledger lives beside the
+  other run logs as `runs/spend_ledger.jsonl`. The report is built from those two things, so a
+  call made outside this governor, or under another id, is missing from every cost figure. The
+  rules for the id are in docs/cost-tracking.md.
 - `send` raises `NotBilledError` only when the API definitely charged nothing. Any other exception
   keeps the call's worst-case cost on the ledger, since a timed-out request can still be billed.
 """
@@ -45,6 +49,7 @@ class BudgetedCall:
     max_input_tokens: int
     max_output_tokens: int
     cache_write_ttl: CacheTtl | None = "1h"  # None only if the request sets no cache_control.
+    turn: int | None = None  # The game turn, so the cost report can place the spend. Pass it.
 
 
 @dataclass(frozen=True)
@@ -85,6 +90,7 @@ class Governor:
                 tier=call.tier,
                 model=call.model,
                 worst_case_usd=worst_case,
+                turn=call.turn,
             )
         except (OSError, LedgerDamagedError) as error:
             log.error("Blocking a model call, the ledger is unusable: %r", error)

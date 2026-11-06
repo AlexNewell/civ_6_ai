@@ -17,6 +17,7 @@ from civ_mcp.connection import GameConnection
 from civ_mcp.game_state import GameState
 
 from civ6_ai.bot import SettleDecisionLog, build_orchestrator
+from civ6_ai.metrics.costs import game_id_of_log
 from civ6_ai.monitors import EventBus, EventLog
 from civ6_ai.orchestrator import StopReason, TurnLog
 from civ6_ai.saves import use_real_save_dirs
@@ -72,6 +73,8 @@ async def run(turns: int) -> int:
         if reason != StopReason.TURN_LIMIT:
             print(f"Last result: {records[-1].detail}")
     print(f"Log: {turn_log.path.relative_to(ROOT)}")
+    # The id the cost report gives this game, and the ledger's game_id must be, across sessions.
+    print(f"Game: {game_id_of_log(ROOT / 'runs', turn_log.path) or '(no turns logged)'}")
     print(f"Settling decisions: {decisions.path.relative_to(ROOT)}")
     return 0 if reason == StopReason.TURN_LIMIT else 1
 

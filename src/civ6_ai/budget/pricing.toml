@@ -1,6 +1,6 @@
 # Model prices in USD per million tokens, as strings so they parse to exact Decimals.
 # Standard first-party API rates with global inference. Recheck against `source` before use.
-checked = 2026-11-05
+checked = 2026-11-06
 source = "https://platform.claude.com/docs/en/about-claude/pricing"
 
 [budget]

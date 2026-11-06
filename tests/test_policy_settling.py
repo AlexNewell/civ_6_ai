@@ -571,3 +571,20 @@ def test_first_city_does_not_retry_a_tile_where_founding_failed():
     skipped = [d for d in policy.decisions if d.action == "found_skipped"]
     assert skipped
     assert "already failed" in skipped[0].reason
+
+
+def test_a_scout_stops_waiting_for_a_camp_that_never_leaves():
+    # Live: barbarians sat beside the capital for 30 turns, every route out passed within their
+    # radius, and the scout never left.
+    scout = unit_info(unit_id=3, unit_index=3, x=10, y=12, **SCOUT)
+    only = lq.StrategicMapData([lq.FogBoundary("Alpha", 10, 10, [-1, 5, -1, -1, -1, -1])], [])
+    policy = SettlingPolicy()
+    for turn in (6, 7):
+        waiting = make_game(
+            [scout], cities=[alpha()], strategic=only, threats=[barbarian(9, 13)], turn=turn
+        )
+        run(policy, waiting)
+        assert waiting.actions == []
+    going = make_game([scout], cities=[alpha()], strategic=only, threats=[barbarian(9, 13)], turn=8)
+    run(policy, going)
+    assert going.actions == [("move", 3, 14, 6)]

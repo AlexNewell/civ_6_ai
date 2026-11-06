@@ -97,6 +97,7 @@ class SettlingSettings:
     max_hold_turns: int = 4  # A settler held this many turns in a row goes without its escort.
     max_move_failures: int = 3  # Refused moves to one site before it is set aside.
     retry_turns: int = 10  # How long a site or frontier that could not be reached is set aside.
+    scout_wait_turns: int = 2  # A scout waits this long for a hostile unit on its route, then goes.
     automate_retry_turns: int = 3  # Before an idle scout is handed to the game's explorer again.
     map_width: int | None = STANDARD_MAP_WIDTH
 
@@ -268,6 +269,7 @@ class SettlingPolicy:
     _holds: dict[int, int] = field(default_factory=dict, init=False, repr=False)
     _automated: dict[int, int] = field(default_factory=dict, init=False, repr=False)
     _scout_targets: dict[int, tuple[int, int]] = field(default_factory=dict, init=False, repr=False)
+    _scout_waits: dict[int, int] = field(default_factory=dict, init=False, repr=False)
 
     async def run(self, game: SettlingGame) -> None:
         units = await read_units(game)
@@ -312,6 +314,7 @@ class SettlingPolicy:
         self._site_claims = {k: v for k, v in self._site_claims.items() if k in alive}
         self._holds = {k: v for k, v in self._holds.items() if k in alive}
         self._scout_targets = {k: v for k, v in self._scout_targets.items() if k in alive}
+        self._scout_waits = {k: v for k, v in self._scout_waits.items() if k in alive}
         self._automated = {k: v for k, v in self._automated.items() if k in alive}
         self._set_aside = {k: v for k, v in self._set_aside.items() if v >= turn}
         self._bad_frontiers = {k: v for k, v in self._bad_frontiers.items() if v >= turn}
@@ -610,8 +613,11 @@ class SettlingPolicy:
         )
         tried = 0
         blocked_by_threat = len(reachable) > len(frontier)
+        # Live: barbarians camped beside the capital from turn 9, so every route out started
+        # within their radius and the first scout waited for ever. After a short wait it goes.
+        impatient = self._scout_waits.get(scout.unit_id, 0) >= s.scout_wait_turns
         for target in frontier:
-            if danger.on_path(here, target, s.scout_threat_radius):
+            if not impatient and danger.on_path(here, target, s.scout_threat_radius):
                 blocked_by_threat = True
                 continue
             if tried == _MAX_SCOUT_TRIES:
@@ -619,10 +625,12 @@ class SettlingPolicy:
             tried += 1
             if move_succeeded(await game.move_unit(scout.unit_index, *target)):
                 self._scout_targets[scout.unit_id] = target
+                self._scout_waits.pop(scout.unit_id, None)
                 return
             self._bad_frontiers[target] = turn + s.retry_turns
         self._scout_targets.pop(scout.unit_id, None)
         if blocked_by_threat and not tried:
+            self._scout_waits[scout.unit_id] = self._scout_waits.get(scout.unit_id, 0) + 1
             return  # Wait a turn for the hostile unit to move on.
         last = self._automated.get(scout.unit_id)
         if last is None or turn - last >= s.automate_retry_turns:

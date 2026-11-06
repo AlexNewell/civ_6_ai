@@ -61,7 +61,7 @@ These have no entry in `BlockerType`, because the bot never sees them.
 | Blocker | How `end_turn` handles it |
 |---|---|
 | Popups: wonders, disasters, era screens, tech and civic completion | `dismiss_popup` before each end of turn |
-| AI turn hang | Returned as a `HANG:` report. The turn loop stops. Recovery is out of scope here, because civ6-mcp's recovery restarts the game. |
+| AI turn hang | Returned as a `HANG:` report. The turn loop stops, as `GAME_OVER` instead if `civ6_ai.defeat` finds the player defeated, which looks the same from outside. Recovery is out of scope here, because civ6-mcp's recovery restarts the game. |
 
 ## Things that look like blockers
 

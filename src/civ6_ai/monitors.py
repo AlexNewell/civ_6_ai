@@ -14,6 +14,10 @@ limits are set here, field by field. Each read is used only for:
   shows as unmet entries. Not `num_cities` or `visible_cities`, which cover hidden cities and give
   live stats, nor `military_strength`.
 - `get_threat_scan`: units on visible tiles, minus `STEALTH_UNITS`.
+
+civ6-mcp reads that time out return the lines received so far, with no error and no marker, so a
+short answer can look like an empty one. Monitors cross-check what they can (city counts) and
+otherwise wait for a change to repeat before acting on a disappearance.
 - `get_victory_progress`: met civs' World Rankings figures, meaning science and diplomatic points,
   majority religion and original capitals. Not `demographics`, which covers unmet civs, nor
   `spaceports` or yields.
@@ -38,13 +42,16 @@ VICTORY_PERIOD = 5
 
 BARBARIAN_ID = 63
 THREAT_RADIUS = 4  # Tiles from our nearest city or unit.
+ABSENT_CHECKS = 3  # A hostile owner is forgotten after this many checks without it nearby.
 THREAT_UNITS = 3  # Fewer than this is a job for the military policy, not the strategist.
 # GameCore's scan checks the tile, not the unit, so it also reports units the player can't see.
+# These are the units tagged CLASS_STEALTH in the game's Units data, base game and Gathering Storm.
 STEALTH_UNITS = frozenset(
     {
         "UNIT_ENGLISH_SEADOG",
         "UNIT_GERMAN_UBOAT",
         "UNIT_NUCLEAR_SUBMARINE",
+        "UNIT_OTTOMAN_BARBARY_CORSAIR",
         "UNIT_PRIVATEER",
         "UNIT_SUBMARINE",
     }
@@ -230,16 +237,23 @@ class Monitor(Protocol):
         """Return the events that start now. Reads come first, so a failure changes no state."""
         ...
 
+    def reset(self) -> None:
+        """Forget everything seen. Called when the turn goes backwards, as after loading a save."""
+        ...
+
 
 class ThreatMonitor:
     name = "threat"
     period = THREAT_PERIOD
 
     def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
         self._at_war: dict[int, bool] = {}
         self._cities: dict[int, tuple[str, int, int]] | None = None
         self._disloyal: set[int] = set()
-        self._hostile_owners: set[int] = set()
+        self._hostile_owners: dict[int, int] = {}  # Owner to checks since it was last near.
 
     async def check(self, game: MonitorGame, overview) -> list[Event]:
         civs = await game.get_diplomacy()
@@ -293,7 +307,10 @@ class ThreatMonitor:
         return events
 
     def _hostile_units(self, turn: int, scan: list) -> list[Event]:
-        """Warn once per owner, until that owner has no units left near us."""
+        """Warn once per owner, until it has been gone for `ABSENT_CHECKS` checks.
+
+        A timed-out scan returns fewer lines without saying so, so one empty scan isn't a retreat.
+        """
         near = defaultdict(list)
         for unit in scan:
             if (
@@ -305,13 +322,21 @@ class ThreatMonitor:
 
         events: list[Event] = []
         for owner_id, units in near.items():
-            if len(units) >= THREAT_UNITS and owner_id not in self._hostile_owners:
-                self._hostile_owners.add(owner_id)
+            if len(units) < THREAT_UNITS:
+                continue
+            is_new = owner_id not in self._hostile_owners
+            self._hostile_owners[owner_id] = 0
+            if is_new:
                 nearest = min(unit.distance for unit in units)
                 events.append(
                     HostileUnitsNear(turn, owner_id, units[0].owner_name, len(units), nearest)
                 )
-        self._hostile_owners &= set(near)
+        for owner_id in list(self._hostile_owners):
+            if owner_id in near and len(near[owner_id]) >= THREAT_UNITS:
+                continue
+            self._hostile_owners[owner_id] += 1
+            if self._hostile_owners[owner_id] >= ABSENT_CHECKS:
+                del self._hostile_owners[owner_id]
         return events
 
     def _is_hostile(self, unit) -> bool:
@@ -328,6 +353,9 @@ class ResourceMonitor:
     period = RESOURCE_PERIOD
 
     def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
         self._short: set[str] = set()
         self._gold_short = False
 
@@ -366,8 +394,13 @@ class VictoryMonitor:
     period = VICTORY_PERIOD
 
     def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
         self._shares_passed: dict[tuple[VictoryPath, str], int] = {}
         self._most_majors = 0
+        self._majors = 0  # Living majors, once two reads in a row agree.
+        self._majors_seen = 0
 
     async def check(self, game: MonitorGame, overview) -> list[Event]:
         progress = await game.get_victory_progress()
@@ -375,7 +408,7 @@ class VictoryMonitor:
         if not civs or not progress.players:
             raise IncompleteRead("no civs in victory or diplomacy read")
 
-        living_majors = len(civs) + 1  # Unmet civs are counted, but nothing else about them is.
+        living_majors = self._confirmed_majors(len(civs) + 1)  # Unmet civs are counted, no more.
         self._most_majors = max(self._most_majors, living_majors)
 
         enabled = progress.enabled_victories  # Empty means all of them.
@@ -394,6 +427,16 @@ class VictoryMonitor:
                 )
             self._shares_passed[(path, subject)] = shares
         return events
+
+    def _confirmed_majors(self, seen: int) -> int:
+        """A short diplomacy read would look like eliminated civs, so a drop must repeat.
+
+        A rise is believed at once: a short read can't add civs.
+        """
+        if seen >= self._majors or seen == self._majors_seen:
+            self._majors = seen
+        self._majors_seen = seen
+        return self._majors
 
     @staticmethod
     def _points(progress, our_id: int) -> list[tuple]:
@@ -483,9 +526,16 @@ class Monitors:
         self._bus = bus
         self._monitors = default_monitors() if monitors is None else monitors
         self._last_success: dict[str, int] = {}
+        self._last_turn: int | None = None
 
     async def run(self, game: MonitorGame) -> None:
         overview = await game.get_game_overview()
+        if self._last_turn is not None and overview.turn < self._last_turn:
+            # The turn went backwards, so a save was loaded. Old baselines describe another game.
+            self._last_success.clear()
+            for monitor in self._monitors:
+                monitor.reset()
+        self._last_turn = overview.turn
         failures: list[str] = []
         for monitor in self._monitors:
             if not self._is_due(monitor, overview.turn):
@@ -506,5 +556,4 @@ class Monitors:
 
     def _is_due(self, monitor: Monitor, turn: int) -> bool:
         last = self._last_success.get(monitor.name)
-        # An earlier turn than the last means a save was loaded.
-        return last is None or turn < last or turn - last >= monitor.period
+        return last is None or turn - last >= monitor.period

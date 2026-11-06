@@ -16,6 +16,7 @@ from civ_mcp.lua.models import (
 )
 
 from civ6_ai.monitors import (
+    ABSENT_CHECKS,
     BARBARIAN_ID,
     EVENT_TYPES,
     THREAT_RADIUS,
@@ -352,9 +353,30 @@ def test_hostile_units_warn_once_per_owner_until_they_leave():
     assert check(monitor, game) == []
 
     game.threats = []
-    assert check(monitor, game) == []
+    for _ in range(ABSENT_CHECKS):
+        assert check(monitor, game) == []
     game.threats = [unit() for _ in range(3)]
     assert len(check(monitor, game)) == 1
+
+
+def test_one_empty_threat_scan_isnt_a_retreat():
+    """civ6-mcp returns the lines it has when a read times out, so a short scan looks empty."""
+    game = FakeGame()
+    set_at_war(game)
+    monitor = ThreatMonitor()
+    game.threats = [unit() for _ in range(3)]
+    assert len(check(monitor, game)) == 1
+
+    full, game.threats = game.threats, []
+    for _ in range(ABSENT_CHECKS - 1):
+        assert check(monitor, game) == []
+    game.threats = full
+    assert check(monitor, game) == []
+    game.threats = []  # The count of missed scans starts again after the army is seen.
+    for _ in range(ABSENT_CHECKS - 1):
+        assert check(monitor, game) == []
+    game.threats = full
+    assert check(monitor, game) == []
 
 
 @pytest.mark.parametrize(
@@ -385,7 +407,9 @@ def test_units_that_are_not_an_alert(threats):
     assert check(ThreatMonitor(), game) == []
 
 
-@pytest.mark.parametrize("hidden", ["UNIT_SUBMARINE", "UNIT_PRIVATEER", "UNIT_GERMAN_UBOAT"])
+@pytest.mark.parametrize(
+    "hidden", ["UNIT_SUBMARINE", "UNIT_PRIVATEER", "UNIT_OTTOMAN_BARBARY_CORSAIR"]
+)
 def test_stealth_units_on_visible_tiles_are_not_seen(hidden):
     game = FakeGame()
     set_at_war(game)
@@ -528,10 +552,27 @@ def test_conquest_warning_counts_captured_capitals_and_eliminated_civs():
     game.victory.capitals_held = {"Us": True, "Rome": True, "Egypt": False}
     assert check(monitor, game) == []
 
-    del game.civs[1]
+    # The game only lists living civs in both reads, so an eliminated civ is in neither.
+    del game.civs[0]
+    del game.victory.capitals_held["Rome"]
+    assert check(monitor, game) == []  # A drop must repeat before it's believed.
     assert check(monitor, game) == [
-        RivalVictoryWarning(3, VictoryPath.CONQUEST, None, "original capitals", 2, 3)
+        RivalVictoryWarning(4, VictoryPath.CONQUEST, None, "original capitals", 2, 3)
     ]
+
+
+def test_a_short_diplomacy_read_isnt_taken_for_eliminated_civs():
+    game = FakeGame()
+    monitor = VictoryMonitor()
+    game.victory.capitals_held = {"Us": True, "Rome": True, "Egypt": True}
+    assert check(monitor, game) == []
+
+    full, game.civs = game.civs, game.civs[:1]
+    assert check(monitor, game) == []
+    game.civs = full
+    assert check(monitor, game) == []
+    game.civs = full[:1]
+    assert check(monitor, game) == []
 
 
 def test_an_empty_victory_read_is_a_failure():
@@ -669,6 +710,30 @@ def test_loading_an_earlier_save_makes_monitors_due():
     game.turn = 18
     asyncio.run(monitors.run(game))
     assert game.read_turns("get_victory_progress") == [20, 18]
+
+
+def test_loading_an_earlier_save_forgets_what_the_later_one_had():
+    game = FakeGame()
+    set_at_war(game, False)
+    bus = EventBus()
+    events = collect(bus)
+    monitors = Monitors(bus)
+    game.turn = 20
+    game.gold, game.gold_per_turn = 100.0, -20.0
+    game.threats = [unit(), unit(), unit()]
+    asyncio.run(monitors.run(game))
+
+    game.turn = 10  # An earlier save: one city, and none of the later trouble.
+    game.cities = game.cities[:1]
+    game.gold, game.gold_per_turn = 100.0, 5.0
+    game.threats = []
+    asyncio.run(monitors.run(game))
+    assert not [event for event in events if isinstance(event, CityLost)]
+
+    game.turn = 15  # Then the same troubles come back: they're new events, not repeats.
+    game.gold_per_turn = -20.0
+    asyncio.run(monitors.run(game))
+    assert [event.kind for event in events].count("gold_shortage") == 2
 
 
 def test_subscribers_get_only_the_types_they_asked_for():

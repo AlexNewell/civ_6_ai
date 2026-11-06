@@ -193,6 +193,11 @@ async def register_default_votes(game: BlockerGame, blocker: Blocker) -> bool:
     return _succeeded(await game.queue_wc_votes([]))
 
 
+async def submit_world_congress_votes(game: BlockerGame) -> None:
+    """Submit the votes cast so far, which closes the session. Leaves ending the turn alone."""
+    await game.execute_lua(_SUBMIT_CONGRESS_LUA, "ingame")
+
+
 async def vote_in_open_session(game: BlockerGame, blocker: Blocker) -> bool:
     """Cast one free vote on each resolution of a session that's already open, then submit."""
     status = await game.get_world_congress()
@@ -203,7 +208,7 @@ async def vote_in_open_session(game: BlockerGame, blocker: Blocker) -> bool:
             vote = await game.vote_world_congress(resolution.resolution_hash, 1, 0, 1)
             if not _succeeded(vote):
                 return False
-    await game.execute_lua(_SUBMIT_CONGRESS_LUA, "ingame")
+    await submit_world_congress_votes(game)
     return True
 
 

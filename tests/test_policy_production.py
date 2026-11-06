@@ -77,8 +77,15 @@ def test_early_city_without_a_garrison_builds_a_defender_first():
 def test_early_garrisoned_city_expands_once_it_can():
     small = city(population=1, buildings=["PALACE"])
     grown = city(population=3, buildings=["PALACE"])
-    assert best(small, MENU, EARLY) != "UNIT_SETTLER"
-    assert best(grown, MENU, EARLY) == "UNIT_SETTLER"
+    scouted = replace(EARLY, recon=1)
+    assert best(small, MENU, scouted) != "UNIT_SETTLER"
+    assert best(grown, MENU, scouted) == "UNIT_SETTLER"
+
+
+def test_the_first_scout_comes_before_a_settler():
+    # Live: with nothing exploring, a settler found no site on the 30-tile revealed map.
+    grown = city(population=3, buildings=["PALACE"])
+    assert best(grown, MENU, EARLY) == "UNIT_SCOUT"
 
 
 def test_expansion_stops_at_target_and_while_a_settler_is_already_out():
@@ -667,3 +674,15 @@ def test_a_refused_switch_keeps_counting_the_build():
     picks = [c[2] for c in game.set_calls if c[0] == 2]
     assert "UNIT_SETTLER" not in picks
     assert picks[-1] == "BUILDING_LIBRARY"
+
+
+def test_a_long_siege_by_barbarians_does_not_stop_expansion_once_defended():
+    # Live, turns 9 to 25: barbarians camped beside the capital and never attacked. The capital
+    # built six defenders and, as threatened, never scored a settler or builder again.
+    camp = [threat(unit_type="UNIT_WARRIOR", x=11, y=10, distance=1) for _ in range(4)]
+    c = city(threats=camp, population=3)
+    assert len(c.threats) == 4
+    held = ProductionContext(turn=25, num_cities=1, army=6, recon=1)
+    assert best(c, MENU, held) == "UNIT_SETTLER"
+    thin = ProductionContext(turn=25, num_cities=1, army=2, recon=1)
+    assert best(c, MENU, thin) in {"UNIT_WARRIOR", "BUILDING_WALLS"}

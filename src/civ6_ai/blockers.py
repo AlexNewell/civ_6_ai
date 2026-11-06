@@ -62,6 +62,9 @@ class BlockerType(StrEnum):
     PRODUCTION = "ENDTURN_BLOCKING_PRODUCTION"
     FILL_CIVIC_SLOT = "ENDTURN_BLOCKING_FILL_CIVIC_SLOT"
     GOVERNOR_APPOINTMENT = "ENDTURN_BLOCKING_GOVERNOR_APPOINTMENT"
+    GOVERNOR_OPPORTUNITY = (
+        "ENDTURN_BLOCKING_GOVERNOR_OPPORTUNITY"  # "New Governor Title Available".
+    )
     GOVERNOR_IDLE = "ENDTURN_BLOCKING_GOVERNOR_IDLE"
     UNIT_PROMOTION = "ENDTURN_BLOCKING_UNIT_PROMOTION"
     PANTHEON = "ENDTURN_BLOCKING_PANTHEON"
@@ -380,6 +383,7 @@ DEFAULT_RESOLVERS: Mapping[str, Resolve] = {
     BlockerType.PRODUCTION: build_cheapest,
     BlockerType.FILL_CIVIC_SLOT: fill_policy_slots,
     BlockerType.GOVERNOR_APPOINTMENT: appoint_or_promote_governor,
+    BlockerType.GOVERNOR_OPPORTUNITY: appoint_or_promote_governor,
     BlockerType.GOVERNOR_IDLE: leave_to_end_turn,
     BlockerType.UNIT_PROMOTION: promote_units,
     BlockerType.PANTHEON: choose_first_pantheon,

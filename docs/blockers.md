@@ -39,6 +39,7 @@ All of these come from civ6-mcp's blocking query, run through `execute_lua` in t
 | `ENDTURN_BLOCKING_PRODUCTION` | In each idle city, starts the cheapest non-unit item, then units, skipping districts and repairs because they need a tile. Tries every option until one is accepted, because wonders are listed as buildings but refused without a tile, so no cap on tries can be safe. Corrupted queues are left to `end_turn`. |
 | `ENDTURN_BLOCKING_FILL_CIVIC_SLOT` | Puts an unused policy that fits into each empty slot. A wildcard slot takes any type. |
 | `ENDTURN_BLOCKING_GOVERNOR_APPOINTMENT` | Appoints the first available governor that's accepted, or promotes the first one with a promotion on offer. |
+| `ENDTURN_BLOCKING_GOVERNOR_OPPORTUNITY` | Same as an appointment. Seen live on turn 62, when a governor title became available: the turn still ended, but the type had no handler and raised `UnresolvedBlockers` every turn. |
 | `ENDTURN_BLOCKING_GOVERNOR_IDLE` | Left to `end_turn`, which dismisses it. The governor stays unassigned until a policy places it. |
 | `ENDTURN_BLOCKING_UNIT_PROMOTION` | Asks each combat unit for its options and takes the first. Stale notifications are left to `end_turn`. |
 | `ENDTURN_BLOCKING_PANTHEON` | Chooses the first belief offered. |

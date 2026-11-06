@@ -1,6 +1,93 @@
 # Live checks
 
-What was verified against a running Civ VI game, and what wasn't reached. Newest run first.
+What was verified against a running Civ VI game, and what wasn't reached. Newest run first. Run 2 updates the status of earlier checks it reached.
+
+## Run 2: the wired bot from turn 1 (issues 6 and 12)
+
+- **Build:** the `live-t1-run` branch (main at `61f6759` plus the fixes below), civ6-mcp pinned at `dd20190`.
+- **Game:** standard save `STD_T1_01`, identified by seed. Maya, Prince. Played from turn 1 to turn 100 (99 turn ends logged over 8 sessions; the first session stopped after one turn, stop 1).
+- **Time per turn:** median 25.6s, and 28.2s on average over the 87 turns where `end_turn` took under a minute. Handlers averaged about 15s (monitors 1.2s, settling 5.3s, research 0.5s, production 2.8s, resolver 4.7s) and a normal `end_turn` took 11 to 13s. Settling spikes to 20 to 65s on turns where a settler or scout travels far. Some `end_turn` calls took 79 to 97s, usually around an autosave or a diplomacy retry.
+- **Two `end_turn` calls took 583s (turns 81 and 96).** Both returned a normal `Turn N -> N+1` report with no blocker and no handler error, so `end_turn` waited out its full polling time and the AI turn then finished. Cause not found, because nothing could be read while the bot held the one tuner connection. Turn 80 had ended with "Turn paused - AI diplomatic proposal from Sumeria [deal]" and one retry. For turn 96, a natural disaster popup had been dismissed on turn 95. This looks like a `HANG:` that recovered by itself.
+- **`0_MCP_*` saves:** 8 left (`0_MCP_0093` to `0_MCP_0100`), 9.9 MB. Older ones were pruned.
+
+### Cities and the first city
+
+- **Cities by turn:** 1 city from turn 1 to 56, 2 at turn 57, 3 at turn 77, still 3 at turn 100 (a fourth settler was on its way). **"4 cities by turn 100" is refuted on this save** with the bot as it stood. The delay came from the problems in stops 3 and 4 below, not from the site choice.
+- **First city:** founded on turn 1 at (66,25), the tile the settler started on ("delay over", since `first_city_delay_turns` is 0). `runs/*_settle.jsonl` has the decision. Here score 183. Candidate site scores (before travel cost, none with a path threat): (66,25) 183, (66,24) 175, (65,25) 165, (66,26) 157, (67,26) 153, (67,24) 150, (67,25) 139, (65,26) 139, (65,24) 136, (66,23) 129. `threats` was empty. The result was `FOUNDED|66,25`. Confirmed: the file receives `settle_decision` lines with candidates, rejections, threats and the result.
+- **Threats seen:** a barbarian scout 2 tiles from the capital on turn 9. From turn 13 a group of barbarian warriors, slingers and a scout stayed 1 to 3 tiles from the capital until at least turn 77, and never attacked. A Mapuche crossbowman was near the second city on turn 77.
+- **Later cities:** second at (63,27) on turn 57 (site score 242, the best on the map), third at (64,22) on turn 77.
+
+### Stops and fixes
+
+1. **Turn 1 stopped `blocked` although the report said "Turn 1 -> 2".** A natural disaster popup (moderate flood) held the game UI on the old turn: the GameCore turn was 2, while the InGame context and `get_game_overview` still read 1. civ6-mcp's `dismiss_popup` (Lua only, no clicks) cleared it. Fix: when the turn doesn't read as advanced, the orchestrator dismisses popups once and reads again before stopping. Test `test_popup_holding_the_turn_is_dismissed_instead_of_stopping`. It worked again live between turns 95 and 96.
+2. **The defeat check could not read the player.** `Game.GetWinningTeam()` returns nil before anyone wins, which printed `nil` and failed the integer parse. The Lua now prints -1 for nil. Test `test_status_with_no_winning_team_reads_as_minus_one`. A live read now gives `DEFEAT_STATE|true|-1|0|1|1|hidden` in the InGame context.
+3. **Barbarians next to the capital blocked all expansion (turns 9 to 30).** A threatened city scored settlers and builders as zero and defenders and walls high with no limit, so the capital built six defenders and nothing else. Fix: defence only outranks expansion while the empire has fewer defenders than `min(threats + 1, 3)` per city. Test `test_a_long_siege_by_barbarians_does_not_stop_expansion_once_defended`.
+4. **The settler found no site for 25 turns.** Nothing explored: the starting warrior is not a scout and the first scout scored 5, below a settler, so the revealed map was about 30 tiles. Fixes: the first scout scores 15 (test `test_the_first_scout_comes_before_a_settler`); a scout waits 2 turns for a camp to leave and then goes, because every route out passed within 2 tiles of the camp (test `test_a_scout_stops_waiting_for_a_camp_that_never_leaves`); and a settler with a combat unit on its tile now ignores "hostile unit near the site", which had rejected every site while the settler stood on the best one with its escort (test `test_an_escorted_settler_founds_though_a_hostile_unit_shadows_it`). It founded the next turn.
+5. **`ENDTURN_BLOCKING_GOVERNOR_OPPORTUNITY` (turn 62 on).** The notification reads "New Governor Title Available". The turn still ended, so the game doesn't treat it as a hard block, but the type had no handler and raised `UnresolvedBlockers` every turn (about 3s). It is now handled like an appointment (test `test_a_governor_title_opportunity_is_spent_like_an_appointment`). Not confirmed live that this spends the point: the game still had `points_available=1` and an unassigned governor at turn 80, and no handler error followed on turns 80 to 99.
+6. **Seen, not fixed:** the starting warrior and slingers stay in the capital all game; builders are made but never given work (no builder policy); 625 gold is unspent at turn 100; a trade route sits idle; a unit promotion notification is listed from turn 80 on. A settler escort step onto a tile holding our scout was refused with `STACKING_CONFLICT|Friendly UNIT_SCOUT already on (65,26). Cannot stack same formation class.` The pair held for a turn and went on.
+
+### Checks for the wired bot (PR 74)
+
+| Check | Status |
+|---|---|
+| `DEFEAT_STATE` Lua parses and prints in both UI and GameCore contexts | Confirmed at turn 25, after the nil fix. Prints in both; the screen field is `unknown` in GameCore. |
+| `IsAlive` is true for a living player with units and no city | Not reached. A city existed before any read. |
+| `/InGame/EndGameMenu` is found and `IsHidden` flips on the defeat screen | Found and hidden while alive (turn 25). The flip was not reached. |
+| A defeat is turned into `GAME_OVER` after `end_turn` returns | Not reached. |
+| Settling, research and production policies run with no handler errors | Confirmed on turns 1 to 61 and 80 to 99. Turns 62 to 79 had only the governor error (stop 5). |
+| `runs/*_settle.jsonl` receives `settle_decision` lines | Confirmed, turn 1 on. |
+| Time per turn with `SharedReads` against the 18s baseline | Not a like for like: 28s on average now. The baseline had no policies, which add about 10s of reads and moves, and the game has more to process. |
+
+### Checks from PR 70 (research and civics)
+
+| Check | Status |
+|---|---|
+| Real names are `TECHNOLOGY_*` and `CIVIC_*` | Refuted for techs: the policy logs `TECH_MATHEMATICS` and `CIVIC_FOREIGN_TRADE`. The policy works with both. |
+| The item in progress appears in the available list | Not read directly. Consistent with it: a new item was started only after a completion, never every turn. |
+| `LockedResearch.missing` names match `ResearchOption.name` | Not reached. |
+| `turns` is positive for options | Not read directly. No option was refused for it. |
+| Switching mid-way keeps progress | Not reached. |
+| Research and civic never empty in a full game | Confirmed for turns 1 to 100: the policy set one at the start of every turn that needed it (Mining and Code of Laws on turn 1, then after each completion), with no refusal. Between a completion and the next turn's handler the slot is empty, which doesn't block. Late game not reached. |
+
+### Checks from PR 71 (production)
+
+| Check | Status |
+|---|---|
+| Item names are `BUILDING_*`, `DISTRICT_*`, `UNIT_*` | Confirmed: `UNIT_SETTLER`, `UNIT_SCOUT`, `UNIT_BUILDER`, `DISTRICT_COMMERCIAL_HUB`, `BUILDING_LIBRARY`. |
+| Wonders list as `BUILDING` and are refused with `MISSING_COORDS` | Confirmed at turn 95: `BUILDING_ORACLE` and `BUILDING_APADANA` were refused with `MISSING_COORDS`. |
+| `get_wonder_advisor` result shape | Not reached in a way the log shows. |
+| District placement | In part: a Commercial Hub was started; `DISTRICT_GOVERNMENT` was refused with `ERR:NO_PLACEMENT|no valid tile` and the policy moved on. |
+| `set_city_production` with repair coordinates | Not reached. |
+| `District.district_type` and `City.buildings` naming | Not checked directly. |
+| Scores need tuning (settler timing, builder count, walls) | Confirmed: the threat response starved expansion (stop 3), the first scout came too late (stop 4), and builders were made but unused. |
+
+### Checks from PR 72 (settling)
+
+| Check | Status |
+|---|---|
+| Four cities by turn 100 on each standard save | Refuted on `STD_T1_01`: 3 cities at turn 100. |
+| `found_city` result strings and failure modes | Success is `FOUNDED|x,y` (turns 1, 57, 77). Failure not reached. |
+| Escort and settler stop on the same tile | Confirmed over about 10 steps. The pair moved one tile a turn (`STOPPED_MID_PATH (moves exhausted)`), stayed stacked, and the settler founded on the escort's tile. |
+| A combat unit and a settler can stack; `move_unit` onto an unrevealed tile | Stacking confirmed. Unrevealed tiles not reached. A combat unit can't join a tile holding our scout (`STACKING_CONFLICT`). |
+| `automate_explore` leaves the scout needing no orders | Not reached: the scout was routed to frontier points and those moves succeeded. |
+| Fog rays are approximate | The frontier points were reachable (`MOVING_TO` succeeded). |
+| Site-score weights and `min_site_score` 50 | Not tuned. First-city options scored 129 to 183 and later sites 98 to 242. |
+| Names `UNIT_SETTLER`, `UNIT_SCOUT`, sea filter | Names confirmed. Sea filter not reached. |
+
+### Checks from PRs 64 and 65 that this run reached
+
+| Check | Status |
+|---|---|
+| Threat monitor: no errors, radius, stealth units | Ran every turn with no error and raised `hostile_units_near` for barbarians 1 to 3 tiles away. No stealth units seen. |
+| Victory monitor with a city | Confirmed: no error on turns 1 to 99, including the empty read before the first city on turn 1. |
+| `enabled_victories` empty semantics | Refuted again for the overview: turn 1 `get_game_overview` returned an empty set. |
+| `has_met` / `is_at_war` against real declarations | Not reached. Mapuche and Sumeria were met by turn 77 to 80, with no war. |
+| Religion majority names, 20 diplomatic points | Not reached. |
+| A full game ending every turn with no block | Confirmed for 99 turn ends: all ended or stopped only on stop 1. Two took 583s (see above). |
+| World Congress, `STACKED_UNITS`, great person claim, promotion lookup | Not reached. A promotion notification was listed from turn 80 on and never appeared in the blocking query. |
+| Auto End Turn must be off | Consistent: turns ended only when the bot ended them. |
+| Diplomacy session handling | In part: "Turn paused - AI diplomatic proposal from Sumeria [deal]" on turn 80 was cleared and the retry went through. |
+| Unknown blocker types | `ENDTURN_BLOCKING_GOVERNOR_OPPORTUNITY` was logged unresolved on turns 62 to 79 (stop 5). |
 
 ## Pending: government, policies and governors (issue 1.10)
 

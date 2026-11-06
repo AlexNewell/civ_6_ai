@@ -8,6 +8,7 @@ Civ must be running with the tuner on and one of those saves open. It doesn't lo
 import argparse
 import asyncio
 import json
+import logging
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -49,12 +50,19 @@ async def run(turns: int) -> int:
     turn_log = TurnLog(ROOT / "runs" / f"{name}_{stamp}.jsonl")
     bus = EventBus()
     bus.subscribe(EventLog(ROOT / "runs" / f"{name}_{stamp}_events.jsonl").write)
+    # Policy decisions are logged at INFO. Keep them beside the turn log, since they explain it.
+    file_log = logging.FileHandler(ROOT / "runs" / f"{name}_{stamp}_bot.log", encoding="utf-8")
+    file_log.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
+    logging.getLogger("civ6_ai").addHandler(file_log)
+    logging.getLogger("civ6_ai").setLevel(logging.INFO)
     decisions = SettleDecisionLog(ROOT / "runs" / f"{name}_{stamp}_settle.jsonl")
     decisions.attach()
     try:
         reason = await build_orchestrator(game, bus, turn_log).play(turns)
     finally:
         decisions.detach()
+        logging.getLogger("civ6_ai").removeHandler(file_log)
+        file_log.close()
 
     records = turn_log.records
     total = sum(record.total_seconds for record in records)

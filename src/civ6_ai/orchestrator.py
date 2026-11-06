@@ -169,13 +169,34 @@ class Orchestrator:
         if await self._game.check_game_over() is not None:
             return StopReason.GAME_OVER
         try:
-            return None if await self._read_turn() > turn_before else StopReason.BLOCKED
+            if await self._read_turn() > turn_before:
+                return None
+            # A popup such as a natural disaster can hold the game's UI on the old turn although
+            # the turn has ended (seen live on turn 1: the report said "Turn 1 -> 2" but the UI
+            # still read 1). Clearing it lets the UI catch up.
+            if await self._dismiss_popup() and await self._read_turn() > turn_before:
+                return None
+            return StopReason.BLOCKED
         except ConnectionError:
             raise
         except Exception:
             if await self._defeated():
                 return StopReason.GAME_OVER  # Reads can fail once the defeat screen is up.
             raise
+
+    async def _dismiss_popup(self) -> bool:
+        """Clear any popup through civ6-mcp (Lua only, no clicks). True if the call was made."""
+        dismiss = getattr(self._game, "dismiss_popup", None)
+        if dismiss is None:
+            return False
+        try:
+            log.info("Turn did not read as advanced; dismissed: %s", await dismiss())
+        except ConnectionError:
+            raise
+        except Exception:
+            log.exception("Popup dismissal failed")
+            return False
+        return True
 
     async def _defeated(self) -> bool:
         """Ask the defeat check, if there is one. A check that fails counts as not defeated."""

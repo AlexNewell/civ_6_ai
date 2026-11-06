@@ -478,6 +478,7 @@ def test_blocker_policies_cover_slots_governors_and_government():
     assert set(table) == {
         BlockerType.FILL_CIVIC_SLOT,
         BlockerType.GOVERNOR_APPOINTMENT,
+        BlockerType.GOVERNOR_OPPORTUNITY,
         BlockerType.GOVERNOR_IDLE,
         BlockerType.CONSIDER_GOVERNMENT_CHANGE,
     }

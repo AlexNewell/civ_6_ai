@@ -31,8 +31,8 @@ _STATUS_LUA = f"""
 local me = Game.GetLocalPlayer()
 local alive, winTeam, myTeam, units, cities, screen = "?", -1, -1, -1, -1, "unknown"
 pcall(function() alive = tostring(Players[me]:IsAlive()) end)
-pcall(function() winTeam = Game.GetWinningTeam() end)
-pcall(function() myTeam = Players[me]:GetTeam() end)
+pcall(function() winTeam = Game.GetWinningTeam() or -1 end)
+pcall(function() myTeam = Players[me]:GetTeam() or -1 end)
 pcall(function() units = Players[me]:GetUnits():GetCount() end)
 pcall(function() cities = Players[me]:GetCities():GetCount() end)
 pcall(function()

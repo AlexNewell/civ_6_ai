@@ -413,6 +413,7 @@ class GovernmentPolicy:
         return {
             BlockerType.FILL_CIVIC_SLOT: fill,
             BlockerType.GOVERNOR_APPOINTMENT: appoint,
+            BlockerType.GOVERNOR_OPPORTUNITY: appoint,
             BlockerType.GOVERNOR_IDLE: idle,
             BlockerType.CONSIDER_GOVERNMENT_CHANGE: consider,
         }

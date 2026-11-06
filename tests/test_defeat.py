@@ -159,3 +159,10 @@ def test_a_failing_defeat_check_does_not_hide_the_stop(tmp_path):
     turn_log = TurnLog(tmp_path / "game.jsonl")
     orchestrator = Orchestrator(StuckGame(), [DoNothing()], turn_log, defeat_check=broken)
     assert asyncio.run(orchestrator.play(3)) is StopReason.HUNG
+
+
+def test_status_with_no_winning_team_reads_as_minus_one():
+    # The Lua now prints -1 where the game returned nil (no winner yet), as seen live.
+    status = parse_status("DEFEAT_STATE|true|-1|0|1|1|hidden")
+    assert status is not None
+    assert not status.is_game_over

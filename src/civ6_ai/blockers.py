@@ -21,7 +21,6 @@ log = logging.getLogger(__name__)
 MAX_PASSES = 3  # Clearing one blocker can reveal another, such as an idle governor.
 MAX_END_TURN_RETRIES = 8  # Enough for all five opponents to interrupt one turn, plus a blocker.
 MAX_DIPLOMACY_ROUNDS = 4  # A first meeting takes 2-3 rounds.
-MAX_PRODUCTION_TRIES = 10  # Wonders list as buildings but need a tile, so some options fail.
 
 _NOTHING_CHOSEN = "None"  # civ6-mcp's value when no tech or civic is in progress.
 _NO_PRODUCTION = "nothing"  # civ6-mcp's value for a city with an empty queue.
@@ -222,7 +221,9 @@ async def _start_production(game: BlockerGame, city_id: int) -> bool:
     # Districts need a tile, and choosing one is a job for the build policy.
     buildable = [o for o in options if o.category != "DISTRICT" and not o.is_repair]
     buildable.sort(key=lambda option: (option.category == "UNIT", option.cost))
-    for option in buildable[:MAX_PRODUCTION_TRIES]:
+    # Wonders list as buildings but are refused without a tile. A refusal costs one call and
+    # changes nothing, so every option is tried, and a unit at the end still clears the block.
+    for option in buildable:
         result = await game.set_city_production(city_id, option.category, option.item_name)
         if _succeeded(result):
             return True
@@ -253,8 +254,10 @@ async def fill_policy_slots(game: BlockerGame, blocker: Blocker) -> bool:
 async def appoint_or_promote_governor(game: BlockerGame, blocker: Blocker) -> bool:
     """Spend a governor point. `end_turn` clears the idle governor this leaves."""
     status = await game.get_governors()
-    if status.can_appoint and status.available_to_appoint:
-        return _succeeded(await game.appoint_governor(status.available_to_appoint[0].governor_type))
+    if status.can_appoint:
+        for candidate in status.available_to_appoint:
+            if _succeeded(await game.appoint_governor(candidate.governor_type)):
+                return True
     for governor in status.appointed:
         if governor.available_promotions:
             promotion = governor.available_promotions[0].promotion_type
@@ -296,16 +299,24 @@ async def choose_first_dedications(game: BlockerGame, blocker: Blocker) -> bool:
 
 
 async def send_envoys_to_one(game: BlockerGame, blocker: Blocker) -> bool:
-    """Send every envoy to one city-state, which earns more than spreading them."""
+    """Send envoys to one city-state where it accepts them, which earns more than spreading them."""
     status = await game.get_city_states()
     if status.tokens_available == 0:
         return True  # A stale notification, which `end_turn` clears.
     targets = [city for city in status.city_states if city.can_send_envoy]
     if not targets:
         return False
-    target = targets[0].player_id
-    results = [await game.send_envoy(target) for _ in range(status.tokens_available)]
-    return all(_succeeded(result) for result in results)
+    # Spend each envoy on the first city-state that takes it, so one refusal can't strand them.
+    for _ in range(status.tokens_available):
+        for target in targets:
+            if _succeeded(await game.send_envoy(target.player_id)):
+                break
+        else:
+            return False
+    return True
+
+
+_NEIGHBOUR_OFFSETS = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (-1, -1), (1, -1), (-1, 1)]
 
 
 async def unstack_units(game: BlockerGame, blocker: Blocker) -> bool:
@@ -323,15 +334,9 @@ async def unstack_units(game: BlockerGame, blocker: Blocker) -> bool:
 async def _step_aside(game: BlockerGame, unit: Any) -> bool:
     if unit.moves_remaining <= 0:
         return False
-    # Rows are staggered, so one of these may be two tiles away. Any free tile will do.
-    for x, y in (
-        (unit.x + 1, unit.y),
-        (unit.x - 1, unit.y),
-        (unit.x, unit.y + 1),
-        (unit.x, unit.y - 1),
-        (unit.x + 1, unit.y + 1),
-        (unit.x - 1, unit.y - 1),
-    ):
+    # Rows are staggered, so which diagonals touch depends on the row. Try all eight offsets.
+    for dx, dy in _NEIGHBOUR_OFFSETS:
+        x, y = unit.x + dx, unit.y + dy
         result = await game.move_unit(unit.unit_index, x, y)
         if _succeeded(result) and "BLOCKED" not in result:
             return True

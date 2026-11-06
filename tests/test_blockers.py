@@ -669,6 +669,25 @@ def test_production_prefers_cheap_non_units_and_only_touches_idle_cities():
     ]
 
 
+def test_production_gets_past_many_refused_wonders_to_a_unit():
+    game = FakeGame([BlockerType.PRODUCTION])
+    game.production = [option("BUILDING", f"BUILDING_WONDER_{i}", 100 + i) for i in range(12)] + [
+        option("UNIT", "UNIT_SCOUT", 30)
+    ]
+    real = game.set_city_production
+
+    async def picky(city_id, item_type, item_name):
+        if item_name.startswith("BUILDING_WONDER"):
+            game.calls.append(("set_city_production", city_id, item_type, item_name))
+            return "ERR:MISSING_COORDS|needs a tile"
+        return await real(city_id, item_type, item_name)
+
+    game.set_city_production = picky
+
+    assert resolve(game) == []
+    assert game.called("set_city_production")[-1][-1] == "UNIT_SCOUT"
+
+
 def test_production_moves_on_from_a_rejected_item():
     game = FakeGame([BlockerType.PRODUCTION])
     game.production = [option("BUILDING", "WONDER", 10), option("UNIT", "UNIT_SCOUT", 20)]
@@ -746,6 +765,42 @@ def test_every_envoy_goes_to_one_city_state():
     resolve(game)
 
     assert game.called("send_envoy") == [("send_envoy", 9)] * 2
+
+
+def test_envoy_refused_by_one_city_state_goes_to_the_next():
+    game = FakeGame([BlockerType.GIVE_INFLUENCE_TOKEN])
+    first = lq.CityStateInfo(8, "Full", "Sci", 0, -1, "None", True)
+    second = lq.CityStateInfo(9, "Geneva", "Sci", 0, -1, "None", True)
+    game.envoys = lq.EnvoyStatus(1, [first, second])
+    real = game.send_envoy
+
+    async def picky(player_id):
+        if player_id == 8:
+            game.calls.append(("send_envoy", 8))
+            return "Error: cannot send"
+        return await real(player_id)
+
+    game.send_envoy = picky
+
+    assert resolve(game) == []
+    assert game.called("send_envoy") == [("send_envoy", 8), ("send_envoy", 9)]
+
+
+def test_governor_refused_once_tries_the_next_candidate():
+    game = FakeGame([BlockerType.GOVERNOR_APPOINTMENT])
+    game.governors = governor_status(available=("GOV_A", "GOV_B"))
+    real = game.appoint_governor
+
+    async def picky(governor_type):
+        if governor_type == "GOV_A":
+            game.calls.append(("appoint_governor", "GOV_A"))
+            return "Error: cannot appoint"
+        return await real(governor_type)
+
+    game.appoint_governor = picky
+
+    assert resolve(game) == []
+    assert game.called("appoint_governor")[-1] == ("appoint_governor", "GOV_B")
 
 
 def test_stale_envoy_notification_sends_nothing():

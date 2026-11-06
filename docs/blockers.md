@@ -36,14 +36,14 @@ All of these come from civ6-mcp's blocking query, run through `execute_lua` in t
 |---|---|
 | `ENDTURN_BLOCKING_RESEARCH` | Starts the tech with the fewest turns. If a tech is already set, the notification is stale and is left to `end_turn`. |
 | `ENDTURN_BLOCKING_CIVIC` | Same, for civics. |
-| `ENDTURN_BLOCKING_PRODUCTION` | In each idle city, starts the cheapest non-unit item, then units, skipping districts and repairs because they need a tile. Tries up to 10 options. Corrupted queues are left to `end_turn`. |
+| `ENDTURN_BLOCKING_PRODUCTION` | In each idle city, starts the cheapest non-unit item, then units, skipping districts and repairs because they need a tile. Tries every option until one is accepted, because wonders are listed as buildings but refused without a tile, so no cap on tries can be safe. Corrupted queues are left to `end_turn`. |
 | `ENDTURN_BLOCKING_FILL_CIVIC_SLOT` | Puts an unused policy that fits into each empty slot. A wildcard slot takes any type. |
-| `ENDTURN_BLOCKING_GOVERNOR_APPOINTMENT` | Appoints the first available governor, or promotes the first one with a promotion on offer. |
+| `ENDTURN_BLOCKING_GOVERNOR_APPOINTMENT` | Appoints the first available governor that's accepted, or promotes the first one with a promotion on offer. |
 | `ENDTURN_BLOCKING_GOVERNOR_IDLE` | Left to `end_turn`, which dismisses it. The governor stays unassigned until a policy places it. |
 | `ENDTURN_BLOCKING_UNIT_PROMOTION` | Asks each combat unit for its options and takes the first. Stale notifications are left to `end_turn`. |
 | `ENDTURN_BLOCKING_PANTHEON` | Chooses the first belief offered. |
 | `ENDTURN_BLOCKING_COMMEMORATION_AVAILABLE` | Chooses the first dedications, up to the number allowed. This is the era choice. |
-| `ENDTURN_BLOCKING_GIVE_INFLUENCE_TOKEN` | Sends every envoy to the first city-state that accepts one. With no envoys left it's stale, and `end_turn` clears it. |
+| `ENDTURN_BLOCKING_GIVE_INFLUENCE_TOKEN` | Sends each envoy to the first city-state that accepts it. With no envoys left it's stale, and `end_turn` clears it. |
 | `ENDTURN_BLOCKING_WORLD_CONGRESS_SESSION` | If a session is open, casts one free vote on option A, target 0, for each open resolution, then submits. Otherwise queues the default voter. civ6-mcp's `submit_congress` isn't used, because it also ends the turn and a second end-turn request can skip turns. |
 | `ENDTURN_BLOCKING_WORLD_CONGRESS_LOOK` | Left to `end_turn`, which marks the results as seen. |
 | `ENDTURN_BLOCKING_WORLD_CONGRESS_SPECIAL_SESSION` | Left to `end_turn`, which passes on it, as any other World Congress type. |
@@ -51,7 +51,7 @@ All of these come from civ6-mcp's blocking query, run through `execute_lua` in t
 | `ENDTURN_BLOCKING_CONSIDER_RAZE_CITY` | Left to `end_turn`, which keeps the city. |
 | `ENDTURN_BLOCKING_CONSIDER_DISLOYAL_CITY` | Left to `end_turn`, which keeps the city. |
 | `ENDTURN_BLOCKING_SPY_CHOOSE_ESCAPE_ROUTE` | Left to `end_turn`, which picks the fastest route. |
-| `ENDTURN_BLOCKING_STACKED_UNITS` | Moves extra units to any tile nearby. Combat units and others count as separate groups. |
+| `ENDTURN_BLOCKING_STACKED_UNITS` | Moves extra units to any of the eight neighbouring tiles that accepts them. Combat units and others count as separate groups. |
 | `ENDTURN_BLOCKING_UNITS` | `skip_remaining_units`, which fortifies combat units and skips the rest. Runs after every other type. |
 
 ### Handled by `end_turn` alone

@@ -282,6 +282,7 @@ class SecondaryGame(GameReads, BlockerGame, Protocol):
 class _GreatPersonState:
     stuck: int = 0
     last_distance: int | None = None
+    last_target: tuple[int, int] | None = None
     skip_until: int = -1
 
 
@@ -388,7 +389,9 @@ class SecondaryPolicy:
                 log.info("Founding religion (attempt %d): %s", n + 1, result[:120])
             else:
                 log.warning("Religion is ready but the game offers no follower or founder belief")
-        return True
+        # Once attempts run out nothing will found, so prophets must not be spent. There is no
+        # choose-religion blocker type (docs/blockers.md), so giving up can't leave one stuck.
+        return self._found_attempts < MAX_FOUND_ATTEMPTS
 
     # ----- great people -----
 
@@ -444,16 +447,25 @@ class SecondaryPolicy:
         for city in cities[:MAX_MOVE_TARGETS]:
             result = await game.move_unit(unit.unit_index, city.district_x, city.district_y)
             if move_succeeded(result):
+                moved_to = city
                 break
             log.info("%s can't move to %s: %s", unit.name, city.city_name, result[:120])
         else:
             self._no_progress(state, turn, unit.name)
             return
-        if state.last_distance is not None and target.distance >= state.last_distance:
+        # Progress is measured against the district it actually moved toward.
+        goal = (moved_to.district_x, moved_to.district_y)
+        if (
+            state.last_target == goal
+            and state.last_distance is not None
+            and moved_to.distance >= state.last_distance
+        ):
             self._no_progress(state, turn, unit.name)
+            if state.skip_until > turn:
+                return  # Set aside: the reset in `_no_progress` must stand.
         else:
             state.stuck = 0
-        state.last_distance = target.distance
+        state.last_target, state.last_distance = goal, moved_to.distance
 
     @staticmethod
     def _no_progress(state: _GreatPersonState, turn: int, name: str) -> None:
@@ -463,7 +475,7 @@ class SecondaryPolicy:
             log.warning("%s is stuck, leaving it for %d turns", name, GP_SET_ASIDE_TURNS)
             state.skip_until = turn + GP_SET_ASIDE_TURNS
             state.stuck = 0
-            state.last_distance = None
+            state.last_distance = state.last_target = None
 
     # ----- trade -----
 

@@ -643,3 +643,46 @@ def test_run_is_deterministic():
         return game.actions
 
     assert play() == play()
+
+
+def test_progress_is_measured_against_the_district_actually_moved_to():
+    near, far = gp_city(12, 10, 2, city_id=1), gp_city(13, 10, 5, city_id=2)
+    game = make_game(units=[gp_unit()], advisor=advisor(near, far))
+    game.replies["move"] = ["MOVING_TO|12,10|BLOCKED (x)"]  # Falls back to the far district.
+    policy = SecondaryPolicy()
+    run(policy, game)
+    state = policy._great[40]
+    assert (state.last_target, state.last_distance) == ((13, 10), 5)
+    game.data["advisor"] = advisor(gp_city(12, 10, 2, city_id=1), gp_city(13, 10, 4, city_id=2))
+    game.replies["move"] = ["MOVING_TO|12,10|BLOCKED (x)"]
+    run(policy, game)
+    assert policy._great[40].stuck == 0  # Closer to the far district, so it is progress.
+
+
+def test_set_aside_clears_the_comparison():
+    game = make_game(units=[gp_unit()], advisor=advisor(gp_city(distance=3)))
+    policy = SecondaryPolicy()
+    for turn in range(10, 10 + GP_STUCK_TURNS + 2):
+        game.data["overview"] = overview(turn=turn)
+        run(policy, game)
+    state = policy._great[40]
+    assert state.last_distance is None and state.last_target is None and state.skip_until > 0
+
+
+def test_prophets_are_not_spent_once_founding_is_given_up():
+    unit = gp_unit("UNIT_GREAT_PROPHET")
+    game = make_game(
+        units=[unit],
+        advisor=advisor(gp_city(distance=0, can=True)),
+        religion=religion_status(),
+        notifications=[note("NOTIFICATION_CHOOSE_RELIGION")],
+    )
+    policy = SecondaryPolicy()
+    for _ in range(8):
+        run(policy, game)
+    assert len(acted(game, "religion")) == 6
+    assert not acted(game, "activate") or len(acted(game, "activate")) <= 6
+    policy._great.clear()
+    before = len(acted(game, "activate"))
+    run(policy, game)
+    assert len(acted(game, "activate")) == before

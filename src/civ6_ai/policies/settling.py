@@ -331,6 +331,7 @@ class SettlingPolicy:
         first_city: bool,
         turn: int,
         reserved: list[tuple[int, int]],
+        escorted: bool = False,
     ) -> list[CandidateLog]:
         s = self.settings
         found = []
@@ -357,7 +358,7 @@ class SettlingPolicy:
                 for cx, cy in reserved
             ):
                 rejected = "reserved by another settler"
-            elif danger.near(site.x, site.y, s.threat_radius):
+            elif not escorted and danger.near(site.x, site.y, s.threat_radius):
                 rejected = "hostile unit near the site"
             elif not first_city and site_score < s.min_site_score:
                 rejected = "below minimum site score"
@@ -406,8 +407,23 @@ class SettlingPolicy:
         )
         here_score = score_site(here, s) if here else None
         reserved = [t for uid, t in sorted(self._site_claims.items()) if uid != settler.unit_id]
+        # Live: barbarians shadowed an escorted settler for turns, so every site near it was
+        # "hostile unit near the site" and it never founded. A settler with a combat unit on its
+        # own tile has the escort the threat rules are there to demand, so it may found.
+        escorted = any(
+            u.is_combat and (u.x, u.y) == (settler.x, settler.y) and u.unit_type != SCOUT
+            for u in units
+        )
         candidates = self._candidates(
-            settler, exploration, city_tiles, rival_tiles, danger, first_city, turn, reserved
+            settler,
+            exploration,
+            city_tiles,
+            rival_tiles,
+            danger,
+            first_city,
+            turn,
+            reserved,
+            escorted,
         )
         usable = [c for c in candidates if c.rejected is None]
 

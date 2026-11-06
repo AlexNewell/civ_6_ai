@@ -236,7 +236,8 @@ def test_weights_are_validated():
 # A scripted game for the handler itself.
 class ScriptedGame(fx.FakeGame):
     def __init__(self, refuse=(), **overrides):
-        overrides.setdefault("overview", fx.overview(num_cities=1))
+        count = len(overrides["cities"]) if "cities" in overrides else 2  # The fixture's two.
+        overrides.setdefault("overview", fx.overview(num_cities=count))
         overrides.setdefault("threats", [])
         super().__init__(**overrides)
         self.refuse = dict(refuse)

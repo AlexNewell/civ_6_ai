@@ -3,6 +3,7 @@
 import json
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -56,9 +57,14 @@ _REPORT_PREFIXES = {
 
 
 def stop_reason_in_report(report: str) -> StopReason | None:
-    """Return the stop reason in `end_turn`'s text. civ6-mcp reports these without raising."""
+    """Return the stop reason in `end_turn`'s text. civ6-mcp reports these without raising.
+
+    A marker counts at the start of any line, because a report can open with a turn summary such
+    as "Turn 5 -> 6" before it.
+    """
+    lines = [line.lstrip() for line in report.splitlines()]
     for prefix, reason in _REPORT_PREFIXES.items():
-        if report.startswith(prefix):
+        if any(line.startswith(prefix) for line in lines):
             return reason
     return None
 
@@ -90,11 +96,23 @@ class TurnLog:
             file.write(json.dumps(asdict(record)) + "\n")
 
 
+# Answers whether the local player has been defeated or eliminated. It's only asked after a turn
+# failed to end, because it costs a game read.
+DefeatCheck = Callable[[], Awaitable[bool]]
+
+
 class Orchestrator:
-    def __init__(self, game: Game, handlers: list[Handler], turn_log: TurnLog) -> None:
+    def __init__(
+        self,
+        game: Game,
+        handlers: list[Handler],
+        turn_log: TurnLog,
+        defeat_check: DefeatCheck | None = None,
+    ) -> None:
         self._game = game
         self._handlers = handlers
         self._log = turn_log
+        self._defeat_check = defeat_check
 
     async def play(self, turns: int) -> StopReason:
         """Play up to `turns` turns, stopping early if the game can't continue."""
@@ -113,10 +131,24 @@ class Orchestrator:
         seconds, errors = await self._run_handlers()
 
         end_turn_started = time.perf_counter()
-        result = await self._game.end_turn()
+        try:
+            result = await self._game.end_turn()
+        except ConnectionError:
+            raise
+        except Exception:
+            # A defeat can make the call itself fail. If it wasn't one, this is still an error.
+            if not await self._defeated():
+                raise
+            log.warning("end_turn failed and the player is defeated", exc_info=True)
+            result = "GAME OVER: end_turn failed after the player was defeated"
         end_turn_seconds = time.perf_counter() - end_turn_started
 
-        reason = stop_reason_in_report(result) or await self._check_after_end_turn(turn)
+        reason = stop_reason_in_report(result)
+        if reason is None:
+            reason = await self._check_after_end_turn(turn)
+        if reason in (StopReason.BLOCKED, StopReason.HUNG) and await self._defeated():
+            # With no city, the game-over check can't see a defeat, so the turn just never ends.
+            reason = StopReason.GAME_OVER
 
         self._log.write(
             TurnRecord(
@@ -136,7 +168,26 @@ class Orchestrator:
         # A defeat lands during the AI's turn, and normal reads can fail on the defeat screen.
         if await self._game.check_game_over() is not None:
             return StopReason.GAME_OVER
-        return None if await self._read_turn() > turn_before else StopReason.BLOCKED
+        try:
+            return None if await self._read_turn() > turn_before else StopReason.BLOCKED
+        except ConnectionError:
+            raise
+        except Exception:
+            if await self._defeated():
+                return StopReason.GAME_OVER  # Reads can fail once the defeat screen is up.
+            raise
+
+    async def _defeated(self) -> bool:
+        """Ask the defeat check, if there is one. A check that fails counts as not defeated."""
+        if self._defeat_check is None:
+            return False
+        try:
+            return await self._defeat_check()
+        except ConnectionError:
+            raise
+        except Exception:
+            log.exception("Defeat check failed")
+            return False
 
     async def _run_handlers(self) -> tuple[dict[str, float], dict[str, str]]:
         """Run each handler, timing it. A failing handler must not stop the turn from ending."""

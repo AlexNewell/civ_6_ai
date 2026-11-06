@@ -15,9 +15,9 @@ from pathlib import Path
 from civ_mcp.connection import GameConnection
 from civ_mcp.game_state import GameState
 
-from civ6_ai.blockers import BlockerResolver, ResolvingGame
-from civ6_ai.monitors import EventBus, EventLog, Monitors
-from civ6_ai.orchestrator import Orchestrator, StopReason, TurnLog
+from civ6_ai.bot import SettleDecisionLog, build_orchestrator
+from civ6_ai.monitors import EventBus, EventLog
+from civ6_ai.orchestrator import StopReason, TurnLog
 from civ6_ai.saves import use_real_save_dirs
 
 ROOT = Path(__file__).parent.parent
@@ -49,10 +49,12 @@ async def run(turns: int) -> int:
     turn_log = TurnLog(ROOT / "runs" / f"{name}_{stamp}.jsonl")
     bus = EventBus()
     bus.subscribe(EventLog(ROOT / "runs" / f"{name}_{stamp}_events.jsonl").write)
-    resolver = BlockerResolver()
-    # Monitors go first so they read the turn before the resolver acts on it.
-    handlers = [Monitors(bus), resolver]
-    reason = await Orchestrator(ResolvingGame(game, resolver), handlers, turn_log).play(turns)
+    decisions = SettleDecisionLog(ROOT / "runs" / f"{name}_{stamp}_settle.jsonl")
+    decisions.attach()
+    try:
+        reason = await build_orchestrator(game, bus, turn_log).play(turns)
+    finally:
+        decisions.detach()
 
     records = turn_log.records
     total = sum(record.total_seconds for record in records)
@@ -62,6 +64,7 @@ async def run(turns: int) -> int:
         if reason != StopReason.TURN_LIMIT:
             print(f"Last result: {records[-1].detail}")
     print(f"Log: {turn_log.path.relative_to(ROOT)}")
+    print(f"Settling decisions: {decisions.path.relative_to(ROOT)}")
     return 0 if reason == StopReason.TURN_LIMIT else 1
 
 

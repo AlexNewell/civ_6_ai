@@ -1,0 +1,153 @@
+"""Put the turn loop together: which handlers run, in what order, and what they share.
+
+Order within a turn:
+
+1. `Monitors` read the turn first, so they see it before anything acts on it.
+2. `SettlingPolicy` moves settlers and scouts, which changes cities and units.
+3. `ResearchPolicy` keeps a tech and a civic in progress.
+4. `CityProductionPolicy` gives idle cities something to build, after settling may have founded one.
+5. `BlockerResolver` goes last, because it clears what is left and skips any idle units. It also
+   gets the production and research policies for their blockers, with its defaults as fallback.
+"""
+
+import json
+import logging
+from collections.abc import Awaitable, Callable
+from functools import partial
+from pathlib import Path
+from typing import Any
+
+from civ6_ai.blockers import BlockerResolver, ResolvingGame
+from civ6_ai.defeat import is_defeated
+from civ6_ai.monitors import EventBus, Monitors
+from civ6_ai.orchestrator import Handler, Orchestrator, TurnLog
+from civ6_ai.policies import research
+from civ6_ai.policies.production import CityProductionPolicy
+from civ6_ai.policies.settling import SettlingPolicy
+from civ6_ai.state.reader import IncompleteRead, check_cities_complete
+
+SETTLING_LOGGER = "civ6_ai.policies.settling"
+_DECISION_PREFIX = "settle_decision "
+
+# Reads that more than one handler makes each turn. They can be shared until something changes the
+# game, because a turn's handlers run one after another with nothing else moving.
+_SHARED_READS = frozenset(
+    {
+        "get_game_overview",
+        "get_cities",
+        "get_empire_resources",
+        "get_diplomacy",
+        "get_victory_progress",
+        "get_threat_scan",
+    }
+)
+_PLAIN_READS = ("get_", "list_", "check_")
+
+
+def _is_empty(value: Any) -> bool:
+    """True for a read that came back with nothing, which civ6-mcp also returns on a timeout."""
+    if value is None:
+        return True
+    if isinstance(value, tuple):
+        return all(_is_empty(part) for part in value)
+    return isinstance(value, list | dict | set | str) and not value
+
+
+class SharedReads:
+    """A game that answers repeated reads from memory until anything else is called.
+
+    Any call that isn't a plain read clears the memory first, as does ending the turn, so no read
+    outlives a change or a turn. A read that raises isn't kept.
+    """
+
+    def __init__(self, game: Any) -> None:
+        self._game = game
+        self._kept: dict[str, Any] = {}
+
+    def __getattr__(self, name: str) -> Any:
+        attribute = getattr(self._game, name)
+        if not callable(attribute):
+            return attribute
+        if name in _SHARED_READS:
+            return partial(self._shared, name, attribute)
+        if name.startswith(_PLAIN_READS):
+            return attribute
+        return partial(self._changing, attribute)
+
+    async def _shared(self, name: str, read: Callable[[], Awaitable[Any]]) -> Any:
+        if name in self._kept:
+            return self._kept[name]
+        value = await read()
+        if name == "get_cities":
+            # Kept only once checked against a real overview. On a mismatch either read may be the
+            # short one, so both are dropped and the next ask reads them again.
+            overview = await self.get_game_overview()
+            if overview is None:
+                return value
+            try:
+                check_cities_complete(value[0], overview)
+            except IncompleteRead:
+                self._kept.pop("get_game_overview", None)
+                raise
+        if not _is_empty(value):
+            self._kept[name] = value  # An empty answer may be a timeout, so ask again next time.
+        return value
+
+    async def _changing(self, call: Callable[..., Awaitable[Any]], *args: Any, **kwargs: Any):
+        self._kept.clear()
+        try:
+            return await call(*args, **kwargs)
+        finally:
+            self._kept.clear()  # The call itself may have changed what a read would return.
+
+
+class SettleDecisionLog(logging.Handler):
+    """Writes the settling policy's `settle_decision` log lines to a file, one JSON object each."""
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(level=logging.INFO)
+        self.path = path
+        self._level_before = logging.NOTSET
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        message = record.getMessage()
+        if not message.startswith(_DECISION_PREFIX):
+            return
+        try:
+            line = json.dumps(json.loads(message[len(_DECISION_PREFIX) :]), sort_keys=True)
+            with self.path.open("a", encoding="utf-8") as file:
+                file.write(line + "\n")
+        except Exception:
+            self.handleError(record)
+
+    def attach(self) -> None:
+        """Start listening. The logger is lowered to INFO if it would drop the lines."""
+        logger = logging.getLogger(SETTLING_LOGGER)
+        self._level_before = logger.level
+        if not logger.isEnabledFor(logging.INFO):
+            logger.setLevel(logging.INFO)
+        logger.addHandler(self)
+
+    def detach(self) -> None:
+        logger = logging.getLogger(SETTLING_LOGGER)
+        logger.removeHandler(self)
+        logger.setLevel(self._level_before)
+        self.close()
+
+
+def build_orchestrator(game: Any, bus: EventBus, turn_log: TurnLog) -> Orchestrator:
+    """Wire the handlers to a game. `game` is civ6-mcp's `GameState`, or a fake with its reads."""
+    production = CityProductionPolicy()
+    resolver = BlockerResolver(
+        {**production.blocker_policies(), **research.blocker_policies()},
+    )
+    handlers: list[Handler] = [
+        Monitors(bus),
+        SettlingPolicy(),
+        research.ResearchPolicy(),
+        production,
+        resolver,
+    ]
+    shared = ResolvingGame(SharedReads(game), resolver)
+    return Orchestrator(shared, handlers, turn_log, defeat_check=partial(is_defeated, game))

@@ -34,6 +34,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import ClassVar, Protocol
 
+from civ6_ai.state.reader import IncompleteRead, check_cities_complete
+
 log = logging.getLogger(__name__)
 
 THREAT_PERIOD = 1
@@ -225,10 +227,6 @@ class MonitorGame(Protocol):
     async def get_victory_progress(self): ...
 
 
-class IncompleteRead(Exception):
-    """civ6-mcp returns what it has when a read times out, so a short answer can't be trusted."""
-
-
 class Monitor(Protocol):
     name: str
     period: int  # Turns between checks.
@@ -259,8 +257,7 @@ class ThreatMonitor:
         civs = await game.get_diplomacy()
         cities, _ = await game.get_cities()
         scan = await game.get_threat_scan()
-        if len(cities) != overview.num_cities:
-            raise IncompleteRead(f"{len(cities)} of {overview.num_cities} cities read")
+        check_cities_complete(cities, overview)
 
         turn = overview.turn
         return [

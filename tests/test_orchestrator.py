@@ -65,6 +65,9 @@ def play(game, handlers, turns, tmp_path):
         ("Cannot end turn — resolve these blockers:", None),
         ("HANG:5:save|End turn requested", StopReason.HUNG),
         ("GAME OVER — DEFEAT. Someone won.", StopReason.GAME_OVER),
+        ("Turn 5 -> 6\nGAME OVER - DEFEAT.", StopReason.GAME_OVER),
+        ("Turn 5 -> 6\n  HANG:5:save|stuck", StopReason.HUNG),
+        ("Turn 5 -> 6\nThe GAME OVER sign", None),
         ("RUN ABORTED — save scumming threshold exceeded.", StopReason.RUN_ABORTED),
     ],
 )

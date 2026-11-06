@@ -13,11 +13,33 @@ What was verified against a running Civ VI game, and what wasn't reached. Newest
 ### Stops
 
 1. **Victory monitor, turn 39.** Before a player has a city, the game reports it as not alive, and `get_victory_progress` then lists no players at all, not even us (all five rivals were unmet). The monitor treated that as an incomplete read and failed every turn. Fixed: with no cities and an empty read it returns nothing. Test: `test_no_city_yet_is_not_a_failed_victory_read`.
-2. **AI turn hang, turn 39.** After `end_turn`, the turn stayed on 39 for over 15 minutes, with only the barbarian player still marked as taking its turn. No blocker, diplomacy session, trade deal or popup was open, and the tuner still answered. This is the `HANG:` case from `docs/blockers.md`, whose recovery restarts the game, so it was not attempted. The bot's own code had nothing in flight. It is not known whether the barbarians' capture of our warrior on this turn is related.
+2. **Turn 39 "hang" was a defeat.** After `end_turn`, the turn stayed on 39 for over 15 minutes, with only the barbarian player still marked as taking its turn. No blocker, diplomacy session, trade deal or popup was open, and the tuner still answered. At the time this looked like the `HANG:` case from `docs/blockers.md`, and no recovery was attempted. **The owner has since confirmed that the game had actually ended in a defeat.**
+   - **Confirmed:** the game was over (owner, by looking at the game). The bot never founded a city. Barbarians captured our warrior on turn 39.
+   - **Inference, not confirmed:** the defeat came from losing our last unit. Nothing was read from the game to show this, such as `IsAlive` or the defeat screen, before the run stopped. Which units we still had, and whether a settler was lost earlier, were not recorded.
+   - **From the game's own UI scripts (read only):** the defeat screen is shown on the `PlayerDefeat` event and pauses the game, so the turn never advances. That fits a turn that stays put with no blocker open, though it was not observed directly.
+   - **Not known:** whether `Players[me]:IsAlive()` is already false for a player who simply has no city yet. The victory monitor's empty read before turn 39 suggests it might be (stop 1), so `civ6_ai.defeat` does not trust "not alive" on its own. It needs the end-game screen up, or no units and no cities left.
 
 ### Side findings in civ6-mcp at the pin
 
-- `GameState.check_game_over` can never succeed here. Its InGame query fails with a nil comparison in Lua (while we have no city), and the fallback calls `build_gameover_check_gamecore`, which doesn't exist at the pin. It returns `None`, so game-over detection during a hang is blind.
+- `GameState.check_game_over` can never succeed here. Its InGame query fails with a nil comparison in Lua (while we have no city), and the fallback calls `build_gameover_check_gamecore`, which is defined in `civ_mcp/lua/overview.py` but not exported from `civ_mcp.lua`, so the call raises and the error is swallowed. It returns `None`, so game-over detection during a hang is blind. We don't patch civ6-mcp. `civ6_ai/defeat.py` is our own read-only check (fixed Lua through `execute_lua`, UI context first, then GameCore), used by the turn loop when a turn is `BLOCKED` or `HUNG`, or `end_turn` raises.
+- **How long a defeat takes to notice.** `end_turn` (civ6-mcp `end_turn.py`) polls for the turn to advance for 4s, then 550s more in 31 steps, so about 554s (9.2 minutes) plus the read time of each poll. Its mid-wait game-over checks (every poll of 10s or longer) go through the blind `check_game_over`, so they find nothing. Phase 3 then adds a diplomacy probe, a trade-deal check, one popup dismissal that can add up to about 10s, and a final 2s wait. So `end_turn` returns about 9.5 to 10 minutes after a defeat, with a `HANG:` or "End turn blocked" report, and our check turns that into `GAME_OVER` straight away. This is computed from the code, not timed live. The earlier T39 wait of over 15 minutes was the owner's observation of the game, not the time `end_turn` took to return.
+
+### Turn-time costs (run 1 numbers, with an inference)
+
+- The resolver's steady 4.0s with nothing to resolve is five reads in a row (diplomacy sessions, trade deals, World Congress, the end-turn blocking query and notifications), so about 0.8s each. Each call to civ6-mcp waits 0.1s to drain stale output before sending and 0.2s after the sentinel, which is 0.3s of every read that never goes away, and the rest is the game answering through the tuner. Every query ends with its sentinel, so none is waiting out a 2s timeout. This is inferred from the code and the totals, not timed per read. No read can be dropped safely: each is a separate blocker source that `end_turn` itself checks, so it was not trimmed.
+- What was trimmed: reads that several handlers repeat in a turn (`get_game_overview`, `get_cities`, `get_empire_resources`, `get_diplomacy`, `get_victory_progress`, `get_threat_scan`) are now answered from memory by `SharedReads` until any other call changes the game, and `end_turn` always clears it. Empty answers are never kept, because civ6-mcp returns a timed-out read as a short result. `read_cities` (used by the settling and production policies) raises `IncompleteRead` when the city count differs from the overview's, so no policy acts on a short city list.
+
+### Live checks needed for the wiring and defeat detection
+
+| Check | Status |
+|---|---|
+| `DEFEAT_STATE` Lua parses and prints in both UI and GameCore contexts | Not run. No live game this round. |
+| `IsAlive` is true for a living player with units and no city | Not run. Decides whether "not alive" could ever be a false alarm. |
+| `/InGame/EndGameMenu` is found and `IsHidden` flips on the defeat screen | Not run. |
+| A defeat is turned into `GAME_OVER` after `end_turn` returns | Not run. Expected about 9.5 to 10 minutes after the defeat. |
+| Settling, research and production policies run in a played turn with no handler errors | Not run. |
+| `runs/*_settle.jsonl` receives `settle_decision` lines | Not run. |
+| Time per turn with `SharedReads` against the 18s baseline | Not run. |
 
 ### Live checks from PR 65 (resolver)
 

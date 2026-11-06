@@ -27,7 +27,7 @@ What was verified against a running Civ VI game, and what wasn't reached. Newest
 ### Turn-time costs (run 1 numbers, with an inference)
 
 - The resolver's steady 4.0s with nothing to resolve is five reads in a row (diplomacy sessions, trade deals, World Congress, the end-turn blocking query and notifications), so about 0.8s each. Each call to civ6-mcp waits 0.1s to drain stale output before sending and 0.2s after the sentinel, which is 0.3s of every read that never goes away, and the rest is the game answering through the tuner. Every query ends with its sentinel, so none is waiting out a 2s timeout. This is inferred from the code and the totals, not timed per read. No read can be dropped safely: each is a separate blocker source that `end_turn` itself checks, so it was not trimmed.
-- What was trimmed: reads that several handlers repeat in a turn (`get_game_overview`, `get_cities`, `get_empire_resources`, `get_diplomacy`, `get_victory_progress`, `get_threat_scan`) are now answered from memory by `SharedReads` until any other call changes the game, and `end_turn` always clears it.
+- What was trimmed: reads that several handlers repeat in a turn (`get_game_overview`, `get_cities`, `get_empire_resources`, `get_diplomacy`, `get_victory_progress`, `get_threat_scan`) are now answered from memory by `SharedReads` until any other call changes the game, and `end_turn` always clears it. Empty answers are never kept, because civ6-mcp returns a timed-out read as a short result. `read_cities` (used by the settling and production policies) raises `IncompleteRead` when the city count differs from the overview's, so no policy acts on a short city list.
 
 ### Live checks needed for the wiring and defeat detection
 

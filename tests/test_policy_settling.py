@@ -63,7 +63,7 @@ def make_game(units, cities=(), threats=(), sites=(), turn=1, strategic=None):
         cities=list(cities),
         threats=list(threats),
         settle=list(sites),
-        overview=overview(turn=turn),
+        overview=overview(turn=turn, num_cities=len(cities)),
         strategic=strategic or lq.StrategicMapData([], []),
     )
 

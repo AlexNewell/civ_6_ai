@@ -1,14 +1,18 @@
 import asyncio
 import json
 import logging
+from dataclasses import replace
 
 import pytest
 
 from civ6_ai import bot
 from civ6_ai.monitors import EventBus
 from civ6_ai.orchestrator import StopReason, TurnLog
+from civ6_ai.policies.settling import SettlingPolicy
+from civ6_ai.state.reader import IncompleteRead
 from fixtures import civ_state as fx
 from test_blockers import FakeGame as BlockerFake
+from test_blockers import unit
 
 
 class WiredGame(BlockerFake):
@@ -17,6 +21,8 @@ class WiredGame(BlockerFake):
     def __init__(self):
         super().__init__()
         self.reads = []
+        self.threat_reads = 0
+        self.overview_cities = None  # Overrides the city count the overview reports.
 
     async def get_cities(self):
         self.reads.append("get_cities")
@@ -24,7 +30,8 @@ class WiredGame(BlockerFake):
 
     async def get_game_overview(self):
         self.reads.append("get_game_overview")
-        return fx.overview(turn=self.turn, num_cities=len(self.cities))
+        count = len(self.cities) if self.overview_cities is None else self.overview_cities
+        return fx.overview(turn=self.turn, num_cities=count)
 
     async def get_empire_resources(self):
         self.reads.append("get_empire_resources")
@@ -40,6 +47,7 @@ class WiredGame(BlockerFake):
         return fx.trade()
 
     async def get_threat_scan(self):
+        self.threat_reads += 1
         return []
 
 
@@ -90,9 +98,10 @@ def test_shared_reads_are_made_once_until_something_changes():
         await shared.get_units()  # a plain read that isn't shared doesn't clear anything
         await shared.get_cities()
         assert game.reads.count("get_cities") == 2
+        before = game.reads.count("get_game_overview")
         await shared.end_turn()
         await shared.get_game_overview()
-        assert game.reads.count("get_game_overview") == 2
+        assert game.reads.count("get_game_overview") == before + 1
 
     asyncio.run(go())
 
@@ -101,20 +110,61 @@ def test_a_failed_shared_read_is_not_kept():
     class Flaky:
         calls = 0
 
-        async def get_cities(self):
+        async def get_threat_scan(self):
             Flaky.calls += 1
             if Flaky.calls == 1:
                 raise RuntimeError("boom")
-            return "ok"
+            return ["unit"]
 
     shared = bot.SharedReads(Flaky())
 
     async def go():
         with pytest.raises(RuntimeError):
-            await shared.get_cities()
-        assert await shared.get_cities() == "ok"
+            await shared.get_threat_scan()
+        assert await shared.get_threat_scan() == ["unit"]
 
     asyncio.run(go())
+
+
+def test_an_empty_read_is_not_kept_because_it_may_be_a_timeout():
+    game = WiredGame()
+    game.cities = []
+    shared = bot.SharedReads(game)
+
+    async def go():
+        await shared.get_threat_scan()
+        await shared.get_threat_scan()
+        assert game.threat_reads == 2
+
+    asyncio.run(go())
+
+
+def test_a_short_city_read_is_neither_kept_nor_passed_on():
+    game = WiredGame()
+    full = game.cities
+    game.overview_cities = 1
+    game.cities = []  # The overview says 1 city, the read comes back empty.
+    shared = bot.SharedReads(game)
+
+    async def go():
+        with pytest.raises(IncompleteRead):
+            await shared.get_cities()
+        game.cities = full
+        cities, _ = await shared.get_cities()  # The next ask reads again, and is believed.
+        assert len(cities) == 1
+
+    asyncio.run(go())
+
+
+def test_settling_does_not_act_on_an_empty_city_read(tmp_path):
+    game = WiredGame()
+    game.units = [replace(unit(), unit_type="UNIT_SETTLER")]
+    game.cities = []
+    game.overview_cities = 1
+    shared = bot.SharedReads(game)
+    with pytest.raises(IncompleteRead):
+        asyncio.run(SettlingPolicy().run(shared))
+    assert not game.called("found_city") and not game.called("move_unit")
 
 
 def test_settle_decisions_are_written_one_json_object_per_line(tmp_path):
@@ -132,3 +182,11 @@ def test_settle_decisions_are_written_one_json_object_per_line(tmp_path):
     assert decisions not in logger.handlers
     lines = path.read_text(encoding="utf-8").splitlines()
     assert [json.loads(line) for line in lines] == [{"action": "wait", "turn": 4}]
+
+
+def test_a_prefixed_blocked_report_is_retried(tmp_path):
+    game = WiredGame()
+    game.reports = ["Turn 5 -> 6\nCannot end turn: diplomacy encounter pending with Egypt."]
+    reason, _ = play_one_turn(game, tmp_path)
+    assert reason is StopReason.TURN_LIMIT
+    assert len(game.called("end_turn")) == 2

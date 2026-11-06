@@ -8,7 +8,7 @@ so a policy should call the narrowest `read_*` it can. `fog.py` explains every f
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Sized
 from typing import TYPE_CHECKING, Protocol
 
 from civ6_ai.state.fog import BARBARIAN_ID, is_hidden_stealth_unit
@@ -58,6 +58,17 @@ type EmpireResources = tuple[
     list[lq.NearbyResource],
     dict[str, int],
 ]
+
+
+class IncompleteRead(Exception):
+    """civ6-mcp returns what it has when a read times out, so a short answer can't be trusted."""
+
+
+def check_cities_complete(cities: Sized, overview: object) -> None:
+    """Raise if fewer cities were read than the overview counts. Skipped where it has no count."""
+    expected = getattr(overview, "num_cities", None)
+    if isinstance(expected, int) and len(cities) != expected:
+        raise IncompleteRead(f"{len(cities)} of {expected} cities read")
 
 
 class GameReads(Protocol):
@@ -637,6 +648,8 @@ async def read_cities(
     game: GameReads, map_width: int | None = STANDARD_MAP_WIDTH
 ) -> tuple[City, ...]:
     cities, _ = await game.get_cities()
+    # A timed-out read returns the cities received so far, and a policy must not act on that.
+    check_cities_complete(cities, await game.get_game_overview())
     threats = await read_threats(game)
     _, owned, _, _ = await game.get_empire_resources()
     visible = _visible_resources(owned)

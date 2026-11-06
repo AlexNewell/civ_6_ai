@@ -45,6 +45,11 @@ _DIPLOMACY_REPORTS = (
 _BLOCKED_REPORTS = ("Cannot end turn", "World Congress fires", "End turn blocked")
 
 
+def _has_line_starting(report: str, prefixes: tuple[str, ...]) -> bool:
+    """True if any line of the report starts with a prefix, as `stop_reason_in_report` matches."""
+    return any(line.lstrip().startswith(prefixes) for line in report.splitlines())
+
+
 class BlockerType(StrEnum):
     # Found by their own queries, because they aren't end-turn blocking notifications.
     DIPLOMACY_SESSION = "DIPLOMACY_SESSION"
@@ -509,9 +514,9 @@ class ResolvingGame:
     async def end_turn(self) -> str:
         report = await self._game.end_turn()
         for _ in range(MAX_END_TURN_RETRIES):
-            if report.startswith(_DIPLOMACY_REPORTS):
+            if _has_line_starting(report, _DIPLOMACY_REPORTS):
                 await self._clear(diplomacy_only=True)
-            elif report.startswith(_BLOCKED_REPORTS):
+            elif _has_line_starting(report, _BLOCKED_REPORTS):
                 await self._clear(diplomacy_only=False)
             else:
                 return report  # It advanced, or it's something for the turn loop to judge.

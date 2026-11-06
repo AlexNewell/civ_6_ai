@@ -24,6 +24,7 @@ from civ6_ai.orchestrator import Handler, Orchestrator, TurnLog
 from civ6_ai.policies import research
 from civ6_ai.policies.production import CityProductionPolicy
 from civ6_ai.policies.settling import SettlingPolicy
+from civ6_ai.state.reader import check_cities_complete
 
 SETTLING_LOGGER = "civ6_ai.policies.settling"
 _DECISION_PREFIX = "settle_decision "
@@ -41,6 +42,15 @@ _SHARED_READS = frozenset(
     }
 )
 _PLAIN_READS = ("get_", "list_", "check_")
+
+
+def _is_empty(value: Any) -> bool:
+    """True for a read that came back with nothing, which civ6-mcp also returns on a timeout."""
+    if value is None:
+        return True
+    if isinstance(value, tuple):
+        return all(_is_empty(part) for part in value)
+    return isinstance(value, list | dict | set | str) and not value
 
 
 class SharedReads:
@@ -65,9 +75,15 @@ class SharedReads:
         return partial(self._changing, attribute)
 
     async def _shared(self, name: str, read: Callable[[], Awaitable[Any]]) -> Any:
-        if name not in self._kept:
-            self._kept[name] = await read()
-        return self._kept[name]
+        if name in self._kept:
+            return self._kept[name]
+        value = await read()
+        if name == "get_cities":
+            # Raises on a short read, so it is neither kept nor passed on.
+            check_cities_complete(value[0], await self.get_game_overview())
+        if not _is_empty(value):
+            self._kept[name] = value  # An empty answer may be a timeout, so ask again next time.
+        return value
 
     async def _changing(self, call: Callable[..., Awaitable[Any]], *args: Any, **kwargs: Any):
         self._kept.clear()

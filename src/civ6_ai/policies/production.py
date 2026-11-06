@@ -13,10 +13,11 @@ balanced game.
 import logging
 import math
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from typing import Any, Protocol
 
 from civ6_ai.blockers import Blocker, BlockerGame, BlockerType
+from civ6_ai.policies.game_data import COMBAT_UNITS, UPGRADES, WONDERS
 from civ6_ai.state import City, Empire, ProductionChoice, Unit
 from civ6_ai.state import read_cities as _read_cities
 from civ6_ai.state import read_empire as _read_empire
@@ -28,6 +29,8 @@ log = logging.getLogger(__name__)
 MAX_ATTEMPTS = 6  # Per city per turn. Every refusal costs a call, and a unit always works.
 _NO_COORDS_WONDER = "ERR:MISSING_COORDS"
 _TURN_SCALE = 20.0  # A build this many turns away scores half as much as an instant one.
+_URGENT_SCALE = 10.0
+_FINISHING_TURNS = 2  # A build this close to done is let finish.
 _EARLY_TURNS = 60  # Turns in which a city with no garrison should get one first.
 
 
@@ -70,47 +73,82 @@ class ProductionContext:
     recon: int = 0
     army: int = 0
 
-    def after_choosing(self, item: str) -> "ProductionContext":
+    def after_choosing(self, item: str, unknown_combat: bool = False) -> "ProductionContext":
         """Count a pick, so two cities don't both build the one builder the empire needs."""
-        if item == "UNIT_BUILDER":
-            return ProductionContext(**{**vars(self), "builders": self.builders + 1})
-        if item == "UNIT_SETTLER":
-            return ProductionContext(**{**vars(self), "settlers": self.settlers + 1})
-        if item == "UNIT_SCOUT":
-            return ProductionContext(**{**vars(self), "recon": self.recon + 1})
-        if item in _UNIT_LINE:
-            return ProductionContext(**{**vars(self), "army": self.army + 1})
-        return self
+        kinds = _counted_as(item) or (("army",) if unknown_combat else ())
+        return replace(self, **{kind: getattr(self, kind) + 1 for kind in kinds})
 
 
-def build_context(empire: Empire, units: Iterable[Unit]) -> ProductionContext:
-    counts: dict[str, int] = {}
-    army = 0
+def _counted_as(item: str) -> tuple[str, ...]:
+    if item == "UNIT_BUILDER":
+        return ("builders",)
+    if item == "UNIT_SETTLER":
+        return ("settlers",)
+    if item == "UNIT_SCOUT":
+        return ("recon",)
+    stats = COMBAT_UNITS.get(item)
+    if stats is not None and stats[4] != "RECON":
+        return ("army",)
+    return ()
+
+
+def build_context(
+    empire: Empire, units: Iterable[Unit], cities: Iterable[City] = ()
+) -> ProductionContext:
+    """Count what exists plus what busy cities are already building, so picks don't double up."""
+    ctx = ProductionContext(turn=empire.turn, num_cities=empire.num_cities)
     for unit in units:
-        counts[unit.unit_type] = counts.get(unit.unit_type, 0) + 1
-        army += unit.is_combat
-    return ProductionContext(
-        turn=empire.turn,
-        num_cities=empire.num_cities,
-        builders=counts.get("UNIT_BUILDER", 0),
-        settlers=counts.get("UNIT_SETTLER", 0),
-        recon=counts.get("UNIT_SCOUT", 0),
-        army=army,
-    )
+        ctx = ctx.after_choosing(
+            unit.unit_type, unknown_combat=unit.is_combat and unit.unit_type not in COMBAT_UNITS
+        )
+    for city in cities:
+        if city.building is not None:
+            ctx = ctx.after_choosing(city.building)
+    return ctx
 
 
-# Each line is ordered weakest first. Offering a stronger unit drops the weaker ones in its line,
-# because it costs a little more for far more strength, and the weaker one can't be upgraded to.
-_MILITARY_LINES = (
-    ("UNIT_WARRIOR", "UNIT_SWORDSMAN", "UNIT_MUSKETMAN", "UNIT_RIFLEMAN", "UNIT_INFANTRY"),
-    ("UNIT_SLINGER", "UNIT_ARCHER", "UNIT_CROSSBOWMAN", "UNIT_FIELD_CANNON", "UNIT_MACHINE_GUN"),
-    ("UNIT_SPEARMAN", "UNIT_PIKEMAN", "UNIT_PIKE_AND_SHOT", "UNIT_ANTITANK_GUN"),
-    ("UNIT_HORSEMAN", "UNIT_KNIGHT", "UNIT_CAVALRY", "UNIT_HELICOPTER"),
-    ("UNIT_CATAPULT", "UNIT_TREBUCHET", "UNIT_BOMBARD", "UNIT_ARTILLERY"),
+_DEFENSIVE_UNIT_CLASSES = frozenset({"SIEGE", "RECON"})
+# Units the policy has no plan for. Anything else the game offers and the table lacks is kept
+# and scored low, so a new or modded land unit is a last resort, never invisible.
+_UNPLANNED_WORDS = (
+    "TRADER",
+    "MISSIONARY",
+    "APOSTLE",
+    "INQUISITOR",
+    "SPY",
+    "GREAT_",
+    "GURU",
+    "ARCHAEOLOGIST",
+    "NATURALIST",
+    "ROCK_BAND",
+    "SUPPORT",
+    "MEDIC",
+    "BATTERING",
+    "OBSERVATION",
+    "SUPPLY",
+    "SIEGE_TOWER",
 )
-_UNIT_LINE: dict[str, tuple[str, ...]] = {u: line for line in _MILITARY_LINES for u in line}
-_RANGED_DEFENDERS = frozenset({"UNIT_ARCHER", "UNIT_CROSSBOWMAN", "UNIT_SLINGER"})
+_UNKNOWN_UNIT_SCORE = 0.3
 _CIVILIAN_UNITS = frozenset({"UNIT_BUILDER", "UNIT_SETTLER", "UNIT_SCOUT"})
+
+
+def _upgrades_of(item: str) -> set[str]:
+    """Every unit this one eventually upgrades to."""
+    found: set[str] = set()
+    step = UPGRADES.get(item)
+    while step is not None and step not in found:
+        found.add(step)
+        step = UPGRADES.get(step)
+    return found
+
+
+def defence_strength(item: str) -> float:
+    """How well a unit holds a city, from the game's own numbers. Siege and scouts hold nothing."""
+    stats = COMBAT_UNITS.get(item)
+    if stats is None or stats[4] in _DEFENSIVE_UNIT_CLASSES:
+        return 0.0
+    return max(float(stats[0]), 0.9 * stats[1])
+
 
 # Value of a building to each yield it grows: (food, production, gold, science, culture, faith).
 _BUILDING_YIELDS: dict[str, tuple[float, float, float, float, float, float]] = {
@@ -141,6 +179,7 @@ _BUILDING_YIELDS: dict[str, tuple[float, float, float, float, float, float]] = {
 }
 _DEFENSIVE_BUILDINGS = frozenset({"WALLS", "CASTLE", "STAR_FORT"})
 _TRAINING_BUILDINGS = frozenset({"BARRACKS", "STABLE", "ARMORY", "MILITARY_ACADEMY"})
+_WONDER_VALUE = 8.0
 _UNKNOWN_BUILDING = 1.0  # Anything not listed still helps a little, so it ranks last, not never.
 
 _DISTRICT_YIELDS: dict[str, tuple[float, float, float, float, float, float]] = {
@@ -207,15 +246,22 @@ def drop_dominated(
         if option.category == "DISTRICT" and (name in districts or name in _UNWANTED_DISTRICTS):
             continue
         if option.category == "UNIT":
-            line = _UNIT_LINE.get(option.item)
-            if line and any(
-                stronger in offered for stronger in line[line.index(option.item) + 1 :]
+            if any(better in offered for better in _upgrades_of(option.item)):
+                continue  # The game offers its upgrade, which does the same job better.
+            if option.item not in COMBAT_UNITS and (
+                option.item not in _CIVILIAN_UNITS
+                and any(word in option.item for word in _UNPLANNED_WORDS)
             ):
                 continue
-            if not line and option.item not in _CIVILIAN_UNITS:
-                continue  # Naval, religious, trade and support units need a plan this lacks.
         keep.append(option)
     return keep, repairs
+
+
+def is_defence(option: ProductionChoice) -> bool:
+    """A unit that holds a city, or the walls that help it."""
+    if option.category == "UNIT":
+        return defence_strength(option.item) > 0
+    return option.category == "BUILDING" and _short(option.item) in _DEFENSIVE_BUILDINGS
 
 
 def _unit_score(
@@ -239,26 +285,30 @@ def _unit_score(
         return (6.0 + 2.0 * min(wanted, 3) + len(city.unimproved_resources)) * w.builders
     if item == "UNIT_SCOUT":
         return 5.0 if ctx.recon == 0 and ctx.turn <= _EARLY_TURNS else 0.0
-    # Military.
-    ungarrisoned = city.garrison_unit is None
+    # Military. Strength comes from the game's own numbers, so the best unit offered wins.
+    stats = COMBAT_UNITS.get(item)
+    if stats is None:
+        return _UNKNOWN_UNIT_SCORE  # A land unit the table lacks is a last resort, not hidden.
+    strength = defence_strength(item)
+    if strength == 0:
+        return 0.0  # Siege and scouts hold no city.
     if threatened:
-        # Several enemies near need several defenders. Ranged units hit them without being hit.
-        base = 18.0 + 2.0 * len(city.threats)
-        if item in _RANGED_DEFENDERS:
-            base += 2.0
-        return base
-    if ungarrisoned:
-        return 16.0 if ctx.turn <= _EARLY_TURNS else 12.0
+        return 14.0 + strength / 4.0 + 2.0 * len(city.threats)
+    if city.garrison_unit is None:
+        return (16.0 if ctx.turn <= _EARLY_TURNS else 12.0) + strength / 10.0
     wanted = w.army_per_city * ctx.num_cities - ctx.army
     if wanted <= 0:
         return 0.0
-    return min(wanted, 4.0) * 1.5 * w.military
+    return min(wanted, 4.0) * 1.5 * w.military + strength / 20.0
 
 
 def _building_score(
     option: ProductionChoice, city: City, ctx: ProductionContext, w: ProductionWeights
 ) -> float:
     name = _short(option.item)
+    if option.item in WONDERS:
+        # Needs a tile, which `_start` finds when the game asks for one.
+        return 0.0 if city.is_threatened else _WONDER_VALUE * w.wonders
     if name in _DEFENSIVE_BUILDINGS:
         if city.is_threatened and not city.has_walls:
             return 17.0 + len(city.threats)
@@ -267,8 +317,7 @@ def _building_score(
         return 0.5 * w.military
     profile = _BUILDING_YIELDS.get(name)
     if profile is None:
-        # An unlisted building can be a wonder, which needs a tile this policy finds on demand.
-        return _UNKNOWN_BUILDING * (w.wonders if "WONDER" in name else 1.0)
+        return _UNKNOWN_BUILDING
     value = _yield_value(profile, w)
     if name == "GRANARY" and city.food_surplus > 3:
         value *= 0.5
@@ -300,9 +349,9 @@ def score(
         value = _building_score(option, city, ctx, weights)
     if value <= 0:
         return 0.0
-    urgent = city.is_threatened and option.category == "UNIT" and option.item in _UNIT_LINE
-    if urgent:
-        return value  # Time matters less than having it, and slow units are already dominated.
+    if city.is_threatened and is_defence(option):
+        # A defender that arrives in time matters most, so speed counts for more than usual.
+        return value * _URGENT_SCALE / (_URGENT_SCALE + max(option.turns, 1))
     return value * _TURN_SCALE / (_TURN_SCALE + max(option.turns, 1))
 
 
@@ -371,9 +420,18 @@ async def choose_for_city(
     options: Iterable[ProductionChoice],
     context: ProductionContext,
     weights: ProductionWeights,
+    only_defence: bool = False,
 ) -> ProductionChoice | None:
-    """Start the best option that the game accepts. Returns it, or None if all were refused."""
+    """Start the best option that the game accepts. Returns it, or None if all were refused.
+
+    With `only_defence`, the city's current build is replaced only if the best option is a
+    defender or walls, and only defence is tried.
+    """
     ranked = rank_production(city, options, context, weights)
+    if only_defence:
+        if not ranked or not is_defence(ranked[0]) or score(ranked[0], city, context, weights) <= 0:
+            return None
+        ranked = [o for o in ranked if is_defence(o)]
     for option in ranked[:MAX_ATTEMPTS]:
         result = await _start(game, city, option)
         if not _failed(result):
@@ -381,6 +439,14 @@ async def choose_for_city(
             return option
         log.info("%s can't build %s: %s", city.name, option.item, result[:120])
     return None
+
+
+def _should_switch(city: City) -> bool:
+    """A threatened city is building something that isn't defence and won't finish this turn."""
+    if not city.is_threatened or city.is_idle or city.build_turns_left <= _FINISHING_TURNS:
+        return False
+    current = city.building or ""
+    return not (defence_strength(current) > 0 or _short(current) in _DEFENSIVE_BUILDINGS)
 
 
 class CityProductionPolicy:
@@ -398,18 +464,30 @@ class CityProductionPolicy:
             log.warning("No production chosen for %s", ", ".join(unfinished))
 
     async def assign(self, game: ProductionGame) -> list[str]:
-        """Choose for each idle city and return the names of any left without a choice."""
-        cities = [city for city in await _read_cities(game) if city.is_idle]
-        if not cities:
+        """Choose for each idle city, and return the names of any left without a choice.
+
+        A threatened city that is building something else switches to a defender or walls when
+        that is the best thing on offer, unless the current item is about to finish. A city
+        already building a defender or walls is left alone, so a switch never repeats.
+        """
+        cities = await _read_cities(game)
+        wanting = [c for c in cities if c.is_idle or _should_switch(c)]
+        if not wanting:
             return []
-        context = build_context(await _read_empire(game), await _read_units(game))
+        busy = [c for c in cities if not c.is_idle]
+        context = build_context(await _read_empire(game), await _read_units(game), busy)
         unfinished = []
-        for city in sorted(cities, key=lambda c: (not c.is_threatened, c.city_id)):
+        for city in sorted(wanting, key=lambda c: (not c.is_threatened, c.city_id)):
             options = await _read_production(game, city.city_id)
-            picked = await choose_for_city(game, city, options, context, self.weights)
-            if picked is None:
-                unfinished.append(city.name)
+            if city.is_idle:
+                picked = await choose_for_city(game, city, options, context, self.weights)
+                if picked is None:
+                    unfinished.append(city.name)
             else:
+                picked = await choose_for_city(
+                    game, city, options, context, self.weights, only_defence=True
+                )
+            if picked is not None:
                 context = context.after_choosing(picked.item)
         return unfinished
 

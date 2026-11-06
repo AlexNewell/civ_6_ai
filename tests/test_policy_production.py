@@ -1,6 +1,7 @@
 import asyncio
 import random
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 from civ_mcp import lua as lq
@@ -11,11 +12,12 @@ from civ6_ai.policies.production import (
     CityProductionPolicy,
     ProductionContext,
     ProductionWeights,
+    build_context,
     drop_dominated,
     rank_production,
     score,
 )
-from civ6_ai.state import ProductionChoice, Threat
+from civ6_ai.state import ProductionChoice, Threat, read_empire
 from civ6_ai.state.reader import build_city
 from fixtures import civ_state as fx
 
@@ -121,7 +123,7 @@ def test_threatened_city_defends_before_anything_else():
     assert best(walled, MENU, MID) == "UNIT_WARRIOR"
 
 
-def test_threat_prefers_ranged_defenders_and_the_best_of_a_line():
+def test_threat_picks_the_strongest_defender_by_the_games_numbers():
     c = city(threats=[threat()])
     menu = [
         option("UNIT", "UNIT_WARRIOR", 4),
@@ -129,9 +131,65 @@ def test_threat_prefers_ranged_defenders_and_the_best_of_a_line():
         option("UNIT", "UNIT_ARCHER", 5),
         option("BUILDING", "BUILDING_LIBRARY", 5),
     ]
-    assert best(c, menu, MID) == "UNIT_ARCHER"
+    assert best(c, menu, MID) == "UNIT_SWORDSMAN"
     kept, _ = drop_dominated(menu, c)
-    assert "UNIT_WARRIOR" not in [k.item for k in kept]
+    assert "UNIT_WARRIOR" not in [k.item for k in kept]  # Its upgrade is offered.
+
+
+def test_threat_never_picks_siege_over_a_real_defender_by_name():
+    c = city(threats=[threat()])
+    menu = [
+        option("UNIT", "UNIT_CATAPULT", 5),
+        option("UNIT", "UNIT_ARCHER", 5),
+        option("UNIT", "UNIT_BOMBARD", 5),
+        option("UNIT", "UNIT_CROSSBOWMAN", 5),
+    ]
+    assert best(c, menu, MID) == "UNIT_CROSSBOWMAN"  # The archer upgrades to it.
+    assert score(menu[0], c, MID, ProductionWeights()) == 0.0
+
+
+def test_late_ranged_units_count_as_defenders():
+    c = city(threats=[threat()])
+    menu = [option("UNIT", "UNIT_FIELD_CANNON", 6), option("UNIT", "UNIT_SCOUT", 3)]
+    assert best(c, menu, MID) == "UNIT_FIELD_CANNON"
+
+
+def test_unique_and_unlisted_units_are_kept_and_scored():
+    c = city(garrison_unit="")
+    legion = option("UNIT", "UNIT_ROMAN_LEGION", 6)
+    kept, _ = drop_dominated([legion], c)
+    assert [k.item for k in kept] == ["UNIT_ROMAN_LEGION"]
+    assert best(c, [legion, option("BUILDING", "BUILDING_X")], MID) == "UNIT_ROMAN_LEGION"
+    extras = [option("UNIT", "UNIT_NEW_THING"), option("UNIT", "UNIT_MISSIONARY")]
+    kept, _ = drop_dominated(extras, city())
+    assert [k.item for k in kept] == ["UNIT_NEW_THING"]
+
+
+def test_a_unique_unit_does_not_remove_its_neighbours():
+    menu = [option("UNIT", "UNIT_JAPANESE_SAMURAI", 8), option("UNIT", "UNIT_MAN_AT_ARMS", 8)]
+    kept, _ = drop_dominated(menu, city())
+    assert len(kept) == 2
+
+
+def test_wonders_use_the_wonders_weight():
+    c = city()
+    menu = [
+        option("BUILDING", "BUILDING_PYRAMIDS", 10),
+        option("BUILDING", "BUILDING_LIBRARY", 10),
+    ]
+    assert best(c, menu, MID, ProductionWeights(wonders=0.0)) == "BUILDING_LIBRARY"
+    assert best(c, menu, MID, ProductionWeights(wonders=5.0)) == "BUILDING_PYRAMIDS"
+    threatened = city(threats=[threat()])
+    assert score(menu[0], threatened, MID, ProductionWeights(wonders=5.0)) == 0.0
+
+
+def test_context_counts_what_busy_cities_are_building():
+    busy = [city(currently_building="UNIT_SETTLER"), city(currently_building="UNIT_BUILDER")]
+    empire = run(read_empire(fx.FakeGame()))
+    ctx = build_context(empire, [], busy)
+    assert (ctx.settlers, ctx.builders) == (1, 1)
+    grown = city(population=4)
+    assert score(option("UNIT", "UNIT_SETTLER", 8), grown, ctx, ProductionWeights()) == 0.0
 
 
 def test_unthreatened_walls_are_a_last_resort():
@@ -436,3 +494,108 @@ def test_the_same_game_gives_the_same_choices():
         return game.set_calls
 
     assert play() == play()
+
+
+class BlockerGame(ScriptedGame):
+    """Adds the reads `BlockerResolver` makes. A production blocker is open while a city is idle."""
+
+    async def execute_lua(self, code, context="gamecore"):
+        cities, _ = await self.get_cities()
+        idle = any(c.currently_building == "nothing" for c in cities)
+        return f"BLOCKING|{BlockerType.PRODUCTION}|choose" if idle else "NONE"
+
+    async def get_notifications(self):
+        return []
+
+    async def get_diplomacy_sessions(self):
+        return []
+
+    async def get_pending_deals(self):
+        return []
+
+    async def get_world_congress(self):
+        return SimpleNamespace(turns_until_next=-1, is_in_session=False, resolutions=[])
+
+    async def set_city_production(self, *args, **kwargs):
+        result = await super().set_city_production(*args, **kwargs)
+        if not result.startswith(("ERR", "Error")):
+            infos, _ = await self.get_cities()
+            self.data["cities"] = [replace(c, currently_building=args[2]) for c in infos]
+        return result
+
+
+def test_a_real_resolver_hands_the_production_blocker_to_the_policy():
+    options = [lq.ProductionOption("DISTRICT", "DISTRICT_THEATER", 54, 5, -1)]
+    game = BlockerGame(cities=idle_cities(), production=options)
+    resolver = BlockerResolver(CityProductionPolicy().blocker_policies())
+    assert run(resolver.resolve(game)) == []
+    # The default skips districts, so only the policy could have placed this one.
+    assert game.set_calls == [(65536, "DISTRICT", "DISTRICT_THEATER", 6, 6)]
+
+
+def test_a_real_resolver_falls_back_to_the_default_when_the_policy_fails():
+    options = [
+        lq.ProductionOption("BUILDING", "BUILDING_LIBRARY", 90, 9, -1),
+        lq.ProductionOption("DISTRICT", "DISTRICT_THEATER", 54, 5, -1),
+    ]
+    game = BlockerGame(cities=idle_cities(), production=options)
+
+    async def broken(*args):
+        raise RuntimeError("advisor down")
+
+    game.get_district_advisor = broken
+    resolver = BlockerResolver(CityProductionPolicy().blocker_policies())
+    assert run(resolver.resolve(game)) == []
+    assert game.set_calls[-1][2] == "BUILDING_LIBRARY"
+
+
+def threatened_game(building, turns_left=6):
+    info = fx.city_info(
+        currently_building=building,
+        production_turns_left=turns_left,
+        buildings=["PALACE", "MONUMENT"],
+    )
+    options = [
+        lq.ProductionOption("UNIT", "UNIT_WARRIOR", 40, 4, -1),
+        lq.ProductionOption("BUILDING", "BUILDING_LIBRARY", 90, 9, -1),
+    ]
+    return ScriptedGame(cities=[info], production=options, threats=[fx.threat_info(x=12, y=11)])
+
+
+def test_a_threatened_city_switches_from_a_library_to_a_defender():
+    game = threatened_game("BUILDING_LIBRARY")
+    run(CityProductionPolicy().run(game))
+    assert [c[2] for c in game.set_calls] == ["UNIT_WARRIOR"]
+
+
+def test_a_threatened_city_does_not_switch_when_nearly_done_or_already_defending():
+    near_done = threatened_game("BUILDING_LIBRARY", turns_left=1)
+    run(CityProductionPolicy().run(near_done))
+    assert near_done.set_calls == []
+    for building in ("UNIT_WARRIOR", "BUILDING_WALLS"):
+        game = threatened_game(building)
+        run(CityProductionPolicy().run(game))
+        assert game.set_calls == []
+
+
+def test_an_unthreatened_busy_city_is_never_switched():
+    game = ScriptedGame(
+        cities=[fx.city_info(currently_building="BUILDING_LIBRARY")],
+        production=[lq.ProductionOption("UNIT", "UNIT_WARRIOR", 40, 4, -1)],
+    )
+    run(CityProductionPolicy().run(game))
+    assert game.set_calls == []
+
+
+def test_two_cities_do_not_both_start_a_settler():
+    infos = [
+        fx.city_info(city_id=1, name="A", currently_building="UNIT_SETTLER", population=4),
+        fx.city_info(city_id=2, name="B", currently_building="nothing", population=4),
+    ]
+    options = [
+        lq.ProductionOption("UNIT", "UNIT_SETTLER", 80, 8, -1),
+        lq.ProductionOption("BUILDING", "BUILDING_LIBRARY", 90, 9, -1),
+    ]
+    game = ScriptedGame(cities=infos, production=options)
+    run(CityProductionPolicy().run(game))
+    assert [c[:3] for c in game.set_calls] == [(2, "BUILDING", "BUILDING_LIBRARY")]

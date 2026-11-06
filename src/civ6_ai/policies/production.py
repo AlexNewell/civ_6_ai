@@ -306,7 +306,9 @@ def _unit_score(
             return 0.0
         return (6.0 + 2.0 * min(wanted, 3) + len(city.unimproved_resources)) * w.builders
     if kind == "UNIT_SCOUT":
-        return 5.0 if ctx.recon == 0 and ctx.turn <= _EARLY_TURNS else 0.0
+        # With nothing exploring, the settling policy sees no sites (live: a settler sat idle from
+        # turn 30 on a 30-tile map), so the first scout outranks a settler.
+        return 15.0 if ctx.recon == 0 and ctx.turn <= _EARLY_TURNS else 0.0
     # Military. Strength comes from the game's own numbers, so the best unit offered wins.
     stats = COMBAT_UNITS.get(item)
     if stats is None:

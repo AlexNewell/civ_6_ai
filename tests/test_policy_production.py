@@ -77,8 +77,15 @@ def test_early_city_without_a_garrison_builds_a_defender_first():
 def test_early_garrisoned_city_expands_once_it_can():
     small = city(population=1, buildings=["PALACE"])
     grown = city(population=3, buildings=["PALACE"])
-    assert best(small, MENU, EARLY) != "UNIT_SETTLER"
-    assert best(grown, MENU, EARLY) == "UNIT_SETTLER"
+    scouted = replace(EARLY, recon=1)
+    assert best(small, MENU, scouted) != "UNIT_SETTLER"
+    assert best(grown, MENU, scouted) == "UNIT_SETTLER"
+
+
+def test_the_first_scout_comes_before_a_settler():
+    # Live: with nothing exploring, a settler found no site on the 30-tile revealed map.
+    grown = city(population=3, buildings=["PALACE"])
+    assert best(grown, MENU, EARLY) == "UNIT_SCOUT"
 
 
 def test_expansion_stops_at_target_and_while_a_settler_is_already_out():

@@ -16,6 +16,7 @@ from civ_mcp.connection import GameConnection
 from civ_mcp.game_state import GameState
 
 from civ6_ai.blockers import BlockerResolver, ResolvingGame
+from civ6_ai.monitors import EventBus, EventLog, Monitors
 from civ6_ai.orchestrator import Orchestrator, StopReason, TurnLog
 from civ6_ai.saves import use_real_save_dirs
 
@@ -46,8 +47,12 @@ async def run(turns: int) -> int:
 
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     turn_log = TurnLog(ROOT / "runs" / f"{name}_{stamp}.jsonl")
+    bus = EventBus()
+    bus.subscribe(EventLog(ROOT / "runs" / f"{name}_{stamp}_events.jsonl").write)
     resolver = BlockerResolver()
-    reason = await Orchestrator(ResolvingGame(game, resolver), [resolver], turn_log).play(turns)
+    # Monitors go first so they read the turn before the resolver acts on it.
+    handlers = [Monitors(bus), resolver]
+    reason = await Orchestrator(ResolvingGame(game, resolver), handlers, turn_log).play(turns)
 
     records = turn_log.records
     total = sum(record.total_seconds for record in records)

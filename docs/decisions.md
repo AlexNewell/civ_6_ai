@@ -32,6 +32,8 @@ Estimated split, to be replaced with measurements in issue 2.5:
 | Cheap tier | $0.25 | Haiku, 1.5k input, 100 output, $0.0002 per call | About 1,250 calls, under 4 per turn |
 | Crisis reserve | $0.10 | Late-game escalations | About 3 Sonnet calls |
 
+A serialised city gets at most 400 estimated tokens, about a quarter of the Cheap tier's 1,500-token call, which leaves room for instructions, an empire summary and the choices on offer. Tokens are estimated offline as UTF-8 bytes divided by 3, and a test enforces the limit ([`serialise.py`](../src/civ6_ai/state/serialise.py)). A typical city is about 80.
+
 Prompt caching is left out of these figures. Strategist calls will often be more than 5 minutes apart, so cache hits can't be assumed. Prices live in [`pricing.toml`](../src/civ6_ai/budget/pricing.toml), last checked against Anthropic's pricing page on 2026-11-05. Recheck them before use.
 
 ## Models

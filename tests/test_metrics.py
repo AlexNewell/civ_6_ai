@@ -101,15 +101,38 @@ def test_counts_are_summed_only_when_every_turn_has_one(tmp_path):
     assert "decisions" in result["absent"]
 
 
-def test_victory_report_gives_outcome(tmp_path):
-    detail = "GAME OVER - VICTORY! You won a Science victory."
+# The exact end_turn texts from civ_mcp (end_turn.py), with its em dash.
+VICTORY_REPORT = "GAME OVER — VICTORY! You won a Science victory! The game has ended."
+DEFEAT_REPORT = (
+    "GAME OVER — DEFEAT. Gandhi of India won a Culture victory. "
+    "The game has ended. No further actions are possible."
+)
+PREFIXED_DEFEAT_REPORT = "Turn 120 -> 121" + chr(10) + DEFEAT_REPORT
+
+
+@pytest.mark.parametrize(
+    ("detail", "won", "victory_type"),
+    [
+        (VICTORY_REPORT, True, "Science"),
+        (DEFEAT_REPORT, False, "Culture"),
+        (PREFIXED_DEFEAT_REPORT, False, "Culture"),
+        (DEFEAT_REPORT[:25], False, None),  # Cut off by TurnLog before the victory type.
+    ],
+)
+def test_game_over_report_gives_outcome(tmp_path, detail, won, victory_type):
     log = write_log(
         tmp_path / "r.jsonl", [turn_line(1), turn_line(2, stop_reason="game_over", detail=detail)]
     )
-    metrics = score(load_turn_log(log))["metrics"]
-    assert metrics["won"] is True
-    assert metrics["victory_type"] == "Science"
-    assert metrics["stop_reason"] == "game_over"
+    result = score(load_turn_log(log))
+    assert result["metrics"]["won"] is won
+    assert result["metrics"].get("victory_type") == victory_type
+    assert ("victory_type" in result["absent"]) == (victory_type is None)
+    assert result["metrics"]["stop_reason"] == "game_over"
+
+
+def test_other_results_leave_the_outcome_absent(tmp_path):
+    log = write_log(tmp_path / "r.jsonl", [turn_line(1, detail="Turn 1 -> 2")])
+    assert {"won", "victory_type"} <= set(score(load_turn_log(log))["absent"])
 
 
 def test_standing_from_log_when_recorded(tmp_path):

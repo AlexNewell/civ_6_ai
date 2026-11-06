@@ -20,7 +20,11 @@ NO_STOP_REASON = "the log ends without one, and a turn limit and a crash look th
 NO_OUTCOME = "the log's last result doesn't show a win or a defeat"
 NO_LEDGER = "no spend ledger was given"
 NOT_IN_LEDGER = "the spend ledger has no calls for game {game_id}"
-GAME_OVER_REPORT = re.compile(r"GAME OVER\W+(VICTORY|DEFEAT)\b.*?won an? (.+?) victory")
+# civ_mcp's end_turn writes "GAME OVER - DEFEAT. <leader> of <civ> won a <Type> victory. ..." or
+# "GAME OVER - VICTORY! You won a <Type> victory! ...", and one path puts "Turn N -> M" on a line
+# before it, so these are searched for, not matched at the start.
+GAME_OVER_REPORT = re.compile(r"GAME OVER\W+(VICTORY|DEFEAT)\b")
+VICTORY_TYPE = re.compile(r"\bwon an? ([^.!\n]+?) victory\b")
 SNAPSHOT_FIELDS = tuple(field.name for field in fields(Snapshot) if field.name != "turn")
 RECORDED_LATER = (
     *SNAPSHOT_FIELDS,
@@ -60,8 +64,14 @@ def _sum_every_turn(records: list[dict], key: str) -> int | None:
 
 
 def _outcome(last: dict) -> tuple[bool | None, str | None]:
-    match = GAME_OVER_REPORT.match(last.get("detail", ""))
-    return (match[1] == "VICTORY", match[2]) if match else (None, None)
+    """Read the result from the last turn's detail, which holds the first 300 characters of the
+    report. The result is at the start of the report, so only the victory type could be cut off."""
+    detail = last.get("detail", "")
+    match = GAME_OVER_REPORT.search(detail)
+    if not match:
+        return None, None
+    kind = VICTORY_TYPE.search(detail, match.end())
+    return match[1] == "VICTORY", kind[1] if kind else None
 
 
 def _standing(last: dict) -> Standing | None:

@@ -15,7 +15,8 @@ from pathlib import Path
 from civ_mcp.connection import GameConnection
 from civ_mcp.game_state import GameState
 
-from civ6_ai.orchestrator import DoNothing, Orchestrator, StopReason, TurnLog
+from civ6_ai.blockers import BlockerResolver, ResolvingGame
+from civ6_ai.orchestrator import Orchestrator, StopReason, TurnLog
 from civ6_ai.saves import use_real_save_dirs
 
 ROOT = Path(__file__).parent.parent
@@ -45,7 +46,8 @@ async def run(turns: int) -> int:
 
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     turn_log = TurnLog(ROOT / "runs" / f"{name}_{stamp}.jsonl")
-    reason = await Orchestrator(game, [DoNothing()], turn_log).play(turns)
+    resolver = BlockerResolver()
+    reason = await Orchestrator(ResolvingGame(game, resolver), [resolver], turn_log).play(turns)
 
     records = turn_log.records
     total = sum(record.total_seconds for record in records)

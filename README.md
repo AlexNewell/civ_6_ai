@@ -14,16 +14,18 @@ This project tries opponents that follow the same rules as the human and win or 
 
 ## Cost
 
-Calling an LLM costs money, so a main goal of this project is to make the cost per game as low as possible. A strategy game can take many hours or days, so a player might pay a very small amount for an opponent that makes the game worthwhile. Tens or hundreds of dollars per game is too much.
+Calling an LLM costs money, so a main goal of this project is to make the cost per game as low as possible. A strategy game can take many hours or days, so a player might be willing to pay a very small amount for an opponent that makes the game worthwhile. Tens or hundreds of dollars per game is too much.
 
 [CivBench](https://arxiv.org/abs/2609.02459), the one public benchmark of LLMs playing Civilization VI, reports roughly $31 to $229 in API fees per full game. In the sample this project analysed, the LLM won only 3 of 23 games. The paper calls its data a pilot, so this is a rough signal.
 
-To keep costs down, ordinary code makes most decisions, a cheap model handles routine judgment calls, and a frontier model is called only for rare strategic choices. The project measures cost per game and works to lower it.
+To keep costs down, ordinary code makes most decisions, a cheap model handles routine judgment calls, and a frontier model is called only for rare strategic choices. The project measures cost per game and works to lower it. 
+
+Furthermore, wherever possible, this project will explore locally hosting miniature LLM models to avoid API costs. However, locally hosting an LLM may not be reasonable for all potential players, given the hardware requirements.
 
 ## Approach
 
 - Deterministic code handles routine decisions, a cheap model tier handles routine judgment calls, and a frontier Claude model handles rare strategic ones.
-- Cost is measured on every call. A working target of $1 per player per game is enforced in code, and the aim is to go lower.
+- Cost is measured on every call. There is a working target of $1 per opponent player per game. It is currently unclear how realistic that goal is.
 - No handicap bonuses. Results are measured at Prince, where the built-in AI gets no advantages.
 - Early work pits one LLM player against the built-in AI to see whether it plays better. The long-term goal is a set of LLM opponents for a human player.
 

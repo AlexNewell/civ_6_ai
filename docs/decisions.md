@@ -1,6 +1,6 @@
 # Decisions
 
-Project decisions and why they were made. Add new ones as the work teaches us more.
+Project decisions and why they were made. New ones are added as the work goes on.
 
 ## What shaped the plan
 
@@ -14,9 +14,11 @@ Project decisions and why they were made. Add new ones as the work teaches us mo
 | Claude Haiku 5.5 costs $0.10 input and $0.50 output per million tokens, for prompts up to 100,000 tokens. Above that, the whole request costs five times as much. | It is a viable cloud option for routine decisions, provided prompts stay small. |
 | Consumer PCs share limited memory between the game and a local model. | Local models are benchmarked offline first and may not be viable during live play. |
 
-## Budget
+## Cost
 
-- The $1 cap counts every external model call in a game, per player. Local inference counts as $0.
+Lowering cost per game is a main goal, because players are unlikely to pay much for an opponent. The $1 per player per game cap is a working target and a safeguard, and the aim is to go lower.
+
+- The cap counts every external model call in a game, per player. Local inference counts as $0.
 - A code-enforced governor blocks any call whose worst-case cost would exceed the cap.
 - At the cap, or if an API is down, the player continues deterministically. A game never stalls.
 - Every call is logged using actual API usage.
@@ -51,7 +53,7 @@ Prompt caching is left out of these figures. Strategist calls will often be more
 - Every LLM player uses identical code, prompts and config.
 - Strict fairness: own fog of war only, no cheat APIs, and no resource bonuses added by this project.
 - Latency target: under 2 minutes for all five opponents combined. Strategist calls run in the background during the human's turn.
-- **Determinism has a limit.** Identical inputs can't guarantee identical play, because Claude responses aren't reproducible on request. Deterministic layers are seeded and model replies are stored, so any game can be replayed exactly.
+- Play isn't fully deterministic, because Claude responses can't be reproduced on request. Deterministic layers are seeded and model replies are stored, so any game can be replayed exactly.
 
 ## Dependencies
 
@@ -60,7 +62,7 @@ Prompt caching is left out of these figures. Strategist calls will often be more
 
 ### Rules for using civ6-mcp
 
-A review of the pinned commit found nothing malicious, but these rules apply:
+A review of the pinned commit found nothing malicious. These rules still apply:
 
 - Never run `civ_mcp.server`. It opens an unauthenticated dashboard on all network interfaces, moves the mouse and can close the game.
 - `load_game_save` can restart the game and click through its menus if Lua can't find the save.
@@ -71,7 +73,7 @@ A review of the pinned commit found nothing malicious, but these rules apply:
 
 ## Public-ready rules
 
-Making a repo public exposes all of its history and issues, so these rules apply from the first commit.
+A public repo exposes all of its history and issues, so these rules apply from the first commit.
 
 **Never in git or issues:**
 

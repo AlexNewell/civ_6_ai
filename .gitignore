@@ -6,6 +6,13 @@
 
 # Python
 __pycache__/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+.ipynb_checkpoints/
+.tox/
+.nox/
 *.py[cod]
 .venv/
 .pytest_cache/
@@ -23,13 +30,31 @@ logs/
 *.jsonl
 *.parquet
 *.eval
+*.log
+*.sqlite
+*.sqlite3
+*.db
 
 # Upstream datasets are fetched by script, never committed
 datasets/
+
+# Local assistant and tool state
+.claude/
+.cursor/
+*.local.json
+
+# Scratch and temporary files
+*.tmp
+*.bak
+*.swp
+*~
+tmp/
+scratch/
 
 # OS and editor
 .DS_Store
 Thumbs.db
 desktop.ini
+*.lnk
 .vscode/
 .idea/

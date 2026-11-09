@@ -90,7 +90,7 @@ Making a repo public exposes all of its history and issues, so these rules apply
 - [`scripts/check_public_ready.py`](../scripts/check_public_ready.py) checks files and commit metadata. Personal strings go in the untracked `.local/public-ready-patterns.txt`.
 - Test fixtures must be synthetic or scrubbed.
 
-No licence is chosen yet. That decision is part of issue 7.4, or comes sooner if the repo goes public first.
+The repo is public under an all-rights-reserved [`LICENSE`](../LICENSE), the most protective choice that still suits a public repo. It allows reading and GitHub forks only. As sole copyright holder the owner can relicense later, for example to MIT, but only while no outside code has been merged. Until the licence is changed, don't merge contributions from others without their agreement to relicense. Issue 7.4 revisits the choice.
 
 ## Sources
 

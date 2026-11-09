@@ -48,6 +48,10 @@ If this folder is synced by a cloud drive, set `UV_PROJECT_ENVIRONMENT` to a pat
 
 Put API keys in an untracked `.env`, using [`.env.example`](.env.example) as the template. Personal strings to block from commits go in `.local/public-ready-patterns.txt`, one regular expression per line.
 
+## Licence
+
+All rights reserved. The code is public to read and follow, not to reuse. See [`LICENSE`](LICENSE). This may change as the project matures. Third-party material keeps its own terms, listed in [Third-party notices](THIRD_PARTY_NOTICES.md).
+
 ## GitHub setup
 
 [`scripts/seed_github.py`](scripts/seed_github.py) creates the labels, milestones and issues from [`.github/roadmap-issues.yaml`](.github/roadmap-issues.yaml), and links them from the roadmap. It is safe to run again. Use `--dry-run` to preview.

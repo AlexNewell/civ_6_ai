@@ -3,6 +3,8 @@ name = "civ6-ai"
 version = "0.0.0"
 description = "Low-cost LLM opponents for Civilization VI."
 readme = "README.md"
+license = "LicenseRef-All-Rights-Reserved"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
     "civ6-mcp",

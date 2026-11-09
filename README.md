@@ -1,14 +1,29 @@
 # civ_6_ai
 
-Experiments in building Civilization VI opponents powered by LLMs, for no more than $1 of external model calls per player per game.
+Better opponents for human players of Civilization VI, built from LLMs.
 
-Most decisions are handled by deterministic code, routine judgment calls by a cheap model tier, and rare strategic ones by a frontier Claude model. Early work pits one LLM player against the built-in AI. The long-term goal is a set of LLM opponents for a human player.
+The goal is not to replace human players. It is to make the game more fun for them, by giving them opponents that play like capable people instead of like scripts.
 
-**Status:** planning and setup. Nothing plays the game yet.
+## Why
+
+Most people play grand strategy games against the built-in AI. That AI mostly follows a very long list of hand-written if-then rules. It is predictable, and advanced players find it too weak to be a real challenge.
+
+Developers know this, so higher difficulty levels don't make the AI play better. They give it advantages instead: extra yields, extra starting units, combat bonuses. In Civilization VI, for example, [every level above Prince hands the AI bonuses](https://civilization.fandom.com/wiki/Difficulty_level_(Civ6)). The result can feel less like facing a skilled rival and more like facing someone who is cheating.
+
+This project explores a different route: opponents that win or lose on decisions, under the same rules as the human. A language model can adapt to what the human is actually doing, change plans, and behave less predictably than a rule list. The hard part is cost, so the design keeps most decisions in ordinary code and calls a model only when judgment is needed.
+
+## Approach
+
+- Deterministic code handles routine decisions, a cheap model tier handles routine judgment calls, and a frontier Claude model handles rare strategic ones.
+- A hard budget of $1 of external model calls per player per game, enforced in code.
+- No handicap bonuses. Results are measured at Prince, the level where the built-in AI gets no advantages.
+- Early work pits one LLM player against the built-in AI, to measure whether it plays better. The long-term goal is a set of LLM opponents for a human player.
+
+**Status:** early. The budget tooling, baseline data and test saves are in place. Nothing plays a full game yet. This is a personal experiment, and anything here may change.
 
 - [Roadmap](roadmap.md)
 - [Decisions and public-ready rules](docs/decisions.md)
-- [Original research report](docs/research/reducing-frontier-model-cost.md)
+- [Research notes](docs/research/reducing-frontier-model-cost.md)
 - [Third-party notices](THIRD_PARTY_NOTICES.md)
 
 ## Requirements
@@ -33,16 +48,8 @@ If this folder is synced by a cloud drive, set `UV_PROJECT_ENVIRONMENT` to a pat
 
 Put API keys in an untracked `.env`, using [`.env.example`](.env.example) as the template. Personal strings to block from commits go in `.local/public-ready-patterns.txt`, one regular expression per line.
 
-## First push
+## GitHub setup
 
-Run these once from the repo root:
+[`scripts/seed_github.py`](scripts/seed_github.py) creates the labels, milestones and issues from [`.github/roadmap-issues.yaml`](.github/roadmap-issues.yaml), and links them from the roadmap. It is safe to run again. Use `--dry-run` to preview.
 
-```bash
-gh repo create civ_6_ai --private --source . --push
-uv run python scripts/seed_github.py
-git add roadmap.md
-git commit -m "Link roadmap items to issues"
-git push
-```
-
-The seed script creates the labels, milestones and issues, then adds issue links to the roadmap. It is safe to run again.
+Civilization VI is a product of Firaxis Games and 2K. This project isn't affiliated with or endorsed by them.

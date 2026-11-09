@@ -29,7 +29,7 @@ Furthermore, wherever possible, this project will explore locally hosting miniat
 - No handicap bonuses. Results are measured at Prince, where the built-in AI gets no advantages.
 - Early work pits one LLM player against the built-in AI to see whether it plays better. The long-term goal is a set of LLM opponents for a human player.
 
-**Status:** early. The budget tooling, baseline data and test saves are in place. Nothing plays a full game yet. This is a personal experiment and anything here may change.
+**Status:** Phase 1, the deterministic bot. The turn loop and policies for settling, research, government, production, builders, trade and religion, defence and diplomacy are built and tested offline. Live acceptance is still in progress. This is a personal experiment and anything here may change.
 
 - [Roadmap](roadmap.md)
 - [Decisions and public-ready rules](docs/decisions.md)

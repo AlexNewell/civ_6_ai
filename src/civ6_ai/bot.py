@@ -3,20 +3,27 @@
 Order within a turn:
 
 1. `Monitors` read the turn first, so they see it before anything acts on it.
-2. `SettlingPolicy` moves settlers and scouts, which changes cities and units.
-3. `ResearchPolicy` keeps a tech and a civic in progress.
-4. `GovernmentPolicy` changes government, fills policy slots and spends governor points. It runs
+2. `DiplomacyPolicy` answers every open proposal next, before anything else spends gold or acts.
+   It moves no unit, and a deal it accepts changes gold and resources that production and trade
+   then see. Leaving a session open while the rest of the turn plays is what can hold the game.
+3. `SettlingPolicy` moves settlers and scouts, which changes cities and units.
+4. `MilitaryPolicy` attacks, heals, garrisons and spends promotions. It runs after settling,
+   which has moved its escorts and scouts first (it never touches the units settling reserves),
+   and before production, builders and the resolver, whose skip must come last.
+5. `ResearchPolicy` keeps a tech and a civic in progress.
+6. `GovernmentPolicy` changes government, fills policy slots and spends governor points. It runs
    after research, whose completed civics decide which governments are open.
-5. `CityProductionPolicy` gives idle cities something to build, after settling may have founded one.
-6. `BuilderPolicy` sends builders to work. Settling moves only settlers, scouts and combat escorts,
-   so no unit is ordered twice.
-7. `SecondaryPolicy` runs pantheon, religion, great people and trade routes. It comes after
+7. `CityProductionPolicy` gives idle cities something to build, after settling may have founded one.
+8. `BuilderPolicy` sends builders to work. Settling moves only settlers, scouts and combat escorts,
+   and military only combat units, so no unit is ordered twice.
+9. `SecondaryPolicy` runs pantheon, religion, great people and trade routes. It comes after
    production, so a trader built earlier is routed this turn, and moves only great people and
    traders, which no other handler touches.
-8. `BlockerResolver` goes last, because it clears what is left and skips any idle units. It gets
-   the blocker policies of production, research, government and secondary, with its defaults as
-   fallback. The government policy is one instance, shared by its handler and its blocker table,
-   so its limits on government changes hold across both.
+10. `BlockerResolver` goes last, because it clears what is left and skips any idle units. It gets
+   the blocker policies of production, research, government, secondary, military and diplomacy,
+   with its defaults as fallback. Government, military and diplomacy are each one instance,
+   shared by handler and blocker table, so their bounds hold across both. Two policies claiming
+   the same blocker type raise `ValueError` when the bot is built.
 """
 
 import json
@@ -32,7 +39,9 @@ from civ6_ai.monitors import EventBus, Monitors
 from civ6_ai.orchestrator import Handler, Orchestrator, TurnLog
 from civ6_ai.policies import research
 from civ6_ai.policies.builder import BuilderPolicy
+from civ6_ai.policies.diplomacy import DiplomacyPolicy
 from civ6_ai.policies.government import GovernmentPolicy
+from civ6_ai.policies.military import MilitaryPolicy
 from civ6_ai.policies.production import CityProductionPolicy
 from civ6_ai.policies.secondary import SecondaryPolicy
 from civ6_ai.policies.settling import SettlingPolicy
@@ -153,11 +162,15 @@ def build_orchestrator(game: Any, bus: EventBus, turn_log: TurnLog) -> Orchestra
     production = CityProductionPolicy()
     government = GovernmentPolicy()  # One instance, so handler and blockers share its bounds.
     secondary = SecondaryPolicy()
+    military = MilitaryPolicy()
+    diplomacy = DiplomacyPolicy()
     tables = [
         production.blocker_policies(),
         research.blocker_policies(),
         government.blocker_policies(),
         secondary.blocker_policies(),
+        military.blocker_policies(),
+        diplomacy.blocker_policies(),
     ]
     merged: dict[str, Any] = {}
     for table in tables:
@@ -167,7 +180,9 @@ def build_orchestrator(game: Any, bus: EventBus, turn_log: TurnLog) -> Orchestra
     resolver = BlockerResolver(merged)
     handlers: list[Handler] = [
         Monitors(bus),
+        diplomacy,
         SettlingPolicy(),
+        military,
         research.ResearchPolicy(),
         government,
         production,

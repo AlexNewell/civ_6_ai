@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">
+  <rect width="1280" height="640" fill="#101a2b"/>
+  <text x="100" y="250" font-family="Consolas, 'Cascadia Mono', monospace" font-size="92" font-weight="700" fill="#f2f4f7">civ_6_ai</text>
+  <text x="102" y="310" font-family="'Segoe UI', Arial, sans-serif" font-size="32" fill="#a9b6cc">LLM opponents that play better, not cheat</text>
+  <text x="102" y="352" font-family="'Segoe UI', Arial, sans-serif" font-size="32" fill="#a9b6cc">— built for low cost per game</text>
+  <g transform="translate(100,440)" font-family="'Segoe UI', Arial, sans-serif">
+    <rect x="0" y="0" width="140" height="44" rx="6" fill="#4f8cff"/>
+    <text x="70" y="29" text-anchor="middle" font-size="22" font-weight="600" fill="#0b1220">code</text>
+    <text x="70" y="76" text-anchor="middle" font-size="18" fill="#7d8aa3">most calls</text>
+  </g>
+  <g transform="translate(100,440)" font-family="'Segoe UI', Arial, sans-serif">
+    <path d="M152 22 h28" stroke="#4a5873" stroke-width="3"/>
+    <rect x="192" y="6" width="150" height="32" rx="6" fill="#4f8cff" fill-opacity="0.6"/>
+    <text x="267" y="29" text-anchor="middle" font-size="20" font-weight="600" fill="#0b1220">cheap model</text>
+    <text x="267" y="76" text-anchor="middle" font-size="18" fill="#7d8aa3">some</text>
+    <path d="M354 22 h28" stroke="#4a5873" stroke-width="3"/>
+    <rect x="394" y="12" width="140" height="20" rx="6" fill="#4f8cff" fill-opacity="0.3"/>
+    <text x="464" y="27" text-anchor="middle" font-size="15" font-weight="600" fill="#dbe4f5">frontier</text>
+    <text x="464" y="76" text-anchor="middle" font-size="18" fill="#7d8aa3">rare</text>
+  </g>
+  <g transform="translate(940,72)">
+    <rect width="240" height="48" rx="24" fill="#4f8cff" fill-opacity="0.15" stroke="#4f8cff" stroke-width="2"/>
+    <text x="120" y="32" text-anchor="middle" font-family="'Segoe UI', Arial, sans-serif" font-size="22" font-weight="600" fill="#8fb4ff">Work in progress</text>
+  </g>
+</svg>

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">
+  <rect width="1280" height="640" fill="#14181f"/>
+  <rect x="100" y="250" width="8" height="140" fill="#e0a43a"/>
+  <text x="140" y="330" font-family="Consolas, 'Cascadia Mono', monospace" font-size="104" font-weight="700" fill="#f2f4f7">civ_6_ai</text>
+  <text x="142" y="385" font-family="'Segoe UI', Arial, sans-serif" font-size="36" fill="#aab3c0">LLM opponents that play better, not cheat</text>
+  <g transform="translate(940,72)">
+    <rect width="240" height="48" rx="24" fill="none" stroke="#e0a43a" stroke-width="2"/>
+    <text x="120" y="32" text-anchor="middle" font-family="'Segoe UI', Arial, sans-serif" font-size="22" font-weight="600" fill="#e0a43a">Work in progress</text>
+  </g>
+  <text x="142" y="560" font-family="'Segoe UI', Arial, sans-serif" font-size="24" fill="#6b7685">Built for low cost per game</text>
+</svg>

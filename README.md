@@ -10,12 +10,21 @@ Most people play grand strategy games against the built-in AI. That AI mostly fo
 
 Developers know this, so higher difficulty levels don't make the AI play better. They give it advantages instead: extra yields, extra starting units, combat bonuses. In Civilization VI, for example, [every level above Prince hands the AI bonuses](https://civilization.fandom.com/wiki/Difficulty_level_(Civ6)). The result can feel less like facing a skilled rival and more like facing someone who is cheating.
 
-This project explores a different route: opponents that win or lose on decisions, under the same rules as the human. A language model can adapt to what the human is actually doing, change plans, and behave less predictably than a rule list. The hard part is cost, so the design keeps most decisions in ordinary code and calls a model only when judgment is needed.
+This project explores a different route: opponents that win or lose on decisions, under the same rules as the human. A language model can adapt to what the human is actually doing, change plans, and behave less predictably than a rule list.
+## Cost
+
+Calling an LLM costs real money, and this project treats that as a central problem, not a detail. A major goal is to make the cost per game as low as possible.
+
+The reason is practical. A strategy game can take many hours or days, so a player might happily pay a very small amount for an opponent that makes the game worthwhile. They are unlikely to pay tens or hundreds of dollars.
+
+The one public benchmark of LLMs playing Civilization VI shows the gap. [CivBench](https://arxiv.org/abs/2609.02459) reports roughly $31 to $229 in API fees per full game. In the sample this project analysed, the LLM won only 3 of 23 games, so the money didn't buy strong play either. The paper calls its data a pilot, so treat that as a rough signal, not a verdict.
+
+The response is to keep most decisions in ordinary code, use a cheap model for routine judgment calls, and call a frontier model only for rare strategic choices. Cost per game is something this project measures and works to push down.
 
 ## Approach
 
 - Deterministic code handles routine decisions, a cheap model tier handles routine judgment calls, and a frontier Claude model handles rare strategic ones.
-- A hard budget of $1 of external model calls per player per game, enforced in code.
+- Cost is measured on every call. A working target of $1 per player per game is enforced in code as a safeguard, and the aim is to go lower.
 - No handicap bonuses. Results are measured at Prince, the level where the built-in AI gets no advantages.
 - Early work pits one LLM player against the built-in AI, to measure whether it plays better. The long-term goal is a set of LLM opponents for a human player.
 

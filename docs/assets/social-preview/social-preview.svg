@@ -1,10 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">
   <rect width="1280" height="640" fill="#0f2421"/>
   <text x="100" y="140" font-family="Consolas, 'Cascadia Mono', monospace" font-size="34" fill="#5fc2a8">civ_6_ai</text>
-  <text x="100" y="290" font-family="'Segoe UI', Arial, sans-serif" font-size="80" font-weight="700" fill="#f1f5f3">Opponents that play</text>
-  <text x="100" y="385" font-family="'Segoe UI', Arial, sans-serif" font-size="80" font-weight="700" fill="#f1f5f3">better, <tspan fill="#5fc2a8">not cheat.</tspan></text>
-  <text x="102" y="460" font-family="'Segoe UI', Arial, sans-serif" font-size="30" fill="#9db5ae">Strategy-game opponents from LLMs, built for low cost per game</text>
-  <rect x="100" y="520" width="1080" height="2" fill="#24423c"/>
-  <text x="100" y="568" font-family="'Segoe UI', Arial, sans-serif" font-size="22" font-weight="600" fill="#5fc2a8">WORK IN PROGRESS</text>
-  <text x="1180" y="568" text-anchor="end" font-family="'Segoe UI', Arial, sans-serif" font-size="22" fill="#6f8a83">Mostly code · some small-model calls · rare frontier calls</text>
+  <g transform="translate(940,103)">
+    <rect width="240" height="48" rx="24" fill="#5fc2a8" fill-opacity="0.12" stroke="#5fc2a8" stroke-width="2"/>
+    <text x="120" y="32" text-anchor="middle" font-family="'Segoe UI', Arial, sans-serif" font-size="21" font-weight="600" letter-spacing="1" fill="#5fc2a8">WORK IN PROGRESS</text>
+  </g>
+  <text x="100" y="320" font-family="'Segoe UI', Arial, sans-serif" font-size="80" font-weight="700" fill="#f1f5f3">Opponents that play</text>
+  <text x="100" y="415" font-family="'Segoe UI', Arial, sans-serif" font-size="80" font-weight="700" fill="#f1f5f3">better, <tspan fill="#5fc2a8">not cheat.</tspan></text>
+  <text x="102" y="490" font-family="'Segoe UI', Arial, sans-serif" font-size="30" fill="#9db5ae">Strategy-game opponents from LLMs, built for low cost per game</text>
 </svg>

@@ -6,5 +6,5 @@
   <text x="102" y="460" font-family="'Segoe UI', Arial, sans-serif" font-size="30" fill="#9db5ae">Strategy-game opponents from LLMs, built for low cost per game</text>
   <rect x="100" y="520" width="1080" height="2" fill="#24423c"/>
   <text x="100" y="568" font-family="'Segoe UI', Arial, sans-serif" font-size="22" font-weight="600" fill="#5fc2a8">WORK IN PROGRESS</text>
-  <text x="1180" y="568" text-anchor="end" font-family="'Segoe UI', Arial, sans-serif" font-size="22" fill="#6f8a83">code · cheap model · frontier model</text>
+  <text x="1180" y="568" text-anchor="end" font-family="'Segoe UI', Arial, sans-serif" font-size="22" fill="#6f8a83">Mostly code · some small-model calls · rare frontier calls</text>
 </svg>

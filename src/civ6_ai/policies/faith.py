@@ -11,13 +11,17 @@ Prophets. It counts the turns each Great Prophet has stayed on the same tile. Af
 `PROPHET_ACT_AFTER` turns it tries a fallback, so no prophet stands for more than a few turns
 before something is attempted, and every try and refusal is logged:
 
-- A religion can still be founded: activate it where it stands. This only works on a Holy Site
-  district, so a refusal means we have none yet. Building one is the job of production, and the
-  log says so. Walking to a Holy Site stays with `SecondaryPolicy`.
+- A religion can still be founded: ask the Great People advisor for own cities with a finished
+  Holy Site. On one, activate. Otherwise walk toward the nearest (a few targets are tried when a
+  move is refused, and at most `PROPHET_MAX_MOVES` orders are given). With no Holy Site anywhere
+  it is logged once for that prophet and asked again every `NO_SITE_WAIT` turns. Production has
+  no way to be asked for an item, so this policy does not ask for a Holy Site. The log names
+  the gap.
 - No religion can be founded: try to spread our religion from the current tile. If the game
   refuses (no charges, no city here with another majority), it is retried every
-  `PROPHET_RETRY_TURNS` turns and the reason is logged. Spending such a prophet some other way
-  is not possible through civ6-mcp, so it is a known gap (see docs/live-checks.md).
+  `PROPHET_RETRY_TURNS` turns and the reason is logged. After `SPREAD_GIVE_UP` refusals in a row
+  nothing is left to do with it (nothing moves it to a better place and no religion can be
+  founded), so it is deleted with `delete_unit` rather than left standing for the whole game.
 
 Faith. Faith above `FaithSettings.reserve` is spent, in this order:
 
@@ -45,7 +49,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from civ6_ai.blockers import action_succeeded
+from civ6_ai.blockers import action_succeeded, move_succeeded
 from civ6_ai.policies.secondary import _GP_WEIGHTS, SecondaryWeights, canonical
 from civ6_ai.state import GameReads, Unit, read_units
 
@@ -55,6 +59,10 @@ PROPHET_ACT_AFTER = 2  # Turns on one tile before the fallback runs. Well inside
 PROPHET_RETRY_TURNS = 2  # Turns between tries when the fallback is refused.
 MAX_ATTEMPTS = 6  # Purchase and patronise calls per turn, successful or not.
 MAX_CITY_SCANS = 4  # Cities whose production list is read per turn.
+NO_SITE_WAIT = 5  # Turns between advisor reads while no city has a Holy Site.
+PROPHET_MAX_MOVES = 15  # Move orders given to one prophet before it is left where it is.
+MAX_MOVE_TARGETS = 3  # Holy Sites tried, nearest first, when a move is refused.
+SPREAD_GIVE_UP = 8  # Refused spread tries in a row before a prophet with no use is deleted.
 REFUSED_WAIT = 5  # Turns before a refused person or building is tried again.
 
 _PROPHET = "UNIT_GREAT_PROPHET"
@@ -99,6 +107,9 @@ class FaithGame(GameReads, Protocol):
     ) -> str: ...
     async def activate_great_person(self, unit_index: int) -> str: ...
     async def spread_religion(self, unit_index: int) -> str: ...
+    async def get_gp_advisor(self, unit_index: int) -> Any: ...
+    async def move_unit(self, unit_index: int, target_x: int, target_y: int) -> str: ...
+    async def delete_unit(self, unit_index: int) -> str: ...
 
 
 @dataclass
@@ -108,6 +119,9 @@ class _Prophet:
     idle: int = 0
     retry_at: int = -1
     warned: bool = False
+    moves: int = 0  # Move orders given. Kept while it walks.
+    refusals: int = 0  # Spread tries refused in a row.
+    no_site_logged: bool = False
 
 
 @dataclass
@@ -144,8 +158,11 @@ class FaithPolicy:
         can_found: bool | None = None
         for unit in sorted(units, key=lambda u: u.unit_id):
             seen = self._prophets.get(unit.unit_id)
-            if seen is None or (seen.x, seen.y) != (unit.x, unit.y):
+            if seen is None:
                 self._prophets[unit.unit_id] = _Prophet(unit.x, unit.y)
+                continue
+            if (seen.x, seen.y) != (unit.x, unit.y):
+                seen.x, seen.y, seen.idle, seen.retry_at = unit.x, unit.y, 0, -1
                 continue
             seen.idle += 1
             if seen.idle < PROPHET_ACT_AFTER or seen.retry_at > turn or not unit.can_move:
@@ -164,25 +181,82 @@ class FaithPolicy:
     ) -> None:
         log.info("%s has stood %d turns at (%d,%d)", unit.name, seen.idle, unit.x, unit.y)
         if can_found:
-            result = await game.activate_great_person(unit.unit_index)
-            if "GP_ACTIVATED" in result:
-                log.info("%s activated where it stood: %s", unit.name, result[:120])
-                self._prophets.pop(unit.unit_id, None)
+            reason = await self._found_or_walk(game, unit, seen, turn)
+            if reason is None:
                 return
-            reason = f"religion open but cannot found here (no Holy Site?): {result[:120]}"
         else:
             result = await game.spread_religion(unit.unit_index)
             if action_succeeded(result) and "RELIGION_SPREAD" in result:
                 log.info("%s spread religion: %s", unit.name, result[:120])
-                seen.idle = 0
+                seen.idle = seen.refusals = 0
                 return
+            seen.refusals += 1
             reason = f"no religion to found and cannot spread here: {result[:120]}"
-        seen.retry_at = turn + PROPHET_RETRY_TURNS
+            if seen.refusals >= SPREAD_GIVE_UP:
+                await self._retire(game, unit, seen)
+                return
+        seen.retry_at = max(seen.retry_at, turn + PROPHET_RETRY_TURNS)
         if seen.idle > 5 and not seen.warned:
             seen.warned = True
             log.warning("%s still idle after %d turns: %s", unit.name, seen.idle, reason)
         else:
             log.info("%s unused: %s", unit.name, reason)
+
+    async def _found_or_walk(
+        self, game: FaithGame, unit: Unit, seen: _Prophet, turn: int
+    ) -> str | None:
+        """Found the religion on a Holy Site, or walk to one. None means it did something."""
+        advisor = await game.get_gp_advisor(unit.unit_index)
+        sites = list(advisor.cities) if advisor is not None else []
+        if not sites:
+            seen.retry_at = turn + NO_SITE_WAIT
+            if not seen.no_site_logged:
+                seen.no_site_logged = True
+                log.warning(
+                    "%s can found a religion but no city has a finished Holy Site. "
+                    "Production does not take requests, so none is asked for",
+                    unit.name,
+                )
+            return "religion open but no city has a Holy Site"
+        sites.sort(key=lambda c: (not c.can_activate, c.distance, -c.city_yield, c.city_id))
+        if sites[0].distance == 0:
+            result = await game.activate_great_person(unit.unit_index)
+            if "GP_ACTIVATED" in result:
+                log.info(
+                    "%s founded a religion in %s: %s", unit.name, sites[0].city_name, result[:120]
+                )
+                self._prophets.pop(unit.unit_id, None)
+                return None
+            return f"on the Holy Site of {sites[0].city_name} but refused: {result[:120]}"
+        if seen.moves >= PROPHET_MAX_MOVES:
+            return f"gave up walking after {seen.moves} orders"
+        for site in sites[:MAX_MOVE_TARGETS]:
+            seen.moves += 1
+            result = await game.move_unit(unit.unit_index, site.district_x, site.district_y)
+            if move_succeeded(result):
+                log.info(
+                    "%s walks to the Holy Site in %s, %d tiles away",
+                    unit.name,
+                    site.city_name,
+                    site.distance,
+                )
+                return None
+            log.info("%s can't move to %s: %s", unit.name, site.city_name, result[:120])
+        return "every move toward a Holy Site was refused"
+
+    async def _retire(self, game: FaithGame, unit: Unit, seen: _Prophet) -> None:
+        """Delete a prophet that has no use left, so it doesn't stand for the whole game."""
+        result = await game.delete_unit(unit.unit_index)
+        if action_succeeded(result):
+            log.warning(
+                "%s deleted: no religion to found and spreading refused %d times",
+                unit.name,
+                seen.refusals,
+            )
+            self._prophets.pop(unit.unit_id, None)
+        else:
+            log.info("%s could not be deleted: %s", unit.name, result[:120])
+            seen.refusals = 0  # Count again before the next try.
 
     # ----- faith -----
 

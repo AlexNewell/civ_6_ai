@@ -87,6 +87,20 @@ class Game(FakeGame):
         self.actions.append(("activate", unit_index))
         return self.reply("activate", "Error: CANNOT_ACTIVATE|no Holy Site")
 
+    async def get_gp_advisor(self, unit_index):
+        return self.data.get("advisor")
+
+    async def move_unit(self, unit_index, x, y):
+        self.actions.append(("move", unit_index, x, y))
+        return self.reply("move", f"MOVING_TO|{x},{y}")
+
+    async def delete_unit(self, unit_index):
+        self.actions.append(("delete", unit_index))
+        result = self.reply("delete", "OK:DELETED|UNIT_GREAT_PROPHET at 10,10")
+        if result.startswith("OK"):
+            self.data["units"] = []
+        return result
+
     async def spread_religion(self, unit_index):
         self.actions.append(("spread", unit_index))
         return self.reply("spread", "Error: CANNOT_SPREAD|nothing here")
@@ -99,6 +113,24 @@ def run(policy, game):
 def set_overview(game, turn=100, faith=None):
     faith = game.data["overview"].faith if faith is None else faith
     game.data["overview"] = overview(turn=turn, faith=faith)
+
+
+def holy_site(distance=0, city_id=1, x=12, y=10, **changes):
+    base = dict(
+        city_name="Rome",
+        city_id=city_id,
+        district_x=x,
+        district_y=y,
+        can_activate=distance == 0,
+        distance=distance,
+    )
+    return lq.GPAdvisorCity(**{**base, **changes})
+
+
+def advisor(*cities):
+    return lq.GPAdvisorResult(
+        "Prophet", "GREAT_PERSON_CLASS_PROPHET", "DISTRICT_HOLY_SITE", 10, 10, 1, list(cities)
+    )
 
 
 def acted(game, kind):
@@ -284,7 +316,7 @@ def test_a_prophet_that_keeps_moving_is_left_alone():
 
 
 def test_an_idle_prophet_is_acted_on_within_the_bound_when_it_can_found():
-    game = Game(units=[prophet()])
+    game = Game(units=[prophet()], advisor=advisor(holy_site(0)))
     policy = FaithPolicy()
     play(policy, game, PROPHET_ACT_AFTER + 1)  # Sighting, then PROPHET_ACT_AFTER idle turns.
     assert PROPHET_ACT_AFTER <= 5
@@ -293,7 +325,7 @@ def test_an_idle_prophet_is_acted_on_within_the_bound_when_it_can_found():
 
 
 def test_activation_uses_the_prophet_up_and_forgets_it():
-    game = Game(units=[prophet()])
+    game = Game(units=[prophet()], advisor=advisor(holy_site(0)))
     game.replies["activate"] = ["GP_ACTIVATED|Prophet"]
     policy = FaithPolicy()
     play(policy, game, PROPHET_ACT_AFTER + 1)
@@ -332,3 +364,96 @@ def test_a_prophet_that_is_gone_is_forgotten():
     game.data["units"] = []
     run(policy, game)
     assert policy._prophets == {}
+
+
+# ----- prophet and the Holy Site -----
+
+
+def test_a_prophet_off_the_site_walks_to_the_nearest_holy_site():
+    game = Game(units=[prophet()], advisor=advisor(holy_site(6, 2, 20, 10), holy_site(3, 1)))
+    play(FaithPolicy(), game, PROPHET_ACT_AFTER + 1)
+    assert acted(game, "move") == [("move", 7, 12, 10)]
+    assert acted(game, "activate") == []
+
+
+def test_a_refused_move_tries_the_next_site_up_to_the_bound():
+    sites = [holy_site(d, d, 10 + d, 10) for d in (1, 2, 3, 4, 5)]
+    game = Game(units=[prophet()], advisor=advisor(*sites))
+    game.replies["move"] = ["Error: NO_PATH", "MOVING_TO|x|BLOCKED (enemy)", "MOVING_TO|13,10"]
+    play(FaithPolicy(), game, PROPHET_ACT_AFTER + 1)
+    assert [a[2] for a in acted(game, "move")] == [11, 12, 13]
+
+
+def test_every_move_refused_logs_and_backs_off(caplog):
+    game = Game(units=[prophet()], advisor=advisor(holy_site(2)))
+    game.replies["move"] = ["Error: NO_PATH"] * 20
+    with caplog.at_level(logging.INFO):
+        play(FaithPolicy(), game, 12)
+    assert 1 <= len(acted(game, "move")) <= 6
+    assert "every move toward a Holy Site was refused" in caplog.text
+
+
+def test_a_prophet_that_arrives_activates_without_extra_orders():
+    game = Game(units=[prophet(10, 10)], advisor=advisor(holy_site(2)))
+    policy = FaithPolicy()
+    play(policy, game, PROPHET_ACT_AFTER + 1)
+    assert len(acted(game, "move")) == 1
+    game.data["units"] = [prophet(12, 10)]  # Arrived.
+    game.data["advisor"] = advisor(holy_site(0))
+    game.replies["activate"] = ["GP_ACTIVATED|Prophet"]
+    play(policy, game, PROPHET_ACT_AFTER + 1, start=110)
+    assert acted(game, "activate") == [("activate", 7)]
+    assert policy._prophets == {}
+
+
+def test_walking_orders_are_bounded():
+    from civ6_ai.policies.faith import PROPHET_MAX_MOVES
+
+    game = Game(units=[prophet()], advisor=advisor(holy_site(5)))
+    play(FaithPolicy(), game, 80)  # It never gets anywhere.
+    assert len(acted(game, "move")) == PROPHET_MAX_MOVES
+
+
+def test_no_holy_site_is_logged_once_and_asked_for_rarely(caplog):
+    game = Game(units=[prophet()], advisor=advisor())
+    with caplog.at_level(logging.INFO):
+        play(FaithPolicy(), game, 20)
+    assert caplog.text.count("no city has a finished Holy Site") == 1
+    assert acted(game, "move") == []
+    assert acted(game, "activate") == []
+    assert acted(game, "delete") == []  # A religion can still be founded later.
+
+
+def test_an_unreadable_advisor_counts_as_no_site(caplog):
+    game = Game(units=[prophet()], advisor=None)
+    with caplog.at_level(logging.INFO):
+        play(FaithPolicy(), game, 5)
+    assert "no city has a finished Holy Site" in caplog.text
+
+
+def test_a_prophet_with_no_use_is_deleted_after_repeated_refusals(caplog):
+    from civ6_ai.policies.faith import SPREAD_GIVE_UP
+
+    game = Game(units=[prophet()], religion=RELIGION_HELD)
+    policy = FaithPolicy()
+    with caplog.at_level(logging.INFO):
+        play(policy, game, 60)
+    assert acted(game, "delete") == [("delete", 7)]
+    assert len(acted(game, "spread")) == SPREAD_GIVE_UP
+    assert "deleted" in caplog.text
+    assert policy._prophets == {}
+
+
+def test_a_failed_delete_is_logged_and_retried_later():
+    game = Game(units=[prophet()], religion=RELIGION_HELD)
+    game.replies["delete"] = ["Error: CANNOT_DELETE|no"]
+    play(FaithPolicy(), game, 60)
+    assert len(acted(game, "delete")) == 2
+
+
+def test_a_successful_spread_resets_the_refusal_count():
+    game = Game(units=[prophet()], religion=RELIGION_HELD)
+    play(FaithPolicy(), game, 14)  # A few refusals.
+    game.replies["spread"] = ["RELIGION_SPREAD|ok"]
+    play(FaithPolicy(), game, 3, start=200)
+    assert acted(game, "delete") == []

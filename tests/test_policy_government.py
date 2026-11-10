@@ -405,6 +405,27 @@ def test_accepted_but_unapplied_appointment_stops_instead_of_looping():
     assert len([a for a in game.actions if a[0] == "appoint"]) == 1
 
 
+def test_an_appointment_that_keeps_the_point_is_skipped_for_a_promotion_and_not_retried():
+    # Run 3, turn 318: appointing Ibrahim kept the point every time, and the turn stayed held.
+    game = ScriptedGame(points=1)
+    game.to_appoint = ["GOVERNOR_IBRAHIM"]
+    game.appointed = [appointed("GOVERNOR_THE_EDUCATOR", 65536, ["PROMO_OK"])]
+
+    async def kept(governor_type):
+        game.actions.append(("appoint", governor_type))
+        return f"APPOINTED|{governor_type} (x)"
+
+    game.appoint_governor = kept
+    policy = GovernmentPolicy()
+    run(policy.run(game))
+    assert game.points == 0
+    assert ("promote", "GOVERNOR_THE_EDUCATOR", "PROMO_OK") in game.actions
+    game.points = 1
+    game.appointed = [appointed("GOVERNOR_THE_EDUCATOR", 65536, ["PROMO_NEXT"])]
+    run(policy.run(game))
+    assert [a for a in game.actions if a[0] == "appoint"] == [("appoint", "GOVERNOR_IBRAHIM")]
+
+
 def test_vague_text_is_not_an_appointment():
     game = ScriptedGame(points=1)
     game.to_appoint = ["GOVERNOR_THE_EDUCATOR"]

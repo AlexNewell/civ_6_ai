@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "items": [
+    {"id": "night1-a", "save": "STD_T1_01", "turns": 350},
+    {"id": "night1-b", "save": "STD_T1_02", "turns": 350, "max_attempts": 3},
+    {"id": "short-check", "save": "STD_T1_03", "turns": 20, "options": {}}
+  ]
+}

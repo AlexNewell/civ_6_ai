@@ -19,6 +19,7 @@ from civ_mcp.connection import GameConnection
 from civ_mcp.game_state import GameState
 
 from civ6_ai.bot import SettleDecisionLog, build_orchestrator
+from civ6_ai.fastcalls import narrow_popup_scan, shorten_call_waits
 from civ6_ai.metrics.costs import game_id_of_log
 from civ6_ai.metrics.speed import summarise as summarise_speed
 from civ6_ai.monitors import EventBus, EventLog
@@ -64,6 +65,8 @@ async def play_game(
     """Play `turns` turns in the open game. None if it is not a standard save (or `expect_save`)."""
     use_real_save_dirs()
     disable_mcp_saves()
+    narrow_popup_scan()
+    shorten_call_waits()
     connection = GameConnection()
     await connection.connect()
     game = GameState(connection)

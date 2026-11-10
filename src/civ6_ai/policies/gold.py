@@ -122,14 +122,19 @@ class GoldPolicy:
         self.weights = weights or ProductionWeights()
 
     async def run(self, game: GoldGame) -> None:
+        # The overview alone settles whether there is anything to spend. The full empire read is
+        # five more game calls, so it waits until there is (Run 3 profile: most turns have none).
+        overview = await game.get_game_overview()
+        reserve = reserve_for(overview.num_cities, overview.gold_per_turn)
+        budget = int(overview.gold) - reserve
+        if budget <= 0:
+            log.info(
+                "Gold %d is at or below the reserve %d, nothing to spend", overview.gold, reserve
+            )
+            return
         empire = await _read_empire(game)
         reserve = reserve_for(empire.num_cities, empire.gold_per_turn)
         budget = int(empire.gold) - reserve
-        if budget <= 0:
-            log.info(
-                "Gold %d is at or below the reserve %d, nothing to spend", empire.gold, reserve
-            )
-            return
         turn = _Turn(budget)
         notes: list[str] = []
         log.info("Gold %d, reserve %d, %d to spend", empire.gold, reserve, budget)

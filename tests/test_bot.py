@@ -451,3 +451,64 @@ def test_the_new_policies_plain_reads_do_not_clear_shared_reads(read):
 
     first, after = asyncio.run(scenario())
     assert after == first
+
+
+class _CountingGame:
+    """Any read returns a non-empty answer, and each call is counted."""
+
+    def __init__(self):
+        self.reads = []
+
+    def __getattr__(self, name):
+        async def call(*args):
+            self.reads.append(name)
+            return [name]
+
+        return call
+
+
+def test_units_policies_and_governors_are_read_once_until_something_changes():
+    game = _CountingGame()
+    shared = bot.SharedReads(game)
+    names = [
+        "get_units",
+        "get_tech_civics",
+        "get_policies",
+        "get_governors",
+        "get_trade_routes",
+        "get_pantheon_status",
+        "get_city_states",
+    ]
+
+    async def go():
+        for name in names:
+            await getattr(shared, name)()
+            await getattr(shared, name)()
+        assert [game.reads.count(name) for name in names] == [1] * len(names)
+        await shared.move_unit(1, 2, 3)  # a change
+        await shared.get_units()
+        assert game.reads.count("get_units") == 2
+
+    asyncio.run(go())
+
+
+def test_reads_the_end_turn_watcher_polls_are_never_kept():
+    game = _CountingGame()
+    shared = bot.SharedReads(game)
+
+    async def go():
+        for name in ("get_diplomacy_sessions", "get_pending_deals", "get_notifications"):
+            await getattr(shared, name)()
+            await getattr(shared, name)()
+            assert game.reads.count(name) == 2
+
+    asyncio.run(go())
+
+
+def test_a_turn_log_line_counts_each_handlers_game_calls(tmp_path):
+    reason, record = play_one_turn(WiredGame(), tmp_path)
+    assert record.handler_calls["research"]["get_tech_civics"][0] == 1
+    count, seconds = record.handler_calls["monitors"]["get_diplomacy"]
+    assert count >= 1 and seconds >= 0
+    line = json.loads((tmp_path / "game.jsonl").read_text(encoding="utf-8"))
+    assert line["handler_calls"]["research"]["get_tech_civics"][0] == 1

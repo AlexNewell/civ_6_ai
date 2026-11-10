@@ -285,3 +285,16 @@ def test_every_spend_is_logged(caplog):
     run(game)
     for phrase in ("Upgraded", "Bought BUILDING_LIBRARY", "Bought tile"):
         assert phrase in caplog.text
+
+
+def test_a_turn_with_nothing_to_spend_reads_only_the_overview():
+    reserve = reserve_for(2, 5.0)
+    game = GoldGame(gold_amount=reserve)
+    run(game)
+    assert game.calls == ["get_game_overview"]
+
+
+def test_a_turn_with_gold_to_spend_still_reads_the_full_empire():
+    game = GoldGame(gold_amount=reserve_for(2, 5.0) + 100)
+    run(game)
+    assert {"get_policies", "get_governors", "get_trade_routes"} <= set(game.calls)

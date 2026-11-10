@@ -249,36 +249,51 @@ def _took(result: str, marker: str) -> bool:
     return action_succeeded(result) and marker in result
 
 
-async def spend_governor_points(game: GovernmentGame, weights: GovernmentWeights) -> bool:
+async def spend_governor_points(
+    game: GovernmentGame, weights: GovernmentWeights, unappointable: set[str] | None = None
+) -> bool:
     """Appoint, or else promote, until no point is left or none can be spent. True if all spent.
 
-    The state is read again after each action, and the loop stops the first time a point doesn't
-    go down, so an action the game accepted but didn't apply can't repeat.
+    The state is read again after each action. An appointment the game accepts but doesn't apply
+    keeps the point; that governor goes into `unappointable`, kept for the whole game, and the
+    loop moves on to other governors and promotions (Run 3, turn 318: Ibrahim, every turn). Any
+    other action that keeps the point stops the loop, so it can't repeat.
     """
+    skip = unappointable if unappointable is not None else set()
     government = await read_government(game)
     for _ in range(MAX_GOVERNOR_ACTIONS):
         points = government.governor_points
         if points <= 0:
             return True
-        if not await _spend_one(game, government, weights):
+        action = await _spend_one(game, government, weights, skip)
+        if action is None:
             log.warning("No governor point could be spent, %s left", points)
             return False
         government = await read_government(game)
         if government.governor_points >= points:
-            log.warning("The game took a governor action but kept the point")
-            return False
+            kind, governor_type = action
+            if kind != "appoint":
+                log.warning("The game took a governor action but kept the point")
+                return False
+            log.warning("Appointing %s kept the point; not trying it again", governor_type)
+            skip.add(governor_type)
     return government.governor_points <= 0
 
 
-async def _spend_one(game: GovernmentGame, government: Government, weights: GovernmentWeights):
-    """Try appointments, then promotions, until the game accepts one."""
+async def _spend_one(
+    game: GovernmentGame,
+    government: Government,
+    weights: GovernmentWeights,
+    skip: set[str] = frozenset(),
+) -> tuple[str, str] | None:
+    """Try appointments, then promotions, until the game accepts one. Returns (kind, governor)."""
     if government.can_appoint_governor:
-        wanted = _by_priority(government.appointable_governors, weights)
-        for governor_type in wanted[:MAX_OPTIONS_PER_POINT]:
+        candidates = tuple(g for g in government.appointable_governors if g not in skip)
+        for governor_type in _by_priority(candidates, weights)[:MAX_OPTIONS_PER_POINT]:
             result = await game.appoint_governor(governor_type)
             if _took(result, "APPOINT"):  # `APPOINTED`, or `APPOINT_REQUESTED` if still pending.
                 log.info("Appointed %s", governor_type)
-                return True
+                return ("appoint", governor_type)
             log.warning("The game refused to appoint %s: %s", governor_type, result)
     appointed = {g.governor_type: g for g in government.governors}
     for governor_type in _by_priority(tuple(appointed), weights):
@@ -286,9 +301,9 @@ async def _spend_one(game: GovernmentGame, government: Government, weights: Gove
             result = await game.promote_governor(governor_type, promotion)
             if _took(result, "PROMOTED"):
                 log.info("Promoted %s with %s", governor_type, promotion)
-                return True
+                return ("promote", governor_type)
             log.warning("The game refused %s for %s: %s", promotion, governor_type, result)
-    return False
+    return None
 
 
 async def place_governors(game: GovernmentGame, weights: GovernmentWeights) -> bool:
@@ -326,6 +341,8 @@ class GovernmentPolicy:
         self._last_change_turn: int | None = None
         # Governments the game called locked, with the civics completed when it did.
         self._locked_at: dict[str, int] = {}
+        # Governors whose appointment the game accepted without spending the point.
+        self._unappointable: set[str] = set()
 
     async def change_government(self, game: GovernmentGame) -> bool:
         """Move up one government if a better one is unlocked. True if the game accepted a change.
@@ -370,7 +387,10 @@ class GovernmentPolicy:
         changed = False
         steps: list[tuple[str, Callable[[], Awaitable[bool]]]] = [
             ("policy cards", lambda: fill_empty_slots(game, self.weights)),
-            ("governor points", lambda: spend_governor_points(game, self.weights)),
+            (
+                "governor points",
+                lambda: spend_governor_points(game, self.weights, self._unappointable),
+            ),
             ("governor placement", lambda: place_governors(game, self.weights)),
         ]
         try:
@@ -401,7 +421,7 @@ class GovernmentPolicy:
             return await fill_empty_slots(game, self.weights)
 
         async def appoint(game: Any, blocker: Blocker) -> bool:
-            return await spend_governor_points(game, self.weights)
+            return await spend_governor_points(game, self.weights, self._unappointable)
 
         async def idle(game: Any, blocker: Blocker) -> bool:
             return await place_governors(game, self.weights)

@@ -10,7 +10,7 @@ Issues are generated from [`.github/roadmap-issues.yaml`](.github/roadmap-issues
 |---|---|
 | Phase 0: Repo Setup | Done |
 | Workstream "T": Game <ins>Toolchain</ins> | Done |
-| Phase 1: Deterministic Bot | In progress. 1.1-1.8, 1.10-1.12 and the first slice of 1.9 are merged and wired into the bot, played to the end of a full game in Run 3 (turn 318, a German science victory), with hands-on help at four holds, so G1 has no unattended game yet. 1.13 is not started. 1.14-1.17 were added after Run 3. |
+| Phase 1: Deterministic Bot | In progress. 1.1-1.8, 1.10-1.12 and the first slice of 1.9 are merged and wired into the bot, played to the end of a full game in Run 3 (turn 318, a German science victory), with hands-on help at four holds, so G1 has no unattended game yet. After Run 3, the offline parts of 1.13 (run queue, stall watchdog, run records), 1.14-1.17 (gold, peace, resource offers, faith) and a second 1.9 slice were merged with unit tests only. None has been checked in a live game yet. |
 | Workstream "E": <ins>Evaluator</ins> and Data | In progress |
 | Workstream "S": Puppeteering <ins>Spike</ins> | In progress |
 | Everything else | Not started |

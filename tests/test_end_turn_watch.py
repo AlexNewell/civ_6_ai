@@ -73,6 +73,7 @@ class HeldGame:
         if "WORLD_CONGRESS_SUBMIT_TURN" in code:
             self.calls.append("submit")
             self.session = False
+            self.released.set()  # Submitting lets the game carry on into the next turn.
             return "OK"
         if "ACTION_ENDTURN" in code:
             self.calls.append("ask again")
@@ -117,12 +118,13 @@ def test_no_new_request_while_the_turn_cannot_be_ended():
     assert "ask again" not in game.calls
 
 
-def test_an_open_session_the_game_does_not_list_is_submitted_and_the_turn_asked_again():
+def test_an_open_session_the_game_does_not_list_is_submitted_without_a_new_request():
     # Run 3, turn 156: the voter was registered after the session opened, so it never fired,
     # and the game's blocking list stayed empty while the session held the turn.
     game = HeldGame(session=True)
     assert end_turn(game) == ADVANCED
-    assert game.calls == ["end_turn", "register voter", "submit", "ask again"]
+    # Run 3, turn 302: asking again after the submit ended turn 303 before the bot played it.
+    assert game.calls == ["end_turn", "register voter", "submit"]
 
 
 def test_blockers_seen_once_as_the_turn_changes_are_left_alone():

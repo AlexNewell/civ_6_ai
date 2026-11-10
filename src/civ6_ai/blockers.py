@@ -609,6 +609,12 @@ class ResolvingGame:
                 self._last_hold = hold
                 return
             await self._resolver.resolve(self._game, readers=readers)
+            # A World Congress session runs as the next turn starts, while the turn still reads as
+            # the old one. Submitting it lets the game carry on, and a new request then ends the
+            # new turn unplayed, as turn 303 of Run 3 was.
+            if any(blocker.type == BlockerType.WORLD_CONGRESS_SESSION for blocker in blockers):
+                log.info("Turn %s was held by a World Congress session, submitted it", turn_before)
+                return
             if await self._can_end_turn() and await self._turn() == turn_before:
                 await self._game.execute_lua(build_end_turn(), "ingame")
                 log.info(

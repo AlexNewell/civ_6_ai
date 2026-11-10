@@ -241,6 +241,53 @@ issues:
       - A queued game produces a complete run record unattended.
     depends: ["1.2"]
     budget: none
+  - id: "1.14"
+    title: "Spend gold: purchases and unit upgrades"
+    type: feature
+    parallel: true
+    goal: Turn banked gold into growth and strength without a model call.
+    scope: "A rule-based spending step after production, using civ6-mcp's purchase_item, purchase_tile and upgrade_unit. Buys the most useful affordable unit, building or tile, upgrades obsolete units, and keeps a gold reserve. Found in Run 3: 1,363 gold banked at turn 135 and rising. Run 2 had 625 unspent at turn 100."
+    acceptance:
+      - Gold above the reserve is spent within 5 turns in a live game.
+      - Obsolete units are upgraded when gold and strategic resources allow.
+      - Tests cover the reserve and the priority order.
+    depends: ["1.5", "1.9"]
+    budget: none
+  - id: "1.15"
+    title: Peace-making and war awareness
+    type: feature
+    parallel: true
+    goal: End wars the bot gains nothing from, and know which wars it's in.
+    scope: "Track which civs and city-states are at war with the bot, with start turns. Offer peace through civ6-mcp's propose_peace when no attack is planned, and log every offer and answer. Nothing does this yet. Found in Run 3: units from the city-state Kandy stood near the bot's cities on most turns from about turn 104 to 135, and no peace was offered."
+    acceptance:
+      - Every war the bot is in is logged with its start turn.
+      - Peace is offered at most every 5 turns, and each answer is logged.
+      - A test covers a refused offer.
+    depends: ["1.9", "1.12"]
+    budget: none
+  - id: "1.16"
+    title: Propose resource trades
+    type: feature
+    parallel: true
+    goal: Use surplus resources instead of letting them sit at the cap.
+    scope: "Offer surplus strategic and luxury resources to civs that lack them through civ6-mcp's propose_trade, priced with the rules the diplomacy policy already uses for incoming deals. The bot only answers deals today. Found in Run 3: Horses and Iron both at the 33 cap at turn 135."
+    acceptance:
+      - A capped resource is offered to a civ that lacks it.
+      - No deal is offered to a civ at war with the bot.
+      - Tests cover pricing and the refusal cases.
+    depends: ["1.12"]
+    budget: none
+  - id: "1.17"
+    title: Spend faith and use prophets
+    type: feature
+    parallel: true
+    goal: Make use of faith and Great Prophets.
+    scope: "Decide what a Great Prophet does when no religion can be founded, and spend faith on faith-bought units, buildings or great people. Found in Run 3: 224 faith banked and a Great Prophet idle at turn 135."
+    acceptance:
+      - Faith above a set reserve is spent within 10 turns in a live game.
+      - No Great Prophet stays idle for more than 5 turns.
+    depends: ["1.11"]
+    budget: none
 
   # Track E
   - id: E.1

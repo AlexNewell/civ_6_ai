@@ -10,7 +10,7 @@ Issues are generated from [`.github/roadmap-issues.yaml`](.github/roadmap-issues
 |---|---|
 | Phase 0: Repo setup | Done |
 | Track T: Game toolchain | Done |
-| Phase 1: Deterministic bot | In progress. Merged: 1.1-1.8. 1.10 and 1.11 are wired into the bot and merged, pending live acceptance. 1.9 first slice (defence, healing, promotions) is merged and wired, 1.12 is in PR 80, and 1.13 is not started |
+| Phase 1: Deterministic bot | In progress. 1.1-1.8, 1.10-1.12 and the first slice of 1.9 are merged and wired into the bot, pending live acceptance in a full game. 1.13 is not started. 1.14-1.17 were added after Run 3. |
 | Track E: Evaluator and data | In progress |
 | Track S: Puppeteering spike | In progress |
 | Everything else | Not started |
@@ -75,6 +75,10 @@ No external model calls. Policies 1.5-1.12 can run in parallel. Leads to **G1**.
 - [`1.11`](https://github.com/AlexNewell/civ_6_ai/issues/15) Trade, religion and great people
 - [`1.12`](https://github.com/AlexNewell/civ_6_ai/issues/16) Basic diplomacy and World Congress rules
 - [`1.13`](https://github.com/AlexNewell/civ_6_ai/issues/17) Unattended runner: watchdog, crash recovery and overnight queue
+- [`1.14`](https://github.com/AlexNewell/civ_6_ai/issues/87) Spend gold: purchases and unit upgrades
+- [`1.15`](https://github.com/AlexNewell/civ_6_ai/issues/88) Peace-making and war awareness
+- [`1.16`](https://github.com/AlexNewell/civ_6_ai/issues/89) Propose resource trades
+- [`1.17`](https://github.com/AlexNewell/civ_6_ai/issues/90) Spend faith and use prophets
 
 ## Track E: Evaluator and data
 

@@ -25,7 +25,7 @@ Written offline against civ6-mcp's source, so none of this has run in a game yet
 
 - **Build:** main at `adef6e6`, with every policy wired in, plus the World Congress fix below. civ6-mcp pinned at `dd20190`. No model calls.
 - **Game:** standard save `STD_T1_01`, played from turn 1 to the end of the game, on turn 318, over seven sessions. The owner paused the game on turn 131 and reloaded it on turn 133. Later sessions ran on main as each fix below was merged (PRs 85, 86 and 92 to 95).
-- **Result:** Germany won a science victory at the end of turn 318, and the Maya were defeated. This is the first game the bot played to the end. It doesn't count toward gate G1, because it needed hands-on help: nudges through World Congress sessions on turns 81, 156 and 306, and the governor title on turn 318 (stop 6).
+- **Result:** Germany won a science victory at the end of turn 318, and the Maya were defeated. This is the first game the bot played to the end. It doesn't count toward gate G1, because it needed hands-on help: nudges through World Congress sessions on turns 81, 156 and 306, and the governor title hold on turn 318 (stop 6).
 - **Time:** 5.7 hours of bot time for 312 logged turns. The median was 52s a turn: 40s up to turn 131 and 58s after it. Four turns took over 3 minutes (the table below). Turns 200 and 303 were skipped (stops 3 and 4), and turns 131, 132 and 306 have no line because a session stopped on them.
 
 ### Stops and fixes
@@ -35,7 +35,7 @@ Written offline against civ6-mcp's source, so none of this has run in a game yet
 3. **Turn 200 was skipped.** The turn still read as 199 while turn 200's blockers showed. The watcher cleared them and asked again, which ended turn 200 before the bot played it. Fixed (PR 93): the watcher acts only on a hold it sees twice with the same turn and the same blockers.
 4. **Turn 303 was skipped.** After submitting a session on turn 302, the watcher also asked again to end the turn, which ended turn 303. Fixed (PR 94): after a submit the watcher waits, and doesn't ask again on that check.
 5. **Turn 306, a session that stayed open after each submit.** Fixed (PR 95): if the session is still open on a later check of the same turn, the watcher asks once to end the turn.
-6. **Turn 318, a governor title nobody could spend.** The only governor left to appoint was Ibrahim. Each appointment was reported as made, but the point stayed (4 points available), and each promotion through civ6-mcp failed with `PROMOTION_FAILED` or `PREREQ_NOT_MET`. `UI.CanEndTurn()` was true, yet the end-turn request never advanced the turn. The owner spent the title by hand, and the turn ended. Not fixed (issue 14).
+6. **Turn 318, a governor title nobody could spend.** The only governor left to appoint was Ibrahim. Each appointment was reported as made, but the point stayed (4 points available), and each promotion through civ6-mcp failed with `PROMOTION_FAILED` or `PREREQ_NOT_MET`. `UI.CanEndTurn()` was true, yet the end-turn request never advanced the turn. The bot was stopped, and the turn then ended, with Germany's science victory. How it was released isn't known: the owner may have spent the title by hand, and nobody recorded it. Partly fixed (PR 97): the bot no longer retries an appointment that keeps the point. Why the promotions failed is still open (issue 14).
 
 ### Slow turns: one cause
 

@@ -9,6 +9,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
 
+from civ6_ai.call_timer import CallTimer
+
 log = logging.getLogger(__name__)
 
 MAX_DETAIL_LENGTH = 300
@@ -78,6 +80,8 @@ class TurnRecord:
     total_seconds: float
     stop_reason: str | None = None
     detail: str = ""
+    # Per handler, per game call: [count, seconds]. Empty if the run didn't time calls.
+    handler_calls: dict[str, dict[str, list[float]]] = field(default_factory=dict)
 
 
 @dataclass
@@ -108,7 +112,9 @@ class Orchestrator:
         handlers: list[Handler],
         turn_log: TurnLog,
         defeat_check: DefeatCheck | None = None,
+        call_timer: CallTimer | None = None,
     ) -> None:
+        self._call_timer = call_timer
         self._game = game
         self._handlers = handlers
         self._log = turn_log
@@ -129,6 +135,7 @@ class Orchestrator:
         started = time.perf_counter()
         turn = await self._read_turn()
         seconds, errors = await self._run_handlers()
+        calls = self._call_timer.take() if self._call_timer else {}
 
         end_turn_started = time.perf_counter()
         try:
@@ -155,6 +162,7 @@ class Orchestrator:
                 turn=turn,
                 handler_seconds=seconds,
                 handler_errors=errors,
+                handler_calls=calls,
                 end_turn_seconds=end_turn_seconds,
                 total_seconds=time.perf_counter() - started,
                 stop_reason=reason,
@@ -216,6 +224,8 @@ class Orchestrator:
         errors: dict[str, str] = {}
         for handler in self._handlers:
             started = time.perf_counter()
+            if self._call_timer:
+                self._call_timer.begin(handler.name)
             try:
                 await handler.run(self._game)
             except ConnectionError:
@@ -224,6 +234,8 @@ class Orchestrator:
                 log.exception("Handler %s failed", handler.name)
                 errors[handler.name] = repr(error)[:MAX_DETAIL_LENGTH]
             seconds[handler.name] = time.perf_counter() - started
+        if self._call_timer:
+            self._call_timer.begin(None)
         return seconds, errors
 
     async def _read_turn(self) -> int:

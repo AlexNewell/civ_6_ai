@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from civ6_ai.blockers import BlockerResolver, ResolvingGame
+from civ6_ai.call_timer import CallTimer
 from civ6_ai.defeat import is_defeated
 from civ6_ai.monitors import EventBus, Monitors
 from civ6_ai.orchestrator import Handler, Orchestrator, TurnLog
@@ -71,6 +72,16 @@ _SHARED_READS = frozenset(
         "get_diplomacy",
         "get_victory_progress",
         "get_threat_scan",
+        # Read by several handlers and by the blocker resolver, and by the government handler
+        # up to five times a turn. Left out on purpose: the diplomacy, notification and congress
+        # reads, because the end-turn watcher polls them while the game is moving.
+        "get_units",
+        "get_tech_civics",
+        "get_policies",
+        "get_governors",
+        "get_trade_routes",
+        "get_pantheon_status",
+        "get_city_states",
     }
 )
 _PLAIN_READS = ("get_", "list_", "check_")
@@ -205,5 +216,8 @@ def build_orchestrator(game: Any, bus: EventBus, turn_log: TurnLog) -> Orchestra
         FaithPolicy(),
         resolver,
     ]
-    shared = ResolvingGame(SharedReads(game), resolver)
-    return Orchestrator(shared, handlers, turn_log, defeat_check=partial(is_defeated, game))
+    timer = CallTimer(game)  # Under SharedReads, so it times real calls and not remembered ones.
+    shared = ResolvingGame(SharedReads(timer), resolver)
+    return Orchestrator(
+        shared, handlers, turn_log, defeat_check=partial(is_defeated, game), call_timer=timer
+    )

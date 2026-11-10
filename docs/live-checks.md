@@ -24,12 +24,18 @@ Written offline against civ6-mcp's source, so none of this has run in a game yet
 ## Run 3: the fully wired bot from turn 1 (issues 6, 13 and 16)
 
 - **Build:** main at `adef6e6`, with every policy wired in, plus the World Congress fix below. civ6-mcp pinned at `dd20190`. No model calls.
-- **Game:** standard save `STD_T1_01`. Played turns 1 to 131 in two sessions: the first stopped on turn 81 (stop 1), and the second ran until the owner paused the experiment on turn 131.
-- **Time:** 2.3 hours of bot time for 131 turns, median 40s a turn. Three turns took over 5 minutes, 32 minutes in all.
+- **Game:** standard save `STD_T1_01`, played from turn 1 to the end of the game, on turn 318, over seven sessions. The owner paused the game on turn 131 and reloaded it on turn 133. Later sessions ran on main as each fix below was merged (PRs 85, 86 and 92 to 95).
+- **Result:** Germany won a science victory at the end of turn 318, and the Maya were defeated. This is the first game the bot played to the end. It doesn't count toward gate G1, because it needed hands-on help: nudges through World Congress sessions on turns 81, 156 and 306, and the governor title on turn 318 (stop 6).
+- **Time:** 5.7 hours of bot time for 312 logged turns. The median was 52s a turn: 40s up to turn 131 and 58s after it. Four turns took over 3 minutes (the table below). Turns 200 and 303 were skipped (stops 3 and 4), and turns 131, 132 and 306 have no line because a session stopped on them.
 
 ### Stops and fixes
 
 1. **Turn 81, the first World Congress session.** `end_turn` refuses while a session is open unless a voter is registered, even after votes are submitted. The bot voted directly in an open session and never registered one, so every retry was refused. Fixed: voting in an open session now registers the voter first. Confirmed live on turn 81, and on turn 131's session.
+2. **Turn 156, an open session the game didn't list.** The voter was registered after the session opened, so it never fired. The game's blocking list stayed empty while the session held the turn, and `end_turn` reported a hang after 12 minutes. Fixed (PR 92): the end-turn watcher (PR 86) also reads whether a session is open, and votes and submits.
+3. **Turn 200 was skipped.** The turn still read as 199 while turn 200's blockers showed. The watcher cleared them and asked again, which ended turn 200 before the bot played it. Fixed (PR 93): the watcher acts only on a hold it sees twice with the same turn and the same blockers.
+4. **Turn 303 was skipped.** After submitting a session on turn 302, the watcher also asked again to end the turn, which ended turn 303. Fixed (PR 94): after a submit the watcher waits, and doesn't ask again on that check.
+5. **Turn 306, a session that stayed open after each submit.** Fixed (PR 95): if the session is still open on a later check of the same turn, the watcher asks once to end the turn.
+6. **Turn 318, a governor title nobody could spend.** The only governor left to appoint was Ibrahim. Each appointment was reported as made, but the point stayed (4 points available), and each promotion through civ6-mcp failed with `PROMOTION_FAILED` or `PREREQ_NOT_MET`. `UI.CanEndTurn()` was true, yet the end-turn request never advanced the turn. The owner spent the title by hand, and the turn ended. Not fixed (issue 14).
 
 ### Slow turns: one cause
 
@@ -38,8 +44,9 @@ Written offline against civ6-mcp's source, so none of this has run in a game yet
 | 10 | 612 | A unit left with no orders after a refused move, reported as "Command Units" |
 | 97 | 693 | A World Congress session reopened after the end-turn request |
 | 106 | 616 | No blocker reported, so probably a popup during the AI turn |
+| 156 | 716 | An open World Congress session the game didn't list (stop 2) |
 
-All three, and Run 2's turns 81 and 96, fit one pattern. Something needs attention after the end-turn request, and civ6-mcp only looks after polling for about 9 minutes: then it reports a blocker, or closes popups and asks again. Checking every 20 to 30 seconds while `end_turn` waits would cut these to seconds.
+The first three, and Run 2's turns 81 and 96, fit one pattern. Something needs attention after the end-turn request, and civ6-mcp only looks after polling for about 9 minutes: then it reports a blocker, or closes popups and asks again. PR 86 added a watcher that checks every 20 seconds while `end_turn` waits, and after it no turn took over 3 minutes except turn 156, which led to PR 92.
 
 ### Seen, not fixed
 
@@ -48,6 +55,12 @@ All three, and Run 2's turns 81 and 96, fit one pattern. Something needs attenti
 - **Units lost near the capital.** Two Builders, a Trader, a Scout, two Slingers and two Warriors died by turn 80, mostly to a Sumerian Archer and barbarians that stayed close for dozens of turns.
 - **Traders try routes with no moves left**, and Builders are refused some improvements ("cannot improve").
 - **Votes aren't logged**, so how the bot voted can't be checked.
+- **The governor point loop (turns 259, 262, 280, 285, 302 and 318).** The bot appoints Ibrahim, the game keeps the point, and the bot gives up for that turn. On earlier turns the turn still ended. On turn 318 it didn't (stop 6).
+- **Wars.** Sumeria was at war with the Maya for much of the game, and the city-state Kandy, with Sumeria as its suzerain, joined in. The Mapuche declared war on turn 302 and killed a Heavy Chariot, a Warrior and a Settler, and the score fell from 498 to 448. Peace and war awareness is issue 88.
+- **The watcher closes the leader screen** (`LeaderScene`) before an AI deal or demand is answered, so the diplomacy policy never sees the deal.
+- **The military handler failed once (turn 287)**, parsing a diplomacy statement: "Overview response has 1 fields".
+- **civ6-mcp's victory check raises `ValueError`** on a decimal value ('33.5') in `_check_victory_proximity`. Its report loses that section, and the turn goes on.
+- **Resources and gold pile up.** Strategic resources and gold were unspent late in the game. These are issues 89 (resource trades) and 87 (gold spending).
 - civ6-mcp's after-turn snapshot sometimes fails with a Lua error. It catches this, and the only effect is a shorter event report.
 
 ## Run 2: the wired bot from turn 1 (issues 6 and 12)

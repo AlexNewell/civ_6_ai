@@ -17,12 +17,14 @@ Order within a turn:
 6. `GovernmentPolicy` changes government, fills policy slots and spends governor points. It runs
    after research, whose completed civics decide which governments are open.
 7. `CityProductionPolicy` gives idle cities something to build, after settling may have founded one.
-8. `BuilderPolicy` sends builders to work. Settling moves only settlers, scouts and combat escorts,
+8. `GoldPolicy` spends gold above its reserve on upgrades, purchases and tiles, after production
+   has chosen what each city builds.
+9. `BuilderPolicy` sends builders to work. Settling moves only settlers, scouts and combat escorts,
    and military only combat units, so no unit is ordered twice.
-9. `SecondaryPolicy` runs pantheon, religion, great people and trade routes. It comes after
+10. `SecondaryPolicy` runs pantheon, religion, great people and trade routes. It comes after
    production, so a trader built earlier is routed this turn, and moves only great people and
    traders, which no other handler touches.
-10. `BlockerResolver` goes last, because it clears what is left and skips any idle units. It gets
+11. `BlockerResolver` goes last, because it clears what is left and skips any idle units. It gets
    the blocker policies of production, research, government, secondary, military and diplomacy,
    with its defaults as fallback. Government, military and diplomacy are each one instance,
    shared by handler and blocker table, so their bounds hold across both. Two policies claiming
@@ -43,6 +45,7 @@ from civ6_ai.orchestrator import Handler, Orchestrator, TurnLog
 from civ6_ai.policies import research
 from civ6_ai.policies.builder import BuilderPolicy
 from civ6_ai.policies.diplomacy import DiplomacyPolicy
+from civ6_ai.policies.gold import GoldPolicy
 from civ6_ai.policies.government import GovernmentPolicy
 from civ6_ai.policies.military import MilitaryPolicy
 from civ6_ai.policies.production import CityProductionPolicy
@@ -193,6 +196,7 @@ def build_orchestrator(game: Any, bus: EventBus, turn_log: TurnLog) -> Orchestra
         research.ResearchPolicy(),
         government,
         production,
+        GoldPolicy(),
         BuilderPolicy(),
         secondary,
         resolver,

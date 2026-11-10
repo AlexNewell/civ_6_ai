@@ -112,6 +112,7 @@ def test_one_turn_runs_handlers_in_order_and_acts(tmp_path):
         "research",
         "government",
         "city_production",
+        "gold",
         "builder",
         "secondary",
         "blockers",

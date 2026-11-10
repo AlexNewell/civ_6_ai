@@ -17,13 +17,25 @@ Issues are generated from [`.github/roadmap-issues.yaml`](.github/roadmap-issues
 
 ## Sequence
 
-Phases 1, 2 and 3 and Tracks E and S can overlap. Diamonds mark hard gates.
+Phases 1, 2 and 3 and Tracks E and S can overlap. Diamonds are hard gates.
 
-```text
-Phase 0 Repo ─ Track T Toolchain ──◆ G0 ─┬─ Phase 1 Deterministic bot ──◆ G1 ─┬─ Phase 2 Strategist ─┬─ Phase 4 ──◆ M1 ─ Phase 5 Improvement loop
-                                         ├─ Track E Evaluator + data ─────────┤                      │
-                                         │                                    └─ Phase 3 Bake-off ───┘
-                                         └─ Track S Puppeteering spike ──◆ G2 ──────────────────────────────── Phase 6 Puppets ─ Phase 7 Human vs LLM
+```mermaid
+flowchart TD
+    P0["Phase 0: Repo setup"] --> T["Track T: Game toolchain"] --> G0{G0}
+    G0 --> P1["Phase 1: Deterministic bot"] --> G1{G1}
+    G0 --> E["Track E: Evaluator and data"]
+    G0 --> S["Track S: Puppeteering spike"] --> G2{G2}
+    G1 --> P2["Phase 2: Strategist"]
+    G1 --> P3["Phase 3: Cheap-tier bake-off"]
+    E --> P2
+    E --> P3
+    P2 --> P4["Phase 4: Reach M1"]
+    P3 --> P4
+    P4 --> M1{M1}
+    M1 --> P5["Phase 5: Improvement loop"]
+    M1 --> P6["Phase 6: Puppeted opponents"]
+    G2 --> P6
+    P6 --> P7["Phase 7: Human vs LLM"]
 ```
 
 ## Gates

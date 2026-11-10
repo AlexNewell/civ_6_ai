@@ -1,18 +1,18 @@
 # Source of truth for GitHub labels, milestones and issues. Created by scripts/seed_github.py.
-# An issue's id prefix sets its milestone and phase/track label. Dependencies are issue ids.
+# An issue's id prefix sets its milestone and phase/workstream label. Dependencies are issue ids.
 # Keep personal details out: this repo may become public.
 
 labels:
-  - {name: "phase:1", color: "1d76db", description: "Deterministic bot"}
+  - {name: "phase:1", color: "1d76db", description: "Deterministic Bot"}
   - {name: "phase:2", color: "1d76db", description: "Strategist"}
-  - {name: "phase:3", color: "1d76db", description: "Cheap-tier bake-off"}
+  - {name: "phase:3", color: "1d76db", description: "Cheap-Tier Bake-Off"}
   - {name: "phase:4", color: "1d76db", description: "Reach M1"}
-  - {name: "phase:5", color: "1d76db", description: "Improvement loop"}
-  - {name: "phase:6", color: "1d76db", description: "Puppeted opponents"}
+  - {name: "phase:5", color: "1d76db", description: "Improvement Loop"}
+  - {name: "phase:6", color: "1d76db", description: "Puppeted Opponents"}
   - {name: "phase:7", color: "1d76db", description: "Human vs LLM"}
-  - {name: "track:t", color: "5319e7", description: "Game toolchain"}
-  - {name: "track:e", color: "5319e7", description: "Evaluator and data"}
-  - {name: "track:s", color: "5319e7", description: "Puppeteering spike"}
+  - {name: "workstream:t", color: "5319e7", description: "Game Toolchain"}
+  - {name: "workstream:e", color: "5319e7", description: "Evaluator and Data"}
+  - {name: "workstream:s", color: "5319e7", description: "Puppeteering Spike"}
   - {name: "type:feature", color: "0e8a16", description: "Buildable work"}
   - {name: "type:epic", color: "b60205", description: "Large task to split into smaller issues"}
   - {name: "type:spike", color: "fbca04", description: "Time-boxed feasibility investigation"}
@@ -22,38 +22,38 @@ labels:
 
 milestones:
   - id: T
-    title: "Track T: Game toolchain (G0)"
+    title: "Workstream T: Game Toolchain (G0)"
     description: "G0: a script reads state, moves a unit and ends a turn; the governor test proves the hard stop."
   - id: "1"
-    title: "Phase 1: Deterministic bot (G1)"
+    title: "Phase 1: Deterministic Bot (G1)"
     description: "G1: three unattended full games complete with zero LLM calls."
   - id: E
-    title: "Track E: Evaluator and data"
+    title: "Workstream E: Evaluator and Data"
     description: "Objective scoring, baselines and fast scenarios."
   - id: S
-    title: "Track S: Puppeteering spike (G2)"
+    title: "Workstream S: Puppeteering Spike (G2)"
     description: "G2: a scripted bot plays a puppet with the built-in AI fully suppressed for 50 turns."
   - id: "2"
     title: "Phase 2: Strategist"
     description: "A rarely called frontier model steers deterministic policy within the per-game cap."
   - id: "3"
-    title: "Phase 3: Cheap-tier bake-off"
+    title: "Phase 3: Cheap-Tier Bake-Off"
     description: "Choose the routine-decision tier by measured quality per dollar."
   - id: "4"
     title: "Phase 4: Reach M1"
     description: "M1: at least 8 standard games complete unattended, none above $1.00, with mean rank 3 of 6 or better, or at least 2 wins."
   - id: "5"
-    title: "Phase 5: Improvement loop"
+    title: "Phase 5: Improvement Loop"
     description: "Evaluator-driven code improvement between games."
   - id: "6"
-    title: "Phase 6: Puppeted opponents"
+    title: "Phase 6: Puppeted Opponents"
     description: "Five fair LLM opponents in one game. Needs a budget review first."
   - id: "7"
     title: "Phase 7: Human vs LLM"
     description: "A human can play and enjoy a game against LLM opponents."
 
 issues:
-  # Track T
+  # Workstream T
   - id: T.1
     title: Set up Civ VI tooling
     type: feature
@@ -289,7 +289,7 @@ issues:
     depends: ["1.11"]
     budget: none
 
-  # Track E
+  # Workstream E
   - id: E.1
     title: Ingest CivBench dataset and extract baselines
     type: research
@@ -347,7 +347,7 @@ issues:
     depends: ["1.8", E.2, E.4]
     budget: none
 
-  # Track S
+  # Workstream S
   - id: S.1
     title: "Lua mod: intercept and hold an AI turn"
     type: spike

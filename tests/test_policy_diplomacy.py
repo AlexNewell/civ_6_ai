@@ -626,6 +626,28 @@ def test_an_open_session_is_voted_then_submitted():
     assert game.lua[-1][1] == "ingame" and "WORLD_CONGRESS_SUBMIT_TURN" in game.lua[-1][0]
 
 
+def test_an_open_session_registers_the_voter_end_turn_requires_before_submitting():
+    game = Game()
+    game.congress = wc_status([dv_resolution()])
+    assert run(
+        DiplomacyPolicy().vote_in_open_session(game, Blocker(BlockerType.WORLD_CONGRESS_SESSION))
+    )
+    codes = [code for code, _ in game.lua]
+    assert "__civmcp_wc_handler = handler" in codes[0]  # The voter's own code submits too.
+    assert "WORLD_CONGRESS_SUBMIT_TURN" in codes[-1]
+    assert "__civmcp_wc_handler" not in codes[-1]
+
+
+def test_an_open_session_still_votes_and_submits_if_the_voter_will_not_register():
+    game = Game()
+    game.congress = wc_status([dv_resolution()])
+    game.lua_result = "ERR:something"
+    policy = DiplomacyPolicy()
+    assert not run(policy.queue_voter(game, Blocker(BlockerType.WORLD_CONGRESS_VOTE)))
+    assert any(c[0] == "vote" for c in game.calls)
+    assert "WORLD_CONGRESS_SUBMIT_TURN" in game.lua[-1][0]
+
+
 def test_an_unmet_rival_is_never_voted_on():
     game = Game()
     game.congress = wc_status([dv_resolution()])

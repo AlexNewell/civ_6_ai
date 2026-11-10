@@ -913,6 +913,9 @@ class DiplomacyPolicy:
         return await self._vote_now(game, status)
 
     async def _vote_now(self, game: DiplomacyGame, status: Any) -> bool:
+        # civ6-mcp's end_turn refuses while a session is open unless a voter is registered, even
+        # after these votes are submitted. Without this, a live game stuck on its first session.
+        registered = await self._register_voter(game, status)
         context = await self._vote_context(game, status)
         favor = context.favor
         failed = False
@@ -945,7 +948,7 @@ class DiplomacyPolicy:
             await submit_world_congress_votes(game)  # An open session holds the turn.
         if failed:
             log.warning("Some World Congress votes were not cast")
-        return True
+        return registered  # False lets the default voter register, which end_turn also accepts.
 
     def blocker_policies(self) -> Mapping[str, Callable[[Any, Blocker], Awaitable[bool]]]:
         """Policies for `BlockerResolver`. Use the same instance as the turn handler."""

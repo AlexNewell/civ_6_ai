@@ -20,7 +20,8 @@ class Overview:
 class HeldGame:
     """A game whose end_turn waits until a new end-turn request is sent, as a held turn does."""
 
-    def __init__(self, blocking=(), can_end=True, popup=False, advances_alone=False):
+    def __init__(self, blocking=(), can_end=True, popup=False, advances_alone=False, session=False):
+        self.session = session
         self.turn = 5
         self.blocking = list(blocking)
         self.can_end = can_end
@@ -54,6 +55,13 @@ class HeldGame:
             return "Dismissed: WorldCongressPopup"
         return "No popups to dismiss."
 
+    async def get_world_congress(self):
+        return Congress(self.session)
+
+    async def queue_wc_votes(self, votes):
+        self.calls.append("register voter")
+        return "OK:QUEUED"
+
     async def skip_remaining_units(self):
         self.calls.append("skip")
         self.blocking.remove(BlockerType.UNITS)
@@ -62,11 +70,22 @@ class HeldGame:
     async def execute_lua(self, code, context="gamecore"):
         if "UI.CanEndTurn" in code:
             return f"CAN_END_TURN|{str(self.can_end).lower()}"
+        if "WORLD_CONGRESS_SUBMIT_TURN" in code:
+            self.calls.append("submit")
+            self.session = False
+            return "OK"
         if "ACTION_ENDTURN" in code:
             self.calls.append("ask again")
             self.released.set()
             return "OK:TURN_ENDED"
         return "\n".join(f"BLOCKING|{found}|message" for found in self.blocking) or "NONE"
+
+
+@dataclass
+class Congress:
+    is_in_session: bool
+    resolutions: tuple = ()
+    turns_until_next: int = 20
 
 
 @pytest.fixture(autouse=True)
@@ -96,6 +115,14 @@ def test_no_new_request_while_the_turn_cannot_be_ended():
     game = HeldGame(blocking=[BlockerType.UNITS], can_end=False)
     assert end_turn(game) == TIMED_OUT
     assert "ask again" not in game.calls
+
+
+def test_an_open_session_the_game_does_not_list_is_submitted_and_the_turn_asked_again():
+    # Run 3, turn 156: the voter was registered after the session opened, so it never fired,
+    # and the game's blocking list stayed empty while the session held the turn.
+    game = HeldGame(session=True)
+    assert end_turn(game) == ADVANCED
+    assert game.calls == ["end_turn", "register voter", "submit", "ask again"]
 
 
 def test_nothing_to_clear_means_no_new_request():

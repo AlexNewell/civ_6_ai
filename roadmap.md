@@ -10,7 +10,7 @@ Issues are generated from [`.github/roadmap-issues.yaml`](.github/roadmap-issues
 |---|---|
 | Phase 0: Repo setup | Done |
 | Track T: Game toolchain | Done |
-| Phase 1: Deterministic bot | In progress. 1.1-1.8, 1.10-1.12 and the first slice of 1.9 are merged and wired into the bot, pending live acceptance in a full game. 1.13 is not started. 1.14-1.17 were added after Run 3. |
+| Phase 1: Deterministic bot | In progress. 1.1-1.8, 1.10-1.12 and the first slice of 1.9 are merged and wired into the bot, played to the end of a full game in Run 3 (turn 318, a German science victory), with hands-on help at four holds, so G1 has no unattended game yet. 1.13 is not started. 1.14-1.17 were added after Run 3. |
 | Track E: Evaluator and data | In progress |
 | Track S: Puppeteering spike | In progress |
 | Everything else | Not started |

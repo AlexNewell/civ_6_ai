@@ -10,6 +10,8 @@ import asyncio
 import json
 import logging
 import sys
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -20,7 +22,7 @@ from civ6_ai.bot import SettleDecisionLog, build_orchestrator
 from civ6_ai.metrics.costs import game_id_of_log
 from civ6_ai.metrics.speed import summarise as summarise_speed
 from civ6_ai.monitors import EventBus, EventLog
-from civ6_ai.orchestrator import StopReason, TurnLog
+from civ6_ai.orchestrator import StopReason, TurnLog, TurnRecord
 from civ6_ai.saves import use_real_save_dirs
 
 ROOT = Path(__file__).parent.parent
@@ -35,7 +37,31 @@ def identify_save(manifest: dict, game_seed: int) -> str | None:
     return None
 
 
-async def run(turns: int) -> int:
+@dataclass
+class GameRun:
+    name: str
+    reason: StopReason
+    turn_log: TurnLog
+    decisions: SettleDecisionLog
+
+
+class _NotifyingTurnLog(TurnLog):
+    """A turn log that tells the runner's watchdog about each finished turn."""
+
+    on_turn: Callable[[TurnRecord], None] | None = None
+
+    def write(self, record: TurnRecord) -> None:
+        super().write(record)
+        if self.on_turn is not None:
+            self.on_turn(record)
+
+
+async def play_game(
+    turns: int,
+    expect_save: str | None = None,
+    on_turn: Callable[[TurnRecord], None] | None = None,
+) -> GameRun | None:
+    """Play `turns` turns in the open game. None if it is not a standard save (or `expect_save`)."""
     use_real_save_dirs()
     connection = GameConnection()
     await connection.connect()
@@ -46,10 +72,14 @@ async def run(turns: int) -> int:
     name = identify_save(manifest, seed)
     if name is None:
         print("FAILED: the open game isn't a standard save")
-        return 1
+        return None
+    if expect_save is not None and name != expect_save:
+        print(f"FAILED: the open game is {name}, not {expect_save}")
+        return None
 
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    turn_log = TurnLog(ROOT / "runs" / f"{name}_{stamp}.jsonl")
+    turn_log = _NotifyingTurnLog(ROOT / "runs" / f"{name}_{stamp}.jsonl")
+    turn_log.on_turn = on_turn
     bus = EventBus()
     bus.subscribe(EventLog(ROOT / "runs" / f"{name}_{stamp}_events.jsonl").write)
     # Policy decisions are logged at INFO. Keep them beside the turn log, since they explain it.
@@ -65,7 +95,19 @@ async def run(turns: int) -> int:
         decisions.detach()
         logging.getLogger("civ6_ai").removeHandler(file_log)
         file_log.close()
+    return GameRun(name, reason, turn_log, decisions)
 
+
+async def run(turns: int) -> int:
+    played = await play_game(turns)
+    if played is None:
+        return 1
+    name, reason, turn_log, decisions = (
+        played.name,
+        played.reason,
+        played.turn_log,
+        played.decisions,
+    )
     records = turn_log.records
     total = sum(record.total_seconds for record in records)
     print(f"{name}: played {len(records)} turns in {total:.0f}s, stopped: {reason}")

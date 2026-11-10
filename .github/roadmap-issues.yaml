@@ -22,16 +22,16 @@ labels:
 
 milestones:
   - id: T
-    title: "Workstream T: Game Toolchain (G0)"
+    title: 'Workstream "T": Game Toolchain (G0)'
     description: "G0: a script reads state, moves a unit and ends a turn; the governor test proves the hard stop."
   - id: "1"
     title: "Phase 1: Deterministic Bot (G1)"
     description: "G1: three unattended full games complete with zero LLM calls."
   - id: E
-    title: "Workstream E: Evaluator and Data"
+    title: 'Workstream "E": Evaluator and Data'
     description: "Objective scoring, baselines and fast scenarios."
   - id: S
-    title: "Workstream S: Puppeteering Spike (G2)"
+    title: 'Workstream "S": Puppeteering Spike (G2)'
     description: "G2: a scripted bot plays a puppet with the built-in AI fully suppressed for 50 turns."
   - id: "2"
     title: "Phase 2: Strategist"
@@ -53,7 +53,7 @@ milestones:
     description: "A human can play and enjoy a game against LLM opponents."
 
 issues:
-  # Workstream T
+  # Workstream "T"
   - id: T.1
     title: Set up Civ VI tooling
     type: feature
@@ -289,7 +289,7 @@ issues:
     depends: ["1.11"]
     budget: none
 
-  # Workstream E
+  # Workstream "E"
   - id: E.1
     title: Ingest CivBench dataset and extract baselines
     type: research
@@ -347,7 +347,7 @@ issues:
     depends: ["1.8", E.2, E.4]
     budget: none
 
-  # Workstream S
+  # Workstream "S"
   - id: S.1
     title: "Lua mod: intercept and hold an AI turn"
     type: spike

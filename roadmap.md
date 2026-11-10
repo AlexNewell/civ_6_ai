@@ -9,22 +9,22 @@ Issues are generated from [`.github/roadmap-issues.yaml`](.github/roadmap-issues
 | Stage | Status |
 |---|---|
 | Phase 0: Repo Setup | Done |
-| Workstream T: Game <ins>Toolchain</ins> | Done |
+| Workstream "T": Game <ins>Toolchain</ins> | Done |
 | Phase 1: Deterministic Bot | In progress. 1.1-1.8, 1.10-1.12 and the first slice of 1.9 are merged and wired into the bot, played to the end of a full game in Run 3 (turn 318, a German science victory), with hands-on help at four holds, so G1 has no unattended game yet. 1.13 is not started. 1.14-1.17 were added after Run 3. |
-| Workstream E: <ins>Evaluator</ins> and Data | In progress |
-| Workstream S: Puppeteering <ins>Spike</ins> | In progress |
+| Workstream "E": <ins>Evaluator</ins> and Data | In progress |
+| Workstream "S": Puppeteering <ins>Spike</ins> | In progress |
 | Everything else | Not started |
 
 ## Sequence
 
-Phases are the main line of work, in order. Workstreams are side work that runs alongside them and feeds in at a gate. Each workstream's letter is the first letter of its underlined word. Phases 1, 2 and 3 and Workstreams E and S can overlap. Diamonds are hard gates.
+Phases are the main line of work, in order. Workstreams are side work that runs alongside them and feeds in at a gate. Each workstream's letter is the first letter of its underlined word. Phases 1, 2 and 3 and Workstreams "E" and "S" can overlap. Diamonds are hard gates.
 
 ```mermaid
 flowchart TD
-    P0["Phase 0: Repo Setup"] --> T["Workstream T: Game <u>Toolchain</u>"] --> G0{G0}
+    P0["Phase 0: Repo Setup"] --> T["Workstream #quot;T#quot;: Game <u>Toolchain</u>"] --> G0{G0}
     G0 --> P1["Phase 1: Deterministic Bot"] --> G1{G1}
-    G0 --> E["Workstream E: <u>Evaluator</u> and Data"]
-    G0 --> S["Workstream S: Puppeteering <u>Spike</u>"] --> G2{G2}
+    G0 --> E["Workstream #quot;E#quot;: <u>Evaluator</u> and Data"]
+    G0 --> S["Workstream #quot;S#quot;: Puppeteering <u>Spike</u>"] --> G2{G2}
     G1 --> P2["Phase 2: Strategist"]
     G1 --> P3["Phase 3: Cheap-Tier Bake-Off"]
     E --> P2
@@ -63,7 +63,7 @@ Local only and tracked here, because it comes before the GitHub repo exists. **E
 - `0.6` Public-ready checks and secret scanning
 - `0.7` Final check and initial commit
 
-## Workstream T: Game <ins>Toolchain</ins>
+## Workstream "T": Game <ins>Toolchain</ins>
 
 **Purpose:** Connect to Civ VI, read and change the game, cap model spend, and fix a set of starting saves so games can be compared.
 
@@ -98,7 +98,7 @@ No external model calls. Policies 1.5-1.12 can run in parallel. Leads to **G1**.
 - [`1.16`](https://github.com/AlexNewell/civ_6_ai/issues/89) Propose resource trades
 - [`1.17`](https://github.com/AlexNewell/civ_6_ai/issues/90) Spend faith and use prophets
 
-## Workstream E: <ins>Evaluator</ins> and Data
+## Workstream "E": <ins>Evaluator</ins> and Data
 
 **Purpose:** Measure how well the bot plays, so each change is judged on data rather than impressions: baselines from CivBench, metrics, short test scenarios and reports.
 
@@ -110,7 +110,7 @@ Parallel with Phase 1.
 - [`E.4`](https://github.com/AlexNewell/civ_6_ai/issues/21) Results report with confidence intervals
 - [`E.5`](https://github.com/AlexNewell/civ_6_ai/issues/62) First-city timing study
 
-## Workstream S: Puppeteering <ins>Spike</ins>
+## Workstream "S": Puppeteering <ins>Spike</ins>
 
 **Purpose:** Find out whether our code can fully control an AI player, which LLM opponents beside a human require.
 

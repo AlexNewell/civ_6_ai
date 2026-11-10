@@ -8,7 +8,7 @@ Project decisions and why they were made. New ones are added as the work goes on
 |---|---|
 | Frontier-only CivBench games cost about $31-229 each and take 2-8 hours. | A $1 cap needs a 97-99.5% reduction, so most turns must make no LLM call and a deterministic bot comes first. |
 | FireTuner is hard-disabled in all multiplayer modes, including hot-seat. | Opponents must "puppeteer" AI slots in single-player. |
-| Puppeteering is an unimplemented upstream proposal with open questions. | The long-term goal is unproven, so Workstream S tests it early. |
+| Puppeteering is an unimplemented upstream proposal with open questions. | The long-term goal is unproven, so Workstream "S" tests it early. |
 | The tuner allows one connection, and upstream recommends one orchestrator process for multi-agent play. | The game AI runs in-process against civ6-mcp's `GameState`, with no per-model MCP tool loop. |
 | GameCore can read every player's state. | Fog-of-war filtering must be enforced, or opponents can cheat by accident. |
 | Claude Haiku 5.5 costs $0.10 input and $0.50 output per million tokens, for prompts up to 100,000 tokens. Above that, the whole request costs five times as much. | It is a viable cloud option for routine decisions, provided prompts stay small. |

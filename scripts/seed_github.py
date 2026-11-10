@@ -24,7 +24,10 @@ SEED_PATH = ROOT / ".github" / "roadmap-issues.yaml"
 ROADMAP_PATH = ROOT / "roadmap.md"
 PENDING = "(link pending)"
 REQUIRED = ("id", "title", "type", "goal", "scope", "acceptance", "budget")
-ROADMAP_ITEM = re.compile(r"^- (?:\[`([^`]+)`\]\([^)]*\)|`([^`]+)`) (.+)$", re.MULTILINE)
+# A roadmap item is a table row: | `id` or [`id`](url) | title | status and notes... |
+ROADMAP_ITEM = re.compile(
+    r"^\| (?:\[`([^`]+)`\]\([^)]*\)|`([^`]+)`) \| ([^|\n]+?) \|(.*)$", re.MULTILINE
+)
 
 
 def load_seed(path: Path = SEED_PATH) -> dict[str, Any]:
@@ -194,7 +197,7 @@ def link_roadmap(numbers: dict[str, int], repo: str, path: Path = ROADMAP_PATH) 
         if issue_id not in numbers:
             return match[0]
         url = f"https://github.com/{repo}/issues/{numbers[issue_id]}"
-        return f"- [`{issue_id}`]({url}) {match[3]}"
+        return f"| [`{issue_id}`]({url}) | {match[3]} |{match[4]}"
 
     path.write_text(ROADMAP_ITEM.sub(replace, path.read_text(encoding="utf-8")), encoding="utf-8")
 

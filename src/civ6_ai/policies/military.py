@@ -19,6 +19,15 @@ is built. What it does, in the order a unit is considered (a unit gets one order
 4. Clear a barbarian camp, only when the force on hand is `camp_force_ratio` times theirs.
 5. Idle units in a threatened city fortify, and units outside run for a city if hostile units
    are close.
+6. Spare units (see below) get one useful order. They hunt a hostile unit just out of reach when
+   the odds favour it, and the destination is within `spare_leash` of a city. Otherwise they
+   fortify in place. A spare unit with nothing to do is logged as such.
+
+A spare unit is a healthy combat unit that is not reserved for settling and is not needed for its
+city's `garrison_required`. A unit outside a city is spare. Step 1 already covers attacks on
+units of a civ we are at war with and on barbarians, as `Threat.hostile` is true for both, so
+no second war list is kept here. Step 4 already covers camps, so spare units are not sent
+anywhere else. At most `max_spare_orders` spare orders go out in a turn.
 
 A refused move to a city is not the end of the unit's turn: it tries up to `fallback_tiles` tiles
 beside the city, then fortifies where it stands.
@@ -147,6 +156,9 @@ class MilitarySettings:
     fallback_tiles: int = (
         2  # Other tiles tried for a unit whose move was refused, before it fortifies.
     )
+    spare_hunt_radius: int = 3  # A hostile unit this close to a spare unit may be walked at.
+    spare_leash: int = 4  # A spare unit never goes further than this from its nearest city.
+    max_spare_orders: int = 6  # Hunt and fortify orders for spare units in one turn.
     max_actions: int = 12  # Orders sent to the game in one turn, whatever the number of units.
     attempts_per_unit: int = 2  # Calls spent on one unit in a turn, as each refusal costs one.
     retry_turns: int = 3  # How long a refused order for a unit is not repeated.
@@ -286,7 +298,8 @@ class MilitaryDecision:
     unit_id: int
     x: int
     y: int
-    action: str  # attack, city_strike, heal, retreat, garrison, camp, fortify, flee, promote, skip
+    # attack, city_strike, heal, retreat, garrison, camp, hunt, fortify, flee, promote, skip
+    action: str
     reason: str
     target: tuple[int, int] | None = None
     odds: dict[str, Any] | None = None
@@ -331,6 +344,7 @@ class _Turn:
     target_hp: dict[tuple[int, int], float] = field(default_factory=dict)
     at_city: dict[tuple[int, int], int] = field(default_factory=dict)
     camp_scanned: bool = False
+    spare_orders: int = 0
     fired: set[int] = field(default_factory=set)  # Cities that have used their strike.
     struck: set[tuple[int, int]] = field(default_factory=set)  # Targets a city has hit.
     attacked: set[tuple[int, int]] = field(default_factory=set)  # Targets any attack landed on.
@@ -391,6 +405,7 @@ class MilitaryPolicy:
         await self._heal(game, t)
         await self._garrison(game, t)
         await self._clear_camp(game, t)
+        await self._spare_units(game, t)
         await self._idle(game, t)
 
     # ----- bookkeeping -----
@@ -890,6 +905,8 @@ class MilitaryPolicy:
                 t, unit, "fortify", "move refused, so fortified where it stands", result=result
             )
         else:
+            t.acted.add(unit.unit_id)  # Out of options, so not tried again this turn.
+            self._refuse(t, unit, "spare")
             self._log(
                 t, unit, "fortify", "fortify refused after a refused move", result=result or ""
             )
@@ -1032,16 +1049,103 @@ class MilitaryPolicy:
                     else:
                         self._refuse(t, unit, "idle")
                 continue
-            near_hostile = any(
-                th.hostile
-                and hex_distance(unit.x, unit.y, th.x, th.y, s.map_width) <= s.flee_radius
-                for th in t.threats
-            )
-            home = self._nearest_city(t, unit, s.retreat_reach) if near_hostile else None
+            home = self._nearest_city(t, unit, s.retreat_reach) if self._exposed(t, unit) else None
             if home is not None:
                 await self._walk_home(
                     game, t, unit, home, "flee", "alone outside with hostile units near"
                 )
+
+    # ----- spare units -----
+
+    async def _spare_units(self, game: MilitaryGame, t: _Turn) -> None:
+        """One useful order for each healthy unit nobody else ordered and no city needs."""
+        s = self.settings
+        w = s.weights
+        for unit in sorted(t.mine, key=lambda u: u.unit_id):
+            if unit.unit_id in t.acted or unit.hp < w.heal_below * unit.max_hp:
+                continue
+            if not self._spare(t, unit):
+                continue  # Needed for the garrison, so it stays as it is.
+            if self._city_at(t, unit) is None and self._exposed(t, unit):
+                continue  # Alone outside with hostile units close: the idle step runs for home.
+            if t.spare_orders >= s.max_spare_orders or t.actions >= s.max_actions:
+                self._log(t, unit, "skip", "spare, but the orders for this turn are used up")
+                continue
+            if await self._hunt(game, t, unit):
+                continue
+            if self._fortified.get(unit.unit_id) == (unit.x, unit.y) or (
+                self._resting.get(unit.unit_id) == (unit.x, unit.y)
+            ):
+                self._log(t, unit, "skip", "spare, already fortified, nothing to do")
+                continue
+            if not self._available(t, unit, "spare"):
+                self._log(
+                    t, unit, "skip", "spare, but an order was refused lately or is not allowed"
+                )
+                continue
+            t.spare_orders += 1
+            result = await self._order(t, unit, "spare", game.fortify_unit(unit.unit_index))
+            if result is not None and action_succeeded(result):
+                t.acted.add(unit.unit_id)
+                self._fortified[unit.unit_id] = (unit.x, unit.y)
+                self._log(t, unit, "fortify", "spare unit, nothing to attack, so fortified",
+                          result=result)  # fmt: skip
+            else:
+                self._refuse(t, unit, "spare")
+                self._log(t, unit, "skip", "spare, fortify refused", result=result or "")
+
+    def _exposed(self, t: _Turn, unit: Unit) -> bool:
+        s = self.settings
+        return any(
+            th.hostile and hex_distance(unit.x, unit.y, th.x, th.y, s.map_width) <= s.flee_radius
+            for th in t.threats
+        )
+
+    async def _hunt(self, game: MilitaryGame, t: _Turn, unit: Unit) -> bool:
+        """Walk a spare unit next to the nearest hostile unit it would attack, if close and safe.
+
+        The attack itself is left to the next turn's attack step. Never past `spare_leash` from a
+        city. True if the unit was ordered.
+        """
+        s = self.settings
+        w = s.weights
+        if not self._available(t, unit, "move") or unit.targets:
+            return False  # Targets in reach were judged by the attack step and turned down.
+        options = []
+        for threat in t.threats:
+            where = (threat.x, threat.y)
+            dist = hex_distance(unit.x, unit.y, *where, s.map_width)
+            if not threat.hostile or where in t.dead or dist > s.spare_hunt_radius or dist <= 1:
+                continue
+            tgt = Target(threat.unit_type, threat.x, threat.y, threat.hp)
+            odds = assess_attack(unit, tgt, threat, w, None, s.map_width)
+            if odds is None or not odds.favourable:
+                continue
+            stage = self._stage_tile(unit, where)
+            if stage is None:
+                continue
+            home = min(
+                (hex_distance(stage[0], stage[1], c.x, c.y, s.map_width) for c in t.cities),
+                default=None,
+            )
+            if home is None or home > s.spare_leash:
+                continue
+            options.append((dist, -odds.rank, where, stage, odds))
+        if not options:
+            return False
+        *_, where, stage, odds = min(options, key=lambda o: o[:3])
+        t.spare_orders += 1
+        result = await self._order(t, unit, "move", game.move_unit(unit.unit_index, *stage))
+        if result is not None and move_succeeded(result):
+            t.acted.add(unit.unit_id)
+            self._leave(t, unit)
+            self._fortified.pop(unit.unit_id, None)
+            self._log(t, unit, "hunt", "spare unit, moving next to a hostile unit it can beat",
+                      where, odds=asdict(odds), result=result)  # fmt: skip
+            return True
+        self._refuse(t, unit, "move")
+        self._log(t, unit, "hunt", "move refused", where, result=result or "")
+        return False
 
     # ----- promotions -----
 

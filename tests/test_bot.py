@@ -82,6 +82,10 @@ class WiredGame(BlockerFake):
         self.calls.append(("move_unit", unit_index, target_x, target_y))
         return f"MOVING_TO|{target_x},{target_y}"
 
+    async def fortify_unit(self, unit_index):
+        self.calls.append(("fortify_unit", unit_index))
+        return "FORTIFIED"
+
     async def improve_tile(self, unit_index, improvement_name):
         self.calls.append(("improve_tile", unit_index, improvement_name))
         return f"OK:IMPROVING|{improvement_name}|0,0"

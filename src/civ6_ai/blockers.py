@@ -568,6 +568,7 @@ class ResolvingGame:
     async def _watched_end_turn(self) -> str:
         """Run `end_turn`, clearing what holds the turn while it waits. Never sends a duplicate."""
         turn_before = await self._turn()
+        self._last_hold: tuple | None = None
         task = asyncio.ensure_future(self._game.end_turn())
         delay = WATCH_FIRST_SECONDS
         try:
@@ -595,11 +596,20 @@ class ResolvingGame:
             dismissed = await self._game.dismiss_popup()
             readers = _WATCH_READERS
             blockers = await _read_all(self._game, readers)
-            if blockers:
-                await self._resolver.resolve(self._game, readers=readers)
             if "Dismissed" in dismissed:
                 log.info("Turn %s was held, closed: %s", turn_before, dismissed[:200])
-            if blockers and await self._can_end_turn() and await self._turn() == turn_before:
+            if not blockers:
+                self._last_hold = None
+                return
+            # Act only on a hold seen twice with the same turn. As a turn changes, the turn can
+            # still read as the old one while the new turn's blockers show. Clearing those ended
+            # turn 200 of Run 3 before the bot played it.
+            hold = (turn_before, frozenset(blocker.type for blocker in blockers))
+            if hold != self._last_hold:
+                self._last_hold = hold
+                return
+            await self._resolver.resolve(self._game, readers=readers)
+            if await self._can_end_turn() and await self._turn() == turn_before:
                 await self._game.execute_lua(build_end_turn(), "ingame")
                 log.info(
                     "Turn %s was held by %s, cleared them and asked again to end it",

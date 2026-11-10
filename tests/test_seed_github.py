@@ -54,11 +54,16 @@ def test_body_links_known_numbers_and_marks_others_pending():
 
 def test_link_roadmap_is_repeatable(tmp_path):
     path = tmp_path / "roadmap.md"
-    path.write_text("- `1.5` City production policy\n- `0.1` Setup\n", encoding="utf-8")
+    path.write_text(
+        "| `1.5` | City production policy | Done |\n| `0.1` | Setup | Done |\n", encoding="utf-8"
+    )
     sg.link_roadmap({"1.5": 9}, "owner/repo", path)
     once = path.read_text(encoding="utf-8")
-    assert "- [`1.5`](https://github.com/owner/repo/issues/9) City production policy" in once
-    assert "- `0.1` Setup" in once
+    assert (
+        "| [`1.5`](https://github.com/owner/repo/issues/9) | City production policy | Done |"
+        in once
+    )
+    assert "| `0.1` | Setup | Done |" in once
     sg.link_roadmap({"1.5": 9}, "owner/repo", path)
     assert path.read_text(encoding="utf-8") == once
     assert sg.roadmap_items(once)["1.5"] == "City production policy"

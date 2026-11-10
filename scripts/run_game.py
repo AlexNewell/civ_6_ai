@@ -18,6 +18,7 @@ from civ_mcp.game_state import GameState
 
 from civ6_ai.bot import SettleDecisionLog, build_orchestrator
 from civ6_ai.metrics.costs import game_id_of_log
+from civ6_ai.metrics.speed import summarise as summarise_speed
 from civ6_ai.monitors import EventBus, EventLog
 from civ6_ai.orchestrator import StopReason, TurnLog
 from civ6_ai.saves import use_real_save_dirs
@@ -70,6 +71,9 @@ async def run(turns: int) -> int:
     print(f"{name}: played {len(records)} turns in {total:.0f}s, stopped: {reason}")
     if records:
         print(f"Slowest turn: {max(record.total_seconds for record in records):.1f}s")
+        speed = summarise_speed((r.total_seconds, r.end_turn_seconds) for r in records)
+        for line in speed.lines() if speed else []:
+            print(line)
         if reason != StopReason.TURN_LIMIT:
             print(f"Last result: {records[-1].detail}")
     print(f"Log: {turn_log.path.relative_to(ROOT)}")

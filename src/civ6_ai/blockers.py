@@ -455,6 +455,19 @@ async def _read_great_people(game: BlockerGame) -> list[Blocker]:
 _ALL_READERS = (_read_diplomacy, _read_congress, _read_end_turn_blocking, _read_great_people)
 
 
+async def _read_open_session(game: BlockerGame) -> list[Blocker]:
+    """An open session can hold a turn without being in the game's blocking list.
+
+    That happens when the voter was registered after the session opened, so it never fires.
+    """
+    status = await game.get_world_congress()
+    return [Blocker(BlockerType.WORLD_CONGRESS_SESSION)] if status.is_in_session else []
+
+
+# What the end-turn watcher checks while a turn is held.
+_WATCH_READERS = (_read_end_turn_blocking, _read_open_session)
+
+
 class BlockerResolver:
     """A turn handler that clears blockers. Run it last, because it skips any idle units."""
 
@@ -580,7 +593,7 @@ class ResolvingGame:
             if await self._turn() != turn_before:
                 return
             dismissed = await self._game.dismiss_popup()
-            readers = (_read_end_turn_blocking,)
+            readers = _WATCH_READERS
             blockers = await _read_all(self._game, readers)
             if blockers:
                 await self._resolver.resolve(self._game, readers=readers)

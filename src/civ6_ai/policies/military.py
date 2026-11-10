@@ -7,8 +7,11 @@ blocker resolver, so that settling has moved its escorts first and the resolver'
 This is the defensive slice of issue 13. It does not declare wars, march on a civ or change what
 is built. What it does, in the order a unit is considered (a unit gets one order a turn):
 
-1. Attack. A unit with a target in reach attacks when the odds favour it (`assess_attack`).
-   A ranged unit shoots; it never closes to melee range on purpose.
+1. Attack, in three steps. A walled city strikes a hostile unit within 2 tiles first, as it takes
+   no damage back. Then units attack as a group where together they are planned to kill the
+   target this turn, each above the lower `planned_kill_hp_after` floor. Then each remaining
+   unit attacks alone when the odds favour it (`assess_attack`). A ranged unit shoots; it never
+   closes to melee range on purpose. The best attack turned down for each target is logged.
 2. Heal. A unit below `heal_below` of its health fortifies until healed, in a city, or walks to
    the nearest city first. It is never left outside on its own to recover.
 3. Garrison. A city with hostile units near it, and fewer defenders than `garrison_required`,
@@ -16,6 +19,9 @@ is built. What it does, in the order a unit is considered (a unit gets one order
 4. Clear a barbarian camp, only when the force on hand is `camp_force_ratio` times theirs.
 5. Idle units in a threatened city fortify, and units outside run for a city if hostile units
    are close.
+
+A refused move to a city is not the end of the unit's turn: it tries up to `fallback_tiles` tiles
+beside the city, then fortifies where it stands.
 
 Promotions are spent from the `NOTIFICATION_UNIT_PROMOTION_AVAILABLE` notification every turn,
 and through `blocker_policies()` when the game blocks the turn on one. Live, the notification sat
@@ -110,6 +116,11 @@ class MilitaryWeights:
     damage_variance: float = 0.2  # The game rolls damage within this fraction either way.
     assumed_defender_bonus: float = 6.0  # Strength for terrain and fortification we can't see.
     kill_bonus: float = 50.0  # Rank a kill above any amount of damage.
+    # Health left after the bad-side roll, for a unit in a planned group kill. Below the lone
+    # floor of 0.4 because the plan removes the target this turn, so the unit is not left next to
+    # it, and a hurt unit heals in a city. Still well above 0: the roll is already the bad side,
+    # and the plan is abandoned as soon as an attack goes worse than planned.
+    planned_kill_hp_after: float = 0.25
     camp_force_ratio: float = 2.0  # Our strength over theirs, to go for a camp.
     camp_min_hp: float = 0.8  # Only healthy units are sent to a camp.
 
@@ -132,6 +143,10 @@ class MilitarySettings:
     max_camp_turns: int = 8  # Turns spent advancing on one camp before it is set aside.
     camp_retry_turns: int = 30
     camp_idle_turns: int = 10  # A camp not advanced on for this long starts its count again.
+    city_strike_range: int = 2  # civ6-mcp: "city attack range is 2".
+    fallback_tiles: int = (
+        2  # Other tiles tried for a unit whose move was refused, before it fortifies.
+    )
     max_actions: int = 12  # Orders sent to the game in one turn, whatever the number of units.
     attempts_per_unit: int = 2  # Calls spent on one unit in a turn, as each refusal costs one.
     retry_turns: int = 3  # How long a refused order for a unit is not repeated.
@@ -271,7 +286,7 @@ class MilitaryDecision:
     unit_id: int
     x: int
     y: int
-    action: str  # attack, heal, retreat, garrison, camp, fortify, flee, promote, skip
+    action: str  # attack, city_strike, heal, retreat, garrison, camp, fortify, flee, promote, skip
     reason: str
     target: tuple[int, int] | None = None
     odds: dict[str, Any] | None = None
@@ -288,6 +303,8 @@ class MilitaryGame(GameReads, Protocol):
     async def fortify_unit(self, unit_index: int) -> str: ...
 
     async def heal_unit(self, unit_index: int) -> str: ...
+
+    async def city_attack(self, city_id: int, target_x: int, target_y: int) -> str: ...
 
     async def get_notifications(self) -> list[Any]: ...
 
@@ -314,6 +331,11 @@ class _Turn:
     target_hp: dict[tuple[int, int], float] = field(default_factory=dict)
     at_city: dict[tuple[int, int], int] = field(default_factory=dict)
     camp_scanned: bool = False
+    fired: set[int] = field(default_factory=set)  # Cities that have used their strike.
+    struck: set[tuple[int, int]] = field(default_factory=set)  # Targets a city has hit.
+    attacked: set[tuple[int, int]] = field(default_factory=set)  # Targets any attack landed on.
+    # Per target, the best attack turned down: its odds, the unit and the reason.
+    rejected: dict[tuple[int, int], tuple[AttackOdds, Unit, str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -327,6 +349,7 @@ class MilitaryPolicy:
     _resting: dict[int, tuple[int, int]] = field(default_factory=dict, init=False, repr=False)
     _fortified: dict[int, tuple[int, int]] = field(default_factory=dict, init=False, repr=False)
     _refused: dict[tuple[int, str], int] = field(default_factory=dict, init=False, repr=False)
+    _strike_refused: dict[int, int] = field(default_factory=dict, init=False, repr=False)
     _promotion_refused: dict[int, int] = field(default_factory=dict, init=False, repr=False)
     _promotion_asked: dict[int, int] = field(default_factory=dict, init=False, repr=False)
     # Per camp tile: turns spent advancing on it and the last of them; and when it is set aside to.
@@ -384,6 +407,7 @@ class MilitaryPolicy:
             k: v for k, v in self._fortified.items() if k in by_id and (by_id[k].x, by_id[k].y) == v
         }
         self._refused = {k: v for k, v in self._refused.items() if v >= turn and k[0] in by_id}
+        self._strike_refused = {k: v for k, v in self._strike_refused.items() if v >= turn}
         self._promotion_refused = {
             k: v for k, v in self._promotion_refused.items() if v >= turn and k in by_id
         }
@@ -470,6 +494,199 @@ class MilitaryPolicy:
     # ----- attack -----
 
     async def _attack(self, game: MilitaryGame, t: _Turn) -> None:
+        """City strikes first, then planned group kills, then one attacker at a time."""
+        await self._city_strikes(game, t)
+        await self._group_kills(game, t)
+        await self._solo_attacks(game, t)
+        self._log_rejections(t)
+
+    def _defender_at(self, t: _Turn, where: tuple[int, int]) -> Threat | None:
+        defenders = [d for d in t.threats if (d.x, d.y) == where and d.hostile]
+        if not defenders:
+            return None  # The scan did not show it, so there is nothing to judge it by.
+        return max(defenders, key=lambda d: (d.combat_strength, d.ranged_strength))
+
+    def _live(self, t: _Turn, target: Target) -> Target:
+        where = (target.x, target.y)
+        return Target(target.unit_type, target.x, target.y, int(t.target_hp.get(where, target.hp)))
+
+    def _floor_for(self, t: _Turn, unit: Unit) -> float | None:
+        """The garrison floor for a city's only defender, else None for the weights' own."""
+        city = self._city_at(t, unit)
+        sole = city is not None and t.at_city.get((unit.x, unit.y), 0) <= garrison_required(
+            city, self.settings
+        )
+        return self.settings.weights.garrison_min_hp_after if sole else None
+
+    def _record_hit(
+        self, t: _Turn, where: tuple[int, int], result: str, fallback: float, hp: int
+    ) -> None:
+        killed = "killed" in result.lower() or "eliminated" in result.lower()
+        dealt = _DAMAGE_DEALT.search(result)
+        hp_now = t.target_hp.get(where, hp)
+        t.target_hp[where] = 0 if killed else hp_now - (int(dealt[1]) if dealt else fallback)
+        if killed or t.target_hp[where] <= 0:
+            t.dead.add(where)
+
+    # City strikes.
+
+    def _city_strike_odds(self, city: City, defender: Threat, hp: float) -> AttackOdds | None:
+        """What a strike by `city` is expected to do. A city takes nothing back.
+
+        civ6-mcp does not report a city's ranged strength, so its defence strength stands in
+        for it. That is an assumption to check live.
+        """
+        w = self.settings.weights
+        if city.defense_strength <= 0:
+            return None
+        if defender.combat_strength <= 0 and defender.ranged_strength <= 0:
+            return None
+        defence = defender.combat_strength + w.assumed_defender_bonus
+        dealt = expected_damage(city.defense_strength, defence)
+        sure = dealt * (1 - w.damage_variance) >= hp
+        rank = min(dealt, hp) + (w.kill_bonus if sure else 0.0)
+        return AttackOdds(dealt, 0.0, sure, 1.0, True, rank)
+
+    def _city_can_strike(self, t: _Turn, city: City) -> bool:
+        # civ6-mcp refuses a strike from a city without walls ("ERR:NO_WALLS") or one that has
+        # already fired ("ERR:ALREADY_FIRED"), so those are not asked.
+        return city.has_walls and city.city_id not in t.fired
+
+    async def _city_strikes(self, game: MilitaryGame, t: _Turn) -> None:
+        s = self.settings
+        for city in sorted(t.cities, key=lambda c: c.city_id):
+            if t.actions >= s.max_actions or not self._city_can_strike(t, city):
+                continue
+            if self._strike_refused.get(city.city_id, -1) >= t.turn:
+                continue
+            options = []
+            for threat in t.threats:
+                where = (threat.x, threat.y)
+                near = hex_distance(city.x, city.y, *where, s.map_width) <= s.city_strike_range
+                if not threat.hostile or where in t.dead or not near:
+                    continue
+                hp = int(t.target_hp.get(where, threat.hp))
+                odds = self._city_strike_odds(city, threat, hp)
+                if odds is None:
+                    continue
+                # Prefer a target the units can then finish together with the strike.
+                low = odds.dealt * (1 - s.weights.damage_variance)
+                after = Target(threat.unit_type, threat.x, threat.y, max(1, int(hp - low)))
+                plan = self._group_plan(t, after, threat, counted=1)
+                live = Target(threat.unit_type, threat.x, threat.y, hp)
+                options.append((plan is not None, odds.rank, -threat.x, -threat.y, odds, live))
+            if not options:
+                continue
+            *_, odds, live = max(options, key=lambda o: o[:4])
+            where = (live.x, live.y)
+            t.fired.add(city.city_id)  # One strike a turn, whatever the answer.
+            t.actions += 1
+            try:
+                result = await game.city_attack(city.city_id, *where)
+            except ConnectionError:
+                raise
+            except Exception:
+                log.exception("City strike from %s failed", city.name)
+                result = None
+            ok = (
+                result is not None
+                and result.startswith("CITY_RANGE_ATTACK")
+                and action_succeeded(result)
+            )
+            self._record(
+                MilitaryDecision(
+                    t.turn, -city.city_id, city.x, city.y, "city_strike",
+                    "city strike, no damage back, so first" if ok else "strike refused",
+                    where, asdict(odds), result or "",
+                )
+            )  # fmt: skip
+            if not ok or result is None:
+                self._strike_refused[city.city_id] = t.turn + s.retry_turns
+                continue
+            t.attacked.add(where)
+            t.struck.add(where)
+            self._record_hit(t, where, result, odds.dealt, live.hp)
+
+    # Planned group kills.
+
+    def _group_plan(
+        self, t: _Turn, target: Target, defender: Threat, counted: int = 0
+    ) -> list[tuple[Unit, AttackOdds]] | None:
+        """Units that together kill `target` this turn, fewest and safest first, or None.
+
+        The group must kill even on a low roll, so the plan does not rely on luck. Each unit is
+        judged on a lower floor than a lone attack (`planned_kill_hp_after`), unless it is the
+        only defender of its city. `counted` is the number of strikes already made or about to
+        be made on this target: a group needs two or more participants, or it is a lone attack
+        and the lone-attack rule applies.
+        """
+        s = self.settings
+        w = s.weights
+        where = (target.x, target.y)
+        pool = []
+        for unit in t.mine:
+            if (
+                not any((tg.x, tg.y) == where for tg in unit.targets)
+                or not self._available(t, unit, "attack")
+                or unit.hp < w.heal_below * unit.max_hp
+            ):
+                continue
+            floor = self._floor_for(t, unit)
+            floor = w.planned_kill_hp_after if floor is None else floor
+            odds = assess_attack(unit, target, defender, w, floor, s.map_width)
+            if odds is None or odds.dealt <= 0 or odds.hp_after < floor * unit.max_hp:
+                continue
+            pool.append((unit, odds))
+        # Units that take the least damage back first, then the hardest hitters.
+        pool.sort(key=lambda p: (p[1].taken, -p[1].dealt, p[0].unit_id))
+        chosen: list[tuple[Unit, AttackOdds]] = []
+        total = 0.0
+        for unit, odds in pool:
+            if total >= target.hp:
+                break
+            chosen.append((unit, odds))
+            total += odds.dealt * (1 - w.damage_variance)
+        struck = counted + (1 if where in t.struck else 0)
+        if total < target.hp or len(chosen) + struck < 2:
+            return None
+        return chosen
+
+    async def _group_kills(self, game: MilitaryGame, t: _Turn) -> None:
+        """Attack as a group where the group is planned to kill.
+
+        It replans after every attack, so a bad roll stops the plan before more units are spent
+        on a kill that no longer works. Bounded by `max_actions` and the per-unit call cap.
+        """
+        s = self.settings
+        for _ in range(s.max_actions):
+            if t.actions >= s.max_actions:
+                return
+            best = None
+            seen: set[tuple[int, int]] = set()
+            for unit in t.mine:
+                for tg in unit.targets:
+                    where = (tg.x, tg.y)
+                    defender = self._defender_at(t, where)
+                    if where in seen or where in t.dead or defender is None:
+                        continue
+                    seen.add(where)
+                    live = self._live(t, tg)
+                    plan = self._group_plan(t, live, defender)
+                    if plan is None:
+                        continue
+                    key = (defender.combat_strength, -len(plan), -where[0], -where[1])
+                    if best is None or key > best[0]:
+                        best = (key, live, plan)
+            if best is None:
+                return
+            _, live, plan = best
+            unit, odds = plan[0]
+            reason = f"planned kill: {len(plan)} unit(s) expected to kill it this turn"
+            await self._strike(game, t, unit, live, odds, reason)
+
+    # One attacker at a time.
+
+    async def _solo_attacks(self, game: MilitaryGame, t: _Turn) -> None:
         ready = [u for u in t.mine if u.targets]
         # Ranged units first, since they take no damage back, then the strongest.
         ready.sort(
@@ -482,64 +699,83 @@ class MilitaryPolicy:
             options = self._attack_options(t, unit)
             if not options:
                 continue
-            odds, target, defender = options[0]
-            result = await self._order(
-                t, unit, "attack", game.attack_unit(unit.unit_index, target.x, target.y)
-            )
-            where = (target.x, target.y)
-            if result is None or not attack_landed(result):
-                self._refuse(t, unit, "attack")
-                self._log(
-                    t,
-                    unit,
-                    "attack",
-                    "attack refused",
-                    target=where,
-                    odds=asdict(odds),
-                    result=result or "",
-                )
-                continue
-            t.acted.add(unit.unit_id)
-            self._fortified.pop(unit.unit_id, None)  # Attacking ends a fortification.
-            killed = "killed" in result.lower() or "eliminated" in result.lower()
-            dealt = _DAMAGE_DEALT.search(result)
-            hp_now = t.target_hp.get(where, target.hp)
-            t.target_hp[where] = 0 if killed else hp_now - (int(dealt[1]) if dealt else odds.dealt)
-            if killed or t.target_hp[where] <= 0:
-                t.dead.add(where)
+            odds, target, _ = options[0]
+            await self._strike(game, t, unit, target, odds, "odds favour the attack")
+
+    async def _strike(
+        self,
+        game: MilitaryGame,
+        t: _Turn,
+        unit: Unit,
+        target: Target,
+        odds: AttackOdds,
+        reason: str,
+    ) -> bool:
+        """Order one unit's attack. True if it landed."""
+        result = await self._order(
+            t, unit, "attack", game.attack_unit(unit.unit_index, target.x, target.y)
+        )
+        where = (target.x, target.y)
+        if result is None or not attack_landed(result):
+            self._refuse(t, unit, "attack")
             self._log(
-                t,
-                unit,
-                "attack",
-                "odds favour the attack",
-                target=where,
-                odds=asdict(odds),
-                result=result,
-            )
+                t, unit, "attack", "attack refused",
+                target=where, odds=asdict(odds), result=result or "",
+            )  # fmt: skip
+            return False
+        t.acted.add(unit.unit_id)
+        t.attacked.add(where)
+        self._fortified.pop(unit.unit_id, None)  # Attacking ends a fortification.
+        self._record_hit(t, where, result, odds.dealt, target.hp)
+        self._log(t, unit, "attack", reason, target=where, odds=asdict(odds), result=result)
+        return True
 
     def _attack_options(self, t: _Turn, unit: Unit) -> list[tuple[AttackOdds, Target, Threat]]:
+        """Attacks this unit would take, best first. Turned-down ones are kept for the log."""
         s = self.settings
-        city = self._city_at(t, unit)
-        sole = city is not None and t.at_city.get((unit.x, unit.y), 0) <= garrison_required(city, s)
-        floor = s.weights.garrison_min_hp_after if sole else None
+        w = s.weights
+        floor = self._floor_for(t, unit)
+        used = w.min_hp_after_attack if floor is None else floor
+        hurt = unit.hp < w.heal_below * unit.max_hp
+        v = w.damage_variance
         found = []
         for target in unit.targets:
             where = (target.x, target.y)
-            if where in t.dead:
+            defender = self._defender_at(t, where)
+            if where in t.dead or defender is None:
                 continue
-            defenders = [d for d in t.threats if (d.x, d.y) == where and d.hostile]
-            if not defenders:
-                continue  # The scan did not show it, so there is nothing to judge it by.
-            defender = max(defenders, key=lambda d: (d.combat_strength, d.ranged_strength))
-            live = Target(
-                target.unit_type, target.x, target.y, int(t.target_hp.get(where, target.hp))
-            )
-            odds = assess_attack(unit, live, defender, s.weights, floor, s.map_width)
-            hurt = unit.hp < s.weights.heal_below * unit.max_hp
-            if odds is not None and odds.favourable and (odds.sure_kill or not hurt):
+            live = self._live(t, target)
+            odds = assess_attack(unit, live, defender, w, floor, s.map_width)
+            if odds is None:
+                continue
+            if odds.favourable and (odds.sure_kill or not hurt):
                 found.append((odds, live, defender))
+                continue
+            if hurt and not odds.sure_kill:
+                reason = f"unit is hurt (hp {unit.hp}/{unit.max_hp}) and this is no sure kill"
+            elif odds.hp_after < used * unit.max_hp:
+                reason = (
+                    f"would be left with {max(odds.hp_after, 0):.0f} hp on a bad roll, "
+                    f"under the floor of {used * unit.max_hp:.0f}"
+                )
+            else:
+                reason = (
+                    f"deals {odds.dealt:.0f} and takes {odds.taken:.0f} "
+                    f"(low roll {odds.dealt * (1 - v):.0f} against {w.min_damage_ratio} "
+                    f"times the high-roll {odds.taken * (1 + v):.0f}), so the ratio is too poor"
+                )
+            kept = t.rejected.get(where)
+            if kept is None or odds.rank > kept[0].rank:
+                t.rejected[where] = (odds, unit, reason)
         found.sort(key=lambda f: (-f[0].rank, f[1].x, f[1].y))
         return found
+
+    def _log_rejections(self, t: _Turn) -> None:
+        """Once per target, the best option turned down, so a quiet turn can be audited."""
+        for where, (odds, unit, reason) in sorted(t.rejected.items()):
+            if where in t.attacked:
+                continue
+            self._log(t, unit, "skip", f"no attack: {reason}", target=where, odds=asdict(odds))
 
     # ----- heal -----
 
@@ -592,7 +828,71 @@ class MilitaryPolicy:
             return True
         self._refuse(t, unit, kind)
         self._log(t, unit, action, "move refused", where, result=result or "")
+        await self._fallback(game, t, unit, city, action)
         return False
+
+    def _fallback_tiles(self, t: _Turn, unit: Unit, city: City) -> list[tuple[int, int]]:
+        """Tiles beside the city, nearest the unit first, with no unit on them."""
+        s = self.settings
+        width = s.map_width
+        taken = {(u.x, u.y) for u in t.units if u.unit_id != unit.unit_id}
+        taken |= {(th.x, th.y) for th in t.threats}
+        found = set()
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                x, y = city.x + dx, city.y + dy
+                if width:
+                    x %= width
+                if (x, y) != (city.x, city.y) and hex_distance(city.x, city.y, x, y, width) == 1:
+                    found.add((x, y))
+        found -= taken
+        found.discard((unit.x, unit.y))
+        ordered = sorted(found, key=lambda p: (hex_distance(unit.x, unit.y, *p, width), p))
+        return ordered[: s.fallback_tiles]
+
+    async def _fallback(
+        self, game: MilitaryGame, t: _Turn, unit: Unit, city: City, action: str
+    ) -> None:
+        """A refused move leaves the unit without an order, so give it one: try the next-best
+        tile beside the city, then fortify where it stands. Bounded by `fallback_tiles`, one
+        fortify, and `max_actions`. Whatever happens the unit is not tried again this turn.
+        """
+        s = self.settings
+        if unit.unit_id in t.acted or not unit.can_move:
+            return
+        if hex_distance(unit.x, unit.y, city.x, city.y, s.map_width) > 1:
+            for goal in self._fallback_tiles(t, unit, city):
+                if t.actions >= s.max_actions:
+                    return
+                result = await self._order(
+                    t, unit, "fallback", game.move_unit(unit.unit_index, *goal)
+                )
+                if result is not None and move_succeeded(result):
+                    t.acted.add(unit.unit_id)
+                    self._leave(t, unit)
+                    self._log(
+                        t,
+                        unit,
+                        action,
+                        "city tile refused, so went to a tile beside it",
+                        goal,
+                        result=result,
+                    )
+                    return
+                self._log(t, unit, action, "fallback move refused", goal, result=result or "")
+        if t.actions >= s.max_actions:
+            return
+        result = await self._order(t, unit, "fallback", game.fortify_unit(unit.unit_index))
+        if result is not None and action_succeeded(result):
+            t.acted.add(unit.unit_id)
+            self._fortified[unit.unit_id] = (unit.x, unit.y)
+            self._log(
+                t, unit, "fortify", "move refused, so fortified where it stands", result=result
+            )
+        else:
+            self._log(
+                t, unit, "fortify", "fortify refused after a refused move", result=result or ""
+            )
 
     # ----- garrison -----
 

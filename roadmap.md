@@ -8,22 +8,34 @@ Issues are generated from [`.github/roadmap-issues.yaml`](.github/roadmap-issues
 
 | Stage | Status |
 |---|---|
-| Phase 0: Repo setup | Done |
-| Track T: Game toolchain | Done |
-| Phase 1: Deterministic bot | In progress. 1.1-1.8, 1.10-1.12 and the first slice of 1.9 are merged and wired into the bot, played to the end of a full game in Run 3 (turn 318, a German science victory), with hands-on help at four holds, so G1 has no unattended game yet. 1.13 is not started. 1.14-1.17 were added after Run 3. |
-| Track E: Evaluator and data | In progress |
-| Track S: Puppeteering spike | In progress |
+| Phase 0: Repo Setup | Done |
+| Workstream "T": Game <ins>Toolchain</ins> | Done |
+| Phase 1: Deterministic Bot | In progress. 1.1-1.8, 1.10-1.12 and the first slice of 1.9 are merged and wired into the bot, played to the end of a full game in Run 3 (turn 318, a German science victory), with hands-on help at four holds, so G1 has no unattended game yet. 1.13 is not started. 1.14-1.17 were added after Run 3. |
+| Workstream "E": <ins>Evaluator</ins> and Data | In progress |
+| Workstream "S": Puppeteering <ins>Spike</ins> | In progress |
 | Everything else | Not started |
 
 ## Sequence
 
-Phases 1, 2 and 3 and Tracks E and S can overlap. Diamonds mark hard gates.
+Phases are the main line of work, in order. Workstreams are side work that runs alongside them and feeds in at a gate. Each workstream's letter is the first letter of its underlined word. Phases 1, 2 and 3 and Workstreams "E" and "S" can overlap. Diamonds are hard gates.
 
-```text
-Phase 0 Repo ─ Track T Toolchain ──◆ G0 ─┬─ Phase 1 Deterministic bot ──◆ G1 ─┬─ Phase 2 Strategist ─┬─ Phase 4 ──◆ M1 ─ Phase 5 Improvement loop
-                                         ├─ Track E Evaluator + data ─────────┤                      │
-                                         │                                    └─ Phase 3 Bake-off ───┘
-                                         └─ Track S Puppeteering spike ──◆ G2 ──────────────────────────────── Phase 6 Puppets ─ Phase 7 Human vs LLM
+```mermaid
+flowchart TD
+    P0["Phase 0: Repo Setup"] --> T["Workstream #quot;T#quot;: Game <u>Toolchain</u>"] --> G0{G0}
+    G0 --> P1["Phase 1: Deterministic Bot"] --> G1{G1}
+    G0 --> E["Workstream #quot;E#quot;: <u>Evaluator</u> and Data"]
+    G0 --> S["Workstream #quot;S#quot;: Puppeteering <u>Spike</u>"] --> G2{G2}
+    G1 --> P2["Phase 2: Strategist"]
+    G1 --> P3["Phase 3: Cheap-Tier Bake-Off"]
+    E --> P2
+    E --> P3
+    P2 --> P4["Phase 4: Reach M1"]
+    P3 --> P4
+    P4 --> M1{M1}
+    M1 --> P5["Phase 5: Improvement Loop"]
+    M1 --> P6["Phase 6: Puppeted Opponents"]
+    G2 --> P6
+    P6 --> P7["Phase 7: Human vs LLM"]
 ```
 
 ## Gates
@@ -37,7 +49,9 @@ Phase 0 Repo ─ Track T Toolchain ──◆ G0 ─┬─ Phase 1 Deterministic 
 
 Standard game: 6 players, Small map, Quick speed, Prince, Gathering Storm, fixed starting saves.
 
-## Phase 0: Repo setup
+## Phase 0: Repo Setup
+
+**Purpose:** A clean, public-ready repo before any game code exists.
 
 Local only and tracked here, because it comes before the GitHub repo exists. **Exit:** clean tree, tests and lint passing, ready to push.
 
@@ -49,7 +63,9 @@ Local only and tracked here, because it comes before the GitHub repo exists. **E
 - `0.6` Public-ready checks and secret scanning
 - `0.7` Final check and initial commit
 
-## Track T: Game toolchain
+## Workstream "T": Game <ins>Toolchain</ins>
+
+**Purpose:** Connect to Civ VI, read and change the game, cap model spend, and fix a set of starting saves so games can be compared.
 
 Sequential, except T.3. Leads to **G0**.
 
@@ -58,7 +74,9 @@ Sequential, except T.3. Leads to **G0**.
 - [`T.3`](https://github.com/AlexNewell/civ_6_ai/issues/3) Spend ledger and budget governor
 - [`T.4`](https://github.com/AlexNewell/civ_6_ai/issues/4) Standard T1 save set
 
-## Phase 1: Deterministic bot
+## Phase 1: Deterministic Bot
+
+**Purpose:** A rule-based bot that plays full games alone. It's the free baseline, and the base the model-driven phases build on.
 
 No external model calls. Policies 1.5-1.12 can run in parallel. Leads to **G1**.
 
@@ -80,7 +98,9 @@ No external model calls. Policies 1.5-1.12 can run in parallel. Leads to **G1**.
 - [`1.16`](https://github.com/AlexNewell/civ_6_ai/issues/89) Propose resource trades
 - [`1.17`](https://github.com/AlexNewell/civ_6_ai/issues/90) Spend faith and use prophets
 
-## Track E: Evaluator and data
+## Workstream "E": <ins>Evaluator</ins> and Data
+
+**Purpose:** Measure how well the bot plays, so each change is judged on data rather than impressions: baselines from CivBench, metrics, short test scenarios and reports.
 
 Parallel with Phase 1.
 
@@ -90,7 +110,9 @@ Parallel with Phase 1.
 - [`E.4`](https://github.com/AlexNewell/civ_6_ai/issues/21) Results report with confidence intervals
 - [`E.5`](https://github.com/AlexNewell/civ_6_ai/issues/62) First-city timing study
 
-## Track S: Puppeteering spike
+## Workstream "S": Puppeteering <ins>Spike</ins>
+
+**Purpose:** Find out whether our code can fully control an AI player, which LLM opponents beside a human require.
 
 Parallel with Phase 1, and tests whether the long-term goal is possible. FireTuner is disabled in multiplayer, so opponents must control AI slots in single-player. Leads to **G2**.
 
@@ -103,6 +125,8 @@ Parallel with Phase 1, and tests whether the long-term goal is possible. FireTun
 
 ## Phase 2: Strategist
 
+**Purpose:** Add one model call, the strategist, that sets the bot's goals a few times a game, and measure what it costs.
+
 Starts after G1.
 
 - [`2.1`](https://github.com/AlexNewell/civ_6_ai/issues/28) Policy document schema
@@ -112,7 +136,9 @@ Starts after G1.
 - [`2.5`](https://github.com/AlexNewell/civ_6_ai/issues/32) Measure real per-call and per-game cost
 - [`2.6`](https://github.com/AlexNewell/civ_6_ai/issues/33) Sonnet 5.5 vs Opus 5.5 at the same dollar cap
 
-## Phase 3: Cheap-tier bake-off
+## Phase 3: Cheap-Tier Bake-Off
+
+**Purpose:** Find a cheaper model for the many small decisions, tested on recorded game situations before live games.
 
 Parallel with Phase 2, offline first.
 
@@ -125,12 +151,16 @@ Parallel with Phase 2, offline first.
 
 ## Phase 4: Reach M1
 
+**Purpose:** Tune the bot until it wins or ranks well at $1 or less a game.
+
 Starts after Phases 2 and 3. Leads to **M1**.
 
 - [`4.1`](https://github.com/AlexNewell/civ_6_ai/issues/40) Tuning rounds
 - [`4.2`](https://github.com/AlexNewell/civ_6_ai/issues/41) Formal M1 benchmark and report
 
-## Phase 5: Improvement loop
+## Phase 5: Improvement Loop
+
+**Purpose:** Let Claude propose policy improvements from game logs, and test and promote them automatically.
 
 Starts after M1, and can overlap Phase 6. Code changes are promoted only between games, and full games confirm what fast scenarios select.
 
@@ -140,7 +170,9 @@ Starts after M1, and can overlap Phase 6. Code changes are promoted only between
 - [`5.4`](https://github.com/AlexNewell/civ_6_ai/issues/45) Automated promotion pipeline
 - [`5.5`](https://github.com/AlexNewell/civ_6_ai/issues/46) Versioned policy registry and rollback
 
-## Phase 6: Puppeted opponents
+## Phase 6: Puppeted Opponents
+
+**Purpose:** Run the LLM bot as the AI opponents in a game, each seeing only what its own player can see.
 
 Needs G2, M1 and a budget review, because a five-opponent test game can cost up to $5.
 
@@ -152,6 +184,10 @@ Needs G2, M1 and a budget review, because a five-opponent test game can cost up 
 - [`6.6`](https://github.com/AlexNewell/civ_6_ai/issues/52) Meet the opponent latency target
 
 ## Phase 7: Human vs LLM
+
+**Purpose:** Make it something a person can set up and play against.
+
+Needs Phase 6.
 
 - [`7.1`](https://github.com/AlexNewell/civ_6_ai/issues/53) One-command setup and launch
 - [`7.2`](https://github.com/AlexNewell/civ_6_ai/issues/54) Human-turn experience polish

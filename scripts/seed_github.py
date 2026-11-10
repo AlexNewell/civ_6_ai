@@ -37,7 +37,7 @@ def prefix(issue_id: str) -> str:
 
 def area_label(issue_id: str) -> str:
     head = prefix(issue_id)
-    return f"phase:{head}" if head.isdigit() else f"track:{head.lower()}"
+    return f"phase:{head}" if head.isdigit() else f"workstream:{head.lower()}"
 
 
 def labels_for(issue: dict[str, Any]) -> list[str]:

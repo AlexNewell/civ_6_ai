@@ -2,6 +2,10 @@
 
 What was verified against a running Civ VI game, and what wasn't reached. Newest run first. Run 2 updates the status of earlier checks it reached.
 
+## To check in the next live run: no per-turn MCP saves
+
+`disable_mcp_saves` is applied at startup. No new `0_MCP_*` files should appear in the `Single` saves folder, and Civ's own `AutoSave_*` files in `auto` should keep rolling as before.
+
 ## To check live: military policy (issue 13, first slice)
 
 Written offline against civ6-mcp's source, so none of this has run in a game yet.

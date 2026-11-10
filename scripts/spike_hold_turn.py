@@ -20,7 +20,7 @@ from pathlib import Path
 from civ_mcp.connection import GameConnection, LuaError
 from civ_mcp.lua import SENTINEL
 
-from civ6_ai.saves import use_real_save_dirs
+from civ6_ai.saves import disable_mcp_saves, use_real_save_dirs
 from run_game import identify_save
 
 ROOT = Path(__file__).parent.parent
@@ -274,6 +274,7 @@ def print_summary(events: list[Event], polls: list[dict], target: int) -> None:
 
 async def run(args: argparse.Namespace) -> int:
     use_real_save_dirs()
+    disable_mcp_saves()
     connection = GameConnection()
     await connection.connect()
     spike = Spike(connection)

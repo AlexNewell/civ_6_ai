@@ -23,7 +23,7 @@ from civ6_ai.metrics.costs import game_id_of_log
 from civ6_ai.metrics.speed import summarise as summarise_speed
 from civ6_ai.monitors import EventBus, EventLog
 from civ6_ai.orchestrator import StopReason, TurnLog, TurnRecord
-from civ6_ai.saves import use_real_save_dirs
+from civ6_ai.saves import disable_mcp_saves, use_real_save_dirs
 
 ROOT = Path(__file__).parent.parent
 MANIFEST = ROOT / "config" / "standard_saves.json"
@@ -63,6 +63,7 @@ async def play_game(
 ) -> GameRun | None:
     """Play `turns` turns in the open game. None if it is not a standard save (or `expect_save`)."""
     use_real_save_dirs()
+    disable_mcp_saves()
     connection = GameConnection()
     await connection.connect()
     game = GameState(connection)

@@ -201,15 +201,18 @@ async def submit_world_congress_votes(game: BlockerGame) -> None:
 async def vote_in_open_session(game: BlockerGame, blocker: Blocker) -> bool:
     """Cast one free vote on each resolution of a session that's already open, then submit."""
     status = await game.get_world_congress()
+    # `end_turn` refuses while a session is open unless a voter is registered, even once votes
+    # are submitted, so register one in both cases.
+    registered = await register_default_votes(game, blocker)
     if not status.is_in_session:
-        return await register_default_votes(game, blocker)
+        return registered
     for resolution in status.resolutions:
         if not resolution.is_passed:
             vote = await game.vote_world_congress(resolution.resolution_hash, 1, 0, 1)
             if not _succeeded(vote):
                 return False
     await submit_world_congress_votes(game)
-    return True
+    return registered
 
 
 async def research_fastest(game: BlockerGame, blocker: Blocker) -> bool:

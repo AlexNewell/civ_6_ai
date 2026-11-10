@@ -625,6 +625,8 @@ def test_open_session_gets_a_free_vote_on_each_open_resolution_and_a_submit():
 
     assert game.called("vote_world_congress") == [("vote_world_congress", 7, 1, 0, 1)]
     assert any("WORLD_CONGRESS_SUBMIT_TURN" in code for code in game.lua)
+    # end_turn refuses an open session unless a voter is registered, even after the submit.
+    assert game.called("queue_wc_votes") == [("queue_wc_votes", [])]
 
 
 def test_research_and_civic_pick_the_fastest():

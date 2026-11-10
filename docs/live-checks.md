@@ -21,6 +21,35 @@ Written offline against civ6-mcp's source, so none of this has run in a game yet
 | Ranged units are not hit back by melee defenders, and ranged defenders do hit back (`assess_attack` assumes both) | Not reached |
 | `Unit.targets` lists only targets in range with line of sight, and ranged units fire at adjacent targets | Not reached |
 
+## Run 3: the fully wired bot from turn 1 (issues 6, 13 and 16)
+
+- **Build:** main at `adef6e6`, with every policy wired in, plus the World Congress fix below. civ6-mcp pinned at `dd20190`. No model calls.
+- **Game:** standard save `STD_T1_01`. Played turns 1 to 131 in two sessions: the first stopped on turn 81 (stop 1), and the second ran until the owner paused the experiment on turn 131.
+- **Time:** 2.3 hours of bot time for 131 turns, median 40s a turn. Three turns took over 5 minutes, 32 minutes in all.
+
+### Stops and fixes
+
+1. **Turn 81, the first World Congress session.** `end_turn` refuses while a session is open unless a voter is registered, even after votes are submitted. The bot voted directly in an open session and never registered one, so every retry was refused. Fixed: voting in an open session now registers the voter first. Confirmed live on turn 81, and on turn 131's session.
+
+### Slow turns: one cause
+
+| Turn | Seconds | What held the turn |
+|---|---|---|
+| 10 | 612 | A unit left with no orders after a refused move, reported as "Command Units" |
+| 97 | 693 | A World Congress session reopened after the end-turn request |
+| 106 | 616 | No blocker reported, so probably a popup during the AI turn |
+
+All three, and Run 2's turns 81 and 96, fit one pattern. Something needs attention after the end-turn request, and civ6-mcp only looks after polling for about 9 minutes: then it reports a blocker, or closes popups and asks again. Checking every 20 to 30 seconds while `end_turn` waits would cut these to seconds.
+
+### Seen, not fixed
+
+- **Refused moves leave units idle.** A unit's move away from danger is often refused because a friendly unit holds the tile (`STACKING_CONFLICT`), and the unit gets no other order.
+- **Great people go unclaimed.** `ENDTURN_BLOCKING_CLAIM_GREAT_PERSON` has no handler under that name (turns 61, 68, 86 and 121). The turn still ends.
+- **Units lost near the capital.** Two Builders, a Trader, a Scout, two Slingers and two Warriors died by turn 80, mostly to a Sumerian Archer and barbarians that stayed close for dozens of turns.
+- **Traders try routes with no moves left**, and Builders are refused some improvements ("cannot improve").
+- **Votes aren't logged**, so how the bot voted can't be checked.
+- civ6-mcp's after-turn snapshot sometimes fails with a Lua error. It catches this, and the only effect is a shorter event report.
+
 ## Run 2: the wired bot from turn 1 (issues 6 and 12)
 
 - **Build:** the `live-t1-run` branch (main at `61f6759` plus the fixes below), civ6-mcp pinned at `dd20190`.

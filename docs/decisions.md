@@ -117,3 +117,4 @@ The repo is public under an all-rights-reserved [`LICENSE`](../LICENSE), the mos
 - [CivBench paper, arXiv 2609.02459](https://arxiv.org/abs/2609.02459)
 - [CivBench dataset](https://huggingface.co/datasets/civbench/civbench-v1)
 - [Original research report](research/reducing-frontier-model-cost.md)
+- [Airbnb classifier benchmark and our review](research/airbnb-llm-classifier-benchmark.md): supports a frontier strategist and suggests a fine-tuned small model for the cheap tier

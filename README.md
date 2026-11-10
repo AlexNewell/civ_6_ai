@@ -34,6 +34,7 @@ Furthermore, wherever possible, this project will explore locally hosting miniat
 - [Roadmap](roadmap.md)
 - [Decisions and public-ready rules](docs/decisions.md)
 - [Research notes](docs/research/reducing-frontier-model-cost.md)
+- [Review: Airbnb's fine-tuned vs frontier classifier benchmark](docs/research/airbnb-llm-classifier-benchmark.md)
 - [Third-party notices](THIRD_PARTY_NOTICES.md)
 
 ## Requirements

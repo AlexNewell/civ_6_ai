@@ -223,6 +223,9 @@ def _item_value(item: Any, weights: DiplomacyWeights) -> float:
     return 0.0
 
 
+item_value = _item_value  # Public name, so trade offers price with the same rules.
+
+
 def forbidden_item(item: Any, ours: bool) -> str | None:
     """Why an item can never be part of a deal we accept, or None."""
     name = item.name.casefold()

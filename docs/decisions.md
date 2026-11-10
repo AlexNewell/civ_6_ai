@@ -47,6 +47,16 @@ Prompt caching is left out of these figures. Strategist calls will often be more
 - Baselines use `civbench/civbench-v1`, the release the paper links. The earlier `lmwilkin/civbench` repo has no parquet tables or Inspect logs.
 - CivBench scenarios don't match our standard game, so baselines are a reference level and M1 is still measured on our own games.
 
+## Speed
+
+A strong, cheap opponent is no use if the human waits too long for it. Speed is the third thing to watch, beside strength and cost.
+
+- **Measure:** an opponent's *decision time*, from the start of its turn to its end-turn request: state reads, policies and model calls. The game's own end-turn processing is logged separately, because a human waits for it in any Civ game. [`speed.py`](../src/civ6_ai/metrics/speed.py) reports both at the end of each `run_game.py` session.
+- **Development bar:** a mean of 60 seconds per opponent turn. It is monitored while the bot is built, not an acceptance criterion.
+- **Long-term goal:** 10 seconds per opponent turn, so five opponents take under a minute together. At 60 seconds each, five opponents would take 5 minutes a turn, and about 25 hours of waiting over a 300-turn game.
+- Opponents act one after another, so their decision times add up. Each one can plan in the background while others and the human play, then on its own turn only react to what it can see changed since it started planning. Model calls belong in that background planning, not on the turn's critical path.
+- **Baseline (Run 3, 313 turns, no model calls):** decision time mean 34.5 s, median 32.5 s, p90 50 s, rising from about 29 s before turn 100 to about 40 s after turn 200. The end-turn wait had a mean of 31.7 s and a median of 13.3 s, with stalls up to 11 minutes. The bot meets the development bar, but the goal needs decisions about 3.5 times faster before any model call is added. Most of the time goes to blockers, government, settling, production and builders, each 3 to 7 s a turn.
+
 ## Game
 
 - Standard setup: 6 players, Small map, Quick speed (about 330 turns), Prince, Gathering Storm, fixed T1 saves.
@@ -56,7 +66,7 @@ Prompt caching is left out of these figures. Strategist calls will often be more
 
 - Every LLM player uses identical code, prompts and config.
 - Strict fairness: own fog of war only, no cheat APIs, and no resource bonuses added by this project.
-- Latency target: under 2 minutes for all five opponents combined. Strategist calls run in the background during the human's turn.
+- Speed targets are in [Speed](#speed).
 - Play isn't fully deterministic, because Claude responses can't be reproduced on request. Deterministic layers are seeded and model replies are stored, so any game can be replayed exactly.
 
 ## Dependencies

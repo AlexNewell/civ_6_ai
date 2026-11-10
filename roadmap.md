@@ -97,6 +97,7 @@ No external model calls. Policies 1.5-1.12 can run in parallel. Leads to **G1**.
 - [`1.15`](https://github.com/AlexNewell/civ_6_ai/issues/88) Peace-making and war awareness
 - [`1.16`](https://github.com/AlexNewell/civ_6_ai/issues/89) Propose resource trades
 - [`1.17`](https://github.com/AlexNewell/civ_6_ai/issues/90) Spend faith and use prophets
+- [`1.18`](https://github.com/AlexNewell/civ_6_ai/issues/112) Cut civ6-mcp's per-call wait
 
 ## Workstream "E": <ins>Evaluator</ins> and Data
 

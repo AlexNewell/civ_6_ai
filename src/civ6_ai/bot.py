@@ -6,6 +6,7 @@ Order within a turn:
 2. `DiplomacyPolicy` answers every open proposal next, before anything else spends gold or acts.
    It moves no unit, and a deal it accepts changes gold and resources that production and trade
    then see. Leaving a session open while the rest of the turn plays is what can hold the game.
+   `WarPolicy` follows it: it logs every war and offers peace. It closes its own sessions.
    `TradeOfferPolicy` runs right after it and offers surplus resources to other civs. It closes
    every session it opens.
 3. `SettlingPolicy` moves settlers and scouts, which changes cities and units.
@@ -48,6 +49,7 @@ from civ6_ai.policies.production import CityProductionPolicy
 from civ6_ai.policies.secondary import SecondaryPolicy
 from civ6_ai.policies.settling import SettlingPolicy
 from civ6_ai.policies.trade_offers import TradeOfferPolicy
+from civ6_ai.policies.wars import WarPolicy
 from civ6_ai.state.reader import IncompleteRead, check_cities_complete
 
 SETTLING_LOGGER = "civ6_ai.policies.settling"
@@ -184,6 +186,7 @@ def build_orchestrator(game: Any, bus: EventBus, turn_log: TurnLog) -> Orchestra
     handlers: list[Handler] = [
         Monitors(bus),
         diplomacy,
+        WarPolicy(),
         TradeOfferPolicy(diplomacy.weights),
         SettlingPolicy(),
         military,

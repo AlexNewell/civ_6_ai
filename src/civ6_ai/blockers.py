@@ -8,18 +8,29 @@ that keeps the game moving. A domain policy takes a type over by passing its own
 appear once the turn has been ended, such as an AI proposal during its turn.
 """
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Protocol
 
-from civ_mcp.lua import SENTINEL, build_end_turn_blocking_query, parse_end_turn_blocking
+from civ_mcp.lua import (
+    SENTINEL,
+    build_end_turn,
+    build_end_turn_blocking_query,
+    parse_end_turn_blocking,
+)
 
 log = logging.getLogger(__name__)
 
 MAX_PASSES = 3  # Clearing one blocker can reveal another, such as an idle governor.
 MAX_END_TURN_RETRIES = 8  # Enough for all five opponents to interrupt one turn, plus a blocker.
+# civ6-mcp's end_turn only looks at what holds a turn after polling for about 9 minutes, so the
+# bot checks itself while it waits. The first check leaves time for a normal AI turn.
+WATCH_FIRST_SECONDS = 20.0
+WATCH_EVERY_SECONDS = 20.0
+_CAN_END_TURN_LUA = f'print("CAN_END_TURN|" .. tostring(UI.CanEndTurn())); print("{SENTINEL}")'
 MAX_DIPLOMACY_ROUNDS = 4  # A first meeting takes 2-3 rounds.
 
 _NOTHING_CHOSEN = "None"  # civ6-mcp's value when no tech or civic is in progress.
@@ -121,6 +132,8 @@ class BlockerGame(Protocol):
     async def promote_unit(self, unit_id: int, promotion_type: str) -> str: ...
     async def move_unit(self, unit_index: int, target_x: int, target_y: int) -> str: ...
     async def skip_remaining_units(self) -> str: ...
+    async def dismiss_popup(self) -> str: ...
+    async def get_game_overview(self) -> Any: ...
     async def get_pantheon_status(self) -> Any: ...
     async def choose_pantheon(self, belief_type: str) -> str: ...
     async def get_dedications(self) -> Any: ...
@@ -455,9 +468,12 @@ class BlockerResolver:
         if unresolved:
             raise UnresolvedBlockers(", ".join(blocker.type for blocker in unresolved))
 
-    async def resolve(self, game: BlockerGame, diplomacy_only: bool = False) -> list[Blocker]:
+    async def resolve(
+        self, game: BlockerGame, diplomacy_only: bool = False, readers: tuple | None = None
+    ) -> list[Blocker]:
         """Clear what's open and return what's left. A settled type isn't touched again."""
-        readers = (_read_diplomacy,) if diplomacy_only else _ALL_READERS
+        if readers is None:
+            readers = (_read_diplomacy,) if diplomacy_only else _ALL_READERS
         settled: set[str] = set()
         open_blockers = await _read_all(game, readers)
         for _ in range(MAX_PASSES):
@@ -524,7 +540,7 @@ class ResolvingGame:
         return getattr(self._game, name)
 
     async def end_turn(self) -> str:
-        report = await self._game.end_turn()
+        report = await self._watched_end_turn()
         for _ in range(MAX_END_TURN_RETRIES):
             if _has_line_starting(report, _DIPLOMACY_REPORTS):
                 await self._clear(diplomacy_only=True)
@@ -533,8 +549,67 @@ class ResolvingGame:
             else:
                 return report  # It advanced, or it's something for the turn loop to judge.
             log.info("Retrying end of turn after: %s", report.splitlines()[0])
-            report = await self._game.end_turn()
+            report = await self._watched_end_turn()
         return report
+
+    async def _watched_end_turn(self) -> str:
+        """Run `end_turn`, clearing what holds the turn while it waits. Never sends a duplicate."""
+        turn_before = await self._turn()
+        task = asyncio.ensure_future(self._game.end_turn())
+        delay = WATCH_FIRST_SECONDS
+        try:
+            while True:
+                done, _ = await asyncio.wait({task}, timeout=delay)
+                if done:
+                    return task.result()
+                delay = WATCH_EVERY_SECONDS
+                if turn_before is not None:
+                    await self._unstick(turn_before)
+        except BaseException:
+            task.cancel()  # Only on a lost connection or cancellation: nothing is left to wait for.
+            raise
+
+    async def _unstick(self, turn_before: int) -> None:
+        """Close popups and clear blockers. Ask again only after clearing a blocker, and only if
+        the game says the turn can end, since a request while the AI plays can skip a turn.
+
+        A listed blocker means the game refused the request. A closed popup lets a held AI turn
+        carry on by itself. `end_turn` keeps polling throughout and returns once the turn moves.
+        """
+        try:
+            if await self._turn() != turn_before:
+                return
+            dismissed = await self._game.dismiss_popup()
+            readers = (_read_end_turn_blocking,)
+            blockers = await _read_all(self._game, readers)
+            if blockers:
+                await self._resolver.resolve(self._game, readers=readers)
+            if "Dismissed" in dismissed:
+                log.info("Turn %s was held, closed: %s", turn_before, dismissed[:200])
+            if blockers and await self._can_end_turn() and await self._turn() == turn_before:
+                await self._game.execute_lua(build_end_turn(), "ingame")
+                log.info(
+                    "Turn %s was held by %s, cleared them and asked again to end it",
+                    turn_before,
+                    [blocker.type for blocker in blockers],
+                )
+        except ConnectionError:
+            raise
+        except Exception:
+            log.warning("Clearing a held turn failed", exc_info=True)
+
+    async def _can_end_turn(self) -> bool:
+        """True only while our turn is still open, so a new request can't be a duplicate."""
+        output = await self._game.execute_lua(_CAN_END_TURN_LUA, "ingame")
+        return "CAN_END_TURN|true" in output
+
+    async def _turn(self) -> int | None:
+        try:
+            return (await self._game.get_game_overview()).turn
+        except ConnectionError:
+            raise
+        except Exception:
+            return None  # A defeat screen can refuse reads. Then just wait for end_turn.
 
     async def _clear(self, diplomacy_only: bool) -> None:
         """Clear what can be cleared. `end_turn` may still pass with something left open."""

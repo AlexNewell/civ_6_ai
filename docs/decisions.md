@@ -82,6 +82,7 @@ A review of the pinned commit found nothing malicious. These rules still apply:
 - `load_game_save` can restart the game and click through its menus if Lua can't find the save.
 - `end_turn` deletes older `0_MCP_*` saves, so project saves must not use that prefix.
 - civ6-mcp assumes the default Documents folder, so call `use_real_save_dirs` first, or `0_MCP_*` saves are never pruned. After that, never call its `load_game_save`, because its fallback would then find the save and restart the game.
+- `end_turn` writes a `0_MCP_NNNN` save every turn, which duplicates Civ's own autosave (issue #17). `disable_mcp_saves` in `saves.py` turns that off at startup. Crash recovery then uses the newest `AutoSave_*` in the `auto` folder, which civ6-mcp's `get_latest_autosave` falls back to.
 - Loading a save over Lua stops on Civ's loading screen until someone clicks, and the tuner stays closed until then. Unattended runs need a way past this. See issue #17.
 - Strings sent to Lua aren't escaped, so model-chosen names must be validated first. Never expose its raw Lua method to a model, because that would bypass fog of war.
 - [`archi-max/jev-civ6`](https://github.com/archi-max/jev-civ6) (MIT) is a usable reference.

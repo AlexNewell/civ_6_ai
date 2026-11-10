@@ -115,6 +115,7 @@ def test_one_turn_runs_handlers_in_order_and_acts(tmp_path):
         "gold",
         "builder",
         "secondary",
+        "faith",
         "blockers",
     ]
     assert game.called("set_research") and game.called("set_civic")

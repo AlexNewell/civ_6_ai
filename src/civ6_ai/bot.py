@@ -24,7 +24,9 @@ Order within a turn:
 10. `SecondaryPolicy` runs pantheon, religion, great people and trade routes. It comes after
    production, so a trader built earlier is routed this turn, and moves only great people and
    traders, which no other handler touches.
-11. `BlockerResolver` goes last, because it clears what is left and skips any idle units. It gets
+11. `FaithPolicy` spends faith above a reserve and finds a use for idle Great Prophets. It runs
+   after `SecondaryPolicy`, which acts on prophets first, and buys with faith only.
+12. `BlockerResolver` goes last, because it clears what is left and skips any idle units. It gets
    the blocker policies of production, research, government, secondary, military and diplomacy,
    with its defaults as fallback. Government, military and diplomacy are each one instance,
    shared by handler and blocker table, so their bounds hold across both. Two policies claiming
@@ -45,6 +47,7 @@ from civ6_ai.orchestrator import Handler, Orchestrator, TurnLog
 from civ6_ai.policies import research
 from civ6_ai.policies.builder import BuilderPolicy
 from civ6_ai.policies.diplomacy import DiplomacyPolicy
+from civ6_ai.policies.faith import FaithPolicy
 from civ6_ai.policies.gold import GoldPolicy
 from civ6_ai.policies.government import GovernmentPolicy
 from civ6_ai.policies.military import MilitaryPolicy
@@ -199,6 +202,7 @@ def build_orchestrator(game: Any, bus: EventBus, turn_log: TurnLog) -> Orchestra
         GoldPolicy(),
         BuilderPolicy(),
         secondary,
+        FaithPolicy(),
         resolver,
     ]
     shared = ResolvingGame(SharedReads(game), resolver)

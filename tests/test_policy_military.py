@@ -25,8 +25,10 @@ from civ6_ai.state.models import Target, Threat
 from civ6_ai.state.reader import build_unit
 from fixtures.civ_state import (
     BARBARIANS,
+    ROME,
     FakeGame,
     city_info,
+    civ_info,
     overview,
     threat_info,
     tile,
@@ -54,6 +56,11 @@ RANGED_KILL = (
 MELEE_HIT = (
     ESTIMATE + "MELEE_ATTACK|target:UNIT_WARRIOR at (11,10)|enemy HP:100 -> 76/100"
     "|your HP:100 -> 76 CS:8"
+)
+STACKING = "Error: STACKING_CONFLICT|Friendly UNIT_WARRIOR already on (10,10)."
+CITY_HIT = (
+    "CITY_RANGE_ATTACK|Alpha -> UNIT_WARRIOR@11,10|pre_hp:100/100|damage dealt:30\n"
+    "  Post-combat: ~70/100"
 )
 ZOC_REFUSAL = (
     ESTIMATE + "Error: ZOC|Unit entered Zone of Control this turn — cannot attack until next turn."
@@ -109,6 +116,7 @@ class MilitaryGame(FakeGame):
         self.notifications: list = []
         self.promotions: dict[int, list[str]] = {}
         self.raises: dict[str, Exception] = {}
+        self.refuse_moves_to: set[tuple[int, int]] = set()
 
     def did(self, name, *args, default=""):
         self.actions.append((name, *args))
@@ -117,6 +125,8 @@ class MilitaryGame(FakeGame):
         return self.replies.get(name, default)
 
     async def move_unit(self, unit_index, target_x, target_y):
+        if (target_x, target_y) in self.refuse_moves_to:
+            return self.did("move", unit_index, target_x, target_y, default=STACKING)
         return self.did(
             "move", unit_index, target_x, target_y,
             default=f"MOVING_TO|{target_x},{target_y}|from:0,0|now_at:{target_x},{target_y}",
@@ -127,6 +137,9 @@ class MilitaryGame(FakeGame):
 
     async def fortify_unit(self, unit_index):
         return self.did("fortify", unit_index, default="FORTIFIED")
+
+    async def city_attack(self, city_id, target_x, target_y):
+        return self.did("city_attack", city_id, target_x, target_y, default=CITY_HIT)
 
     async def heal_unit(self, unit_index):
         return self.did("heal", unit_index, default="HEALING|HP:40/100")
@@ -430,9 +443,11 @@ def test_a_heavily_threatened_city_asks_for_a_second_defender():
 def test_a_refused_garrison_move_tries_the_next_unit_and_stops():
     units = [warrior(uid=1, x=12, y=10), warrior(uid=2, x=13, y=10)]
     game = MilitaryGame(units, [barbarian(x=11, y=11)], cities=[city_info(garrison_unit="")])
-    game.replies["move"] = "Error: STACKING_CONFLICT|Friendly UNIT_WARRIOR already on (10,10)."
+    game.replies["move"] = STACKING
     run(MilitaryPolicy(), game)
-    assert len(game.orders("move")) == 2  # Both tried once, then no loop.
+    # Each unit: the city, then at most two other tiles, then a fortify. No loop.
+    assert len(game.orders("move")) <= 6
+    assert sorted(a[1] for a in game.orders("fortify")) == [1, 2]
 
 
 def test_a_blocked_move_counts_as_a_refusal():
@@ -826,3 +841,202 @@ def test_a_camp_count_starts_again_after_the_camp_is_forgotten():
     game.data["overview"] = overview(turn=20 + policy.settings.camp_idle_turns + 1, num_cities=1)
     run(policy, game)
     assert policy._camp_turns == {}
+
+
+# ----- refused moves fall back -----
+
+
+def test_a_refused_garrison_move_goes_to_the_next_tile_beside_the_city():
+    game = MilitaryGame(
+        [warrior(x=12, y=10)], [barbarian(x=11, y=11)], cities=[city_info(garrison_unit="")]
+    )
+    game.refuse_moves_to = {(10, 10)}
+    policy = MilitaryPolicy()
+    run(policy, game)
+    moves = game.orders("move")
+    assert moves[0] == ("move", 1, 10, 10)
+    assert len(moves) == 2 and moves[1][2:] != (10, 10)
+    assert not game.orders("fortify")  # The second tile took it.
+    assert "tile beside" in policy.decisions[-1].reason
+
+
+def test_a_unit_refused_everywhere_fortifies_where_it_stands():
+    game = MilitaryGame(
+        [warrior(x=12, y=10)], [barbarian(x=11, y=11)], cities=[city_info(garrison_unit="")]
+    )
+    game.replies["move"] = STACKING
+    policy = MilitaryPolicy()
+    run(policy, game)
+    assert len(game.orders("move")) == 3  # The city and two fallback tiles, no more.
+    assert game.orders("fortify") == [("fortify", 1)]
+    assert "fortified where it stands" in policy.decisions[-1].reason
+
+
+def test_the_fallback_skips_tiles_other_units_hold():
+    units = [warrior(uid=1, x=12, y=10), warrior(uid=2, x=11, y=10)]
+    game = MilitaryGame(units, [barbarian(x=11, y=11)], cities=[city_info(garrison_unit="")])
+    game.refuse_moves_to = {(10, 10)}
+    run(MilitaryPolicy(), game)
+    assert ("move", 1, 11, 10) not in game.orders("move")
+
+
+def test_a_fallback_that_is_refused_too_is_not_repeated_on_the_next_turn():
+    game = MilitaryGame(
+        [warrior(x=12, y=10)], [barbarian(x=11, y=11)], cities=[city_info(garrison_unit="")]
+    )
+    game.replies["move"] = STACKING
+    game.replies["fortify"] = "Error: cannot fortify"
+    policy = MilitaryPolicy()
+    run(policy, game)
+    first = len(game.actions)
+    run(policy, game)
+    assert len(game.actions) == first  # The refusal is remembered for a few turns.
+
+
+# ----- rejected attacks are logged -----
+
+
+def musketman(x=11, y=10):
+    return barbarian(kind="UNIT_MUSKETMAN", x=x, y=y, cs=55)
+
+
+def test_a_rejected_attack_is_logged_with_odds_and_reason_once_per_target():
+    units = [
+        warrior(uid=1, targets=[target(kind="UNIT_MUSKETMAN")]),
+        warrior(uid=3, targets=[target(kind="UNIT_MUSKETMAN")]),
+    ]
+    game = MilitaryGame(units, [musketman()])
+    policy = MilitaryPolicy()
+    run(policy, game)
+    assert not game.orders("attack")
+    skips = [d for d in policy.decisions if d.action == "skip" and d.target == (11, 10)]
+    assert len(skips) == 1
+    assert skips[0].odds["dealt"] > 0
+    assert skips[0].reason.startswith("no attack:")
+
+
+def test_a_target_that_was_attacked_is_not_logged_as_rejected():
+    units = [archer(targets=[target(hp=30)]), warrior(uid=3, targets=[target(hp=30)])]
+    game = MilitaryGame(units, [barbarian(hp=30)])
+    policy = MilitaryPolicy()
+    run(policy, game)
+    assert game.orders("attack")
+    assert not [d for d in policy.decisions if d.action == "skip"]
+
+
+# ----- city strikes -----
+
+
+def walled(**changes):
+    return city_info(wall_hp=100, wall_max_hp=100, defense_strength=20, **changes)
+
+
+def test_a_walled_city_strikes_a_hostile_unit_in_range_before_units_attack():
+    game = MilitaryGame(
+        [archer(targets=[target()])], [barbarian()], cities=[walled(garrison_unit="UNIT_ARCHER")]
+    )
+    run(MilitaryPolicy(), game)
+    assert game.orders("city_attack") == [("city_attack", 65536, 11, 10)]
+    names = [a[0] for a in game.actions]
+    assert names.index("city_attack") < names.index("attack")
+
+
+def test_a_city_without_walls_does_not_strike():
+    game = MilitaryGame([warrior()], [barbarian()])
+    run(MilitaryPolicy(), game)
+    assert not game.orders("city_attack")
+
+
+def test_a_city_strikes_only_what_is_within_its_range():
+    game = MilitaryGame([warrior()], [barbarian(x=14, y=10)], cities=[walled()])
+    run(MilitaryPolicy(), game)
+    assert not game.orders("city_attack")
+
+
+def test_a_city_does_not_strike_at_peace():
+    game = MilitaryGame(
+        [warrior()], [barbarian(owner_id=ROME, owner_name="Rome")], cities=[walled()]
+    )
+    game.data["civs"] = [civ_info()]  # Met, not at war.
+    run(MilitaryPolicy(), game)
+    assert not game.orders("city_attack")
+
+
+def test_a_refused_strike_is_not_repeated_at_once():
+    game = MilitaryGame([warrior()], [barbarian(), barbarian(x=11, y=9)], cities=[walled()])
+    game.replies["city_attack"] = "Error: ALREADY_FIRED|City already attacked this turn"
+    policy = MilitaryPolicy()
+    run(policy, game)
+    run(policy, game)
+    assert len(game.orders("city_attack")) == 1
+    assert any(d.action == "city_strike" and "refused" in d.reason for d in policy.decisions)
+
+
+def test_a_city_strike_is_logged_with_its_odds():
+    game = MilitaryGame([warrior()], [barbarian()], cities=[walled()])
+    policy = MilitaryPolicy()
+    run(policy, game)
+    strike = next(d for d in policy.decisions if d.action == "city_strike")
+    assert strike.target == (11, 10) and strike.odds["taken"] == 0
+
+
+# ----- focus fire -----
+
+
+def weak(uid):
+    # Strength 15 against a strength 30 defender (36 with the assumed bonus): about 56 damage
+    # back, so 100 - 56 * 1.2 is 33 hp left. Under the lone floor of 40, over the group's 25.
+    return warrior(uid=uid, combat_strength=15, targets=[target(hp=20)])
+
+
+def test_a_lone_attack_the_floor_refuses_is_still_refused():
+    game = MilitaryGame([weak(1)], [barbarian(hp=20, cs=30)])
+    game.replies["attack"] = MELEE_HIT
+    run(MilitaryPolicy(), game)
+    assert not game.orders("attack")
+
+
+def test_units_that_together_kill_attack_above_the_planned_floor():
+    game = MilitaryGame([weak(1), weak(3), weak(4)], [barbarian(hp=20, cs=30)])
+    game.replies["attack"] = MELEE_HIT
+    policy = MilitaryPolicy()
+    run(policy, game)
+    assert len(game.orders("attack")) >= 2
+    assert all("planned kill" in d.reason for d in policy.decisions if d.action == "attack")
+
+
+def test_a_group_that_cannot_kill_does_not_attack():
+    units = [warrior(uid=i, combat_strength=15, targets=[target(hp=100)]) for i in (1, 3, 4)]
+    game = MilitaryGame(units, [barbarian(hp=100, cs=30)])
+    run(MilitaryPolicy(), game)
+    assert not game.orders("attack")
+
+
+def test_a_unit_that_would_not_survive_even_the_planned_floor_is_not_used():
+    units = [warrior(uid=i, combat_strength=10, targets=[target(hp=20)]) for i in (1, 3, 4, 5, 6)]
+    game = MilitaryGame(units, [barbarian(hp=20, cs=30)])
+    run(MilitaryPolicy(), game)
+    assert not game.orders("attack")
+
+
+def test_a_hurt_unit_is_not_put_in_a_planned_group():
+    hurt = warrior(uid=4, combat_strength=15, health=40, targets=[target(hp=20)])
+    game = MilitaryGame([weak(1), weak(3), hurt], [barbarian(hp=20, cs=30)])
+    game.replies["attack"] = MELEE_HIT
+    run(MilitaryPolicy(), game)
+    assert 4 not in [a[1] for a in game.orders("attack")]
+
+
+def test_the_planned_floor_is_below_the_lone_floor():
+    assert 0 < W.planned_kill_hp_after < W.min_hp_after_attack
+
+
+def test_a_strike_and_one_unit_can_form_a_planned_kill():
+    # The strike takes 30 off 35 hp; one weak unit then finishes it above the planned floor.
+    unit = warrior(uid=1, combat_strength=15, targets=[target(hp=35)])
+    spare = warrior(uid=3)  # A second defender, so the first is not the city's only one.
+    game = MilitaryGame([unit, spare], [barbarian(hp=35, cs=30)], cities=[walled()])
+    game.replies["attack"] = MELEE_HIT
+    run(MilitaryPolicy(), game)
+    assert game.orders("city_attack")
+    assert [a[0] for a in game.actions][:2] == ["city_attack", "attack"]

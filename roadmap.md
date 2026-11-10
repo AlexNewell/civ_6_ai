@@ -17,7 +17,7 @@ Issues are generated from [`.github/roadmap-issues.yaml`](.github/roadmap-issues
 
 ## Sequence
 
-Phases 1, 2 and 3 and Tracks E and S can overlap. Diamonds are hard gates.
+Phases are the main line of work, in order. Tracks are side work that runs alongside them and feeds in at a gate, lettered by name: **T**oolchain, **E**valuator and puppeteering **S**pike. Phases 1, 2 and 3 and Tracks E and S can overlap. Diamonds are hard gates.
 
 ```mermaid
 flowchart TD
@@ -51,6 +51,8 @@ Standard game: 6 players, Small map, Quick speed, Prince, Gathering Storm, fixed
 
 ## Phase 0: Repo setup
 
+**Purpose:** A clean, public-ready repo before any game code exists.
+
 Local only and tracked here, because it comes before the GitHub repo exists. **Exit:** clean tree, tests and lint passing, ready to push.
 
 - `0.1` Git repo, ignore rules, environment example, README, report moved to `docs/research/`
@@ -63,6 +65,8 @@ Local only and tracked here, because it comes before the GitHub repo exists. **E
 
 ## Track T: Game toolchain
 
+**Purpose:** Connect to Civ VI, read and change the game, cap model spend, and fix a set of starting saves so games can be compared.
+
 Sequential, except T.3. Leads to **G0**.
 
 - [`T.1`](https://github.com/AlexNewell/civ_6_ai/issues/1) Set up Civ VI tooling
@@ -71,6 +75,8 @@ Sequential, except T.3. Leads to **G0**.
 - [`T.4`](https://github.com/AlexNewell/civ_6_ai/issues/4) Standard T1 save set
 
 ## Phase 1: Deterministic bot
+
+**Purpose:** A rule-based bot that plays full games alone. It's the free baseline, and the base the model-driven phases build on.
 
 No external model calls. Policies 1.5-1.12 can run in parallel. Leads to **G1**.
 
@@ -94,6 +100,8 @@ No external model calls. Policies 1.5-1.12 can run in parallel. Leads to **G1**.
 
 ## Track E: Evaluator and data
 
+**Purpose:** Measure how well the bot plays, so each change is judged on data rather than impressions: baselines from CivBench, metrics, short test scenarios and reports.
+
 Parallel with Phase 1.
 
 - [`E.1`](https://github.com/AlexNewell/civ_6_ai/issues/18) Ingest CivBench dataset and extract baselines
@@ -103,6 +111,8 @@ Parallel with Phase 1.
 - [`E.5`](https://github.com/AlexNewell/civ_6_ai/issues/62) First-city timing study
 
 ## Track S: Puppeteering spike
+
+**Purpose:** Find out whether our code can fully control an AI player, which LLM opponents beside a human require.
 
 Parallel with Phase 1, and tests whether the long-term goal is possible. FireTuner is disabled in multiplayer, so opponents must control AI slots in single-player. Leads to **G2**.
 
@@ -115,6 +125,8 @@ Parallel with Phase 1, and tests whether the long-term goal is possible. FireTun
 
 ## Phase 2: Strategist
 
+**Purpose:** Add one model call, the strategist, that sets the bot's goals a few times a game, and measure what it costs.
+
 Starts after G1.
 
 - [`2.1`](https://github.com/AlexNewell/civ_6_ai/issues/28) Policy document schema
@@ -125,6 +137,8 @@ Starts after G1.
 - [`2.6`](https://github.com/AlexNewell/civ_6_ai/issues/33) Sonnet 5.5 vs Opus 5.5 at the same dollar cap
 
 ## Phase 3: Cheap-tier bake-off
+
+**Purpose:** Find a cheaper model for the many small decisions, tested on recorded game situations before live games.
 
 Parallel with Phase 2, offline first.
 
@@ -137,12 +151,16 @@ Parallel with Phase 2, offline first.
 
 ## Phase 4: Reach M1
 
+**Purpose:** Tune the bot until it wins or ranks well at $1 or less a game.
+
 Starts after Phases 2 and 3. Leads to **M1**.
 
 - [`4.1`](https://github.com/AlexNewell/civ_6_ai/issues/40) Tuning rounds
 - [`4.2`](https://github.com/AlexNewell/civ_6_ai/issues/41) Formal M1 benchmark and report
 
 ## Phase 5: Improvement loop
+
+**Purpose:** Let Claude propose policy improvements from game logs, and test and promote them automatically.
 
 Starts after M1, and can overlap Phase 6. Code changes are promoted only between games, and full games confirm what fast scenarios select.
 
@@ -154,6 +172,8 @@ Starts after M1, and can overlap Phase 6. Code changes are promoted only between
 
 ## Phase 6: Puppeted opponents
 
+**Purpose:** Run the LLM bot as the AI opponents in a game, each seeing only what its own player can see.
+
 Needs G2, M1 and a budget review, because a five-opponent test game can cost up to $5.
 
 - [`6.1`](https://github.com/AlexNewell/civ_6_ai/issues/47) Vendor civ6-mcp and add player_id support
@@ -164,6 +184,10 @@ Needs G2, M1 and a budget review, because a five-opponent test game can cost up 
 - [`6.6`](https://github.com/AlexNewell/civ_6_ai/issues/52) Meet the opponent latency target
 
 ## Phase 7: Human vs LLM
+
+**Purpose:** Make it something a person can set up and play against.
+
+Needs Phase 6.
 
 - [`7.1`](https://github.com/AlexNewell/civ_6_ai/issues/53) One-command setup and launch
 - [`7.2`](https://github.com/AlexNewell/civ_6_ai/issues/54) Human-turn experience polish

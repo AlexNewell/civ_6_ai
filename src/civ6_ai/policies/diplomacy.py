@@ -915,7 +915,14 @@ class DiplomacyPolicy:
     async def _vote_now(self, game: DiplomacyGame, status: Any) -> bool:
         # civ6-mcp's end_turn refuses while a session is open unless a voter is registered, even
         # after these votes are submitted. Without this, a live game stuck on its first session.
-        registered = await self._register_voter(game, status)
+        try:
+            registered = await self._register_voter(game, status)
+        except ConnectionError:
+            raise
+        except Exception:
+            # Still vote and submit: an unsubmitted session holds the turn whatever happens here.
+            log.exception("Registering the World Congress voter failed")
+            registered = False
         context = await self._vote_context(game, status)
         favor = context.favor
         failed = False

@@ -648,6 +648,21 @@ def test_an_open_session_still_votes_and_submits_if_the_voter_will_not_register(
     assert "WORLD_CONGRESS_SUBMIT_TURN" in game.lua[-1][0]
 
 
+def test_an_open_session_still_votes_and_submits_if_registering_raises():
+    class RegisterFails(Game):
+        async def execute_lua(self, code, context="gamecore"):
+            if "__civmcp_wc_handler = handler" in code:
+                raise ValueError("lua failed")
+            return await super().execute_lua(code, context)
+
+    game = RegisterFails()
+    game.congress = wc_status([dv_resolution()])
+    policy = DiplomacyPolicy()
+    assert not run(policy.queue_voter(game, Blocker(BlockerType.WORLD_CONGRESS_VOTE)))
+    assert any(c[0] == "vote" for c in game.calls)
+    assert "WORLD_CONGRESS_SUBMIT_TURN" in game.lua[-1][0]
+
+
 def test_an_unmet_rival_is_never_voted_on():
     game = Game()
     game.congress = wc_status([dv_resolution()])

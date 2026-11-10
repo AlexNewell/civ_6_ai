@@ -127,6 +127,21 @@ def test_an_open_session_the_game_does_not_list_is_submitted_without_a_new_reque
     assert game.calls == ["end_turn", "register voter", "submit"]
 
 
+def test_a_session_still_open_after_its_submit_gets_a_new_request():
+    # Run 3, turn 306: the session stayed open after each submit until the turn was asked again.
+    class Stubborn(HeldGame):
+        async def execute_lua(self, code, context="gamecore"):
+            if "WORLD_CONGRESS_SUBMIT_TURN" in code:
+                self.calls.append("submit")
+                return "OK"  # Stays open.
+            return await super().execute_lua(code, context)
+
+    game = Stubborn(session=True)
+    assert end_turn(game) == ADVANCED
+    assert game.calls[-1] == "ask again"
+    assert game.calls.count("ask again") == 1
+
+
 def test_blockers_seen_once_as_the_turn_changes_are_left_alone():
     # Run 3, turn 199: the turn still read as 199 while turn 200's blockers showed. Clearing
     # them and asking again ended turn 200 before the bot played it.

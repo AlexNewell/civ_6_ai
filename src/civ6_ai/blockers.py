@@ -569,6 +569,7 @@ class ResolvingGame:
         """Run `end_turn`, clearing what holds the turn while it waits. Never sends a duplicate."""
         turn_before = await self._turn()
         self._last_hold: tuple | None = None
+        self._submitted_on: int | None = None  # The turn a held session was last submitted on.
         task = asyncio.ensure_future(self._game.end_turn())
         delay = WATCH_FIRST_SECONDS
         try:
@@ -609,10 +610,13 @@ class ResolvingGame:
                 self._last_hold = hold
                 return
             await self._resolver.resolve(self._game, readers=readers)
-            # A World Congress session runs as the next turn starts, while the turn still reads as
-            # the old one. Submitting it lets the game carry on, and a new request then ends the
-            # new turn unplayed, as turn 303 of Run 3 was.
-            if any(blocker.type == BlockerType.WORLD_CONGRESS_SESSION for blocker in blockers):
+            # A World Congress session can run as the next turn starts, while the turn still reads
+            # as the old one. Then submitting lets the game carry on, and a new request ends the
+            # new turn unplayed, as turn 303 of Run 3 was. Otherwise the session stays open until
+            # the turn is requested again, as on turn 306. So ask again only if it's still open.
+            session = any(b.type == BlockerType.WORLD_CONGRESS_SESSION for b in blockers)
+            if session and self._submitted_on != turn_before:
+                self._submitted_on = turn_before
                 log.info("Turn %s was held by a World Congress session, submitted it", turn_before)
                 return
             if await self._can_end_turn() and await self._turn() == turn_before:

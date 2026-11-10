@@ -288,6 +288,19 @@ issues:
       - No Great Prophet stays idle for more than 5 turns.
     depends: ["1.11"]
     budget: none
+  - id: "1.18"
+    title: Cut civ6-mcp's per-call wait
+    type: feature
+    parallel: true
+    goal: Make each game call cheaper, the biggest lever on turn time.
+    scope: "civ6-mcp's connection waits a fixed 0.1 s before sending each call and 0.2 s after the reply (connection.py) to drain stray messages, so every GameState call costs at least 0.3 s. Run 3 made about 90 calls a turn, so this wait is roughly 27 of its 34.5 s mean decision time (docs/speed-profile.md). Shorten or replace the drains with a narrow patch applied at startup, as for the per-turn saves, that fails loudly if the pinned code changes. Replies must still be matched to the right call: a stray message read as another call's answer is the main risk. Measure first with the per-call timing in the turn log (handler_calls)."
+    acceptance:
+      - Per-call cost is measured from handler_calls before and after the change in live runs.
+      - Mean decision time drops by at least 10 s against the same save and turn range.
+      - A live run of at least 100 turns shows no misread reply, checked by a test or log check that each reply matches its call.
+      - The patch fails at startup if civ6-mcp's connection code changes.
+    depends: ["1.1"]
+    budget: none
 
   # Workstream "E"
   - id: E.1

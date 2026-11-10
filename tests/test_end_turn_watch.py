@@ -125,6 +125,21 @@ def test_an_open_session_the_game_does_not_list_is_submitted_and_the_turn_asked_
     assert game.calls == ["end_turn", "register voter", "submit", "ask again"]
 
 
+def test_blockers_seen_once_as_the_turn_changes_are_left_alone():
+    # Run 3, turn 199: the turn still read as 199 while turn 200's blockers showed. Clearing
+    # them and asking again ended turn 200 before the bot played it.
+    class Changing(HeldGame):
+        async def execute_lua(self, code, context="gamecore"):
+            result = await super().execute_lua(code, context)
+            if "BLOCKING" in result:
+                self.turn += 1  # The new turn arrives just after the blockers were read.
+            return result
+
+    game = Changing(blocking=[BlockerType.UNITS])
+    assert end_turn(game) == TIMED_OUT
+    assert "skip" not in game.calls and "ask again" not in game.calls
+
+
 def test_nothing_to_clear_means_no_new_request():
     game = HeldGame()
     assert end_turn(game) == TIMED_OUT

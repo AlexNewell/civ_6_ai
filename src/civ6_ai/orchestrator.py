@@ -1,5 +1,6 @@
 """The single process that owns the tuner connection and plays turns."""
 
+import asyncio
 import json
 import logging
 import time
@@ -41,6 +42,10 @@ class DoNothing:
 
     async def run(self, game: Game) -> None:
         pass
+
+
+TURN_READ_RETRIES = 3  # Extra looks at the turn before a turn that reported as ended is a block.
+TURN_READ_RETRY_SECONDS = 3.0
 
 
 class StopReason(StrEnum):
@@ -184,6 +189,12 @@ class Orchestrator:
             # still read 1). Clearing it lets the UI catch up.
             if await self._dismiss_popup() and await self._read_turn() > turn_before:
                 return None
+            # The report said the turn advanced, so a UI that still reads the old turn may only be
+            # slow. Run 4 stopped on turn 318 this way, and the next look read 319.
+            for _ in range(TURN_READ_RETRIES):
+                await asyncio.sleep(TURN_READ_RETRY_SECONDS)
+                if await self._read_turn() > turn_before:
+                    return None
             return StopReason.BLOCKED
         except ConnectionError:
             raise

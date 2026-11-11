@@ -222,7 +222,7 @@ def build_orchestrator(
         resolver,
     ]
     timer = CallTimer(game)  # Under SharedReads, so it times real calls and not remembered ones.
-    shared = ResolvingGame(SharedReads(timer), resolver)
+    shared = ResolvingGame(SharedReads(timer), resolver, defeat_check=partial(is_defeated, game))
     return Orchestrator(
         shared, handlers, turn_log, defeat_check=partial(is_defeated, game), call_timer=timer
     )

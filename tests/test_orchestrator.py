@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import pytest
 
+from civ6_ai import orchestrator
 from civ6_ai.orchestrator import (
     DoNothing,
     Orchestrator,
@@ -199,3 +200,39 @@ def test_popup_holding_the_turn_is_dismissed_instead_of_stopping(tmp_path):
     assert reason is StopReason.TURN_LIMIT
     assert game.calls.count("dismiss_popup") == 2
     assert [record.stop_reason for record in turn_log.records] == [None, None]
+
+
+@pytest.fixture(autouse=True)
+def no_read_delay(monkeypatch):
+    monkeypatch.setattr(orchestrator, "TURN_READ_RETRY_SECONDS", 0.0)
+
+
+class SlowUiGame(FakeGame):
+    """The turn ends but the UI reads the old turn for a few looks, with no popup to dismiss."""
+
+    def __init__(self, stale_reads):
+        super().__init__()
+        self.stale_reads = stale_reads
+
+    async def end_turn(self):
+        result = await super().end_turn()
+        self.remaining = self.stale_reads
+        return result
+
+    async def get_game_overview(self):
+        if getattr(self, "remaining", 0) > 0:
+            self.remaining -= 1
+            return Overview(self.turn - 1)
+        return Overview(self.turn)
+
+
+def test_a_slow_ui_that_catches_up_is_not_a_block(tmp_path):
+    # Run 4, turn 318: the report said "318 -> 319", one look read 318, and the run stopped.
+    reason, turn_log = play(SlowUiGame(stale_reads=3), [DoNothing()], 2, tmp_path)
+    assert reason is StopReason.TURN_LIMIT
+    assert [record.stop_reason for record in turn_log.records] == [None, None]
+
+
+def test_a_ui_that_never_catches_up_is_still_a_block(tmp_path):
+    reason, _ = play(SlowUiGame(stale_reads=99), [DoNothing()], 2, tmp_path)
+    assert reason is StopReason.BLOCKED

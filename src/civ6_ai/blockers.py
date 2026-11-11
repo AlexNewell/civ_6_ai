@@ -25,6 +25,8 @@ from civ_mcp.lua import (
 log = logging.getLogger(__name__)
 
 MAX_PASSES = 3  # Clearing one blocker can reveal another, such as an idle governor.
+# The turn loop reads this prefix as the end of the game, see `orchestrator._REPORT_PREFIXES`.
+GAME_OVER_REPORT = "GAME OVER: the game ended while the turn was waiting to end."
 MAX_END_TURN_RETRIES = 8  # Enough for all five opponents to interrupt one turn, plus a blocker.
 # civ6-mcp's end_turn only looks at what holds a turn after polling for about 9 minutes, so the
 # bot checks itself while it waits. The first check leaves time for a normal AI turn.
@@ -585,9 +587,15 @@ class ResolvingGame:
     advance. Pass this to `Orchestrator` in place of the game. Anything else reaches the game.
     """
 
-    def __init__(self, game: Any, resolver: BlockerResolver) -> None:
+    def __init__(
+        self,
+        game: Any,
+        resolver: BlockerResolver,
+        defeat_check: Callable[[], Awaitable[bool]] | None = None,
+    ) -> None:
         self._game = game
         self._resolver = resolver
+        self._defeat_check = defeat_check
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._game, name)
@@ -619,6 +627,11 @@ class ResolvingGame:
                 if done:
                     return task.result()
                 delay = WATCH_EVERY_SECONDS
+                if await self._game_over():
+                    # Run 4, turn 325: the defeat cinematic played while the watcher kept
+                    # clearing a civic-slot hold and asking again for minutes.
+                    task.cancel()
+                    return GAME_OVER_REPORT
                 if turn_before is not None:
                     await self._unstick(turn_before)
         except BaseException:
@@ -689,6 +702,18 @@ class ResolvingGame:
             raise
         except Exception:
             log.warning("Clearing a held turn failed", exc_info=True)
+
+    async def _game_over(self) -> bool:
+        """Ask the defeat check, if there is one. A check that fails counts as not over."""
+        if self._defeat_check is None:
+            return False
+        try:
+            return await self._defeat_check()
+        except ConnectionError:
+            raise
+        except Exception:
+            log.warning("Game-over check failed during the end-turn wait", exc_info=True)
+            return False
 
     async def _can_end_turn(self) -> bool:
         """True only while our turn is still open, so a new request can't be a duplicate."""

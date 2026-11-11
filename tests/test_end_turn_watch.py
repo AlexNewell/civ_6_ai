@@ -20,8 +20,17 @@ class Overview:
 class HeldGame:
     """A game whose end_turn waits until a new end-turn request is sent, as a held turn does."""
 
-    def __init__(self, blocking=(), can_end=True, popup=False, advances_alone=False, session=False):
+    def __init__(
+        self,
+        blocking=(),
+        can_end=True,
+        popup=False,
+        advances_alone=False,
+        session=False,
+        talk=False,
+    ):
         self.session = session
+        self.talk = talk  # A diplomacy session is open until it is answered.
         self.turn = 5
         self.blocking = list(blocking)
         self.can_end = can_end
@@ -61,6 +70,18 @@ class HeldGame:
     async def queue_wc_votes(self, votes):
         self.calls.append("register voter")
         return "OK:QUEUED"
+
+    async def get_diplomacy_sessions(self):
+        return [object()] if self.talk else []
+
+    async def get_pending_deals(self):
+        return []
+
+    async def diplomacy_respond(self, other_player_id, response):
+        self.calls.append("talk")
+        self.talk = False
+        self.released.set()  # The AI carries on once the session is answered.
+        return "OK:SESSION_CLOSED"
 
     async def skip_remaining_units(self):
         self.calls.append("skip")
@@ -221,3 +242,16 @@ def test_closing_fails_cleanly_without_the_screens_state():
     game = _ViewGame()
     game.conn.lua_states = {}
     assert not asyncio.run(blockers.close_stray_diplomacy_view(game))
+
+
+async def _answer(game, blocker):
+    await game.diplomacy_respond(1, "EXIT")
+    return True
+
+
+def test_a_diplomacy_session_is_answered_at_the_first_look_without_a_new_request():
+    # Run 4: a held turn cost 68 s because sessions were left to civ6-mcp's own report.
+    game = HeldGame(talk=True)
+    resolver = BlockerResolver({BlockerType.DIPLOMACY_SESSION: _answer})
+    assert asyncio.run(ResolvingGame(game, resolver).end_turn()) == ADVANCED
+    assert game.calls == ["end_turn", "talk"]

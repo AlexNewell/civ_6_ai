@@ -179,8 +179,13 @@ class SettleDecisionLog(logging.Handler):
         self.close()
 
 
-def build_orchestrator(game: Any, bus: EventBus, turn_log: TurnLog) -> Orchestrator:
-    """Wire the handlers to a game. `game` is civ6-mcp's `GameState`, or a fake with its reads."""
+def build_orchestrator(
+    game: Any, bus: EventBus, turn_log: TurnLog, trade_offers: bool = True
+) -> Orchestrator:
+    """Wire the handlers to a game. `game` is civ6-mcp's `GameState`, or a fake with its reads.
+
+    `trade_offers=False` leaves out `TradeOfferPolicy`.
+    """
     production = CityProductionPolicy()
     government = GovernmentPolicy()  # One instance, so handler and blockers share its bounds.
     secondary = SecondaryPolicy()
@@ -204,7 +209,7 @@ def build_orchestrator(game: Any, bus: EventBus, turn_log: TurnLog) -> Orchestra
         Monitors(bus),
         diplomacy,
         WarPolicy(),
-        TradeOfferPolicy(diplomacy.weights),
+        *([TradeOfferPolicy(diplomacy.weights)] if trade_offers else []),
         SettlingPolicy(),
         military,
         research.ResearchPolicy(),

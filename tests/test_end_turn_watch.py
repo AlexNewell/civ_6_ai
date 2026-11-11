@@ -176,3 +176,48 @@ def test_a_lost_connection_while_watching_stops_the_wait():
 
     with pytest.raises(ConnectionError):
         end_turn(Lost(popup=True))
+
+
+class _ViewGame:
+    """A game whose diplomacy screen is up, with or without a session behind it."""
+
+    def __init__(self, view_open=True, sessions=()):
+        self.view_open = view_open
+        self.sessions = list(sessions)
+        self.ran = []
+
+        class Conn:
+            lua_states = {7: "DiplomacyRibbon", 94: "DiplomacyActionView"}
+
+        self.conn = Conn()
+
+    async def execute_lua(self, code, context="gamecore"):
+        self.ran.append((context, code))
+        if "OnClose" in code:
+            self.view_open = False
+            return "ok"
+        return "DIPLOMACY_VIEW|open" if self.view_open else "(no output)"
+
+    async def get_diplomacy_sessions(self):
+        return self.sessions
+
+
+def test_a_screen_with_no_session_behind_it_is_found_and_closed_in_its_own_state():
+    game = _ViewGame()
+    assert asyncio.run(blockers.stray_diplomacy_view_open(game))
+    assert asyncio.run(blockers.close_stray_diplomacy_view(game))
+    assert ("94", 'pcall(OnClose) print("---END---")') in game.ran
+
+
+def test_a_screen_with_a_live_session_is_left_alone():
+    assert not asyncio.run(blockers.stray_diplomacy_view_open(_ViewGame(sessions=[object()])))
+
+
+def test_a_hidden_screen_is_not_stray():
+    assert not asyncio.run(blockers.stray_diplomacy_view_open(_ViewGame(view_open=False)))
+
+
+def test_closing_fails_cleanly_without_the_screens_state():
+    game = _ViewGame()
+    game.conn.lua_states = {}
+    assert not asyncio.run(blockers.close_stray_diplomacy_view(game))

@@ -163,6 +163,42 @@ def move_succeeded(result: str) -> bool:
     return _succeeded(result) and "BLOCKED" not in result
 
 
+_DIPLOMACY_VIEW_LUA = (
+    'do local c = ContextPtr:LookUpControl("/InGame/DiplomacyActionView") '
+    'if c and not c:IsHidden() then print("DIPLOMACY_VIEW|open") end end '
+    'print("---END---")'
+)
+_DIPLOMACY_VIEW_STATE = "DiplomacyActionView"
+
+
+async def stray_diplomacy_view_open(game: BlockerGame) -> bool:
+    """True if the diplomacy screen is up although the game lists no session behind it.
+
+    Run 4's turn 221 stuck here: the AI turn waited on Sumeria's screen for ten minutes, and
+    `get_diplomacy_sessions` was empty, so no blocker was read and nothing closed it.
+    """
+    if "DIPLOMACY_VIEW|open" not in await game.execute_lua(_DIPLOMACY_VIEW_LUA, "ingame"):
+        return False
+    return not await game.get_diplomacy_sessions()
+
+
+async def close_stray_diplomacy_view(game: BlockerGame) -> bool:
+    """Close the screen with its own `OnClose`, in its own Lua state, as the game's button does.
+
+    Respond-and-exit finds no session (NO_SESSION) and hiding it from InGame leaves it up, but
+    this closed it on turn 221 and the game went on to turn 222. True if it is closed now.
+    """
+    states = getattr(getattr(game, "conn", None), "lua_states", {})
+    index = next((i for i, name in states.items() if name == _DIPLOMACY_VIEW_STATE), None)
+    if index is None:
+        log.warning(
+            "No Lua state named %s to close the stray diplomacy screen", _DIPLOMACY_VIEW_STATE
+        )
+        return False
+    await game.execute_lua('pcall(OnClose) print("---END---")', str(index))
+    return not await stray_diplomacy_view_open(game)
+
+
 async def leave_to_end_turn(game: BlockerGame, blocker: Blocker) -> bool:
     """Do nothing, because `end_turn` clears this type itself."""
     return True
@@ -569,6 +605,7 @@ class ResolvingGame:
         """Run `end_turn`, clearing what holds the turn while it waits. Never sends a duplicate."""
         turn_before = await self._turn()
         self._last_hold: tuple | None = None
+        self._stray_seen: int | None = None
         self._submitted_on: int | None = None  # The turn a held session was last submitted on.
         task = asyncio.ensure_future(self._game.end_turn())
         delay = WATCH_FIRST_SECONDS
@@ -599,6 +636,15 @@ class ResolvingGame:
             blockers = await _read_all(self._game, readers)
             if "Dismissed" in dismissed:
                 log.info("Turn %s was held, closed: %s", turn_before, dismissed[:200])
+            # Closed only if seen on two checks in a row, so a screen opening as a session starts
+            # is left alone.
+            if await stray_diplomacy_view_open(self._game):
+                if self._stray_seen == turn_before:
+                    closed = await close_stray_diplomacy_view(self._game)
+                    log.info("Turn %s: stray diplomacy screen, closed=%s", turn_before, closed)
+                self._stray_seen = turn_before
+            else:
+                self._stray_seen = None
             if not blockers:
                 self._last_hold = None
                 return

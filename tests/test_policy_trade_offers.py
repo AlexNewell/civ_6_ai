@@ -35,6 +35,13 @@ def civ(player=ROME, war=False, met=True):
     return fx.civ_info(player_id=player, is_at_war=war, has_met=met)
 
 
+ACCEPTABLE = (
+    "Trade test with Rome (player 1):"
+    + chr(10) * 2
+    + "AI response: ACCEPTABLE — this deal would be accepted as-is"
+)
+
+
 class Game:
     def __init__(self, piles=(), luxuries=None, civs=None, turn=50, result="ACCEPTED|Trade ok"):
         self.piles = list(piles)
@@ -43,6 +50,8 @@ class Game:
         self.turn = turn
         self.result = result
         self.proposals = []
+        self.tests = []
+        self.verdict = ACCEPTABLE
         self.sessions = []
         self.exits = []
         self.leave_open = False
@@ -64,6 +73,12 @@ class Game:
         self.sessions.remove(player)
         return "SESSION_CLOSED"
 
+    async def test_trade(self, player, offer, request):
+        self.tests.append((player, offer, request))
+        if isinstance(self.verdict, Exception):
+            raise self.verdict
+        return self.verdict
+
     async def propose_trade(self, player, offer, request):
         self.proposals.append((player, offer, request))
         if self.leave_open:
@@ -71,6 +86,64 @@ class Game:
         if isinstance(self.result, Exception):
             raise self.result
         return self.result
+
+
+COUNTER = chr(10).join(
+    [
+        "Trade test with Mapuche (player 4):",
+        "",
+        "Your proposal:",
+        "  We offer: 1x WINE",
+        "  We request: 2 gold/turn",
+        "",
+        "AI counter-offer (what they consider fair):",
+        "  We give: 30 Diplomatic Favor, Open Borders, Joint War",
+        "  They give: 124 gold",
+    ]
+)
+
+
+def test_only_an_offer_the_ai_takes_as_written_is_sent():
+    game = Game([pile()])
+    play(game)
+    assert len(game.tests) == 1 and len(game.proposals) == 1
+
+
+def test_an_offer_the_ai_would_counter_is_never_sent(caplog):
+    # Run 4, turn 105: propose_trade accepted a counter that carried a Joint War.
+    game = Game([pile()])
+    game.verdict = COUNTER
+    with caplog.at_level(logging.INFO):
+        play(game)
+    assert game.proposals == []
+    assert "not sent" in caplog.text and "Joint War" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "verdict",
+    ["AI response: REJECTED — will not trade at all", "", "Error: no such player"],
+)
+def test_a_rejection_or_an_unreadable_verdict_is_not_sent(verdict):
+    game = Game([pile()])
+    game.verdict = verdict
+    play(game)
+    assert game.proposals == []
+
+
+def test_a_refused_test_rests_the_pair_like_a_refused_offer():
+    game = Game([pile()])
+    game.verdict = COUNTER
+    policy = play(game, turns=1)
+    play(game, policy, turns=W.refusal_turns - 2)
+    assert len(game.tests) == 1
+
+
+def test_a_failing_test_call_does_not_abort_and_closes_the_session():
+    game = Game([pile()])
+    game.verdict = RuntimeError("boom")
+    game.sessions = []
+    play(game)
+    assert game.proposals == []
 
 
 def play(game, policy=None, turns=1):

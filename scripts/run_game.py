@@ -29,7 +29,8 @@ from civ6_ai.saves import disable_mcp_saves, use_real_save_dirs
 ROOT = Path(__file__).parent.parent
 # Off since Run 4 (turn 105): civ6-mcp's propose_trade accepts whatever counter-offer the AI
 # makes, and Mapuche's added Joint War, Open Borders and 30 favor before the game's AI turn
-# stalled for good. Switch back on once the policy checks the terms before committing.
+# stalled for good. The policy now asks test_trade first and sends only an offer the AI takes as
+# written (unit-tested only). Switch back on after a live check that test_trade reads correctly.
 TRADE_OFFERS = False
 MANIFEST = ROOT / "config" / "standard_saves.json"
 

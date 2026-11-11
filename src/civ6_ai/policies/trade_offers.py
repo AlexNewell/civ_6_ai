@@ -84,6 +84,20 @@ class TradeGame(Protocol):
     async def propose_trade(
         self, other_player_id: int, offer_items: list[dict], request_items: list[dict]
     ) -> str: ...
+    async def test_trade(
+        self, other_player_id: int, offer_items: list[dict], request_items: list[dict]
+    ) -> str: ...
+
+
+ACCEPTABLE_AS_IS = "ACCEPTABLE"  # civ6-mcp's `test_trade` text for a deal taken without changes.
+
+
+def is_acceptable_as_is(verdict: str) -> bool:
+    """True only if the AI's answer to `test_trade` says it would take the offer unchanged.
+
+    A counter-offer, a rejection and anything unreadable all count as no.
+    """
+    return any(line.strip().startswith("AI response: ACCEPTABLE") for line in verdict.splitlines())
 
 
 @dataclass(frozen=True)
@@ -257,6 +271,20 @@ class TradeOfferPolicy:
         )
         key = (player, item.name)
         try:
+            # `propose_trade` accepts whatever the AI counters with. In Run 4 (turn 105) that was
+            # 30 favor, Open Borders and a Joint War on top of a wine-for-gold offer, and the AI's
+            # turn never finished. So the AI is asked first, and only an offer it would accept
+            # exactly as written is sent.
+            verdict = await game.test_trade(player, [offer], [ask])
+            if not is_acceptable_as_is(verdict):
+                log.info(
+                    "Trade offer to player %s not sent, the AI would not take it as written: %s",
+                    player,
+                    " ".join(verdict.split())[:200],
+                )
+                self._rest_until[key] = turn + self.weights.refusal_turns
+                await self._close(game, player)
+                return
             result = await game.propose_trade(player, [offer], [ask])
         except ConnectionError:
             raise

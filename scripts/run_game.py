@@ -19,6 +19,7 @@ from civ_mcp.connection import GameConnection
 from civ_mcp.game_state import GameState
 
 from civ6_ai.bot import SettleDecisionLog, build_orchestrator
+from civ6_ai.fastcalls import narrow_popup_scan, shorten_call_waits
 from civ6_ai.metrics.costs import game_id_of_log
 from civ6_ai.metrics.speed import summarise as summarise_speed
 from civ6_ai.monitors import EventBus, EventLog
@@ -26,6 +27,10 @@ from civ6_ai.orchestrator import StopReason, TurnLog, TurnRecord
 from civ6_ai.saves import disable_mcp_saves, use_real_save_dirs
 
 ROOT = Path(__file__).parent.parent
+# Off since Run 4 (turn 105): civ6-mcp's propose_trade accepts whatever counter-offer the AI
+# makes, and Mapuche's added Joint War, Open Borders and 30 favor before the game's AI turn
+# stalled for good. Switch back on once the policy checks the terms before committing.
+TRADE_OFFERS = False
 MANIFEST = ROOT / "config" / "standard_saves.json"
 
 
@@ -64,6 +69,8 @@ async def play_game(
     """Play `turns` turns in the open game. None if it is not a standard save (or `expect_save`)."""
     use_real_save_dirs()
     disable_mcp_saves()
+    narrow_popup_scan()
+    shorten_call_waits()
     connection = GameConnection()
     await connection.connect()
     game = GameState(connection)
@@ -91,7 +98,9 @@ async def play_game(
     decisions = SettleDecisionLog(ROOT / "runs" / f"{name}_{stamp}_settle.jsonl")
     decisions.attach()
     try:
-        reason = await build_orchestrator(game, bus, turn_log).play(turns)
+        reason = await build_orchestrator(game, bus, turn_log, trade_offers=TRADE_OFFERS).play(
+            turns
+        )
     finally:
         decisions.detach()
         logging.getLogger("civ6_ai").removeHandler(file_log)

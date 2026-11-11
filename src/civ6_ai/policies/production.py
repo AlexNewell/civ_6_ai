@@ -27,7 +27,10 @@ from civ6_ai.state import read_units as _read_units
 log = logging.getLogger(__name__)
 
 MAX_ATTEMPTS = 6  # Per city per turn. Every refusal costs a call, and a unit always works.
-_NO_COORDS_WONDER = "ERR:MISSING_COORDS"
+# civ6-mcp turns "ERR:" replies into "Error: " before returning them, so a live wonder reply reads
+# "Error: MISSING_COORDS|BUILDING_X is a wonder and requires target_x/target_y". Run 4 matched only
+# the "ERR:" form, so no wonder was ever placed.
+_NO_COORDS_WONDER = ("ERR:MISSING_COORDS", "Error: MISSING_COORDS")
 _TURN_SCALE = 20.0  # A build this many turns away scores half as much as an instant one.
 _URGENT_SCALE = 10.0
 _FINISHING_TURNS = 2  # A build this close to done is let finish.

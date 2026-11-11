@@ -20,8 +20,17 @@ class Overview:
 class HeldGame:
     """A game whose end_turn waits until a new end-turn request is sent, as a held turn does."""
 
-    def __init__(self, blocking=(), can_end=True, popup=False, advances_alone=False, session=False):
+    def __init__(
+        self,
+        blocking=(),
+        can_end=True,
+        popup=False,
+        advances_alone=False,
+        session=False,
+        talk=False,
+    ):
         self.session = session
+        self.talk = talk  # A diplomacy session is open until it is answered.
         self.turn = 5
         self.blocking = list(blocking)
         self.can_end = can_end
@@ -61,6 +70,18 @@ class HeldGame:
     async def queue_wc_votes(self, votes):
         self.calls.append("register voter")
         return "OK:QUEUED"
+
+    async def get_diplomacy_sessions(self):
+        return [object()] if self.talk else []
+
+    async def get_pending_deals(self):
+        return []
+
+    async def diplomacy_respond(self, other_player_id, response):
+        self.calls.append("talk")
+        self.talk = False
+        self.released.set()  # The AI carries on once the session is answered.
+        return "OK:SESSION_CLOSED"
 
     async def skip_remaining_units(self):
         self.calls.append("skip")
@@ -176,3 +197,61 @@ def test_a_lost_connection_while_watching_stops_the_wait():
 
     with pytest.raises(ConnectionError):
         end_turn(Lost(popup=True))
+
+
+class _ViewGame:
+    """A game whose diplomacy screen is up, with or without a session behind it."""
+
+    def __init__(self, view_open=True, sessions=()):
+        self.view_open = view_open
+        self.sessions = list(sessions)
+        self.ran = []
+
+        class Conn:
+            lua_states = {7: "DiplomacyRibbon", 94: "DiplomacyActionView"}
+
+        self.conn = Conn()
+
+    async def execute_lua(self, code, context="gamecore"):
+        self.ran.append((context, code))
+        if "OnClose" in code:
+            self.view_open = False
+            return "ok"
+        return "DIPLOMACY_VIEW|open" if self.view_open else "(no output)"
+
+    async def get_diplomacy_sessions(self):
+        return self.sessions
+
+
+def test_a_screen_with_no_session_behind_it_is_found_and_closed_in_its_own_state():
+    game = _ViewGame()
+    assert asyncio.run(blockers.stray_diplomacy_view_open(game))
+    assert asyncio.run(blockers.close_stray_diplomacy_view(game))
+    assert ("94", 'pcall(OnClose) print("---END---")') in game.ran
+
+
+def test_a_screen_with_a_live_session_is_left_alone():
+    assert not asyncio.run(blockers.stray_diplomacy_view_open(_ViewGame(sessions=[object()])))
+
+
+def test_a_hidden_screen_is_not_stray():
+    assert not asyncio.run(blockers.stray_diplomacy_view_open(_ViewGame(view_open=False)))
+
+
+def test_closing_fails_cleanly_without_the_screens_state():
+    game = _ViewGame()
+    game.conn.lua_states = {}
+    assert not asyncio.run(blockers.close_stray_diplomacy_view(game))
+
+
+async def _answer(game, blocker):
+    await game.diplomacy_respond(1, "EXIT")
+    return True
+
+
+def test_a_diplomacy_session_is_answered_at_the_first_look_without_a_new_request():
+    # Run 4: a held turn cost 68 s because sessions were left to civ6-mcp's own report.
+    game = HeldGame(talk=True)
+    resolver = BlockerResolver({BlockerType.DIPLOMACY_SESSION: _answer})
+    assert asyncio.run(ResolvingGame(game, resolver).end_turn()) == ADVANCED
+    assert game.calls == ["end_turn", "talk"]

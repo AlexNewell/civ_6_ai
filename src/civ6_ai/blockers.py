@@ -28,8 +28,8 @@ MAX_PASSES = 3  # Clearing one blocker can reveal another, such as an idle gover
 MAX_END_TURN_RETRIES = 8  # Enough for all five opponents to interrupt one turn, plus a blocker.
 # civ6-mcp's end_turn only looks at what holds a turn after polling for about 9 minutes, so the
 # bot checks itself while it waits. The first check leaves time for a normal AI turn.
-WATCH_FIRST_SECONDS = 20.0
-WATCH_EVERY_SECONDS = 20.0
+WATCH_FIRST_SECONDS = 10.0
+WATCH_EVERY_SECONDS = 10.0
 _CAN_END_TURN_LUA = f'print("CAN_END_TURN|" .. tostring(UI.CanEndTurn())); print("{SENTINEL}")'
 MAX_DIPLOMACY_ROUNDS = 4  # A first meeting takes 2-3 rounds.
 
@@ -161,6 +161,42 @@ def action_succeeded(result: str) -> bool:
 def move_succeeded(result: str) -> bool:
     """A move can be accepted yet go nowhere. civ6-mcp then adds `|BLOCKED (reason)`."""
     return _succeeded(result) and "BLOCKED" not in result
+
+
+_DIPLOMACY_VIEW_LUA = (
+    'do local c = ContextPtr:LookUpControl("/InGame/DiplomacyActionView") '
+    'if c and not c:IsHidden() then print("DIPLOMACY_VIEW|open") end end '
+    'print("---END---")'
+)
+_DIPLOMACY_VIEW_STATE = "DiplomacyActionView"
+
+
+async def stray_diplomacy_view_open(game: BlockerGame) -> bool:
+    """True if the diplomacy screen is up although the game lists no session behind it.
+
+    Run 4's turn 221 stuck here: the AI turn waited on Sumeria's screen for ten minutes, and
+    `get_diplomacy_sessions` was empty, so no blocker was read and nothing closed it.
+    """
+    if "DIPLOMACY_VIEW|open" not in await game.execute_lua(_DIPLOMACY_VIEW_LUA, "ingame"):
+        return False
+    return not await game.get_diplomacy_sessions()
+
+
+async def close_stray_diplomacy_view(game: BlockerGame) -> bool:
+    """Close the screen with its own `OnClose`, in its own Lua state, as the game's button does.
+
+    Respond-and-exit finds no session (NO_SESSION) and hiding it from InGame leaves it up, but
+    this closed it on turn 221 and the game went on to turn 222. True if it is closed now.
+    """
+    states = getattr(getattr(game, "conn", None), "lua_states", {})
+    index = next((i for i, name in states.items() if name == _DIPLOMACY_VIEW_STATE), None)
+    if index is None:
+        log.warning(
+            "No Lua state named %s to close the stray diplomacy screen", _DIPLOMACY_VIEW_STATE
+        )
+        return False
+    await game.execute_lua('pcall(OnClose) print("---END---")', str(index))
+    return not await stray_diplomacy_view_open(game)
 
 
 async def leave_to_end_turn(game: BlockerGame, blocker: Blocker) -> bool:
@@ -465,7 +501,11 @@ async def _read_open_session(game: BlockerGame) -> list[Blocker]:
 
 
 # What the end-turn watcher checks while a turn is held.
-_WATCH_READERS = (_read_end_turn_blocking, _read_open_session)
+# Diplomacy is in the list so that a session or deal is answered by our own rules within a tick or
+# two. Left to civ6-mcp's end_turn it waited about 40 s for the report "Turn paused - AI diplomatic
+# proposal", and in Run 4 each turn held by one cost 68 s of end-turn wait against 6.6 s otherwise.
+_WATCH_READERS = (_read_end_turn_blocking, _read_open_session, _read_diplomacy)
+_DIPLOMACY_TYPES = frozenset({BlockerType.DIPLOMACY_SESSION, BlockerType.TRADE_DEAL})
 
 
 class BlockerResolver:
@@ -569,6 +609,7 @@ class ResolvingGame:
         """Run `end_turn`, clearing what holds the turn while it waits. Never sends a duplicate."""
         turn_before = await self._turn()
         self._last_hold: tuple | None = None
+        self._stray_seen: int | None = None
         self._submitted_on: int | None = None  # The turn a held session was last submitted on.
         task = asyncio.ensure_future(self._game.end_turn())
         delay = WATCH_FIRST_SECONDS
@@ -592,13 +633,26 @@ class ResolvingGame:
         carry on by itself. `end_turn` keeps polling throughout and returns once the turn moves.
         """
         try:
-            if await self._turn() != turn_before:
+            now = await self._turn()
+            if now != turn_before:
+                log.info("Watch tick: turn reads %s, not %s, so leaving it", now, turn_before)
                 return
             dismissed = await self._game.dismiss_popup()
             readers = _WATCH_READERS
             blockers = await _read_all(self._game, readers)
             if "Dismissed" in dismissed:
                 log.info("Turn %s was held, closed: %s", turn_before, dismissed[:200])
+            # Closed only if seen on two checks in a row, so a screen opening as a session starts
+            # is left alone.
+            stray = await stray_diplomacy_view_open(self._game)
+            log.info("Watch tick on turn %s: stray diplomacy screen=%s", turn_before, stray)
+            if stray:
+                if self._stray_seen == turn_before:
+                    closed = await close_stray_diplomacy_view(self._game)
+                    log.info("Turn %s: stray diplomacy screen, closed=%s", turn_before, closed)
+                self._stray_seen = turn_before
+            else:
+                self._stray_seen = None
             if not blockers:
                 self._last_hold = None
                 return
@@ -608,6 +662,11 @@ class ResolvingGame:
             hold = (turn_before, frozenset(blocker.type for blocker in blockers))
             if hold != self._last_hold:
                 self._last_hold = hold
+                if all(blocker.type in _DIPLOMACY_TYPES for blocker in blockers):
+                    # Answering a session never ends a turn, so it needn't wait for a second look.
+                    # It is not followed by a new end-turn request: the AI carries on by itself.
+                    await self._resolver.resolve(self._game, readers=readers)
+                    log.info("Turn %s: answered %s at once", turn_before, sorted(hold[1]))
                 return
             await self._resolver.resolve(self._game, readers=readers)
             # A World Congress session can run as the next turn starts, while the turn still reads

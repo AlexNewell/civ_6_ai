@@ -25,11 +25,21 @@ Written offline against civ6-mcp's source, so none of this has run in a game yet
 | Ranged units are not hit back by melee defenders, and ranged defenders do hit back (`assess_attack` assumes both) | Not reached |
 | `Unit.targets` lists only targets in range with line of sight, and ranged units fire at adjacent targets | Not reached |
 
+## Run 4: turns 1 to 325, with the speed and diplomacy fixes (issues 15, 17 and 117)
+
+- **Game:** standard save `STD_T1_01`, played over many sessions and reloads. No model calls, $0.00.
+- **Result:** the game ended on turn 325 with "Culture Victory: Sumerian Empire defeats Mayan Empire", as the owner read it from the defeat screen. It doesn't count toward gate G1, because it needed hands-on help (below). Run 3's recorded "Germany won a science victory" is not verified by any log, and the owner has set that conclusion aside.
+- **Hangs, each needing a reload or a restart:** turn 105 (after a trade offer the AI accepted with extra terms: Joint War, Open Borders and 30 favor; trade offers are now off in `run_game.py` until the terms are checked); turn 221 (the game held Sumeria's diplomacy screen open with no session behind it, closed by `OnClose` in the view's own Lua state, PR 118); turn 256 (the "Welcome to the World Congress" screen; the watcher logged nothing for eight minutes, cause unknown, issue 117).
+- **Speed (decision time, mean):** 40 s on turns 1 to 105; 11.8 s on turns 104 to 221 with the popup scan narrowed and the call waits shortened (PR 116); 14.9 s on turns 262 to 318 with diplomacy answered during the end-turn wait (PR 121). Turns held by a diplomacy screen cost 68 s of end-turn wait against 6.6 s for the rest, before PR 121.
+- **War:** Khmer attacked from turn 223 and took Wak Kab'nal on turn 230. Peace was accepted on turn 256. The war tracker lost the declaration twice, because a restart drops its baseline ("start unknown") and because a hang loses the end-turn report that names the declarer. The flag also read "no war" on turns 234 to 248 with no peace deal logged, which is unexplained.
+- **Great people:** many sat unactivated in one city. Not caused by the war alone. PR 120 logs each one with a reason; see the criteria in issue 15.
+- **Still wrong at the end:** on turn 318 the turn check read the old turn once and stopped the run as "blocked" (it had advanced); and on the defeat screen the bot looped on a civic-slot hold on turn 325 for several minutes instead of recognising game over.
+
 ## Run 3: the fully wired bot from turn 1 (issues 6, 13 and 16)
 
 - **Build:** main at `adef6e6`, with every policy wired in, plus the World Congress fix below. civ6-mcp pinned at `dd20190`. No model calls.
 - **Game:** standard save `STD_T1_01`, played from turn 1 to the end of the game, on turn 318, over seven sessions. The owner paused the game on turn 131 and reloaded it on turn 133. Later sessions ran on main as each fix below was merged (PRs 85, 86 and 92 to 95).
-- **Result:** Germany won a science victory at the end of turn 318, and the Maya were defeated. This is the first game the bot played to the end. It doesn't count toward gate G1, because it needed hands-on help: nudges through World Congress sessions on turns 81, 156 and 306, and the governor title hold on turn 318 (stop 6).
+- **Result:** recorded at the time as a Germany science victory at the end of turn 318, with the Maya defeated (no log holds a victory event, and the owner has since set that conclusion aside). This is the first game the bot played to the end. It doesn't count toward gate G1, because it needed hands-on help: nudges through World Congress sessions on turns 81, 156 and 306, and the governor title hold on turn 318 (stop 6).
 - **Time:** 5.7 hours of bot time for 312 logged turns. The median was 52s a turn: 40s up to turn 131 and 58s after it. Four turns took over 3 minutes (the table below). Turns 200 and 303 were skipped (stops 3 and 4), and turns 131, 132 and 306 have no line because a session stopped on them.
 
 ### Stops and fixes

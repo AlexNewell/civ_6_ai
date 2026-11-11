@@ -629,7 +629,9 @@ class ResolvingGame:
         carry on by itself. `end_turn` keeps polling throughout and returns once the turn moves.
         """
         try:
-            if await self._turn() != turn_before:
+            now = await self._turn()
+            if now != turn_before:
+                log.info("Watch tick: turn reads %s, not %s, so leaving it", now, turn_before)
                 return
             dismissed = await self._game.dismiss_popup()
             readers = _WATCH_READERS
@@ -638,7 +640,9 @@ class ResolvingGame:
                 log.info("Turn %s was held, closed: %s", turn_before, dismissed[:200])
             # Closed only if seen on two checks in a row, so a screen opening as a session starts
             # is left alone.
-            if await stray_diplomacy_view_open(self._game):
+            stray = await stray_diplomacy_view_open(self._game)
+            log.info("Watch tick on turn %s: stray diplomacy screen=%s", turn_before, stray)
+            if stray:
                 if self._stray_seen == turn_before:
                     closed = await close_stray_diplomacy_view(self._game)
                     log.info("Turn %s: stray diplomacy screen, closed=%s", turn_before, closed)

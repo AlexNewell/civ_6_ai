@@ -429,6 +429,34 @@ class SecondaryPolicy:
             if kind == _PROPHET and not can_found:
                 continue  # A religion exists already, or none is left to found.
             await self._activate(game, unit, turn)
+        self._log_waiting(units, turn, can_found)
+
+    def _log_waiting(self, units: Iterable[Unit], turn: int, can_found: bool) -> None:
+        """Say which great people are still on the map, and why each one isn't being used.
+
+        Run 4 piled up great people in one city and the log never mentioned them (issue 15).
+        The reason is a guess from the policy's own state: a unit it never activates (generals,
+        admirals), a prophet with no religion to found, one set aside, or one it is working on.
+        """
+        waiting = []
+        for unit in sorted(units, key=lambda u: u.unit_id):
+            if not unit.unit_type.startswith("UNIT_GREAT_"):
+                continue
+            kind = canonical(unit.unit_type)
+            state = self._great.get(unit.unit_id)
+            if kind not in _ACTIVATABLE:
+                reason = "never activated by this policy"
+            elif kind == _PROPHET and not can_found:
+                reason = "no religion left to found"
+            elif state is not None and state.skip_until > turn:
+                reason = f"set aside until turn {state.skip_until}"
+            else:
+                reason = "working on it"
+            waiting.append(f"{unit.name} ({kind}) at {unit.x},{unit.y}: {reason}")
+        if waiting:
+            log.info(
+                "great_people turn %d: %d on the map: %s", turn, len(waiting), "; ".join(waiting)
+            )
 
     async def _activate(self, game: SecondaryGame, unit: Unit, turn: int) -> None:
         state = self._great.setdefault(unit.unit_id, _GreatPersonState())
@@ -437,6 +465,7 @@ class SecondaryPolicy:
         advisor = await game.get_gp_advisor(unit.unit_index)
         if advisor is None or not advisor.cities:
             # No matching district yet, or an unreadable unit. Ask again later, not every turn.
+            log.info("%s has no district to activate in, asking again later", unit.name)
             state.skip_until = turn + NO_DISTRICT_WAIT
             return
         cities = sorted(

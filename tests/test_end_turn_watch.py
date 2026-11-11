@@ -255,3 +255,25 @@ def test_a_diplomacy_session_is_answered_at_the_first_look_without_a_new_request
     resolver = BlockerResolver({BlockerType.DIPLOMACY_SESSION: _answer})
     assert asyncio.run(ResolvingGame(game, resolver).end_turn()) == ADVANCED
     assert game.calls == ["end_turn", "talk"]
+
+
+def test_game_over_during_the_wait_ends_the_wait_with_a_game_over_report():
+    # Run 4, turn 325: the defeat cinematic played and the watcher kept asking to end the turn.
+    game = HeldGame(blocking=[BlockerType.UNITS], can_end=False)
+
+    async def over():
+        return True
+
+    report = asyncio.run(ResolvingGame(game, BlockerResolver(), defeat_check=over).end_turn())
+    assert report == blockers.GAME_OVER_REPORT
+    assert "ask again" not in game.calls
+
+
+def test_a_failing_game_over_check_does_not_stop_the_watch():
+    game = HeldGame(blocking=[BlockerType.UNITS])
+
+    async def broken():
+        raise ValueError("no status")
+
+    report = asyncio.run(ResolvingGame(game, BlockerResolver(), defeat_check=broken).end_turn())
+    assert report == ADVANCED

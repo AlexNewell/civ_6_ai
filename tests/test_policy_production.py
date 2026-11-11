@@ -288,9 +288,17 @@ def test_handler_places_a_district_on_the_best_tile():
     assert game.set_calls == [(65536, "DISTRICT", "DISTRICT_THEATER", 6, 6)]
 
 
-def test_handler_finds_a_wonder_tile_after_the_game_asks_for_one():
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "ERR:MISSING_COORDS|BUILDING_PYRAMIDS is a wonder",
+        # The wording civ6-mcp really returns, seen live in Run 4 on every wonder.
+        "Error: MISSING_COORDS|BUILDING_PYRAMIDS is a wonder and requires target_x/target_y",
+    ],
+)
+def test_handler_finds_a_wonder_tile_after_the_game_asks_for_one(reply):
     options = [lq.ProductionOption("BUILDING", "BUILDING_PYRAMIDS", 200, 9, -1)]
-    refuse = {"BUILDING_PYRAMIDS": "ERR:MISSING_COORDS|BUILDING_PYRAMIDS is a wonder"}
+    refuse = {"BUILDING_PYRAMIDS": reply}
     game = ScriptedGame(refuse=refuse, cities=idle_cities(), production=options)
     # The first call is refused; the retry carries coordinates, which the fake accepts.
     original = game.set_city_production

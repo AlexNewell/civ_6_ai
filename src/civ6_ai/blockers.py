@@ -28,8 +28,8 @@ MAX_PASSES = 3  # Clearing one blocker can reveal another, such as an idle gover
 MAX_END_TURN_RETRIES = 8  # Enough for all five opponents to interrupt one turn, plus a blocker.
 # civ6-mcp's end_turn only looks at what holds a turn after polling for about 9 minutes, so the
 # bot checks itself while it waits. The first check leaves time for a normal AI turn.
-WATCH_FIRST_SECONDS = 20.0
-WATCH_EVERY_SECONDS = 20.0
+WATCH_FIRST_SECONDS = 10.0
+WATCH_EVERY_SECONDS = 10.0
 _CAN_END_TURN_LUA = f'print("CAN_END_TURN|" .. tostring(UI.CanEndTurn())); print("{SENTINEL}")'
 MAX_DIPLOMACY_ROUNDS = 4  # A first meeting takes 2-3 rounds.
 
@@ -501,7 +501,11 @@ async def _read_open_session(game: BlockerGame) -> list[Blocker]:
 
 
 # What the end-turn watcher checks while a turn is held.
-_WATCH_READERS = (_read_end_turn_blocking, _read_open_session)
+# Diplomacy is in the list so that a session or deal is answered by our own rules within a tick or
+# two. Left to civ6-mcp's end_turn it waited about 40 s for the report "Turn paused - AI diplomatic
+# proposal", and in Run 4 each turn held by one cost 68 s of end-turn wait against 6.6 s otherwise.
+_WATCH_READERS = (_read_end_turn_blocking, _read_open_session, _read_diplomacy)
+_DIPLOMACY_TYPES = frozenset({BlockerType.DIPLOMACY_SESSION, BlockerType.TRADE_DEAL})
 
 
 class BlockerResolver:
@@ -658,6 +662,11 @@ class ResolvingGame:
             hold = (turn_before, frozenset(blocker.type for blocker in blockers))
             if hold != self._last_hold:
                 self._last_hold = hold
+                if all(blocker.type in _DIPLOMACY_TYPES for blocker in blockers):
+                    # Answering a session never ends a turn, so it needn't wait for a second look.
+                    # It is not followed by a new end-turn request: the AI carries on by itself.
+                    await self._resolver.resolve(self._game, readers=readers)
+                    log.info("Turn %s: answered %s at once", turn_before, sorted(hold[1]))
                 return
             await self._resolver.resolve(self._game, readers=readers)
             # A World Congress session can run as the next turn starts, while the turn still reads

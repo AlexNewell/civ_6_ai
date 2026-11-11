@@ -511,11 +511,10 @@ def gp_unit(kind="UNIT_GREAT_SCIENTIST", uid=40, **changes):
         unit_id=uid,
         unit_index=uid,
         unit_type=kind,
-        name="Hypatia",
         combat_strength=0,
         x=10,
         y=10,
-        **changes,
+        **{"name": "Hypatia", **changes},
     )
 
 
@@ -697,3 +696,14 @@ def test_prophets_are_not_recruited_when_no_religion_can_be_founded():
     open_game = make_game(people=people, religion=religion_status())
     run(SecondaryPolicy(), open_game)
     assert 1 in [a[1] for a in acted(open_game, "recruit")]
+
+
+def test_waiting_great_people_are_logged_with_a_reason(caplog):
+    general = gp_unit("UNIT_GREAT_GENERAL", 41, name="Boudica")
+    game = make_game(units=[gp_unit(), general], advisor=advisor())
+    with caplog.at_level("INFO", logger="civ6_ai.policies.secondary"):
+        run(SecondaryPolicy(), game)
+    line = next(r.getMessage() for r in caplog.records if "great_people turn" in r.getMessage())
+    assert "2 on the map" in line
+    assert "Boudica (UNIT_GREAT_GENERAL)" in line and "never activated by this policy" in line
+    assert "no district to activate in" in caplog.text

@@ -12,8 +12,10 @@ gives up, and the next item then fails the same way until the game is restarted 
 
 import argparse
 import asyncio
+import faulthandler
 import logging
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 from civ6_ai.orchestrator import TurnRecord
@@ -68,7 +70,39 @@ def status_lines(queue: RunQueue) -> list[str]:
     ]
 
 
+STACK_DUMP_EVERY_SECONDS = 150
+
+
+async def _dump_stacks(path: Path) -> None:
+    """Every few minutes, write where each task is waiting, to find what stalls a held turn.
+
+    Run 4's end-turn watcher went silent on turns 222 and 256 with the game stuck. A thread dump
+    (faulthandler, below) shows a blocked event loop. This shows what each task awaits when the
+    loop is alive but nothing is moving.
+    """
+    while True:
+        await asyncio.sleep(STACK_DUMP_EVERY_SECONDS)
+        with path.open("a", encoding="utf-8") as out:
+            out.write(f"=== {datetime.now(UTC).isoformat()} tasks ===\n")
+            for task in asyncio.all_tasks():
+                out.write(f"-- {task.get_name()} done={task.done()}\n")
+                task.print_stack(file=out)
+
+
 async def run(queue_path: Path, max_items: int | None, launch: LaunchStep, play: PlayStep) -> int:
+    dump_path = queue_path.parent / "stack_dumps.txt"
+    dumper = asyncio.ensure_future(_dump_stacks(dump_path))
+    dump_file = dump_path.open("a", encoding="utf-8")
+    faulthandler.dump_traceback_later(STACK_DUMP_EVERY_SECONDS, repeat=True, file=dump_file)
+    try:
+        return await _run(queue_path, max_items, launch, play)
+    finally:
+        faulthandler.cancel_dump_traceback_later()
+        dumper.cancel()
+        dump_file.close()
+
+
+async def _run(queue_path: Path, max_items: int | None, launch: LaunchStep, play: PlayStep) -> int:
     queue = RunQueue.load(queue_path)
     deps = RunnerDeps(launch=launch, play=play, runs_dir=queue_path.parent)
     records = await run_queue(queue, deps, max_items=max_items)

@@ -179,7 +179,12 @@ def register_event(event_type: type[Event]) -> None:
 
 def event_from_json(line: str) -> Event:
     fields = json.loads(line)
-    return _EVENTS_BY_KIND[fields.pop("kind")](**fields)
+    kind = fields.pop("kind")
+    if kind not in _EVENTS_BY_KIND:
+        # Events from other modules register themselves on import. Import them now, so a process
+        # that only reads event logs can still read them.
+        import civ6_ai.strategy.tasks  # noqa: F401
+    return _EVENTS_BY_KIND[kind](**fields)
 
 
 class EventBus:

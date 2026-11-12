@@ -501,3 +501,15 @@ def test_bot_accepts_a_shared_task_db(tmp_path):
     )
     handler = next(h for h in orchestrator._handlers if h.name == "tasks")
     assert handler.db is db
+
+
+def test_event_reader_knows_task_events_in_a_fresh_process():
+    line = TaskOverdue(turn=2, task_id=1, title="t", deadline=1, priority=5).to_json()
+    script = (
+        "import sys; from civ6_ai.monitors import event_from_json; "
+        "print(event_from_json(sys.argv[1]))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script, line], capture_output=True, text=True, check=True
+    )
+    assert "TaskOverdue" in result.stdout

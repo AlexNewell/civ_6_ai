@@ -108,6 +108,7 @@ def test_one_turn_runs_handlers_in_order_and_acts(tmp_path):
     assert reason is StopReason.TURN_LIMIT
     assert list(record.handler_seconds) == [
         "monitors",
+        "construction_watch",
         "diplomacy",
         "wars",
         "trade_offers",

@@ -57,7 +57,7 @@ Each cell is the measure's figure; F means the check failed. For ratio checks th
 | Turns held by an unhandled blocker | 66 F | 48 F | 57 F | 12 F |
 | Faith: turns spent vs idle | no data | 5 of 258 F | 5 of 195 F | 4 of 53 F |
 | Faith: most idle above reserve | 0 | 919 F | 360 F | 1101 F |
-| Gold: turns above reserve, nothing bought | no data | 191 of 252 F | 138 of 181 F | 28 of 46 F |
+| Gold: turns above reserve, nothing bought | no data | 194 of 252 F | 138 of 181 F | 39 of 46 F |
 | Upgrade logged as refused when it succeeded | 0 | 21 F | 11 F | 7 F |
 | Production choices refused | 971 of 1127 F | 491 of 693 F | 629 of 799 F | 260 of 305 F |
 | Most repeats of one refused build | 59 F | 50 F | 37 F | 17 |
@@ -109,7 +109,7 @@ Ranked by how much of the policy's purpose was lost, then by how early the signa
 6. **Military.** 42-55% of unit decisions end in a refused move (stacking). In the last session, no attacks were made.
 7. **Settling and city health.** Cities were lost every run and starving notices stayed high. Run 3 had no site on 125 of 202 decisions; this is fixed in Runs 4 and 5.
 8. **Blockers and handlers.** 5-14% of turns had a handler error, and one blocker type has no handler.
-9. **Gold.** Nothing was bought on 61-76% of the turns the handler got past its reserve (138 of 181 in Run 5 sessions 1-2). Often nothing was worth buying, and the log's own reason is a short list of costs, so this is the one to read before changing anything.
+9. **Gold.** Nothing was bought on 76-85% of the turns the handler got past its reserve (138 of 181 in Run 5 sessions 1-2). Buys are counted from the log's success lines, and older logs have none for item purchases, so this is an upper bound. Often nothing was worth buying, and the log's own reason is a short list of costs, so this is the one to read before changing anything.
 10. **Research, diplomacy, trade.** These look healthy: routes work 83-100% of the time, and 35-73% of deals offered were accepted. Envoys are only counted.
 
 ## Suggested fixes
@@ -120,7 +120,7 @@ Ranked by how much of the policy's purpose was lost, then by how early the signa
 | 2 | Skip a build the game refused with `NO_PLACEMENT` or `CANNOT_START` for a number of turns, keyed by city and item. | 1,100 refusals a run; 37-59 repeats of one. | Refused/accepted below 30% and no pair above 10 repeats. |
 | 3 | Read back a set policy before setting it again, or skip when the slot already holds it. | 18-37 sets of the same pair; each set is a game call. | Each slot/policy pair set at most 3 times on average. |
 | 4 | Finish governor placement, or stop warning once the points are spent. | 220-297 unfinished warnings. | Warnings under 20 a run. |
-| 5 | Remove the feature before improving a forest or jungle tile, or choose a tile without one. | The improve call says so in its result. | Improve failures under 25%. |
+| 5 | Remove the feature before improving a forest or jungle tile, or choose a tile without one. The builder now has a `remove_feature` action; check it covers these tiles. | The improve call says so in its result. | Improve failures under 25%. |
 | 6 | Log `UPGRADED` as a success. | The refusal count is wrong by up to 21. | No "refused: UPGRADED" line. |
 | 7 | Spend idle faith on something besides great people (a missionary, a building) once the cheapest great person is beyond reach. | 360-1,101 faith idle. | Idle faith under 250. |
 | 8 | Stop moving a unit onto a tile that holds a same-class unit (check the destination first). | 42-55% of military decisions end in `STACKING_CONFLICT`. | Refused moves under 25%. |

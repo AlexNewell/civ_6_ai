@@ -323,7 +323,8 @@ def faith_checks(run: RunLogs) -> list[Check]:
             for c in ("patronize_great_person", "purchase_item")
         )
     )
-    turns_spent = spending_turns if run.has_calls else bought
+    # A refused buy is still a call, but only a success is logged as bought: bound by that.
+    turns_spent = min(spending_turns, bought) if run.has_calls else bought
     worst = max(idle, default=0)
     return [
         _ratio_check(
@@ -346,6 +347,12 @@ def faith_checks(run: RunLogs) -> list[Check]:
     ]
 
 
+def gold_successes(run: RunLogs) -> int:
+    """Gold buys the game took. Older logs call UPGRADED and TILE_PURCHASED results refusals."""
+    marks = ("Upgraded ", "Bought ", "refused: UPGRADED|", "refused: TILE_PURCHASED|")
+    return sum(1 for m in run.messages("policies.gold") if any(k in m for k in marks))
+
+
 def gold_turns(run: RunLogs) -> tuple[int, int]:
     """Turns the gold handler got past its reserve gate, and how many of those it bought on.
 
@@ -360,7 +367,8 @@ def gold_turns(run: RunLogs) -> tuple[int, int]:
         if bought or "list_city_production" in gold or "get_purchasable_tiles" in gold:
             eligible += 1
             spent += bought
-    return eligible, spent
+    # The calls count whether or not the game took them, but only a success is logged as one.
+    return eligible, (min(spent, gold_successes(run)) if run.has_bot_log else spent)
 
 
 def gold_checks(run: RunLogs) -> list[Check]:
@@ -452,7 +460,7 @@ def builder_checks(run: RunLogs) -> list[Check]:
             _no_data("builders", "improvements failed", "see rule", "no builder_decision lines")
         ]
     actions = Counter(d["action"] for d in decisions)
-    work = actions["improve"] + actions["move"] + actions["repair"]
+    work = sum(n for action, n in actions.items() if action not in ("idle", "failed"))
     failed = actions["failed"]
     repeat = Counter(
         (d.get("target") and tuple(d["target"]), d.get("improvement"))

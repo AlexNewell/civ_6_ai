@@ -239,3 +239,54 @@ def test_faith_buying_twice_in_one_turn_counts_one_spending_turn():
     check = by_name(run)[("faith", "turns idle vs turns spent")]
     assert (check.created, check.used) == (9, 1)
     assert check.status == FAIL
+
+
+def test_refused_gold_purchases_do_not_count_as_spending():
+    def gold_turn(n):
+        calls = {"list_city_production": [1, 0.1], "purchase_item": [1, 0.1]}
+        return {**turn(n), "handler_calls": {"gold": calls}}
+
+    refusal = "Purchase of BUILDING_X in Coba refused: Error: STACKING_CONFLICT|x"
+    run = RunLogs(
+        records=[gold_turn(i) for i in range(8)],
+        bot=[bot("gold", refusal)] * 8,
+        has_bot_log=True,
+    )
+    check = by_name(run)[("gold", "turns above reserve with nothing bought")]
+    assert (check.created, check.used) == (8, 8)
+    assert check.status == FAIL
+
+
+def test_refused_faith_purchases_do_not_count_as_spending():
+    idle = "Faith 500 above reserve 60 but nothing bought: great people: cheapest 550 faith"
+    refused = {"faith": {"patronize_great_person": [1, 0.1]}}
+    records = [{**turn(i), "handler_calls": refused} for i in range(8)]
+    run = RunLogs(records=records, bot=[bot("faith", idle)] * 8, has_bot_log=True)
+    check = by_name(run)[("faith", "turns idle vs turns spent")]
+    assert (check.created, check.used) == (8, 0)
+    assert check.status == FAIL
+
+
+def test_removing_a_feature_is_builder_work():
+    def decision(action):
+        payload = {"action": action, "improvement": None, "target": [1, 1]}
+        return bot("builder", "builder_decision " + json.dumps(payload))
+
+    lines = [decision("idle")] * 5 + [decision("remove_feature")] * 5
+    check = by_name(RunLogs(records=[turn(1)], bot=lines, has_bot_log=True))[
+        ("builders", "builder-turns idle")
+    ]
+    assert (check.created, check.used) == (10, 5)
+    assert check.status == PASS
+
+
+def test_older_logs_that_call_a_successful_upgrade_a_refusal_still_count_it():
+    def gold_turn(n):
+        return {**turn(n), "handler_calls": {"gold": {"upgrade_unit": [1, 0.1]}}}
+
+    line = "Upgrade of UNIT_WARRIOR refused: UPGRADED|UNIT_WARRIOR -> UNIT_SWORDSMAN"
+    run = RunLogs(
+        records=[gold_turn(i) for i in range(6)], bot=[bot("gold", line)] * 6, has_bot_log=True
+    )
+    check = by_name(run)[("gold", "turns above reserve with nothing bought")]
+    assert (check.created, check.used) == (6, 0)

@@ -2,6 +2,10 @@
 
 What was verified against a running Civ VI game, and what wasn't reached. Newest run first. Run 2 updates the status of earlier checks it reached.
 
+## To check in the next live run: victory-threat check no longer fails on decimals
+
+`civ6_ai.victory_check.fix_victory_check` is applied at startup. The console log should have no `Victory proximity check failed` / `invalid literal for int() ... '33.5'` tracebacks. Not reached: a game with a rival holding space-race points.
+
 ## To check live: city strikes (fix for a civ6-mcp Lua bug)
 
 Run 6, turn 282: `City strike from Palenque failed` with `LuaError: ERR:Runtime Error: ... :56: operator .. is not supported for table .. string`. The cause, read from the Lua text (not seen in the game): civ6-mcp's `build_city_attack` writes its `ERR:NO_LOS` message with `{target_x}` in a plain string, so the script holds the literal `{target_x}`, an empty table in Lua. It was reached because the target was not in `CityManager.GetCommandTargets`. `civ6_ai.city_attack.fix_city_attack` (called in `run_game.py`) swaps in a builder without the bug that also no longer stops when the target is missing from that list, and lets `CanStartCommand` decide.

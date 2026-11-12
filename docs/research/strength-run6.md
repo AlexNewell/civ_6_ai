@@ -62,7 +62,7 @@ The result that Germany won on score at the turn limit is taken from the owner's
 
 Notes on reading this:
 
-- The game's score rules (a few points for each citizen, each tech and civic, each wonder, each great person, and so on) are not written down in this repo, so a conversion from components to points would be a guess. The gap is too large for techs and civics alone: 16 techs and 18 civics are a small share of the 400 to 440 point gap with Run 5 at turn 250. Cities and everything inside them (population, districts, buildings, wonders, the great people they produce) are the likelier bulk.
+- The game's score rules (a few points for each citizen, each tech and civic, each wonder, each great person, and so on) are not written down in this repo, so a conversion from components to points would be a guess. The gap is too large for techs and civics alone: 16 techs and 18 civics are a small share of the 310 point gap with Run 5 at turn 250. Cities and everything inside them (population, districts, buildings, wonders, the great people they produce) are the likelier bulk.
 - The drops confirm what a city is worth: the capital falling on turn 135 cost 64 points that turn (250 to 186). Turns 243 to 246 (two cities) cost 43 and 48. Run 4's capital loss on turn 230 cost 48. The growth forgone after each loss is larger than the immediate drop (see the window table).
 - "Started" counts are the cheapest proxy and are lower bounds: a research can be set and not finished, and `builds BUILDING_X` is a production choice, not a completion.
 

@@ -260,6 +260,11 @@ async def vote_in_open_session(game: BlockerGame, blocker: Blocker) -> bool:
     for resolution in status.resolutions:
         if not resolution.is_passed:
             vote = await game.vote_world_congress(resolution.resolution_hash, 1, 0, 1)
+            log.info(
+                "congress (default voter): %s, option A, target 0, 1 vote: %s",
+                resolution.name,
+                str(vote)[:200],
+            )
             if not _succeeded(vote):
                 return False
     await submit_world_congress_votes(game)

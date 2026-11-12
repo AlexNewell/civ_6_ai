@@ -19,10 +19,10 @@ Issues are generated from [`.github/roadmap-issues.yaml`](.github/roadmap-issues
 |---|---|
 | Phase 0: Repo Setup | 🟩 Done |
 | Workstream "T": Game <ins>Toolchain</ins> | 🟩 Done. G0 passed. |
-| Phase 1: Deterministic Bot | 🟨 In progress: 3 of 18 done, 14 in progress, 1 in backlog. Run 3 played a full game to the end with hands-on help, so G1 has no unattended game yet. [Details](#phase-1-deterministic-bot). |
+| Phase 1: Deterministic Bot | 🟨 In progress: 3 of 34 done, 30 in progress, 1 in backlog. Runs 3 to 6 played full games to the end, but each needed a restart or hands-on help, so G1 has no unattended game yet. [Details](#phase-1-deterministic-bot). |
 | Workstream "E": <ins>Evaluator</ins> and Data | 🟨 In progress: 3 of 5 done. |
 | Workstream "S": Puppeteering <ins>Spike</ins> | 🟨 In progress: 1 of 6 done. |
-| Phase 2: Strategist | 🟥 Blocked: waits on G1. |
+| Phase 2: Strategist | 🟥 Blocked: waits on G1. 2 of 6 done ahead of the gate (2.1 and 2.2, built offline). |
 | Phase 3: Cheap-Tier Bake-Off | 🟥 Blocked: waits on G1. |
 | Phase 4: Reach M1 | 🟥 Blocked: waits on Phases 2 and 3. |
 | Phase 5: Improvement Loop | 🟥 Blocked: waits on M1. |
@@ -106,7 +106,7 @@ Sequential, except T.3. Leads to **G0**.
 
 No external model calls. Policies 1.5-1.12 can run in parallel. Leads to **G1**.
 
-Run 3 played a full game to the end (turn 318, a German science victory) with 1.1-1.8, 1.10-1.12 and the first slice of 1.9 wired into the bot. It needed hands-on help at four holds, so G1 has no unattended game yet. Everything merged after Run 3 has unit tests only and hasn't been checked in a live game.
+Run 3 played a full game to the end (turn 318, a German science victory) with 1.1-1.8, 1.10-1.12 and the first slice of 1.9 wired into the bot. It needed hands-on help at four holds, so G1 has no unattended game yet. Run 4 ended in a Sumerian culture victory at turn 325, and Run 6 in a German score victory at turn 331 after one stop and resume at turn 102 (write-ups in [`docs/live-checks.md`](docs/live-checks.md)). Items 1.19 onwards came from the policy-effectiveness research ([`docs/policy-effectiveness.md`](docs/policy-effectiveness.md)) and Run 6; each item's notes say whether it has been checked live.
 
 ```mermaid
 flowchart TD
@@ -122,14 +122,23 @@ flowchart TD
     P19 & P112 --> P115["1.15 Peace-making"]
     P112 --> P116["1.16 Resource trades"]
     P111 --> P117["1.17 Spend faith"]
+    P12 --> P119["1.19 Claim-GP blocker"] & P125["1.25 Congress results blocker"]
+    P15 --> P120["1.20 Refusal memory"] & P129["1.29 Planned districts"] & P134["1.34 Construction log"]
+    P110 --> P121["1.21 Cards and governors"]
+    P113 --> P122["1.22 Effectiveness in summary"] & P132["1.32 Preflight"]
+    P111 --> P123["1.23 GP and envoy logging"]
+    P16 & P19 & P117 --> P124["1.24 Refusals"]
+    P117 --> P126["1.26 Unbuyable GP cost"]
+    P19 --> P127["1.27 Cities lost"]
+    P128["1.28 Live checks"] ~~~ P130["1.30 Run docs"] ~~~ P131["1.31 civ6-mcp review"] ~~~ P133["1.33 Strength review"]
 
     classDef done fill:#c7f0d2,stroke:#1a7f37,color:#0b2e13
     classDef progress fill:#fff0b3,stroke:#9a6700,color:#3d2a00
     classDef blocked fill:#ffd1cc,stroke:#cf222e,color:#4a0a0a
     classDef backlog fill:#eaeef2,stroke:#57606a,color:#1f2328
     class P11,P13,P14 done
-    class P12,P15,P16,P17,P18,P19,P110,P111,P112,P113,P114,P115,P116,P117 progress
-    class P118 backlog
+    class P12,P15,P16,P17,P18,P19,P110,P111,P112,P113,P114,P115,P116,P117,P118,P119,P120,P121,P122,P123,P124,P125,P126,P127,P129,P130,P131,P132,P133,P134 progress
+    class P128 backlog
 ```
 
 | Item | Task | Status | Notes |
@@ -151,7 +160,23 @@ flowchart TD
 | [`1.15`](https://github.com/AlexNewell/civ_6_ai/issues/88) | Peace-making and war awareness | 🟨 In progress | Merged with unit tests. Not checked live. |
 | [`1.16`](https://github.com/AlexNewell/civ_6_ai/issues/89) | Propose resource trades | 🟨 In progress | Merged with unit tests. Not checked live. |
 | [`1.17`](https://github.com/AlexNewell/civ_6_ai/issues/90) | Spend faith and use prophets | 🟨 In progress | Merged with unit tests. Not checked live. |
-| [`1.18`](https://github.com/AlexNewell/civ_6_ai/issues/112) | Cut civ6-mcp's per-call wait | ⬜ Backlog | |
+| [`1.18`](https://github.com/AlexNewell/civ_6_ai/issues/112) | Cut civ6-mcp's per-call wait | 🟨 In progress | PR 116 shortened the waits: Run 6 decision mean 11.1 s. The remaining wait and its live check are open. |
+| [`1.19`](https://github.com/AlexNewell/civ_6_ai/issues/137) | Handle the claim-great-person blocker | 🟨 In progress | PR 144 merged with unit tests. Not checked live. |
+| [`1.20`](https://github.com/AlexNewell/civ_6_ai/issues/138) | Production refusal memory | 🟨 In progress | PR 143 merged with unit tests. Not checked live. |
+| [`1.21`](https://github.com/AlexNewell/civ_6_ai/issues/139) | Stop re-setting policy cards; finish governor placement | 🟨 In progress |  |
+| [`1.22`](https://github.com/AlexNewell/civ_6_ai/issues/140) | Wire policy_effectiveness into the run summary | 🟨 In progress |  |
+| [`1.23`](https://github.com/AlexNewell/civ_6_ai/issues/141) | Log activation success, wasted great people and envoy tokens | 🟨 In progress |  |
+| [`1.24`](https://github.com/AlexNewell/civ_6_ai/issues/142) | Builder, faith and military refusals | 🟨 In progress |  |
+| [`1.25`](https://github.com/AlexNewell/civ_6_ai/issues/145) | Handle the World Congress results blocker | 🟨 In progress |  |
+| [`1.26`](https://github.com/AlexNewell/civ_6_ai/issues/146) | Faith: treat an unreachable great-person cost as not buyable | 🟨 In progress |  |
+| [`1.27`](https://github.com/AlexNewell/civ_6_ai/issues/147) | Why were cities lost? (research) | 🟨 In progress |  |
+| [`1.28`](https://github.com/AlexNewell/civ_6_ai/issues/148) | Live-check checklist for the next run | ⬜ Backlog | Needs the next full game. |
+| [`1.29`](https://github.com/AlexNewell/civ_6_ai/issues/149) | Replace the hard-coded unwanted-district list with a planned policy | 🟨 In progress |  |
+| [`1.30`](https://github.com/AlexNewell/civ_6_ai/issues/150) | Docs: record Runs 5 and 6, fix run labels, add 1.19 to 1.29 to the roadmap | 🟨 In progress |  |
+| [`1.31`](https://github.com/AlexNewell/civ_6_ai/issues/151) | Review the pinned civ6-mcp: our patches, upstream fixes and the noise we see | 🟨 In progress |  |
+| [`1.32`](https://github.com/AlexNewell/civ_6_ai/issues/152) | Preflight check in run_game.py for dependencies and screenshots | 🟨 In progress |  |
+| [`1.33`](https://github.com/AlexNewell/civ_6_ai/issues/153) | Strength review: where we trailed Germany on score in Run 6 | 🟨 In progress |  |
+| [`1.34`](https://github.com/AlexNewell/civ_6_ai/issues/156) | Construction event log and a build tracker that spots gaps | 🟨 In progress |  |
 
 ## Workstream "E": <ins>Evaluator</ins> and Data
 
@@ -222,8 +247,8 @@ Starts after G1.
 
 | Item | Task | Status |
 |---|---|---|
-| [`2.1`](https://github.com/AlexNewell/civ_6_ai/issues/28) | Policy document schema | 🟥 Blocked |
-| [`2.2`](https://github.com/AlexNewell/civ_6_ai/issues/29) | Persistent task DB with deadlines | 🟥 Blocked |
+| [`2.1`](https://github.com/AlexNewell/civ_6_ai/issues/28) | Policy document schema | 🟩 Done |
+| [`2.2`](https://github.com/AlexNewell/civ_6_ai/issues/29) | Persistent task DB with deadlines | 🟩 Done |
 | [`2.3`](https://github.com/AlexNewell/civ_6_ai/issues/30) | Strategist call with structured output | 🟥 Blocked |
 | [`2.4`](https://github.com/AlexNewell/civ_6_ai/issues/31) | Reply store and replay mode | 🟥 Blocked |
 | [`2.5`](https://github.com/AlexNewell/civ_6_ai/issues/32) | Measure real per-call and per-game cost | 🟥 Blocked |

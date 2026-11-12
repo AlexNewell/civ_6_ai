@@ -302,6 +302,168 @@ issues:
     depends: ["1.1"]
     budget: none
 
+  - id: "1.19"
+    title: Handle the claim-great-person blocker
+    type: feature
+    parallel: true
+    goal: Clear ENDTURN_BLOCKING_CLAIM_GREAT_PERSON without a held turn.
+    scope: "The blocker had no handler and held 66, 48 and 57 turns in Runs 3 to 5, the earliest sign of the great-person pile-up. Claim the person, then let the policy activate it. Found by the policy-effectiveness research (docs/policy-effectiveness.md)."
+    acceptance:
+      - "Live: running to the first great person shows no 'No handler for blocker' line for it, and the turn advances."
+    depends: ["1.2"]
+    budget: none
+  - id: "1.20"
+    title: Production refusal memory
+    type: feature
+    parallel: true
+    goal: Stop retrying production choices the game has refused.
+    scope: "70 to 86% of production choices were refused (NO_PLACEMENT, CANNOT_START) and one impossible build was retried 37 to 59 times a run. Skip a refused item for some turns, keyed by city and item."
+    acceptance:
+      - "Live: refused/accepted production choices below 30%, and no city and item pair above 10 repeats."
+    depends: ["1.5"]
+    budget: none
+  - id: "1.21"
+    title: Stop re-setting policy cards; finish governor placement
+    type: feature
+    parallel: true
+    goal: Cut wasted game calls on policy cards and governors.
+    scope: "The same slot and card pair is set 18 to 37 times a run, and governor placement is left unfinished 123 to 297 times a run. Read back or skip a card the slot already holds, and finish placement or stop warning once points are spent."
+    acceptance:
+      - "Live: each slot and card pair set at most 3 times on average, and fewer than 20 unfinished-placement warnings a run."
+    depends: ["1.10"]
+    budget: none
+  - id: "1.22"
+    title: Wire policy_effectiveness into the run summary
+    type: feature
+    parallel: true
+    goal: Show failing effectiveness checks at the end of every run.
+    scope: "Print the failing checks of scripts/policy_effectiveness.py beside the speed summary at the end of run_game.py. Gate checks for G1: an unhandled blocker, great people activated below 50% or more than 5 waiting, idle faith above 250, handler errors on more than 2% of turns, and any stop that was not game over. Other checks warn only."
+    acceptance:
+      - The run summary lists failing checks and marks the G1 gate checks.
+    depends: ["1.13"]
+    budget: none
+  - id: "1.23"
+    title: Log activation success, wasted great people and envoy tokens
+    type: feature
+    parallel: true
+    goal: Give the effectiveness checks the data they lack.
+    scope: "Log great-person activation success, wasted great people, envoy tokens and a spent-gold total per turn, using reads the bot already makes."
+    acceptance:
+      - The new log lines are written with no new game calls and read by scripts/policy_effectiveness.py.
+    depends: ["1.11"]
+    budget: none
+  - id: "1.24"
+    title: Builder, faith and military refusals
+    type: feature
+    parallel: true
+    goal: Cut refused builder, faith and military actions.
+    scope: "Remove the feature before improving forest or jungle, spend idle faith beyond great people, check the destination before moving onto a same-class unit (42 to 55% of military decisions end in STACKING_CONFLICT), investigate CANNOT_ACTIVATE refusals, and log UPGRADED as a success."
+    acceptance:
+      - "Live: refused builder actions under 10%, idle faith under 250, refused military moves under 25%, refused activations under 20."
+    depends: ["1.6", "1.9", "1.17"]
+    budget: none
+  - id: "1.25"
+    title: Handle the World Congress results blocker
+    type: feature
+    parallel: true
+    goal: Clear the World Congress results screen without a held turn.
+    scope: "Run 6 held 3 turns on an UNKNOWN blocker with text LOC_NOTIFICATION_WORLD_CONGRESS_RESULTS_MESSAGE. Dismiss or acknowledge it safely, record it in docs/blockers.md, and fall through to existing handling if the call fails."
+    acceptance:
+      - "Live: at the next World Congress session, no 'No handler for blocker UNKNOWN' line and the turn advances."
+    depends: ["1.2"]
+    budget: none
+  - id: "1.26"
+    title: "Faith: treat an unreachable great-person cost as not buyable"
+    type: feature
+    parallel: true
+    goal: Stop faith sitting idle behind an unbuyable great person.
+    scope: "Run 6 read a cheapest great person at 2147483647 faith (the game's not-buyable sentinel), so 1,574 faith sat idle for 262 turns. Treat the sentinel as not buyable and spend on the next best use."
+    acceptance:
+      - "Live: idle faith above the reserve stays under 250 (scripts/policy_effectiveness.py)."
+    depends: ["1.17"]
+    budget: none
+  - id: "1.27"
+    title: Why were cities lost? (research)
+    type: research
+    parallel: true
+    goal: Find why the bot loses cities and propose measurable fixes.
+    scope: "Run 6 lost 5 cities and 36 units and ended with 2 cities. From run and event logs, find for each lost city the turn, the taker, the war state, its defences and the military policy's actions, separating permanent losses from loyalty flips. No model or game calls."
+    acceptance:
+      - A research doc classifies each loss and proposes fixes with measurable targets.
+    depends: ["1.9"]
+    budget: none
+  - id: "1.28"
+    title: Live-check checklist for the next run
+    type: research
+    parallel: false
+    goal: Confirm in a live game the changes that were only unit-tested.
+    scope: "After the next full game, read the log for each listed PR's live check and record the result in docs/live-checks.md, then run scripts/policy_effectiveness.py on the logs."
+    acceptance:
+      - Every listed live check is recorded as passed or failed in docs/live-checks.md.
+    depends: []
+    budget: none
+  - id: "1.29"
+    title: Replace the hard-coded unwanted-district list with a planned policy
+    type: feature
+    parallel: true
+    goal: Decide when each special district is wanted instead of banning it.
+    scope: "Production drops Spaceport, Aerodrome, Dam, Canal and Stadium everywhere with no recorded reason. Replace the list with a small policy that uses the victory path, the city's geography and the empire's needs."
+    acceptance:
+      - Each special district has a tested want/not-want rule, and the decision is recorded in docs/decisions.md.
+    depends: ["1.5", "2.1"]
+    budget: none
+  - id: "1.30"
+    title: "Docs: record Runs 5 and 6, fix run labels, add 1.19 to 1.29 to the roadmap"
+    type: research
+    parallel: true
+    goal: Keep the run record and roadmap accurate.
+    scope: "Give each run one number, write up Runs 5 and 6 in docs/live-checks.md, and add items 1.19 onwards to the roadmap and this seed file."
+    acceptance:
+      - Runs 5 and 6 are written up, run labels are consistent, and the roadmap lists 1.19 onwards.
+    depends: []
+    budget: none
+  - id: "1.31"
+    title: "Review the pinned civ6-mcp: our patches, upstream fixes and the noise we see"
+    type: research
+    parallel: true
+    goal: Know which civ6-mcp patches we carry and whether to move the pin.
+    scope: "Inventory every patch and workaround with its reason and drop date in docs/decisions.md, check which are fixed upstream, and recommend whether to bump the pin. No game calls."
+    acceptance:
+      - The patch table is in docs/decisions.md with a pin recommendation.
+    depends: []
+    budget: none
+  - id: "1.32"
+    title: Preflight check in run_game.py for dependencies and screenshots
+    type: feature
+    parallel: true
+    goal: Catch a broken environment before turn 1, not at a stop.
+    scope: "Check at startup that screenshot imports work, the tuner answers, the open game is a standard save and the code patches applied. One line each; fail fast on critical ones."
+    acceptance:
+      - "Live: a venv missing Pillow shows the warning at startup, not at the stop."
+    depends: ["1.13"]
+    budget: none
+  - id: "1.33"
+    title: "Strength review: where we trailed Germany on score in Run 6"
+    type: research
+    parallel: true
+    goal: Find where the bot loses on score and what would close the gap.
+    scope: "From turn logs and the final state, compare our score with each rival over time, break it into components, compare with Runs 4 and 5 and the CivBench baselines, and rank the levers. No model or game calls."
+    acceptance:
+      - A research doc ranks the levers with measurable targets.
+    depends: []
+    budget: none
+  - id: "1.34"
+    title: Construction event log and a build tracker that spots gaps
+    type: feature
+    parallel: true
+    goal: Record construction as structured events and report what the empire lacks.
+    scope: "Emit production_set, production_refused and completion and loss events on the event bus, keep an in-memory build ledger, and report gaps (missing district types, districts without buildings, types refused everywhere). No new game calls; propose a 50 ms per-turn budget."
+    acceptance:
+      - Construction events are written with turn, city and coordinates, and the tracker reports the listed gaps in tests.
+      - policy_effectiveness.py reads the events for production facts and still handles older logs.
+    depends: ["1.3", "1.5"]
+    budget: none
+
   # Workstream "E"
   - id: E.1
     title: Ingest CivBench dataset and extract baselines

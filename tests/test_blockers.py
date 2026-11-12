@@ -1064,7 +1064,7 @@ def test_a_long_game_with_a_blocker_every_turn_never_stops(tmp_path):
 
 
 def test_dismissing_a_popup_first_answers_an_open_diplomacy_session():
-    """Run 5, turn 102: dismissing the leader screen alone left Khmer's statement unanswered."""
+    """Run 6, turn 102: dismissing the leader screen alone left Khmer's statement unanswered."""
     game = FakeGame()
     game.sessions = [session(player=2)]
     seen = []

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Protocol
 
 from civ6_ai.call_timer import CallTimer
+from civ6_ai.screenshots import Screenshotter
 
 log = logging.getLogger(__name__)
 
@@ -118,8 +119,11 @@ class Orchestrator:
         turn_log: TurnLog,
         defeat_check: DefeatCheck | None = None,
         call_timer: CallTimer | None = None,
+        screenshots: Screenshotter | None = None,
     ) -> None:
         self._call_timer = call_timer
+        self._screenshots = screenshots
+        self._shot_handlers: set[str] = set()
         self._game = game
         self._handlers = handlers
         self._log = turn_log
@@ -162,6 +166,9 @@ class Orchestrator:
             # With no city, the game-over check can't see a defeat, so the turn just never ends.
             reason = StopReason.GAME_OVER
 
+        detail = result[:MAX_DETAIL_LENGTH]
+        if shot := await self._screenshot(turn, reason, errors):
+            detail += f" [screenshot: {shot}]"
         self._log.write(
             TurnRecord(
                 turn=turn,
@@ -171,10 +178,32 @@ class Orchestrator:
                 end_turn_seconds=end_turn_seconds,
                 total_seconds=time.perf_counter() - started,
                 stop_reason=reason,
-                detail=result[:MAX_DETAIL_LENGTH],
+                detail=detail,
             )
         )
         return reason
+
+    async def _screenshot(
+        self, turn: int, reason: StopReason | None, errors: dict[str, str]
+    ) -> str | None:
+        """Save a screenshot for triage when the run stops or a handler fails for the first time.
+
+        Returns the file name, or None. Never raises, so it can't stop a turn.
+        """
+        if self._screenshots is None:
+            return None
+        if reason is not None:
+            label, stop = reason.value, True
+        else:
+            new = [name for name in errors if name not in self._shot_handlers]
+            if not new:
+                return None
+            label, stop = f"handler-{new[0]}", False
+        path = await asyncio.to_thread(self._screenshots.take, turn, label, stop)
+        if path is not None:
+            self._shot_handlers.update(errors)
+            return path.name
+        return None
 
     async def _check_after_end_turn(self, turn_before: int) -> StopReason | None:
         """Confirm the turn advanced. Only called when the report shows the game can be read."""

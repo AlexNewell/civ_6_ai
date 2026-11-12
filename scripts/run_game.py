@@ -20,11 +20,12 @@ from civ_mcp.game_state import GameState
 
 from civ6_ai.bot import SettleDecisionLog, build_orchestrator
 from civ6_ai.fastcalls import narrow_popup_scan, shorten_call_waits
-from civ6_ai.metrics.costs import game_id_of_log
+from civ6_ai.metrics.costs import game_id_for_new_session, game_id_of_log
 from civ6_ai.metrics.speed import summarise as summarise_speed
 from civ6_ai.monitors import EventBus, EventLog
 from civ6_ai.orchestrator import StopReason, TurnLog, TurnRecord
 from civ6_ai.saves import disable_mcp_saves, use_real_save_dirs
+from civ6_ai.screenshots import Screenshotter
 
 ROOT = Path(__file__).parent.parent
 # Off since Run 4 (turn 105): civ6-mcp's propose_trade accepts whatever counter-offer the AI
@@ -99,9 +100,13 @@ async def play_game(
     decisions = SettleDecisionLog(ROOT / "runs" / f"{name}_{stamp}_settle.jsonl")
     decisions.attach()
     try:
-        reason = await build_orchestrator(game, bus, turn_log, trade_offers=TRADE_OFFERS).play(
-            turns
+        first_turn = (await game.get_game_overview()).turn
+        game_id = game_id_for_new_session(ROOT / "runs", name, first_turn, f"{name}_{stamp}")
+        shots = Screenshotter(ROOT / "runs" / "screenshots", game_id)
+        orchestrator = build_orchestrator(
+            game, bus, turn_log, trade_offers=TRADE_OFFERS, screenshots=shots
         )
+        reason = await orchestrator.play(turns)
     finally:
         decisions.detach()
         logging.getLogger("civ6_ai").removeHandler(file_log)

@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 from civ6_ai.effectiveness import (
@@ -123,24 +124,54 @@ def test_refused_military_moves_are_a_share_of_acting_decisions():
     assert check.status == FAIL
 
 
+def military_line(action, reason):
+    return bot("military", "military_decision " + json.dumps({"action": action, "reason": reason}))
+
+
 def test_units_built_versus_attacks_uses_the_completion_notices():
     notice = "  >> Coba finished building UNIT_SWORDSMAN. Now: nothing."
-    records = [turn(i, {"attack_unit": 0}, detail=notice) for i in range(6)]
-    check = by_name(RunLogs(records=records))[("military", "combat units built vs attacks made")]
+    records = [turn(i, {"attack_unit": 6}, detail=notice) for i in range(6)]
+    lines = [military_line("attack", "attack refused")] * 6
+    run = RunLogs(records=records, bot=lines, has_bot_log=True)
+    check = by_name(run)[("military", "combat units built vs attacks made")]
     assert (check.created, check.used) == (6, 0)
     assert check.status == FAIL
 
 
+def test_attacks_that_landed_count_as_use():
+    notice = "  >> Coba finished building UNIT_SWORDSMAN. Now: nothing."
+    records = [turn(i, {}, detail=notice) for i in range(6)]
+    lines = [military_line("attack", "good odds")] * 4 + [military_line("city_strike", "in range")]
+    run = RunLogs(records=records, bot=lines, has_bot_log=True)
+    check = by_name(run)[("military", "combat units built vs attacks made")]
+    assert (check.created, check.used) == (6, 5)
+    assert check.status == PASS
+
+
 def test_builders_and_settlers_are_not_combat_units():
     notice = "  >> Coba finished building UNIT_BUILDER. Now: nothing."
-    records = [turn(i, {"attack_unit": 0}, detail=notice) for i in range(6)]
-    check = by_name(RunLogs(records=records))[("military", "combat units built vs attacks made")]
-    assert check.created == 0
+    records = [turn(i, {}, detail=notice) for i in range(6)]
+    lines = [military_line("skip", "spare")]
+    run = RunLogs(records=records, bot=lines, has_bot_log=True)
+    assert by_name(run)[("military", "combat units built vs attacks made")].created == 0
+
+
+def test_sessions_without_a_bot_log_are_left_out_when_others_have_one(tmp_path: Path):
+    first = tmp_path / "STD_T1_01_20261111T000000Z.jsonl"
+    second = tmp_path / "STD_T1_01_20261111T010000Z.jsonl"
+    for log in (first, second):
+        log.write_text(json.dumps(turn(1, {"x": 1})) + os.linesep, encoding="utf-8")
+    first.with_name(first.stem + "_bot.log").write_text("", encoding="utf-8")
+    run = load_run([first, second])
+    assert run.has_bot_log
+    assert run.dropped == [second.name]
+    assert len(run.records) == 1
+    assert "Left out" in format_report("X", run, [])
 
 
 def test_settlers_that_never_found_a_city_fail():
     notice = "  >> Coba finished building UNIT_SETTLER. Now: nothing."
-    records = [turn(i, {"found_city": 1}, detail=notice) for i in range(6)]
+    records = [{**turn(i, {"found_city": 1}, detail=notice), "_settle": True} for i in range(6)]
     settle = [{"action": "found_failed"}] * 6
     run = RunLogs(records=records, settle=settle, has_settle=True)
     check = by_name(run)[("settling", "settlers built vs cities founded")]
@@ -306,3 +337,12 @@ def test_older_logs_that_call_a_successful_upgrade_a_refusal_still_count_it():
     )
     check = by_name(run)[("gold", "turns above reserve with nothing bought")]
     assert (check.created, check.used) == (6, 0)
+
+
+def test_events_and_settle_files_passed_by_a_glob_are_not_turn_logs(tmp_path: Path):
+    log = tmp_path / "STD_T1_01_20261111T000000Z.jsonl"
+    log.write_text(json.dumps(turn(1, {"x": 1})) + os.linesep, encoding="utf-8")
+    events = tmp_path / "STD_T1_01_20261111T000000Z_events.jsonl"
+    events.write_text(json.dumps({"kind": "city_lost", "turn": 1}) + os.linesep, encoding="utf-8")
+    run = load_run([log, events])
+    assert len(run.records) == 1

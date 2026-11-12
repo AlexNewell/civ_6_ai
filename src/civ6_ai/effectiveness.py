@@ -15,6 +15,8 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from civ6_ai.metrics.costs import STAMPED_LOG
+
 PASS, FAIL, NO_DATA = "pass", "FAIL", "no data"
 MIN_CREATED = 5  # Fewer created than this and a ratio says little.
 
@@ -70,6 +72,7 @@ class RunLogs:
     has_bot_log: bool = False
     has_events: bool = False
     has_settle: bool = False
+    dropped: list[str] = field(default_factory=list)  # sessions left out for lacking a bot log
 
     @property
     def turns(self) -> int:
@@ -79,11 +82,11 @@ class RunLogs:
     def has_calls(self) -> bool:
         return any(any(d.values()) for r in self.records for d in [r.get("handler_calls", {})])
 
-    def calls(self, name: str) -> int:
-        """How many times a game call was made, across the run."""
+    def calls(self, name: str, records: list[dict] | None = None) -> int:
+        """How many times a game call was made, across the run or the given records."""
         return sum(
             d[name][0]
-            for r in self.records
+            for r in (self.records if records is None else records)
             for d in r.get("handler_calls", {}).values()
             if name in d
         )
@@ -91,8 +94,13 @@ class RunLogs:
     def messages(self, logger: str) -> list[str]:
         return [m for lg, _, m in self.bot if lg == logger]
 
-    def detail_lines(self) -> list[str]:
-        return [ln for r in self.records for ln in r.get("detail", "").splitlines()]
+    def detail_lines(self, records: list[dict] | None = None) -> list[str]:
+        rows = self.records if records is None else records
+        return [ln for r in rows for ln in r.get("detail", "").splitlines()]
+
+    def settle_records(self) -> list[dict]:
+        """The turn records of sessions that wrote a settle log."""
+        return [r for r in self.records if r.get("_settle")]
 
 
 @dataclass(frozen=True)
@@ -137,21 +145,36 @@ def _jsonl(path: Path) -> list[dict]:
 
 
 def load_run(turn_logs: list[Path]) -> RunLogs:
-    """Read the turn logs of one run and the bot, event and settle logs written beside them."""
+    """Read the turn logs of one run and the bot, event and settle logs written beside them.
+
+    If some sessions have a bot log and others don't, the bare ones are left out (and listed in
+    `dropped`), so that no count mixes sessions the bot log covers with sessions it doesn't.
+    """
     run = RunLogs()
-    for log in sorted(turn_logs):
-        run.records += _jsonl(log)
-        bot = log.with_name(f"{log.stem}_bot.log")
+    # A glob also catches the _events and _settle files, which are not turn logs.
+    logs = sorted(p for p in turn_logs if STAMPED_LOG.match(p.name))
+
+    def sibling(log: Path, suffix: str) -> Path:
+        return log.with_name(f"{log.stem}{suffix}")
+
+    with_bot = [log for log in logs if sibling(log, "_bot.log").exists()]
+    if with_bot:
+        run.dropped = [log.name for log in logs if log not in with_bot]
+        logs = with_bot
+    run.has_bot_log = bool(with_bot)
+    for log in logs:
+        settle = sibling(log, "_settle.jsonl")
+        for record in _jsonl(log):
+            run.records.append({**record, "_settle": settle.exists()})
+        bot = sibling(log, "_bot.log")
         if bot.exists():
-            run.has_bot_log = True
             for line in bot.read_text(encoding="utf-8", errors="replace").splitlines():
                 if m := LOG_LINE.match(line):
                     run.bot.append((m["logger"], m["level"], m["msg"]))
-        events = log.with_name(f"{log.stem}_events.jsonl")
+        events = sibling(log, "_events.jsonl")
         if events.exists():
             run.has_events = True
             run.events += _jsonl(events)
-        settle = log.with_name(f"{log.stem}_settle.jsonl")
         if settle.exists():
             run.has_settle = True
             run.settle += _jsonl(settle)
@@ -520,10 +543,15 @@ def military_checks(run: RunLogs) -> list[Check]:
                 built[m[2]] += 1
         elif m := OWN_KILLED.match(ln):
             lost[m[1]] += 1
-    fought = run.calls("attack_unit") + run.calls("city_attack")
-    if not run.has_calls:
+    # Calls count refused attacks too, so count the decisions that did not end in a refusal.
+    fought = sum(
+        1
+        for d in decisions
+        if d["action"] in ("attack", "city_strike") and "refused" not in (d.get("reason") or "")
+    )
+    if not decisions:
         out.append(
-            _no_data("military", "units built vs attacks", "see rule", "needs per-call counts")
+            _no_data("military", "units built vs attacks", "see rule", "no military_decision lines")
         )
     else:
         out.append(
@@ -543,8 +571,11 @@ def military_checks(run: RunLogs) -> list[Check]:
 
 def settling_checks(run: RunLogs) -> list[Check]:
     out: list[Check] = []
+    covered = run.settle_records() if run.has_settle else run.records
     settlers = sum(
-        1 for ln in run.detail_lines() if (m := FINISHED.match(ln)) and m[2] == "UNIT_SETTLER"
+        1
+        for ln in run.detail_lines(covered)
+        if (m := FINISHED.match(ln)) and m[2] == "UNIT_SETTLER"
     )
     if run.has_calls and run.has_settle:
         # A found_city call the game refused is logged as found_failed in the settle log.
@@ -554,7 +585,7 @@ def settling_checks(run: RunLogs) -> list[Check]:
                 "settling",
                 "settlers built vs cities founded",
                 settlers,
-                max(run.calls("found_city") - failed, 0),
+                max(run.calls("found_city", covered) - failed, 0),
                 MIN_FOUNDED_PER_SETTLER,
                 f"at least {MIN_FOUNDED_PER_SETTLER:.0%} of settlers found a city",
                 "settlers are read from completion notices, a lower bound",
@@ -751,6 +782,7 @@ def format_report(label: str, run: RunLogs, checks: list[Check]) -> str:
     failing = [c for c in checks if c.status == FAIL]
     lines = [
         f"Policy effectiveness: {label} ({run.turns} turns, {len(run.records)} turn records)",
+        *([f"Left out for lacking a bot log: {', '.join(run.dropped)}"] if run.dropped else []),
         f"{len(failing)} of {len(checks)} checks failed",
         "",
     ]

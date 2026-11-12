@@ -14,7 +14,7 @@ It exits 1 when any check fails, so it can gate a run later. A check is "no data
 
 | Label | Sessions | Notes |
 |---|---|---|
-| Run 3 | the `from_fullgame` sessions, turns 1-317 | Turn logs have no per-call counts, so call-based checks are "no data". Sessions overlap where turns were replayed (508 records for 314 turns). |
+| Run 3 | the `from_fullgame` sessions, turns 1-317 | Turn logs have no per-call counts, so call-based checks are "no data". Sessions overlap by a few turns where a game was resumed (324 records for 312 turns). |
 | Run 4 | the first session plus the `from_run4_popups` and `from_run4_fastdiplo` sessions, turns 1-324 | Has per-call counts. No `great_people` lines yet. |
 | Run 5 sessions 1-2 | turns 1-264 | Before the great-person fix (#126). |
 | Run 5 session 3 | turns 265-315 | After the fix, to game over. |
@@ -33,7 +33,7 @@ The live run in progress when this was written is not included.
 | Gold | turns the handler got past its reserve gate (from its calls) | turns with a purchase or upgrade call | turn log `handler_calls` | No gold-spent total, and no balance per turn. |
 | Production | choices tried | choices the game accepted (`builds` vs `can't build` lines) | bot log | Items finished are read from the `finished building` notices in the turn detail. |
 | Builders | improve jobs tried | jobs the game accepted (`builder_decision`) | bot log | Tiles wanted vs improved is not recorded. |
-| Military | combat units built (completion notices) | `attack_unit` and `city_attack` calls | turn detail; calls | Units that fought is only attacks by calls; no per-unit record. Units lost come from "was killed" notices. |
+| Military | combat units built (completion notices) | `attack` and `city_strike` decisions not logged as refused | turn detail; bot log | Units that fought is only attacks by decision; no per-unit record. Units lost come from "was killed" notices. |
 | Settling | settlers built | `found_city` calls; `settle_decision` outcomes; `city_lost` events | turn detail; calls; settle log; event log | None needed. |
 | Research and civics | tech and civic completions | completions that arrive with an empty queue | turn detail | Boosts available vs taken is not recorded. |
 | Government | slot assignments logged | distinct slot and policy pairs | bot log | A policy set again each turn shows as churn. Governor titles spent is only visible as warnings. |
@@ -64,6 +64,7 @@ Each cell is the measure's figure; F means the check failed. For ratio checks th
 | Builder actions the game refused | 59 of 305 F | 122 of 740 F | 108 of 579 F | 23 of 94 F |
 | Builder-turns idle | 1042 of 1288 F | 498 of 1116 | 450 of 921 | 164 of 235 F |
 | Military moves refused | 73 of 140 F | 138 of 328 F | 115 of 232 F | 30 of 92 F |
+| Attacks landed per combat unit built (units from notices) | 28 attacks, 13 units | 69 attacks, 12 units | 23 attacks, 13 units | 18 attacks, 0 units |
 | Settling decisions with no site | 147 of 202 F | 21 of 126 | 11 of 57 | 0 of 10 |
 | Cities lost | 3 F | 4 F | 1 F | 2 F |
 | Slot/policy pair set again (times each) | 35.8 F | 36.6 F | 18.1 F | 34.8 F |
@@ -71,7 +72,7 @@ Each cell is the measure's figure; F means the check failed. For ratio checks th
 | Governor actions that kept the point | 291 F | 4 | 2 | 1 |
 | Deals accepted of offered | 18 of 33 | 18 of 51 | 15 of 36 | 11 of 15 |
 | Route calls that worked | no data | 19 of 23 | 8 of 8 | 5 of 5 |
-| Turns with a handler error | 16 of 314 F | 33 of 322 F | 23 of 264 F | 7 of 50 F |
+| Turns with a handler error | 16 of 312 F | 32 of 322 F | 21 of 264 F | 6 of 50 F |
 | Starving notices | 111 F | 32 F | 24 | 61 F |
 
 Did each measure flag the failures found by hand?
@@ -95,7 +96,7 @@ Did each measure flag the failures found by hand?
 - **Builders keep trying forest and jungle tiles.** 21 failures logged as `tile has FEATURE_FOREST` or `FEATURE_JUNGLE` ("use remove_feature first") in Run 5's first session. The game refused 16-24% of builder actions (moves, improves, repairs), and one tile and improvement repeated 15-23 times.
 - **Activations are now refused rather than skipped.** After #126 the great people are activated (23 of 25), but the game refused 79 other activations (`CANNOT_ACTIVATE`, mostly engineers). The pile-up moved from "waiting" to "retrying".
 - **Cities were lost every run** (3, 4, 1, 2) and starvation notices ran at 24-111 per run.
-- **The final session has 0 attacks** for the 23 combat units its notices show built. Settlers built vs cities founded passed in the runs that have a settle log (7 of 9 and 6 of 7).
+- **Combat units built are barely visible.** The end-of-turn notices show 0-13 combat units built per run against 18-69 attacks, so the units-vs-attacks ratio passes and says little until units built are logged properly. Settlers built vs cities founded passed wherever a settle log exists (9 cities for 7 settlers noted in Run 4, 7 for 6 in Run 5 sessions 1-2).
 
 ## Weakest policies, ranked
 
@@ -106,7 +107,7 @@ Ranked by how much of the policy's purpose was lost, then by how early the signa
 3. **Government and governors.** The same policy is set again every turn (18-37 times per pair), and governor placement is left unfinished 220-297 times. Policy cards and governor titles may not be doing what the logs claim.
 4. **Faith.** 360 to 1,101 faith idle above the reserve, with 5 purchases over 258 turns. The idle note names only the great-person price, and the few buys were great people.
 5. **Builders.** 16-24% of builder actions are refused, with forest and jungle tiles retried; 45-81% of builder-turns are idle with no job on offer.
-6. **Military.** 42-55% of unit decisions end in a refused move (stacking). In the last session, no attacks were made.
+6. **Military.** 42-55% of unit decisions end in a refused move (stacking). Units built are too poorly recorded to say how many fought.
 7. **Settling and city health.** Cities were lost every run and starving notices stayed high. Run 3 had no site on 125 of 202 decisions; this is fixed in Runs 4 and 5.
 8. **Blockers and handlers.** 5-14% of turns had a handler error, and one blocker type has no handler.
 9. **Gold.** Nothing was bought on 76-85% of the turns the handler got past its reserve (138 of 181 in Run 5 sessions 1-2). Buys are counted from the log's success lines, and older logs have none for item purchases, so this is an upper bound. Often nothing was worth buying, and the log's own reason is a short list of costs, so this is the one to read before changing anything.

@@ -2,6 +2,17 @@
 
 What was verified against a running Civ VI game, and what wasn't reached. Newest run first. Run 2 updates the status of earlier checks it reached.
 
+## To check live: city strikes (fix for a civ6-mcp Lua bug)
+
+Run 5, turn 282: `City strike from Palenque failed` with `LuaError: ERR:Runtime Error: ... :56: operator .. is not supported for table .. string`. The cause, read from the Lua text (not seen in the game): civ6-mcp's `build_city_attack` writes its `ERR:NO_LOS` message with `{target_x}` in a plain string, so the script holds the literal `{target_x}`, an empty table in Lua. It was reached because the target was not in `CityManager.GetCommandTargets`. `civ6_ai.city_attack.fix_city_attack` (called in `run_game.py`) swaps in a builder without the bug that also no longer stops when the target is missing from that list, and lets `CanStartCommand` decide.
+
+| Check | Status |
+|---|---|
+| A strike logs `city_strike` with a result starting `CITY_RANGE_ATTACK|` and `damage dealt:` and no `City strike from ... failed` | Not reached |
+| The shape of `CityManager.GetCommandTargets` (whether the target plot index `y * width + x` is in it) | Not reached |
+| A refused strike now answers `Error: NO_LOS|Line of sight to (x,y) ...`, `ALREADY_FIRED` or `CANNOT_ATTACK`, and is not repeated for `retry_turns` | Not reached |
+| Why Palenque's target was not in the list (line of sight, or the list's shape) | Unknown |
+
 ## To check in the next live run: no per-turn MCP saves
 
 `disable_mcp_saves` is applied at startup. No new `0_MCP_*` files should appear in the `Single` saves folder, and Civ's own `AutoSave_*` files in `auto` should keep rolling as before.

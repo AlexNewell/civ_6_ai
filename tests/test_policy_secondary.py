@@ -706,4 +706,4 @@ def test_waiting_great_people_are_logged_with_a_reason(caplog):
     line = next(r.getMessage() for r in caplog.records if "great_people turn" in r.getMessage())
     assert "2 on the map" in line
     assert "Boudica (UNIT_GREAT_GENERAL)" in line and "never activated by this policy" in line
-    assert "no district to activate in" in caplog.text
+    assert "nowhere to activate" in caplog.text

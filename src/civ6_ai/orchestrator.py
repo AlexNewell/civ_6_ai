@@ -122,6 +122,8 @@ class Orchestrator:
         screenshots: Screenshotter | None = None,
     ) -> None:
         self._call_timer = call_timer
+        # The newest turn a notification has shown the game reached, for a UI that reads stale.
+        self._confirmed_turn = 0
         self._screenshots = screenshots
         self._shot_handlers: set[str] = set()
         self._game = game
@@ -142,7 +144,7 @@ class Orchestrator:
             return StopReason.GAME_OVER  # The run was started on a game that's already over.
 
         started = time.perf_counter()
-        turn = await self._read_turn()
+        turn = max(await self._read_turn(), self._confirmed_turn)
         seconds, errors = await self._run_handlers()
         calls = self._call_timer.take() if self._call_timer else {}
 
@@ -224,6 +226,16 @@ class Orchestrator:
                 await asyncio.sleep(TURN_READ_RETRY_SECONDS)
                 if await self._read_turn() > turn_before:
                     return None
+            # Run 5 stopped here on turns 248 and 264 with the game on the next turn, the second
+            # time with its "Make Dedication" notification (era change) up. The notifications are
+            # stamped with the turn they were raised on, so one from a later turn shows it moved.
+            # The turn it shows is remembered, so the same notification can't vouch for a later
+            # end-turn attempt that did not advance.
+            reached = await self._notified_turn_after(turn_before)
+            if reached:
+                self._confirmed_turn = reached
+                log.warning("Turn read %d, but notifications show turn %d", turn_before, reached)
+                return None
             return StopReason.BLOCKED
         except ConnectionError:
             raise
@@ -231,6 +243,20 @@ class Orchestrator:
             if await self._defeated():
                 return StopReason.GAME_OVER  # Reads can fail once the defeat screen is up.
             raise
+
+    async def _notified_turn_after(self, turn: int) -> int:
+        """The newest turn a notification was raised on, if it is after `turn`, else 0."""
+        get = getattr(self._game, "get_notifications", None)
+        if get is None:
+            return 0
+        try:
+            newest = max((n.turn for n in await get()), default=0)
+        except ConnectionError:
+            raise
+        except Exception:
+            log.exception("Reading notifications failed")
+            return 0
+        return newest if newest > turn else 0
 
     async def _dismiss_popup(self) -> bool:
         """Clear any popup through civ6-mcp (Lua only, no clicks). True if the call was made."""

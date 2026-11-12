@@ -464,8 +464,12 @@ class SecondaryPolicy:
             return
         advisor = await game.get_gp_advisor(unit.unit_index)
         if advisor is None or not advisor.cities:
-            # No matching district yet, or an unreadable unit. Ask again later, not every turn.
-            log.info("%s has no district to activate in, asking again later", unit.name)
+            # No matching district yet (an engineer needs a wonder being built), or an unreadable
+            # unit. Ask again later, not every turn.
+            log.info(
+                "%s has nowhere to activate (no district or wonder), asking later",
+                unit.name,
+            )
             state.skip_until = turn + NO_DISTRICT_WAIT
             return
         cities = sorted(

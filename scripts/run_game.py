@@ -20,6 +20,7 @@ from civ_mcp.game_state import GameState
 
 from civ6_ai.bot import SettleDecisionLog, build_orchestrator
 from civ6_ai.fastcalls import narrow_popup_scan, shorten_call_waits
+from civ6_ai.gp_advisor import fix_gp_advisor
 from civ6_ai.metrics.costs import game_id_for_new_session, game_id_of_log
 from civ6_ai.metrics.speed import summarise as summarise_speed
 from civ6_ai.monitors import EventBus, EventLog
@@ -73,6 +74,7 @@ async def play_game(
     disable_mcp_saves()
     narrow_popup_scan()
     shorten_call_waits()
+    fix_gp_advisor()
     connection = GameConnection()
     await connection.connect()
     game = GameState(connection)

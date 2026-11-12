@@ -1,9 +1,43 @@
 import asyncio
-
-from tests.test_orchestrator import FakeGame, Recording
+from dataclasses import dataclass
 
 from civ6_ai.orchestrator import Orchestrator, StopReason, TurnLog
 from civ6_ai.screenshots import MAX_PER_GAME, RESERVED_FOR_STOPS, Screenshotter
+
+
+@dataclass
+class Overview:
+    turn: int
+
+
+class FakeGame:
+    """Advances one turn per `end_turn`, unless a scripted report says otherwise."""
+
+    def __init__(self, results=()):
+        self.turn = 1
+        self.results = list(results)
+
+    async def check_game_over(self):
+        return None
+
+    async def get_game_overview(self):
+        return Overview(self.turn)
+
+    async def end_turn(self):
+        if self.results:
+            return self.results.pop(0)
+        self.turn += 1
+        return f"Turn {self.turn - 1} -> {self.turn}"
+
+
+class Recording:
+    def __init__(self, name, error=None):
+        self.name = name
+        self.error = error
+
+    async def run(self, game):
+        if self.error:
+            raise self.error
 
 
 class FakeCapture:

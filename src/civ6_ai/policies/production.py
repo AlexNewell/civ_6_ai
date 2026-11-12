@@ -472,6 +472,11 @@ def _failed(result: str) -> bool:
     return result.startswith(("Error", "ERR:"))
 
 
+def _advisor_failed(item: str, reply: Any) -> str:
+    """The advisor answered with something other than tiles (a read error). Not a refusal."""
+    return f"ERR:ADVISOR_READ|{item}: {reply}"
+
+
 async def _start(game: ProductionGame, city: City, option: ProductionChoice) -> str:
     """Set production, finding a tile first where the item needs one."""
     if option.is_repair:
@@ -480,8 +485,10 @@ async def _start(game: ProductionGame, city: City, option: ProductionChoice) -> 
         )
     if option.category == "DISTRICT":
         placements = await game.get_district_advisor(city.city_id, option.item)
-        if not isinstance(placements, list) or not placements:
-            return f"ERR:NO_PLACEMENT|{option.item}: {placements or 'no valid tile'}"
+        if not isinstance(placements, list):
+            return _advisor_failed(option.item, placements)
+        if not placements:
+            return f"ERR:NO_PLACEMENT|{option.item}: no valid tile"
         best = min(placements, key=lambda p: (-p.total_adjacency, p.x, p.y))
         return await game.set_city_production(
             city.city_id, option.category, option.item, best.x, best.y
@@ -490,8 +497,10 @@ async def _start(game: ProductionGame, city: City, option: ProductionChoice) -> 
     if option.category == "BUILDING" and result.startswith(_NO_COORDS_WONDER):
         # A wonder. The advisor ranks tiles by what building there would displace.
         placements = await game.get_wonder_advisor(city.city_id, option.item)
-        if not isinstance(placements, list) or not placements:
-            return f"ERR:NO_PLACEMENT|{option.item}: {placements or 'no valid tile'}"
+        if not isinstance(placements, list):
+            return _advisor_failed(option.item, placements)
+        if not placements:
+            return f"ERR:NO_PLACEMENT|{option.item}: no valid tile"
         best = min(placements, key=lambda p: (p.displacement_score, p.x, p.y))
         return await game.set_city_production(
             city.city_id, option.category, option.item, best.x, best.y

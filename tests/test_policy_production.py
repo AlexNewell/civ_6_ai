@@ -815,3 +815,13 @@ def test_an_accepted_item_clears_its_memory():
     policy.refusals._entries.clear()
     run(policy.assign(game))
     assert policy.refusals._entries == {}
+
+
+def test_an_advisor_read_error_is_not_remembered_as_a_refusal():
+    options = [lq.ProductionOption("DISTRICT", "DISTRICT_HARBOR", 60, 5, -1)]
+    game = ScriptedGame(cities=idle_cities(), production=options)
+    game.districts = "Error: timed out reading the advisor"
+    policy = CityProductionPolicy()
+    for _ in range(3):
+        run(policy.assign(game))
+    assert policy.refusals._entries == {}

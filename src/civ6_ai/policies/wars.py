@@ -16,8 +16,12 @@ Tracking, each turn:
 - A suzerain change is logged. A rival (another civ, not us) becoming suzerain is flagged as an
   early warning, and more strongly if that civ is at war with us, because the city-state then
   joins that war.
-- State is in memory only. A resumed run finds the wars again with the start turn unknown, logged
-  as "start unknown", because civ6-mcp does not read when a war began.
+- State is kept in memory, and also in `state_path` (a small JSON file) when one is given. A
+  restarted run reads it back, so each war keeps the turn it was first seen. A war that began
+  while the bot was down is then first seen on the first turn after, and the log says "first
+  seen". Without a file, or with one from a later turn (another game or an older save), a
+  restarted run finds the wars again as "start unknown", because civ6-mcp does not read when a
+  war began.
 
 Peace, each turn, for each civ at war with us:
 
@@ -38,9 +42,11 @@ Peace, each turn, for each civ at war with us:
 Other policies read `at_war_with(player_id)`, and `wars()` for the whole table.
 """
 
+import json
 import logging
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any, Protocol
 
 log = logging.getLogger(__name__)
@@ -81,6 +87,7 @@ class War:
 class WarPolicy:
     settings: WarSettings = field(default_factory=WarSettings)
     name: str = "wars"
+    state_path: Path | None = None  # Where wars are kept between runs. None keeps them in memory.
     _wars: dict[int, War] = field(default_factory=dict, init=False, repr=False)
     _suzerains: dict[int, int] = field(default_factory=dict, init=False, repr=False)
     _offered: dict[int, int] = field(default_factory=dict, init=False, repr=False)
@@ -107,6 +114,8 @@ class WarPolicy:
         if self._last_turn is not None and turn < self._last_turn:
             log.info("wars: turn went back from %s to %s, starting over", self._last_turn, turn)
             self._reset()
+        if self._last_turn is None:
+            self._load(turn)
         self._last_turn = turn
         try:
             majors = await game.get_diplomacy()
@@ -122,12 +131,66 @@ class WarPolicy:
         first = self._summary is None
         self._update(turn, overview.player_id, majors, states, first)
         self._log_changes(turn, before)
+        self._save(turn)
         try:
             await self._make_peace(game, turn, before)
         except ConnectionError:
             raise
         except Exception:
             log.warning("wars: peace step failed", exc_info=True)
+
+    def _load(self, turn: int) -> None:
+        """Read back the wars of an earlier run of this game. Anything doubtful is left out."""
+        if self.state_path is None:
+            return
+        try:
+            saved = json.loads(self.state_path.read_text(encoding="utf-8"))
+            if saved["turn"] > turn:
+                log.info(
+                    "wars: saved wars are from turn %s, after turn %s, so not used",
+                    saved["turn"],
+                    turn,
+                )
+                return
+            wars = {int(w["player_id"]): War(**w) for w in saved["wars"]}
+            suzerains = {int(pid): int(boss) for pid, boss in saved["suzerains"].items()}
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError, KeyError, TypeError):
+            log.warning("wars: could not read %s, starting without it", self.state_path)
+            return
+        self._wars = wars
+        self._suzerains = suzerains
+        self._summary = self._summary_of(wars)
+        log.info(
+            "wars: turn %s: %s war(s) read back from turn %s: %s",
+            turn,
+            len(wars),
+            saved["turn"],
+            self._summary,
+        )
+
+    def _save(self, turn: int) -> None:
+        """Write the wars so a restart keeps their start turns. A failure only costs that."""
+        if self.state_path is None:
+            return
+        saved = {
+            "turn": turn,
+            "wars": [asdict(war) for war in self._wars.values()],
+            "suzerains": {str(pid): boss for pid, boss in self._suzerains.items()},
+        }
+        try:
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            temp = self.state_path.with_name(self.state_path.name + ".tmp")
+            temp.write_text(json.dumps(saved, sort_keys=True), encoding="utf-8")
+            temp.replace(self.state_path)
+        except OSError:
+            log.warning("wars: could not save %s", self.state_path, exc_info=True)
+
+    @staticmethod
+    def _summary_of(wars: Mapping[int, War]) -> str:
+        names = ", ".join(f"{w.name}{'*' if w.via is not None else ''}" for w in wars.values())
+        return names or "none"
 
     def _reset(self) -> None:
         self._wars.clear()
@@ -151,7 +214,8 @@ class WarPolicy:
     def _update(
         self, turn: int, me: int, majors: list[Any], states: list[Any], first: bool
     ) -> None:
-        seen = None if first else turn  # A war found on the first read has no known start.
+        # A war found on the first read has no known start. After a read-back state it isn't first.
+        seen = None if first else turn
         wars: dict[int, War] = {}
         for civ in majors:
             self._names[civ.player_id] = civ.civ_name
@@ -209,10 +273,7 @@ class WarPolicy:
             if pid not in self._wars:
                 age = "age unknown" if war.started is None else f"lasted {turn - war.started} turns"
                 log.info("wars: turn %s: war with %s (%s) ended, %s", turn, war.name, pid, age)
-        names = ", ".join(
-            f"{w.name}{'*' if w.via is not None else ''}" for w in self._wars.values()
-        )
-        summary = names or "none"
+        summary = self._summary_of(self._wars)
         if summary != self._summary:
             log.info(
                 "wars: turn %s: at war with %s (* = city-state, via its suzerain)", turn, summary

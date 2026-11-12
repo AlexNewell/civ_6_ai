@@ -61,7 +61,7 @@ Each cell is the measure's figure; F means the check failed. For ratio checks th
 | Upgrade logged as refused when it succeeded | 0 | 21 F | 11 F | 7 F |
 | Production choices refused | 971 of 1127 F | 491 of 693 F | 629 of 799 F | 260 of 305 F |
 | Most repeats of one refused build | 59 F | 50 F | 37 F | 17 |
-| Improve attempts that failed | 59 of 99 F | 122 of 180 F | 108 of 165 F | 23 of 29 F |
+| Builder actions the game refused | 59 of 305 F | 122 of 740 F | 108 of 579 F | 23 of 94 F |
 | Builder-turns idle | 1042 of 1288 F | 498 of 1116 | 450 of 921 | 164 of 235 F |
 | Military moves refused | 73 of 140 F | 138 of 328 F | 115 of 232 F | 30 of 92 F |
 | Settling decisions with no site | 147 of 202 F | 21 of 126 | 11 of 57 | 0 of 10 |
@@ -92,7 +92,7 @@ Did each measure flag the failures found by hand?
 - **A policy card is set again every turn.** The same slot and policy pair was logged 18-37 times per pair: for example, `Slot 1 takes POLICY_GOD_KING` on turn after turn. The game either doesn't keep it or the bot doesn't see that it stuck. Run 5 made 572 `set_policies` calls over 315 turns.
 - **Governor placement never finishes.** 220-297 `Left something unfinished in governor placement` warnings in Runs 3 and 4, and 291 "kept the point" warnings in Run 3. End-turn holds for the governor-opportunity blocker also appear (34 across the runs).
 - **Upgrades are logged as refused when they succeeded.** `Upgrade of ... refused: UPGRADED|...` 21 times in Run 4. A measure that counted refusals would be wrong by that much.
-- **Builders keep trying forest and jungle tiles.** 21 failures logged as `tile has FEATURE_FOREST` or `FEATURE_JUNGLE` ("use remove_feature first") in Run 5's first session. Improve attempts fail 32-79% of the time, and one tile and improvement repeated 15-23 times.
+- **Builders keep trying forest and jungle tiles.** 21 failures logged as `tile has FEATURE_FOREST` or `FEATURE_JUNGLE` ("use remove_feature first") in Run 5's first session. The game refused 16-24% of builder actions (moves, improves, repairs), and one tile and improvement repeated 15-23 times.
 - **Activations are now refused rather than skipped.** After #126 the great people are activated (23 of 25), but the game refused 79 other activations (`CANNOT_ACTIVATE`, mostly engineers). The pile-up moved from "waiting" to "retrying".
 - **Cities were lost every run** (3, 4, 1, 2) and starvation notices ran at 24-111 per run.
 - **The final session has 0 attacks** for the 23 combat units its notices show built, and settlers vs founded was 2 vs 0 in that session (small numbers).
@@ -105,7 +105,7 @@ Ranked by how much of the policy's purpose was lost, then by how early the signa
 2. **Production.** 70-86% of choices refused; the same impossible build is retried every turn. This is wasted time and a likely reason the empire builds less than it could.
 3. **Government and governors.** The same policy is set again every turn (18-37 times per pair), and governor placement is left unfinished 220-297 times. Policy cards and governor titles may not be doing what the logs claim.
 4. **Faith.** 360 to 1,101 faith idle above the reserve, with 5 purchases over 258 turns. The idle note names only the great-person price, and the few buys were great people.
-5. **Builders.** 32-79% of improve attempts fail, with forest and jungle retried; 45-81% of builder-turns are idle with no job on offer.
+5. **Builders.** 16-24% of builder actions are refused, with forest and jungle tiles retried; 45-81% of builder-turns are idle with no job on offer.
 6. **Military.** 42-55% of unit decisions end in a refused move (stacking). In the last session, no attacks were made.
 7. **Settling and city health.** Cities were lost every run and starving notices stayed high. Run 3 had no site on 125 of 202 decisions; this is fixed in Runs 4 and 5.
 8. **Blockers and handlers.** 5-14% of turns had a handler error, and one blocker type has no handler.
@@ -120,7 +120,7 @@ Ranked by how much of the policy's purpose was lost, then by how early the signa
 | 2 | Skip a build the game refused with `NO_PLACEMENT` or `CANNOT_START` for a number of turns, keyed by city and item. | 1,100 refusals a run; 37-59 repeats of one. | Refused/accepted below 30% and no pair above 10 repeats. |
 | 3 | Read back a set policy before setting it again, or skip when the slot already holds it. | 18-37 sets of the same pair; each set is a game call. | Each slot/policy pair set at most 3 times on average. |
 | 4 | Finish governor placement, or stop warning once the points are spent. | 220-297 unfinished warnings. | Warnings under 20 a run. |
-| 5 | Remove the feature before improving a forest or jungle tile, or choose a tile without one. The builder now has a `remove_feature` action; check it covers these tiles. | The improve call says so in its result. | Improve failures under 25%. |
+| 5 | Remove the feature before improving a forest or jungle tile, or choose a tile without one. The builder now has a `remove_feature` action; check it covers these tiles. | The improve call says so in its result. | Refused builder actions under 10%. |
 | 6 | Log `UPGRADED` as a success. | The refusal count is wrong by up to 21. | No "refused: UPGRADED" line. |
 | 7 | Spend idle faith on something besides great people (a missionary, a building) once the cheapest great person is beyond reach. | 360-1,101 faith idle. | Idle faith under 250. |
 | 8 | Stop moving a unit onto a tile that holds a same-class unit (check the destination first). | 42-55% of military decisions end in `STACKING_CONFLICT`. | Refused moves under 25%. |

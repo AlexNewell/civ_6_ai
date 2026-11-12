@@ -106,7 +106,7 @@ def test_builder_failures_and_idle_turns():
 
     lines = [decision("failed")] * 6 + [decision("improve")] * 2 + [decision("idle")] * 10
     checks = by_name(RunLogs(records=[turn(1)], bot=lines, has_bot_log=True))
-    assert checks[("builders", "improve attempts that failed")].status == FAIL
+    assert checks[("builders", "builder actions the game refused")].status == FAIL
     assert checks[("builders", "builder-turns idle")].status == FAIL
 
 

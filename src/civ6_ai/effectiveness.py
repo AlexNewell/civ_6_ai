@@ -43,7 +43,7 @@ MAX_UNHANDLED_BLOCKERS = 0
 MAX_IDLE_FAITH = 250
 MAX_REFUSED_BUILD_SHARE = 0.5
 MAX_REPEAT_REFUSALS = 25
-MAX_BUILDER_FAIL_SHARE = 0.25
+MAX_BUILDER_FAIL_SHARE = 0.1
 MAX_BUILDER_IDLE_SHARE = 0.5
 MAX_MOVE_REFUSED_SHARE = 0.25
 MIN_ATTACKS_PER_MILITARY_UNIT = 0.5
@@ -472,12 +472,12 @@ def builder_checks(run: RunLogs) -> list[Check]:
     return [
         _share_check(
             "builders",
-            "improve attempts that failed",
+            "builder actions the game refused",
             failed,
-            failed + actions["improve"],
+            failed + work,
             MAX_BUILDER_FAIL_SHARE,
-            f"at most {MAX_BUILDER_FAIL_SHARE:.0%} of improve attempts refused",
-            f"{worst} is the most repeats of one tile and improvement",
+            f"at most {MAX_BUILDER_FAIL_SHARE:.0%} of builder actions refused",
+            f"moves, improves and repairs; {worst} is the most repeats of one tile and improvement",
         ),
         _share_check(
             "builders",

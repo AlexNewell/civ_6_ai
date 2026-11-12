@@ -255,6 +255,8 @@ def great_people_checks(run: RunLogs) -> list[Check]:
                 f"at most {GP_MAX_WAITING} on the map",
             )
         )
+    if not run.has_bot_log:
+        return out
     waits = sum(
         1
         for m in run.messages("policies.secondary")
@@ -544,20 +546,29 @@ def settling_checks(run: RunLogs) -> list[Check]:
     settlers = sum(
         1 for ln in run.detail_lines() if (m := FINISHED.match(ln)) and m[2] == "UNIT_SETTLER"
     )
-    if run.has_calls:
+    if run.has_calls and run.has_settle:
+        # A found_city call the game refused is logged as found_failed in the settle log.
+        failed = sum(1 for s in run.settle if s.get("action") == "found_failed")
         out.append(
             _ratio_check(
                 "settling",
                 "settlers built vs cities founded",
                 settlers,
-                run.calls("found_city"),
+                max(run.calls("found_city") - failed, 0),
                 MIN_FOUNDED_PER_SETTLER,
                 f"at least {MIN_FOUNDED_PER_SETTLER:.0%} of settlers found a city",
                 "settlers are read from completion notices, a lower bound",
             )
         )
     else:
-        out.append(_no_data("settling", "settlers vs cities", "see rule", "needs per-call counts"))
+        out.append(
+            _no_data(
+                "settling",
+                "settlers vs cities",
+                "see rule",
+                "needs per-call counts and the settle log",
+            )
+        )
     actions = Counter(s.get("action") for s in run.settle)
     if run.settle:
         out.append(

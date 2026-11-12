@@ -140,9 +140,25 @@ def test_builders_and_settlers_are_not_combat_units():
 
 def test_settlers_that_never_found_a_city_fail():
     notice = "  >> Coba finished building UNIT_SETTLER. Now: nothing."
-    records = [turn(i, {"found_city": 0}, detail=notice) for i in range(6)]
-    check = by_name(RunLogs(records=records))[("settling", "settlers built vs cities founded")]
+    records = [turn(i, {"found_city": 1}, detail=notice) for i in range(6)]
+    settle = [{"action": "found_failed"}] * 6
+    run = RunLogs(records=records, settle=settle, has_settle=True)
+    check = by_name(run)[("settling", "settlers built vs cities founded")]
+    assert (check.created, check.used) == (6, 0)
     assert check.status == FAIL
+
+
+def test_founding_without_the_settle_log_is_no_data():
+    notice = "  >> Coba finished building UNIT_SETTLER. Now: nothing."
+    records = [turn(i, {"found_city": 1}, detail=notice) for i in range(6)]
+    check = by_name(RunLogs(records=records))[("settling", "settlers vs cities")]
+    assert check.status == NO_DATA
+
+
+def test_great_people_event_checks_need_the_bot_log():
+    checks = by_name(RunLogs(records=[turn(1, {"activate_great_person": 0})]))
+    assert ("great people", "activation refused") not in checks
+    assert ("great people", "'no district' waits logged") not in checks
 
 
 def test_policy_slots_set_again_every_turn_are_flagged():

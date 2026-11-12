@@ -95,7 +95,7 @@ Did each measure flag the failures found by hand?
 - **Builders keep trying forest and jungle tiles.** 21 failures logged as `tile has FEATURE_FOREST` or `FEATURE_JUNGLE` ("use remove_feature first") in Run 5's first session. The game refused 16-24% of builder actions (moves, improves, repairs), and one tile and improvement repeated 15-23 times.
 - **Activations are now refused rather than skipped.** After #126 the great people are activated (23 of 25), but the game refused 79 other activations (`CANNOT_ACTIVATE`, mostly engineers). The pile-up moved from "waiting" to "retrying".
 - **Cities were lost every run** (3, 4, 1, 2) and starvation notices ran at 24-111 per run.
-- **The final session has 0 attacks** for the 23 combat units its notices show built, and settlers vs founded was 2 vs 0 in that session (small numbers).
+- **The final session has 0 attacks** for the 23 combat units its notices show built. Settlers built vs cities founded passed in the runs that have a settle log (7 of 9 and 6 of 7).
 
 ## Weakest policies, ranked
 

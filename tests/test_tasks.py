@@ -370,6 +370,14 @@ def break_it(data, how):
         json.dumps(break_it(good_file(), lambda d: d["tasks"][0].update(colour="red"))),
         json.dumps(break_it(good_file(), lambda d: d["tasks"][0].update(metric="mana"))),
         json.dumps(break_it(good_file(), lambda d: d["tasks"].append("task"))),
+        json.dumps(break_it(good_file(), lambda d: d["tasks"][0].update(metric=[]))),
+        json.dumps(break_it(good_file(), lambda d: d["tasks"][0].update(metric="cities", op=[]))),
+        json.dumps(
+            break_it(good_file(), lambda d: d["tasks"][0].update(created_turn=None, deadline=5))
+        ),
+        json.dumps(break_it(good_file(), lambda d: d["tasks"][0].update(deadline="soon"))),
+        json.dumps(break_it(good_file(), lambda d: d["tasks"][0].update(title=["x"]))),
+        json.dumps(break_it(good_file(), lambda d: d["tasks"][0].update(depends_on=5))),
     ],
 )
 def test_unreadable_file_is_kept_aside_and_the_db_starts_empty(tmp_path, text):
@@ -443,3 +451,53 @@ def test_bot_wires_the_task_handler_after_the_policy_document(tmp_path):
 def test_bot_without_a_task_file_has_no_task_handler(tmp_path):
     orchestrator = bot.build_orchestrator(fx.FakeGame(), EventBus(), TurnLog(tmp_path / "g.jsonl"))
     assert "tasks" not in [handler.name for handler in orchestrator._handlers]
+
+
+def test_refresh_picks_up_tasks_another_writer_added(tmp_path):
+    path = tmp_path / "tasks.json"
+    ours = TaskDB(path)
+    ours.add("Ours", turn=1, deadline=5)
+    theirs = TaskDB(path)
+    theirs.add("Theirs", turn=1)
+    assert [t.id for t in ours.tasks()] == [1]
+    assert ours.refresh()
+    assert [t.title for t in ours.tasks()] == ["Ours", "Theirs"]
+    assert not ours.refresh()  # Nothing new.
+    ours.check(9, figures())  # Goes overdue and saves; Theirs must survive.
+    assert [t.title for t in TaskDB(path).tasks()] == ["Ours", "Theirs"]
+    assert ours.add("More", turn=9).id == 3
+
+
+def test_refresh_ignores_our_own_writes(tmp_path):
+    db = TaskDB(tmp_path / "tasks.json")
+    db.add("A", turn=1)
+    assert not db.refresh()
+
+
+def test_refresh_with_a_bad_file_keeps_memory_and_restores_the_file(tmp_path):
+    path = tmp_path / "tasks.json"
+    db = TaskDB(path)
+    db.add("A", turn=1)
+    path.write_text("{oops", encoding="utf-8")
+    assert db.refresh()
+    assert [t.title for t in db.tasks()] == ["A"]
+    assert (tmp_path / "tasks.json.corrupt").exists()
+    assert [t.title for t in TaskDB(path).tasks()] == ["A"]
+
+
+def test_handler_refreshes_before_checking(tmp_path):
+    path = tmp_path / "tasks.json"
+    db = TaskDB(path)
+    handler = TaskHandler(db, EventBus())
+    TaskDB(path).add("Added elsewhere", turn=1, metric="gold", value=10)
+    run(handler.run(OverviewGame(**full_overview(turn=3, gold=50))))
+    assert db.get(1).status is Status.DONE
+
+
+def test_bot_accepts_a_shared_task_db(tmp_path):
+    db = TaskDB(tmp_path / "tasks.json")
+    orchestrator = bot.build_orchestrator(
+        fx.FakeGame(), EventBus(), TurnLog(tmp_path / "g.jsonl"), task_db=db
+    )
+    handler = next(h for h in orchestrator._handlers if h.name == "tasks")
+    assert handler.db is db

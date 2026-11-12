@@ -165,18 +165,20 @@ def _validate(task: Task) -> None:
         raise TaskError(f"task {task.id}: note must be text")
     if not _is_whole(task.priority) or not MIN_PRIORITY <= task.priority <= MAX_PRIORITY:
         raise TaskError(f"task {task.id}: priority must be {MIN_PRIORITY} to {MAX_PRIORITY}")
-    for name in ("created_turn", "deadline", "completed_turn", "overdue_turn"):
+    if not _is_whole(task.created_turn) or task.created_turn < 0:
+        raise TaskError(f"task {task.id}: created_turn must be a whole turn number")
+    for name in ("deadline", "completed_turn", "overdue_turn"):
         value = getattr(task, name)
         if value is not None and (not _is_whole(value) or value < 0):
             raise TaskError(f"task {task.id}: {name} must be a whole turn number")
     if task.deadline is not None and task.deadline < task.created_turn:
         raise TaskError(f"task {task.id}: deadline is before the turn it was created")
     if task.metric is not None:
-        if task.metric not in METRICS:
+        if not isinstance(task.metric, str) or task.metric not in METRICS:
             raise TaskError(
                 f"task {task.id}: unknown metric {task.metric!r}, use {sorted(METRICS)}"
             )
-        if task.op not in _COMPARE:
+        if not isinstance(task.op, str) or task.op not in _COMPARE:
             raise TaskError(f"task {task.id}: op must be one of {sorted(_COMPARE)}")
         if not _is_number(task.value):
             raise TaskError(f"task {task.id}: value must be a finite number")
@@ -194,8 +196,31 @@ class TaskDB:
         self.path = path
         self._tasks: dict[int, Task] = {}
         self._next_id = 1
+        self._stamp: tuple[int, int] | None = (
+            None  # Modified time and size of the file as we left it.
+        )
         if path is not None and path.exists():
             self._load(path)
+
+    def refresh(self) -> bool:
+        """Re-read the file if something else changed it, so another writer's tasks aren't lost.
+
+        True if it was reloaded. Our own writes are recognised and not re-read. If the changed file
+        is unreadable it is moved aside as at start, and what is in memory is written back.
+        """
+        if self.path is None or self._file_stamp() in (self._stamp, None):
+            return False
+        self._load(self.path)
+        if not self.path.exists():
+            self._save()  # The file was bad: put what we have back.
+        return True
+
+    def _file_stamp(self) -> tuple[int, int] | None:
+        try:
+            stat = self.path.stat()  # type: ignore[union-attr]
+        except OSError:
+            return None
+        return stat.st_mtime_ns, stat.st_size
 
     # Reading
 
@@ -339,12 +364,13 @@ class TaskDB:
         temp = self.path.with_name(self.path.name + ".tmp")
         temp.write_text(json.dumps(self.to_dict(), indent=1, default=str), encoding="utf-8")
         os.replace(temp, self.path)  # Atomic, so a crash leaves the old file or the new one.
+        self._stamp = self._file_stamp()
 
     def _load(self, path: Path) -> None:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             tasks, next_id = self._parse(data)
-        except (OSError, ValueError, TaskError) as error:
+        except (OSError, ValueError, TypeError, TaskError) as error:
             aside = path.with_name(path.name + ".corrupt")
             log.warning("Task file unreadable (%s); moved to %s and starting empty", error, aside)
             try:
@@ -353,7 +379,8 @@ class TaskDB:
                 log.exception("Could not move the task file aside")
             return
         self._tasks = {task.id: task for task in tasks}
-        self._next_id = next_id
+        self._next_id = max(next_id, self._next_id)  # Ids given out are never reused.
+        self._stamp = self._file_stamp()
 
     @staticmethod
     def _parse(data: object) -> tuple[list[Task], int]:
@@ -384,6 +411,7 @@ class TaskHandler:
         self._bus = bus
 
     async def run(self, game: Any) -> None:
+        self.db.refresh()
         overview = await game.get_game_overview()
         for event in self.db.check(overview.turn, metrics_from_overview(overview)):
             self._bus.publish(event)

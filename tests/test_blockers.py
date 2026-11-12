@@ -341,6 +341,8 @@ class FakeGame:
         return self.people
 
     async def recruit_great_person(self, individual_id):
+        if self.result.startswith("OK"):
+            self.clear(BlockerType.CLAIM_GREAT_PERSON)
         return self.did("recruit_great_person", individual_id)
 
 
@@ -877,6 +879,37 @@ def test_great_people_are_recruited_on_the_claim_notification():
     resolve(game)
 
     assert game.called("recruit_great_person") == [("recruit_great_person", 4)]
+
+
+def test_claim_great_person_blocker_recruits_with_points_only():
+    game = FakeGame([BlockerType.CLAIM_GREAT_PERSON])
+    game.people = [person(4, True), person(5, False)]
+    game.result = "OK:RECRUITED|Hypatia"
+
+    resolve(game)
+
+    assert game.called("recruit_great_person") == [("recruit_great_person", 4)]
+    assert not game.called("patronize_great_person")
+
+
+def test_claim_great_person_blocker_stays_open_when_the_recruit_fails():
+    game = FakeGame([BlockerType.CLAIM_GREAT_PERSON])
+    game.people = [person(4, True)]
+    game.result = "ERR:CANNOT_RECRUIT|Not enough GP points to recruit Hypatia"
+    assert [found.type for found in resolve(game)] == [BlockerType.CLAIM_GREAT_PERSON]
+
+
+def test_claim_great_person_line_from_run_5_parses():
+    found = blockers.parse_end_turn_blocking(
+        ["BLOCKING|ENDTURN_BLOCKING_CLAIM_GREAT_PERSON|Claim Great Person"]
+    )
+    assert [Blocker(*item) for item in found] == [
+        Blocker(BlockerType.CLAIM_GREAT_PERSON, "Claim Great Person")
+    ]
+
+
+def test_claim_great_person_has_a_default_handler():
+    assert BlockerType.CLAIM_GREAT_PERSON in blockers.DEFAULT_RESOLVERS
 
 
 def test_great_people_are_left_alone_without_the_notification():

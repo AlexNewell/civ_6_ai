@@ -34,6 +34,7 @@ All of these come from civ6-mcp's blocking query, run through `execute_lua` in t
 
 | Type | How resolved |
 |---|---|
+| `ENDTURN_BLOCKING_CLAIM_GREAT_PERSON` | Recruits every great person with enough points (`recruit_great_person`, reply `OK:RECRUITED|name`), never gold or faith: patronage stays with the faith policy and its reserve. `SecondaryPolicy` takes it over with its ranked recruiting. A refused recruit (`ERR:CANNOT_RECRUIT|...`) leaves the blocker open for `end_turn` to judge. Unhandled in Runs 3 to 5 (66, 48 and 57 holds, `No handler for blocker ENDTURN_BLOCKING_CLAIM_GREAT_PERSON: Claim Great Person`). **Live check pending**: see issue 137. |
 | `ENDTURN_BLOCKING_RESEARCH` | Starts the tech with the fewest turns. If a tech is already set, the notification is stale and is left to `end_turn`. |
 | `ENDTURN_BLOCKING_CIVIC` | Same, for civics. |
 | `ENDTURN_BLOCKING_PRODUCTION` | In each idle city, starts the cheapest non-unit item, then units, skipping districts and repairs because they need a tile. Tries every option until one is accepted, because wonders are listed as buildings but refused without a tile, so no cap on tries can be safe. Corrupted queues are left to `end_turn`. |

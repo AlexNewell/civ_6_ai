@@ -403,7 +403,11 @@ def test_belief_ranking_is_deterministic_and_unknown_beliefs_are_kept():
 
 def test_blocker_policies_cover_pantheon_and_great_people():
     policies = SecondaryPolicy().blocker_policies()
-    assert set(policies) == {BlockerType.PANTHEON, BlockerType.GREAT_PERSON_CLAIM}
+    assert set(policies) == {
+        BlockerType.PANTHEON,
+        BlockerType.GREAT_PERSON_CLAIM,
+        BlockerType.CLAIM_GREAT_PERSON,
+    }
     BlockerResolver(policies)
 
 

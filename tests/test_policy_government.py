@@ -595,3 +595,12 @@ def test_a_governor_that_still_reads_as_waiting_is_not_sent_again_and_again():
     for _ in range(6):
         run(policy.run(game))
     assert len([a for a in game.actions if a[0] == "assign"]) == 4  # 2 cities, 2 sends each.
+
+
+def test_exhausted_slot_counts_as_handled_so_the_blocker_fallback_does_not_run():
+    game = ScriptedGame(slots=[slot(0, "SLOT_ECONOMIC")], cards=[info("POLICY_A", "SLOT_ECONOMIC")])
+    policy = GovernmentPolicy()
+    policy._card_sets[(0, "POLICY_A")] = 2
+    fill = policy.blocker_policies()[BlockerType.FILL_CIVIC_SLOT]
+    assert run(fill(game, Blocker(BlockerType.FILL_CIVIC_SLOT))) is True
+    assert not game.actions

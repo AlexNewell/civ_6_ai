@@ -225,6 +225,9 @@ async def fill_empty_slots(
     for slot in empty:
         ranked = rank_cards(slot, spare, weights)
         fresh = [c for c in ranked if counts[(slot.index, c.policy_type)] < MAX_SETS_PER_PAIR]
+        if ranked and not fresh:
+            filled += 1  # Every fitting card was set enough; more calls would repeat them. This
+            continue  # also keeps the blocker fallback, which ignores the counts, from running.
         for card in fresh[:MAX_CARDS_PER_SLOT]:
             result = await game.set_policies({slot.index: card.policy_type})
             if _policies_set(result):

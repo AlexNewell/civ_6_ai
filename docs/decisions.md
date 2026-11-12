@@ -69,6 +69,16 @@ A strong, cheap opponent is no use if the human waits too long for it. Speed is 
 - Speed targets are in [Speed](#speed).
 - Play isn't fully deterministic, because Claude responses can't be reproduced on request. Deterministic layers are seeded and model replies are stored, so any game can be replayed exactly.
 
+## Policy document
+
+Issue 2.1. `src/civ6_ai/strategy/policy_document.py` defines how strategy steers the deterministic policies. It is offline: no model or game call.
+
+- A JSON document with `version` (1), `victory` (`any`, `science`, `culture`, `domination`, `religious`, `diplomatic`), `posture` (`expand`, `balanced`, `defend`, `conquer`), `expansion.target_cities` and `weights` per domain (`production`, `research`, `secondary`, `military`, `gold`). Every part is optional.
+- `resolve` builds each policy's weights from its defaults, then scales them by the victory and posture profiles, then applies the explicit `weights`, so an explicit value always wins. The default document resolves to exactly the policies' own defaults.
+- Only plain numeric weights are settable. The named priority tables (research priorities, government ranks) stay with their policies. Numbers must be finite and between 0 and 1000, and health shares at most 1.
+- An invalid document is rejected whole, with every problem listed, and the weights in force stay. Partial application was ruled out because a half-applied document is hard to reason about.
+- `PolicyDocumentHandler` (`strategy/apply.py`) is a turn-loop handler that runs right after `Monitors`. It re-reads one file when its modified time or size changes. `build_orchestrator(policy_document=path)` adds it. With no path nothing changes. The blocker resolver's fallback policies keep their defaults.
+
 ## Dependencies
 
 - [civ6-mcp](https://github.com/lmwilki/civ6-mcp) (MIT) is pinned to commit `dd2019056371b92ea4854e879ddf05a8cad95e8a` (v1.1.11), then vendored under `third_party/` in Phase 6, because a GitHub fork of a public repo can't be private.

@@ -567,3 +567,18 @@ def test_the_activation_fallback_is_chosen_per_session(tmp_path: Path):
     new.with_name(new.stem + "_bot.log").write_text(act + "\n", encoding="utf-8")
     check = by_name(load_run([old, new]))[("great people", "seen vs activated")]
     assert check.used == 4
+
+
+def test_the_gold_measure_is_chosen_per_session(tmp_path: Path):
+    old = tmp_path / "STD_T1_01_20261111T000000Z.jsonl"
+    new = tmp_path / "STD_T1_01_20261111T010000Z.jsonl"
+    rows = [turn(n) for n in range(1, 7)]
+    for row in rows:
+        row["handler_calls"] = {"gold": {"list_city_production": [1, 0.1]}}
+    old.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    new.write_text(json.dumps(turn(7, {"purchase_item": 1})) + "\n", encoding="utf-8")
+    old.with_name(old.stem + "_bot.log").write_text("", encoding="utf-8")
+    line = f"{STAMP} civ6_ai.policies.gold INFO gold_spent turn total: 50 of 100 to spend\n"
+    new.with_name(new.stem + "_bot.log").write_text(line, encoding="utf-8")
+    check = by_name(load_run([old, new]))[("gold", "turns above reserve with nothing bought")]
+    assert (check.created, check.used) == (7, 6)

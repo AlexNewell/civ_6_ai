@@ -477,49 +477,68 @@ def gold_turns(run: RunLogs) -> tuple[int, int]:
 
 def gold_checks(run: RunLogs) -> list[Check]:
     out: list[Check] = []
-    totals = [
-        (int(m[1]), int(m[2]))
-        for msg in run.messages("policies.gold")
-        if (m := GOLD_SPENT.match(msg))
-    ]
-    if totals:
-        idle_turns = sum(1 for spent, _ in totals if spent == 0)
+    # Each session is measured by its logged totals if it has them, else by its calls, so a run
+    # that spans the logging change doesn't count only the newer sessions.
+    eligible = idle = spent_total = budget_total = 0
+    logged_turns = fallback_turns = 0
+    for part in run.sessions or [run]:
+        totals = [
+            (int(m[1]), int(m[2]))
+            for msg in part.messages("policies.gold")
+            if (m := GOLD_SPENT.match(msg))
+        ]
+        if totals:
+            eligible += len(totals)
+            idle += sum(1 for spent, _ in totals if spent == 0)
+            spent_total += sum(spent for spent, _ in totals)
+            budget_total += sum(budget for _, budget in totals)
+            logged_turns += len(totals)
+        elif part.has_calls:
+            turns, bought = gold_turns(part)
+            eligible += turns
+            idle += turns - bought
+            fallback_turns += turns
+    if eligible:
+        source = (
+            "from the logged spent-gold totals"
+            if not fallback_turns
+            else f"{fallback_turns} turns from the handler's calls, an upper bound"
+        )
         out.append(
             _share_check(
                 "gold",
                 "turns above reserve with nothing bought",
-                idle_turns,
-                len(totals),
-                MAX_IDLE_GOLD_SHARE,
-                f"nothing bought on at most {MAX_IDLE_GOLD_SHARE:.0%} of turns above the reserve",
-                "from the logged spent-gold totals",
-            )
-        )
-        out.append(
-            _info(
-                "gold",
-                "gold spent",
-                sum(spent for spent, _ in totals),
-                f"of {sum(budget for _, budget in totals)} above the reserve, over "
-                f"{len(totals)} turns",
-            )
-        )
-    elif run.has_calls:
-        eligible, spent = gold_turns(run)
-        out.append(
-            _share_check(
-                "gold",
-                "turns above reserve with nothing bought",
-                eligible - spent,
+                idle,
                 eligible,
                 MAX_IDLE_GOLD_SHARE,
                 f"nothing bought on at most {MAX_IDLE_GOLD_SHARE:.0%} of turns above the reserve",
-                "from the gold handler's calls; no gold-spent total is logged",
+                source,
+            )
+        )
+    elif run.has_calls:
+        out.append(
+            _share_check(
+                "gold",
+                "turns above reserve with nothing bought",
+                0,
+                0,
+                MAX_IDLE_GOLD_SHARE,
+                f"nothing bought on at most {MAX_IDLE_GOLD_SHARE:.0%} of turns above the reserve",
+                "from the gold handler's calls",
             )
         )
     else:
         out.append(
             _no_data("gold", "turns above reserve with nothing bought", "see rule", "needs calls")
+        )
+    if logged_turns:
+        out.append(
+            _info(
+                "gold",
+                "gold spent",
+                spent_total,
+                f"of {budget_total} above the reserve, over {logged_turns} logged turns",
+            )
         )
     if not run.has_bot_log:
         return [*out, _no_data("gold", "upgrade logged as refused", "see rule", "needs bot log")]

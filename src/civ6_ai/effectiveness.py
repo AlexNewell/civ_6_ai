@@ -228,7 +228,10 @@ def _no_data(policy: str, name: str, rule: str, why: str) -> Check:
 
 
 def activation_refused(run: RunLogs) -> int:
-    return sum(1 for m in run.messages("policies.secondary") if "can't activate at" in m)
+    """Activations the game refused: the secondary handler's, and the faith handler's prophets."""
+    secondary = sum(1 for m in run.messages("policies.secondary") if "can't activate at" in m)
+    prophets = sum(1 for m in run.messages("policies.faith") if "but refused:" in m)
+    return secondary + prophets
 
 
 def great_people_checks(run: RunLogs) -> list[Check]:

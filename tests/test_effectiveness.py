@@ -346,3 +346,16 @@ def test_events_and_settle_files_passed_by_a_glob_are_not_turn_logs(tmp_path: Pa
     events.write_text(json.dumps({"kind": "city_lost", "turn": 1}) + os.linesep, encoding="utf-8")
     run = load_run([log, events])
     assert len(run.records) == 1
+
+
+def test_refused_prophet_activations_are_not_counted_as_used():
+    names = [f"Person {i}" for i in range(5)]
+    refused = "Prophet still idle after 3 turns: on the Holy Site of Coba but refused: Error"
+    run = RunLogs(
+        records=[turn(1, {"activate_great_person": 3})],
+        bot=[gp_line(1, names), *[bot("faith", refused, "WARNING")] * 3],
+        has_bot_log=True,
+    )
+    check = by_name(run)[("great people", "seen vs activated")]
+    assert (check.created, check.used) == (5, 0)
+    assert check.status == FAIL

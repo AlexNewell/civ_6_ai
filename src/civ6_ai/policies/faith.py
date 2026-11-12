@@ -25,7 +25,9 @@ before something is attempted, and every try and refusal is logged:
 
 Faith. Faith above `FaithSettings.reserve` is spent, in this order:
 
-1. Great people, bought with faith. The price is read from the Great People screen, so it is
+1. Great people, bought with faith. A price of 2147483647 (the game's maximum integer) means
+   the person can't be bought, so it is never the cheapest option and the faith falls through
+   to buildings. The price is read from the Great People screen, so it is
    exact and the reserve can be kept. One person is worth many turns of points, which makes it
    the best use of a lump of faith. Ranked by the same class weights as recruiting. A Great
    Prophet is bought only while a religion can still be founded.
@@ -69,6 +71,7 @@ _PROPHET = "UNIT_GREAT_PROPHET"
 _PROPHET_CLASS = "Great Prophet"
 _UNCLAIMED = "Unclaimed"
 _FAITH = "YIELD_FAITH"
+_UNBUYABLE = 2**31 - 1  # The game's max int: the price it reports for a person who can't be bought.
 _UNKNOWN_CLASS = 0.5  # Weight of a great person class the weights don't name.
 
 # Buildings bought with faith, best first, with an upper estimate of the price. The estimate
@@ -302,9 +305,9 @@ class FaithPolicy:
         people = await game.get_great_people()
         religion = await game.get_religion_founding_status()
         can_found = not religion.has_religion and bool(religion.available_religions)
-        offered = [p for p in people if p.claimant == _UNCLAIMED and p.faith_cost > 0]
+        offered = [p for p in people if p.claimant == _UNCLAIMED and 0 < p.faith_cost < _UNBUYABLE]
         if not offered:
-            notes.append("no great person can be bought with faith")
+            notes.append("no great person can be bought with faith (none priced, or unreachable)")
             return 0.0, 0, 0
 
         def class_weight(person: Any) -> float:

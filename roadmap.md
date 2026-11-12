@@ -176,7 +176,7 @@ flowchart TD
 | [`1.31`](https://github.com/AlexNewell/civ_6_ai/issues/151) | Review the pinned civ6-mcp: our patches, upstream fixes and the noise we see | 🟨 In progress | PR 165 merged: a patch table in [`docs/decisions.md`](docs/decisions.md) and a fix for the victory-check decimal. The pin is upstream's latest commit, so there's no bump to make. |
 | [`1.32`](https://github.com/AlexNewell/civ_6_ai/issues/152) | Preflight check in run_game.py for dependencies and screenshots | 🟨 In progress | PR 161 merged with unit tests. Not checked live. |
 | [`1.33`](https://github.com/AlexNewell/civ_6_ai/issues/153) | Strength review: where we trailed Germany on score in Run 6 | 🟨 In progress | PR 162 merged: [`docs/research/strength-run6.md`](docs/research/strength-run6.md). Open: no log records rival scores, so the gap to the leader can't be measured yet. |
-| [`1.34`](https://github.com/AlexNewell/civ_6_ai/issues/156) | Construction event log and a build tracker that spots gaps | 🟨 In progress | Part 1 merged (PR 168: construction events). Part 2, the gap tracker, is underway. |
+| [`1.34`](https://github.com/AlexNewell/civ_6_ai/issues/156) | Construction event log and a build tracker that spots gaps | 🟨 In progress | PRs 168 and 172 merged: construction events, a build ledger restored on restart, a per-turn gap line, and buffered event writes (about 0.7 ms a turn in tests). Not checked live. Feeding gaps into production scoring is left. |
 
 ## Workstream "E": <ins>Evaluator</ins> and Data
 

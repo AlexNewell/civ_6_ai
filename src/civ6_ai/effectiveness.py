@@ -203,6 +203,7 @@ def load_run(turn_logs: list[Path]) -> RunLogs:
                     part.bot.append((m["logger"], m["level"], m["msg"]))
         run.records += part.records
         run.bot += part.bot
+        part.has_bot_log = bot.exists()
         run.sessions.append(part)
         events = sibling(log, "_events.jsonl")
         if events.exists():

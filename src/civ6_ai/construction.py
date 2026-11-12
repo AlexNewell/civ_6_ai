@@ -151,6 +151,13 @@ class ConstructionWatcher:
         """The turn of the last read, or 0 before the first."""
         return self._last_turn or 0
 
+    def finished_districts(self) -> dict[int, set[tuple[str, int, int]]] | None:
+        """Each city's finished districts as of the last read (those still being built or paused
+        are left out), or None before the first read."""
+        if self._seen is None:
+            return None
+        return {city_id: seen.districts for city_id, seen in self._seen.items()}
+
     def reset(self) -> None:
         self._seen: dict[int, _Seen] | None = None
         self._ever: set[int] = set()

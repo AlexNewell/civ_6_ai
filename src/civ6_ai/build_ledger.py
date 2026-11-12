@@ -114,18 +114,51 @@ class BuildLedger:
         elif isinstance(event, ProductionRefused) and event.is_refusal:
             self.refused[bare(event.item)].add(event.city_id)
 
-    def observe(self, turn: int, cities: Iterable[Any]) -> None:
-        """Absorb the city list: anything standing that no event told us of is added."""
+    def observe(
+        self,
+        turn: int,
+        cities: Iterable[Any],
+        finished: dict[int, set[tuple[str, int, int]]] | None = None,
+    ) -> None:
+        """Absorb the city list: anything standing that no event told us of is added.
+
+        `finished` (from `ConstructionWatcher`) says which districts are done, so one that is
+        being built or paused is not counted. Without it, the city's own current build is skipped.
+        """
         for city in cities:
             self.names.setdefault(city.city_id, city.name)
             known = self.districts.setdefault(city.city_id, {})
-            building = getattr(city, "currently_building", "") or ""
-            for name, x, y in _districts(city.districts):
-                if name == building:
-                    continue  # Still being built, and may be paused.
+            if finished is not None:
+                found = finished.get(city.city_id, set())
+            else:
+                building = getattr(city, "currently_building", "") or ""
+                found = {d for d in _districts(city.districts) if d[0] != building}
+            for name, x, y in found:
                 known.setdefault((bare(name), x, y), turn)
             built = self.buildings.setdefault(city.city_id, set())
             built.update(bare(b) for b in city.buildings)
+
+    def reconcile(
+        self, cities: Iterable[Any], finished: dict[int, set[tuple[str, int, int]]] | None = None
+    ) -> None:
+        """Drop restored holdings the current city list does not show. Run once on the first
+        complete read, because a loss between sessions left no event to say so."""
+        cities = list(cities)
+        present = {c.city_id for c in cities}
+        for city_id in [c for c in self.districts if c not in present]:
+            self.districts.pop(city_id, None)
+            self.buildings.pop(city_id, None)
+        for city in cities:
+            if finished is not None:
+                standing = {(bare(n), x, y) for n, x, y in finished.get(city.city_id, set())}
+            else:
+                standing = {(bare(n), x, y) for n, x, y in _districts(city.districts)}
+            known = self.districts.get(city.city_id, {})
+            for key in [k for k in known if k not in standing]:
+                del known[key]
+            self.buildings[city.city_id] = {b for b in self.buildings.get(city.city_id, set())} & {
+                bare(b) for b in city.buildings
+            }
 
     def district_types(self) -> set[str]:
         return {d[0] for found in self.districts.values() for d in found}
@@ -243,8 +276,15 @@ class BuildTracker:
 
     name = "build_tracker"
 
-    def __init__(self, ledger: BuildLedger, victory: Callable[[], str] = lambda: "any") -> None:
+    def __init__(
+        self,
+        ledger: BuildLedger,
+        victory: Callable[[], str] = lambda: "any",
+        watcher: Any = None,
+    ) -> None:
         self.ledger = ledger
+        self._watcher = watcher
+        self._reconciled = False
         self._victory = victory
         self.gaps: list[Gap] = []
 
@@ -255,7 +295,11 @@ class BuildTracker:
             overview.num_cities
         ):
             return  # A short read would show districts as missing.
-        self.ledger.observe(overview.turn, cities)
+        finished = self._watcher.finished_districts() if self._watcher is not None else None
+        if not self._reconciled:
+            self.ledger.reconcile(cities, finished)
+            self._reconciled = True
+        self.ledger.observe(overview.turn, cities, finished)
         self.gaps = find_gaps(self.ledger, overview.turn, self._victory(), cities)
         log.info("%s", gap_line(self.gaps))
 

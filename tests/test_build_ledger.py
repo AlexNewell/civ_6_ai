@@ -263,3 +263,30 @@ def test_tracker_and_buffered_log_stay_within_the_per_turn_budget(tmp_path):
     average = asyncio.run(play())
     print(f"added per turn: {average * 1000:.2f} ms")
     assert average < 0.050
+
+
+def test_first_snapshot_drops_restored_holdings_that_are_gone():
+    ledger = BuildLedger()
+    ledger.apply(completed(5))
+    ledger.apply(completed(6, "DISTRICT_THEATER", 2))  # City 2 was lost between sessions.
+    ledger.apply(BuildingCompleted(7, 1, "City1", 10, 10, building="LIBRARY"))
+    game = FakeGame()
+    game.turn = 30
+    game.cities = [city(1, districts=["DISTRICT_CITY_CENTER@10,10"])]
+    asyncio.run(BuildTracker(ledger).run(game))
+    assert ledger.district_types() == {"CITY_CENTER"} and ledger.buildings[1] == set()
+
+
+def test_tracker_uses_the_watchers_finished_districts():
+    from civ6_ai.construction import ConstructionWatcher
+
+    bus = EventBus()
+    watcher = ConstructionWatcher(bus)
+    paused = city(districts=["DISTRICT_CAMPUS@11,10"], building="BUILDING_MONUMENT")
+    watcher.update(10, [city()])
+    watcher.update(11, [city(districts=["DISTRICT_CAMPUS@11,10"], building="DISTRICT_CAMPUS")])
+    bus.publish(started(12, 1, "BUILDING_MONUMENT"))  # Production switches away.
+    watcher.update(12, [paused])  # Switched away: held back as paused.
+    ledger = BuildLedger()
+    ledger.observe(12, [paused], watcher.finished_districts())
+    assert ledger.district_types() == set()

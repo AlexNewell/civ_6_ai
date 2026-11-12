@@ -318,7 +318,7 @@ def build_orchestrator(
         BuilderPolicy(),
         secondary,
         FaithPolicy(),
-        BuildTracker(ledger, victory=lambda: production.weights.victory),
+        BuildTracker(ledger, victory=lambda: production.weights.victory, watcher=watcher),
         resolver,
         *([EventFlush(event_log)] if event_log is not None else []),
     ]

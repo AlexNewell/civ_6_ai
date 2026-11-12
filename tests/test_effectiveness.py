@@ -536,3 +536,15 @@ def test_a_wasted_person_idle_then_gone_counts_once_and_prophets_count_as_used()
 def test_envoy_tokens_without_lines_are_no_data():
     run = RunLogs(records=[turn(1)], bot=[logged("wars", "x")], has_bot_log=True)
     assert by_name(run)[("diplomacy", "turns an envoy token stayed unspent")].status == NO_DATA
+
+
+def test_older_logs_without_the_new_great_person_lines_have_no_wasted_figure():
+    run = RunLogs(records=[turn(1)], bot=[gp_line(1, ["P1", "P2"])], has_bot_log=True)
+    check = by_name(run)[("great people", "wasted (left the map unused or idle 20 turns)")]
+    assert check.status == NO_DATA
+
+
+def test_envoy_tokens_need_call_counts_to_judge_unspent_turns():
+    bot = [logged("wars", f"envoy_tokens turn {n}: 1 available") for n in range(5, 12)]
+    run = RunLogs(records=[{"turn": 5, "detail": ""}], bot=bot, has_bot_log=True)
+    assert by_name(run)[("diplomacy", "turns an envoy token stayed unspent")].status == NO_DATA

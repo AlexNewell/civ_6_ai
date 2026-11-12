@@ -328,7 +328,17 @@ def great_people_checks(run: RunLogs) -> list[Check]:
             "at most 100 waits; many means a class is parked",
         )
     )
-    if seen:
+    instrumented = any(
+        GP_ACTIVATED.match(m) or GP_WASTED.match(m) for m in run.messages("policies.secondary")
+    )
+    wasted_name = "wasted (left the map unused or idle 20 turns)"
+    if seen and not instrumented:
+        out.append(
+            _no_data(
+                "great people", wasted_name, "see rule", "log predates the wasted-person lines"
+            )
+        )
+    elif seen:
         # A person idle for 20 turns that then leaves the map has an idle and a wasted line.
         by_person: dict[str, str] = {}
         for m in run.messages("policies.secondary"):
@@ -338,7 +348,7 @@ def great_people_checks(run: RunLogs) -> list[Check]:
         out.append(
             _count_check(
                 "great people",
-                "wasted (left the map unused or idle 20 turns)",
+                wasted_name,
                 len(wasted),
                 MAX_WASTED_GREAT_PEOPLE,
                 f"at most {MAX_WASTED_GREAT_PEOPLE} wasted",
@@ -801,7 +811,13 @@ def diplomacy_checks(run: RunLogs) -> list[Check]:
     if run.has_calls:
         sent = run.calls("send_envoy")
         out.append(_info("diplomacy", "envoys sent", sent, "send_envoy calls"))
-    if tokens:
+    if tokens and not run.has_calls:
+        out.append(
+            _no_data(
+                "diplomacy", "turns an envoy token stayed unspent", "see rule", "needs call counts"
+            )
+        )
+    elif tokens:
         # The wars handler reads tokens before the blockers spend them, so a positive balance
         # only means a token sat unspent on a turn where no envoy was sent.
         sent_on = {

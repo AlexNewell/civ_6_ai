@@ -755,3 +755,13 @@ def test_a_great_person_idle_for_many_turns_is_logged_once(caplog):
             run(policy, game)
     assert caplog.text.count("great_people idle turn 70") == 1
     assert "great_people idle turn 71" not in caplog.text
+
+
+def test_idle_time_restarts_after_a_use_that_leaves_the_person_on_the_map(caplog):
+    game = make_game(units=[gp_unit()], advisor=advisor(gp_city(distance=0, can=True)))
+    policy = SecondaryPolicy()
+    with caplog.at_level("INFO", logger="civ6_ai.policies.secondary"):
+        for turn in (50, 65, 80):
+            game.data["overview"] = overview(turn=turn)
+            run(policy, game)
+    assert "great_people idle" not in caplog.text

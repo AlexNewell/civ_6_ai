@@ -522,6 +522,10 @@ class SecondaryPolicy:
             if "GP_ACTIVATED" in result:
                 first = self._great_seen.get(unit.unit_id, (None, None, turn, False))[2]
                 self._great_done.add(unit.unit_id)
+                # A person with charges left stays on the map: idle time restarts from this use.
+                if unit.unit_id in self._great_seen:
+                    name, kind, _, _ = self._great_seen[unit.unit_id]
+                    self._great_seen[unit.unit_id] = (name, kind, turn, False)
                 log.info(
                     "great_people activated turn %d: %s (%s) at %s after %d turns",
                     turn,

@@ -198,3 +198,19 @@ def test_production_publishes_set_and_refused_events():
     refused = by_type.get(ProductionRefused)
     if refused is not None:
         assert refused.reply.startswith("ERR:") and refused.backoff_turns >= 0
+
+
+def test_a_paused_district_is_not_reported_until_it_is_finished():
+    w, _ = watcher()
+    w.update(5, [info()])
+    tile = ["DISTRICT_CAMPUS@11,10"]
+    assert w.update(6, [info(districts=tile, building="DISTRICT_CAMPUS")]) == []
+    # The defence switch replaces it with a unit.
+    w._on_production_set(ProductionSet(6, 1, "City1", 10, 10, item="UNIT_ARCHER", category="UNIT"))
+    assert w.update(7, [info(districts=tile, building="UNIT_ARCHER")]) == []
+    assert w.update(8, [info(districts=tile, building="UNIT_ARCHER")]) == []
+    w._on_production_set(
+        ProductionSet(8, 1, "City1", 10, 10, item="DISTRICT_CAMPUS", category="DISTRICT")
+    )
+    assert w.update(9, [info(districts=tile, building="DISTRICT_CAMPUS")]) == []
+    assert [type(e) for e in w.update(10, [info(districts=tile)])] == [DistrictCompleted]

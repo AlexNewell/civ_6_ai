@@ -120,15 +120,6 @@ def _bare(name: str, prefix: str) -> str:
     return name.removeprefix(prefix)
 
 
-def _unfinished(city: Any, before: "_Seen | None") -> set[tuple[str, int, int]]:
-    """Districts in the list that are new and of the type the city is still building."""
-    building = city.currently_building or ""
-    if not building.startswith("DISTRICT_"):
-        return set()
-    known = before.districts if before is not None else set()
-    return {d for d in _districts(city.districts) - known if d[0] == building}
-
-
 @dataclass
 class _Seen:
     districts: set[tuple[str, int, int]]
@@ -142,11 +133,25 @@ class ConstructionWatcher:
 
     def __init__(self, bus: EventBus) -> None:
         self._bus = bus
+        bus.subscribe(self._on_production_set, ProductionSet)
         self.reset()
+
+    def _on_production_set(self, event: ProductionSet) -> None:
+        """Setting production to something else pauses a district under way, and setting it back
+        resumes it. A pause is not a completion."""
+        for key in self._pending:
+            if key[0] == event.city_id:
+                if event.item == key[1]:
+                    self._paused.discard(key)
+                else:
+                    self._paused.add(key)
 
     def reset(self) -> None:
         self._seen: dict[int, _Seen] | None = None
         self._ever: set[int] = set()
+        # Districts seen in the list while still being built: (city id, type, x, y).
+        self._pending: set[tuple[int, str, int, int]] = set()
+        self._paused: set[tuple[int, str, int, int]] = set()
         self._last_turn: int | None = None
 
     async def run(self, game: Any) -> None:
@@ -163,6 +168,28 @@ class ConstructionWatcher:
         for event in self.update(overview.turn, cities):
             self._bus.publish(event)
 
+    def _finished(self, city: Any, before: "_Seen | None") -> set[tuple[str, int, int]]:
+        """The city's districts, less new ones that are still being built or are paused."""
+        known = before.districts if before is not None else set()
+        building = city.currently_building or ""
+        found = _districts(city.districts)
+        held = set()
+        for tile in found - known:
+            key = (city.city_id, *tile)
+            if tile[0] == building:
+                self._pending.add(key)
+                self._paused.discard(key)
+                held.add(tile)
+            elif key in self._pending and key in self._paused:
+                held.add(tile)
+            else:
+                self._pending.discard(key)
+                self._paused.discard(key)
+        # A district that has gone from the list is no longer pending.
+        self._pending = {k for k in self._pending if k[1:] in found or k[0] != city.city_id}
+        self._paused &= self._pending
+        return found - held
+
     def update(self, turn: int, cities: list) -> list[Event]:
         """Compare these `CityInfo`s with the last read and return what changed."""
         current: dict[int, _Seen] = {}
@@ -171,7 +198,7 @@ class ConstructionWatcher:
         for city in cities:
             here = (turn, city.city_id, city.name, city.x, city.y)
             before = previous.get(city.city_id) if previous is not None else None
-            districts = _districts(city.districts) - _unfinished(city, before)
+            districts = self._finished(city, before)
             buildings = {_bare(b, "BUILDING_") for b in city.buildings}
             current[city.city_id] = _Seen(districts, buildings)
             if previous is None:

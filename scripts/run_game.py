@@ -28,6 +28,7 @@ from civ6_ai.monitors import EventBus, EventLog
 from civ6_ai.orchestrator import StopReason, TurnLog, TurnRecord
 from civ6_ai.saves import disable_mcp_saves, use_real_save_dirs
 from civ6_ai.screenshots import Screenshotter
+from civ6_ai.victory_check import fix_victory_check
 
 ROOT = Path(__file__).parent.parent
 # Off since Run 4 (turn 105): civ6-mcp's propose_trade accepts whatever counter-offer the AI
@@ -77,6 +78,7 @@ async def play_game(
     shorten_call_waits()
     fix_gp_advisor()
     fix_city_attack()
+    fix_victory_check()
     connection = GameConnection()
     await connection.connect()
     game = GameState(connection)

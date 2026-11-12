@@ -172,6 +172,11 @@ EVENT_TYPES: tuple[type[Event], ...] = (
 _EVENTS_BY_KIND = {event_type.kind: event_type for event_type in EVENT_TYPES}
 
 
+def register_event(event_type: type[Event]) -> None:
+    """Let `event_from_json` read an event that is published but not by a monitor."""
+    _EVENTS_BY_KIND[event_type.kind] = event_type
+
+
 def event_from_json(line: str) -> Event:
     fields = json.loads(line)
     return _EVENTS_BY_KIND[fields.pop("kind")](**fields)

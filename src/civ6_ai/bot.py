@@ -3,7 +3,8 @@
 Order within a turn:
 
 1. `Monitors` read the turn first, so they see it before anything acts on it. When there is a
-   policy document, `PolicyDocumentHandler` follows them and sets the weights for the turn.
+   policy document, `PolicyDocumentHandler` follows them and sets the weights for the turn, then
+   `TaskHandler` checks the tracked tasks and publishes the overdue ones, when there is a task file.
 2. `DiplomacyPolicy` answers every open proposal next, before anything else spends gold or acts.
    It moves no unit, and a deal it accepts changes gold and resources that production and trade
    then see. Leaving a session open while the rest of the turn plays is what can hold the game.
@@ -64,6 +65,7 @@ from civ6_ai.policies.wars import WarPolicy
 from civ6_ai.screenshots import Screenshotter
 from civ6_ai.state.reader import IncompleteRead, check_cities_complete
 from civ6_ai.strategy.apply import PolicyDocumentHandler
+from civ6_ai.strategy.tasks import TaskDB, TaskHandler
 
 SETTLING_LOGGER = "civ6_ai.policies.settling"
 _DECISION_PREFIX = "settle_decision "
@@ -237,6 +239,7 @@ def build_orchestrator(
     screenshots: Screenshotter | None = None,
     policy_document: Path | None = None,
     wars_state: Path | None = None,
+    task_db: Path | None = None,
 ) -> Orchestrator:
     """Wire the handlers to a game. `game` is civ6-mcp's `GameState`, or a fake with its reads.
 
@@ -246,6 +249,8 @@ def build_orchestrator(
     policies' weights, re-read whenever it changes. With none, every policy keeps its defaults.
     `wars_state` is a file where the war tracker keeps its wars, so a restart of the same game
     keeps each war's start turn.
+    `task_db` is the strategist's task file, checked every turn (see `strategy.tasks`). Overdue
+    tasks are published on `bus`. With none, there are no tasks.
     """
     production = CityProductionPolicy()
     government = GovernmentPolicy()  # One instance, so handler and blockers share its bounds.
@@ -284,6 +289,7 @@ def build_orchestrator(
             if policy_document is not None
             else []
         ),
+        *([TaskHandler(TaskDB(task_db), bus)] if task_db is not None else []),
         diplomacy,
         WarPolicy(state_path=wars_state),
         *([TradeOfferPolicy(diplomacy.weights)] if trade_offers else []),

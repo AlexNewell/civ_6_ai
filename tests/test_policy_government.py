@@ -529,3 +529,78 @@ def test_government_blocker_shares_the_policys_bounds():
     game.unlocked.add("GOVERNMENT_DIGITAL_DEMOCRACY")
     run(policy.run(game))  # Same instance, inside the gap.
     assert game.government == "GOVERNMENT_MONARCHY"
+
+
+# --- Repeats (issue 139) ------------------------------------------------------------------------
+
+
+def test_a_card_that_does_not_stick_is_not_set_a_third_time_in_the_same_slot():
+    game = ScriptedGame(
+        slots=[slot(0, "SLOT_ECONOMIC")],
+        cards=[info("POLICY_A", "SLOT_ECONOMIC"), info("POLICY_B", "SLOT_ECONOMIC")],
+    )
+    policy = GovernmentPolicy()
+    for _ in range(5):
+        game.slots = [slot(0, "SLOT_ECONOMIC")]  # The game empties the slot between turns.
+        run(policy.run(game))
+    sets = [a[1][0] for a in game.actions if a[0] == "policies"]
+    assert sets.count("POLICY_A") == 2 and sets.count("POLICY_B") == 2
+    assert len(sets) == 4  # Both cards used up, then no more calls.
+
+
+def test_a_card_that_stays_is_set_once():
+    game = ScriptedGame(slots=[slot(0, "SLOT_ECONOMIC")], cards=[info("POLICY_A", "SLOT_ECONOMIC")])
+    policy = GovernmentPolicy()
+    for _ in range(4):
+        run(policy.run(game))
+    assert len([a for a in game.actions if a[0] == "policies"]) == 1
+
+
+def test_a_government_change_resets_the_card_counts():
+    game = ScriptedGame(
+        government="GOVERNMENT_CHIEFDOM",
+        slots=[slot(0, "SLOT_ECONOMIC")],
+        cards=[info("POLICY_A", "SLOT_ECONOMIC")],
+    )
+    policy = GovernmentPolicy()
+    policy._card_sets[(0, "POLICY_A")] = 5
+    game.unlocked = {"GOVERNMENT_MONARCHY"}
+    run(policy.run(game))
+    assert not policy._card_sets
+
+
+def test_waiting_governor_with_no_free_city_is_not_a_warning_or_a_call(caplog):
+    game = ScriptedGame(cities=[fx.city_info(city_id=1), fx.city_info(city_id=2)])
+    game.appointed = [
+        appointed("GOVERNOR_THE_EDUCATOR", 1),
+        appointed("GOVERNOR_THE_BUILDER", 2),
+        appointed("GOVERNOR_THE_MERCHANT"),
+    ]
+    with caplog.at_level("WARNING"):
+        run(GovernmentPolicy().run(game))
+    assert not game.actions
+    assert "unfinished" not in caplog.text
+
+
+def test_a_governor_that_still_reads_as_waiting_is_not_sent_again_and_again():
+    game = ScriptedGame(cities=[fx.city_info(city_id=1), fx.city_info(city_id=2)])
+    game.appointed = [appointed("GOVERNOR_THE_EDUCATOR")]
+
+    async def no_effect(governor_type, city_id):
+        game.actions.append(("assign", governor_type, city_id))
+        return "ASSIGNED|x"
+
+    game.assign_governor = no_effect
+    policy = GovernmentPolicy()
+    for _ in range(6):
+        run(policy.run(game))
+    assert len([a for a in game.actions if a[0] == "assign"]) == 4  # 2 cities, 2 sends each.
+
+
+def test_exhausted_slot_counts_as_handled_so_the_blocker_fallback_does_not_run():
+    game = ScriptedGame(slots=[slot(0, "SLOT_ECONOMIC")], cards=[info("POLICY_A", "SLOT_ECONOMIC")])
+    policy = GovernmentPolicy()
+    policy._card_sets[(0, "POLICY_A")] = 2
+    fill = policy.blocker_policies()[BlockerType.FILL_CIVIC_SLOT]
+    assert run(fill(game, Blocker(BlockerType.FILL_CIVIC_SLOT))) is True
+    assert not game.actions

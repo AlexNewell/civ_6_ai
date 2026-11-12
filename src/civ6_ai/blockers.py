@@ -47,6 +47,40 @@ UI.RequestPlayerOperation(me, PlayerOperations.WORLD_CONGRESS_SUBMIT_TURN, {{}})
 print("{SENTINEL}")
 """
 
+# Run 6 held three turns on a World Congress results notification whose blocking value has no name
+# in the game's `EndTurnBlockingTypes`, so the query reports it as `UNKNOWN`, and civ6-mcp's own
+# World Congress clearing matches by name and misses it. This does what the game's results screen
+# does on close, as civ6-mcp does for its named types: acknowledge the results, dismiss the
+# notification and hide the two World Congress screens. It touches no vote or favor.
+_RESULTS_MESSAGE = "WORLD_CONGRESS_RESULTS"
+_DISMISS_RESULTS_LUA = f"""
+local me = Game.GetLocalPlayer()
+UI.RequestPlayerOperation(me, PlayerOperations.WORLD_CONGRESS_LOOKED_AT_AVAILABLE, {{}})
+local dismissed = 0
+local list = NotificationManager.GetList(me)
+if list then
+    for _, nid in ipairs(list) do
+        pcall(function()
+            local entry = NotificationManager.Find(me, nid)
+            if entry and not entry:IsDismissed() then
+                local bt = entry:GetEndTurnBlocking()
+                local text = (entry:GetMessage() or "") .. " " .. (entry:GetTypeName() or "")
+                if bt and bt ~= 0 and text:find("{_RESULTS_MESSAGE}") then
+                    NotificationManager.Dismiss(me, nid)
+                    dismissed = dismissed + 1
+                end
+            end
+        end)
+    end
+end
+local intro = ContextPtr:LookUpControl("/InGame/WorldCongressIntro")
+if intro then intro:SetHide(true) end
+local popup = ContextPtr:LookUpControl("/InGame/WorldCongressPopup")
+if popup then popup:SetHide(true) end
+print("OK:DISMISSED|" .. dismissed)
+print("{SENTINEL}")
+"""
+
 # Reports from `end_turn` that mean the turn should be tried again. They're text, not errors.
 # The AI may still be working behind these, so only diplomacy is safe to touch.
 _DIPLOMACY_REPORTS = (
@@ -86,6 +120,9 @@ class BlockerType(StrEnum):
     GIVE_INFLUENCE_TOKEN = "ENDTURN_BLOCKING_GIVE_INFLUENCE_TOKEN"
     WORLD_CONGRESS_SESSION = "ENDTURN_BLOCKING_WORLD_CONGRESS_SESSION"
     WORLD_CONGRESS_LOOK = "ENDTURN_BLOCKING_WORLD_CONGRESS_LOOK"
+    # Not a game name: the query reports the results notification as "UNKNOWN", so `_name_blocker`
+    # renames it by its message.
+    WORLD_CONGRESS_RESULTS = "ENDTURN_BLOCKING_WORLD_CONGRESS_RESULTS"
     WORLD_CONGRESS_SPECIAL_SESSION = "ENDTURN_BLOCKING_WORLD_CONGRESS_SPECIAL_SESSION"
     CONSIDER_GOVERNMENT_CHANGE = "ENDTURN_BLOCKING_CONSIDER_GOVERNMENT_CHANGE"
     CONSIDER_RAZE_CITY = "ENDTURN_BLOCKING_CONSIDER_RAZE_CITY"
@@ -443,6 +480,14 @@ async def recruit_great_people(game: BlockerGame, blocker: Blocker) -> bool:
     return all(_succeeded(result) for result in results)
 
 
+async def dismiss_congress_results(game: BlockerGame, blocker: Blocker) -> bool:
+    """Acknowledge the World Congress results. False if nothing was dismissed."""
+    reply = await game.execute_lua(_DISMISS_RESULTS_LUA, "ingame")
+    return any(
+        line.startswith("OK:DISMISSED|") and line != "OK:DISMISSED|0" for line in reply.splitlines()
+    )
+
+
 DEFAULT_RESOLVERS: Mapping[str, Resolve] = {
     BlockerType.DIPLOMACY_SESSION: answer_diplomacy,
     BlockerType.TRADE_DEAL: reject_deals,
@@ -462,6 +507,7 @@ DEFAULT_RESOLVERS: Mapping[str, Resolve] = {
     BlockerType.GIVE_INFLUENCE_TOKEN: send_envoys_to_one,
     BlockerType.WORLD_CONGRESS_SESSION: vote_in_open_session,
     BlockerType.WORLD_CONGRESS_LOOK: leave_to_end_turn,
+    BlockerType.WORLD_CONGRESS_RESULTS: dismiss_congress_results,
     BlockerType.WORLD_CONGRESS_SPECIAL_SESSION: leave_to_end_turn,
     BlockerType.CONSIDER_GOVERNMENT_CHANGE: leave_to_end_turn,
     BlockerType.CONSIDER_RAZE_CITY: leave_to_end_turn,
@@ -492,7 +538,16 @@ async def _read_congress(game: BlockerGame) -> list[Blocker]:
 
 async def _read_end_turn_blocking(game: BlockerGame) -> list[Blocker]:
     output = await game.execute_lua(build_end_turn_blocking_query(), "ingame")
-    return [Blocker(*found) for found in parse_end_turn_blocking(output.splitlines())]
+    return [
+        _name_blocker(Blocker(*found)) for found in parse_end_turn_blocking(output.splitlines())
+    ]
+
+
+def _name_blocker(blocker: Blocker) -> Blocker:
+    """Give the World Congress results notification, which the game leaves unnamed, its own type."""
+    if blocker.type == "UNKNOWN" and _RESULTS_MESSAGE in blocker.message:
+        return Blocker(BlockerType.WORLD_CONGRESS_RESULTS, blocker.message)
+    return blocker
 
 
 async def _read_great_people(game: BlockerGame) -> list[Blocker]:
@@ -628,7 +683,7 @@ class ResolvingGame:
     async def dismiss_popup(self) -> str:
         """Answer open diplomacy, then dismiss popups.
 
-        The orchestrator calls this when a turn did not advance. Run 5 stopped on turn 102 there:
+        The orchestrator calls this when a turn did not advance. Run 6 stopped on turn 102 there:
         a leader's statement opened during the AI turn, `end_turn` returned an ordinary report,
         and dismissing the leader screen alone left the session open and unanswered. So any open
         session or deal is answered first, by the same rules as at the start of a turn.

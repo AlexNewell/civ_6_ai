@@ -91,6 +91,18 @@ Issue 2.2. `src/civ6_ai/strategy/tasks.py` turns the strategist's intentions int
 - Loading an earlier save leaves tasks as they are, because their deadlines are turn numbers in the run. Re-plan by cancelling and adding.
 - `build_orchestrator(task_db=path)` adds the handler. With no path there are no tasks.
 
+## Special districts
+
+Issue 1.29. `src/civ6_ai/policies/districts.py` replaces the fixed `_UNWANTED_DISTRICTS` list (Spaceport, Aerodrome, Dam, Canal, Stadium), which had no recorded reason. `wants_district` decides per city from what production already reads (city, turn, districts any city has built) and the policy document's victory target, which `resolve` now puts in `ProductionWeights.victory`. No new game calls.
+
+- Spaceport: needed for the space race projects, one per empire. Wanted at once for a `science` victory. With `any` it waits until turn 200 (`LATE_TURN`), so early production goes elsewhere. Never for other targets, and never when any city already has one.
+- Aerodrome: only air units need it. Wanted for a `domination` victory.
+- Dam: housing for a river city. Wanted when housing is within 1 of population and the city is size 4 or more. The game offers it only where the geography allows.
+- Canal: same housing test, and not before turn 80, since it pays back slowly.
+- Stadium: wanted for a `culture` victory in a city of size 4 or more after turn 80. Net amenities are not read (the overview gives provided plus needed), so a shortage alone does not ask for one.
+- A wanted district is scored at a flat value (3 to 4), or 10 when the victory target asks for it, so a science game puts a Spaceport ahead of ordinary districts. An unwanted one is dropped as before.
+- Other districts keep their yield-table scoring. The `DISTRICT_GOVERNMENT` name mismatch stays with issue 138.
+
 ## Dependencies
 
 - [civ6-mcp](https://github.com/lmwilki/civ6-mcp) (MIT) is pinned to commit `dd2019056371b92ea4854e879ddf05a8cad95e8a` (v1.1.11), then vendored under `third_party/` in Phase 6, because a GitHub fork of a public repo can't be private.
@@ -109,6 +121,41 @@ A review of the pinned commit found nothing malicious. These rules still apply:
 - Strings sent to Lua aren't escaped, so model-chosen names must be validated first. Never expose its raw Lua method to a model, because that would bypass fog of war.
 - [`archi-max/jev-civ6`](https://github.com/archi-max/jev-civ6) (MIT) is a usable reference.
 - [`Roarpeng/jev-civ6`](https://github.com/Roarpeng/jev-civ6) has no licence, so it is read for ideas only and no code is copied.
+
+### Patches and workarounds for civ6-mcp (issue 151)
+
+Reviewed 2026-11-12. The pin `dd20190` (v1.1.11, 2026-05-03) is still the head of upstream `main`: no commit has landed since, so no patch below can be dropped by moving to a newer commit. None of them is fixed in an open upstream pull request either. Every patch raises at startup if the pinned code changes, so a bump cannot silently break one.
+
+| Patch or workaround | What and why | PR | Upstream status | Can be dropped when |
+|---|---|---|---|---|
+| `saves.disable_mcp_saves` | Replaces `autosave.saves_work_on_this_platform` so `end_turn` skips its per-turn `0_MCP_NNNN` save (Civ already autosaves). No upstream flag. | 108 | No fix. Open issue 27 asks for run-scoped, opt-in save deletion. | Upstream makes the save opt-in or adds a flag. |
+| `saves.use_real_save_dirs` | Points `game_launcher.SAVE_DIR` at the real Documents folder, which upstream assumes is the default. | 108 | None. | Upstream reads the folder from the game. |
+| `fastcalls.shorten_call_waits` | Cuts the idle drains in `_locked_execute` from 0.1/0.2 s to 0.02/0.05 s (issue 112). Speed only. | 116 | Not a bug. | Upstream shortens them, or speed stops mattering. |
+| `fastcalls.narrow_popup_scan` | `dismiss_popup` Phase 2 walks only the 10 exclusive-popup states, not about 30 (about 20 are `InvitePopup`). Popup turns cost 15 to 30 s. | 116 | None. | Upstream narrows the scan. |
+| `gp_advisor.fix_gp_advisor` | Replaces `GameState.get_gp_advisor`. Upstream reads `Units.GreatPersonClass`, nil in this build, so every great person was `UNKNOWN_GP_CLASS`. Also resolves unique districts via `DistrictReplaces`. | 126 | Not fixed, no issue. | Upstream reads `GreatPersonClasses` and handles unique districts. |
+| Orchestrator `_confirmed_turn` | A turn that still reads old after retries counts as advanced when a notification is stamped with a later turn. Our code, not a patch: it works around the turn counter lagging after era popups. | 126 | Not an upstream matter. | Keep. |
+| `city_attack.fix_city_attack` | Replaces `civ_mcp.lua.build_city_attack`: its `ERR:NO_LOS` text holds a literal `{target_x}` in a plain string, a Lua error. Also no longer bails when the target is missing from `GetCommandTargets`. | 136 | Not fixed (the pin is upstream's head). No issue. | Upstream fixes the string. |
+| `bot.read_retrying_noise` | Retries a read up to 2 times when a Lua log line (`Omitting feature label...`, `Request to BulkHide...`) comes back instead of data and a parser raises a field-count `ValueError`. | 135 | None. | Upstream filters stray log lines out of `execute_read`. |
+| `victory_check.fix_victory_check` | Rounds decimals in `SCI_THREAT` and `DIPLO_THREAT` replies so `_check_victory_proximity` stops raising `ValueError: invalid literal for int() ... '33.5'` (8 times in the latest console log). The caller caught it, so only that turn's threat events were lost. | this one | None. | Upstream parses with `int(float(...))`. |
+| `TRADE_OFFERS = False` in `run_game.py` | `propose_trade` accepts whatever counter-offer the AI makes, which stalled Run 4 at turn 105, so the trade policy is left out. | 116 | None. | Trade terms are validated. |
+| `pyproject.toml` overrides and `pywin32` | Upstream's base dependencies serve its server, which we never run. Its crash-dialog handling needs `pywin32` but does not declare it for us. | n/a | Open issue 29 (reproducible install). | Never. |
+
+#### Should the pin move?
+
+No, for now. There is nothing to move to: the pin is upstream `main`. The only unmerged upstream work is pull request 19 (World Congress end-turn deadlock and a latched in-flight flag) and pull request 31 (base-game overview query, issue 22). Neither fixes anything in the table. Pull request 19 touches `end_turn.py`, `game_lifecycle.py` (the `dismiss_popup` we patch) and `game_state.py`. If it merges, or a World Congress ever wedges a run, that is the reason to bump.
+
+A bump needs a re-review of the GameState path only (the earlier T.2 scope, not the server): diff `src/civ_mcp` between the two commits for `game_state.py`, `end_turn.py`, `game_lifecycle.py`, `connection.py`, `autosave.py`, `game_launcher.py` and `lua/`. Re-confirm that nothing network-facing or process-killing is reachable from `GameState`. Run the tests, which fail loudly on any patched code that changed. Re-check each row in case it is now fixed and can go. Then run a short live game for popups, great people, city strikes and saves.
+
+#### Upstream reports proposed (not opened)
+
+Read-only research: no issue or pull request was opened upstream. Worth reporting, each with the cause in the table:
+
+1. `build_city_attack`: `{target_x}` in a plain (non-f) string inside `_bail_lua`, so a missing command target raises a Lua error instead of `ERR:NO_LOS`.
+2. `get_gp_advisor`: `Units.GreatPersonClass` is nil in the tested build, so every great person is `UNKNOWN_GP_CLASS`; unique districts need `DistrictReplaces`.
+3. `_check_victory_proximity`: `int()` on a decimal victory-point total (`33.5`). One-line fix: `int(float(x))`.
+4. `execute_read` returning an unrelated Lua log line as data, which parsers report as a field-count `ValueError`.
+5. A way to turn off the per-turn `0_MCP_` save (adds to open issue 27).
+6. `dismiss_popup` Phase 2 visiting about 30 Lua states at 0.3 s each.
 
 ### Screenshots for triage
 

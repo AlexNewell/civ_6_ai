@@ -12,11 +12,14 @@ balanced game.
 
 import logging
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, fields, replace
 from typing import Any, Protocol
 
 from civ6_ai.blockers import Blocker, BlockerGame, BlockerType
+from civ6_ai.construction import ProductionRefused, ProductionSet
+from civ6_ai.monitors import Event, EventBus
+from civ6_ai.policies.districts import BASE_VALUE, PLANNED_VALUE, is_planned, wants_district
 from civ6_ai.policies.game_data import COMBAT_UNITS, REPLACES, UPGRADES, WONDERS
 from civ6_ai.state import City, Empire, ProductionChoice, Unit
 from civ6_ai.state import read_cities as _read_cities
@@ -62,11 +65,14 @@ class ProductionWeights:
     trade: float = 1.0  # Traders, while the empire has route capacity no trader fills.
     wonders: float = 0.5
     target_cities: int = 6  # Stop building settlers at this many cities.
+    victory: str = "any"  # The policy document's victory target. Decides the special districts.
     army_per_city: float = 1.5  # Combat units wanted per city before military stops scoring.
 
     def __post_init__(self) -> None:
         for item in fields(self):
             value = getattr(self, item.name)
+            if isinstance(value, str):
+                continue
             if value < 0 or not math.isfinite(value):
                 raise ValueError(f"Weight {item.name} must be a finite number of at least 0")
 
@@ -83,11 +89,15 @@ class ProductionContext:
     army: int = 0
     traders: int = 0  # Traders that exist, on a route or not, plus those being built.
     trade_capacity: int = 0  # Routes the empire can run at once.
+    districts: frozenset[str] = frozenset()  # Short names of districts any city has built.
 
     def after_choosing(self, item: str, unknown_combat: bool = False) -> "ProductionContext":
         """Count a pick, so two cities don't both build the one builder the empire needs."""
         kinds = _counted_as(item) or (("army",) if unknown_combat else ())
-        return replace(self, **{kind: getattr(self, kind) + 1 for kind in kinds})
+        counted = replace(self, **{kind: getattr(self, kind) + 1 for kind in kinds})
+        if item.startswith("DISTRICT_"):  # A district being built counts, so two cities don't.
+            counted = replace(counted, districts=counted.districts | {_short(item)})
+        return counted
 
 
 def canonical(item: str) -> str:
@@ -112,11 +122,17 @@ def _counted_as(item: str) -> tuple[str, ...]:
 
 
 def build_context(
-    empire: Empire, units: Iterable[Unit], in_progress: Iterable[str] = ()
+    empire: Empire,
+    units: Iterable[Unit],
+    in_progress: Iterable[str] = (),
+    cities: Iterable[City] = (),
 ) -> ProductionContext:
     """Count what exists plus what cities are already building, so picks don't double up."""
     ctx = ProductionContext(
-        turn=empire.turn, num_cities=empire.num_cities, trade_capacity=empire.trade_capacity
+        turn=empire.turn,
+        num_cities=empire.num_cities,
+        trade_capacity=empire.trade_capacity,
+        districts=frozenset(_short(d.district_type) for c in cities for d in c.districts),
     )
     for unit in units:
         ctx = ctx.after_choosing(
@@ -218,7 +234,6 @@ _DISTRICT_YIELDS: dict[str, tuple[float, float, float, float, float, float]] = {
     "GOVERNMENT_PLAZA": (0, 0, 3.0, 3.0, 3.0, 0),
     "DIPLOMATIC_QUARTER": (0, 0, 3.0, 3.0, 3.0, 0),
 }
-_UNWANTED_DISTRICTS = frozenset({"SPACEPORT", "AERODROME", "DAM", "CANAL", "STADIUM"})
 _WEIGHT_ORDER = ("food", "production", "gold", "science", "culture", "faith")
 
 _SETTLER_MIN_POP = 2
@@ -238,13 +253,19 @@ def _yield_value(profile: tuple[float, ...], weights: ProductionWeights) -> floa
 
 
 def drop_dominated(
-    options: Iterable[ProductionChoice], city: City
+    options: Iterable[ProductionChoice],
+    city: City,
+    context: ProductionContext | None = None,
+    weights: ProductionWeights | None = None,
 ) -> tuple[list[ProductionChoice], list[ProductionChoice]]:
     """Split options into those worth ranking and those that are never worth building.
 
     Dominated means another offered option does the same job better, or the city already has it.
-    Repairs are kept apart because they have their own coordinates. Returns (choices, repairs).
+    Special districts are kept only when `wants_district` says so. Repairs are kept apart because
+    they have their own coordinates. Returns (choices, repairs).
     """
+    context = context or ProductionContext(turn=0, num_cities=1)
+    victory = (weights or ProductionWeights()).victory
     offered = {o.item for o in options if not o.is_repair}
     built = {_short(b) for b in city.buildings}
     districts = {_short(d.district_type) for d in city.districts}
@@ -263,7 +284,17 @@ def drop_dominated(
         name = _short(option.item)
         if option.category == "BUILDING" and name in built:
             continue
-        if option.category == "DISTRICT" and (name in districts or name in _UNWANTED_DISTRICTS):
+        if option.category == "DISTRICT" and (
+            name in districts
+            or not wants_district(
+                name,
+                victory=victory,
+                turn=context.turn,
+                pop=city.pop,
+                housing=city.housing,
+                empire_districts=context.districts,
+            )
+        ):
             continue
         if option.category == "UNIT":
             if any(better in offered for better in _upgrades_of(option.item)):
@@ -370,7 +401,10 @@ def _building_score(
 
 
 def _district_score(option: ProductionChoice, city: City, w: ProductionWeights) -> float:
-    profile = _DISTRICT_YIELDS.get(_short(option.item))
+    name = _short(option.item)
+    if name in BASE_VALUE:  # It passed `wants_district`, so it is worth building.
+        return PLANNED_VALUE if is_planned(name, w.victory) else BASE_VALUE[name]
+    profile = _DISTRICT_YIELDS.get(name)
     if profile is None:
         return _UNKNOWN_BUILDING * 2.0
     value = _yield_value(profile, w)
@@ -412,7 +446,7 @@ def rank_production(
     input gives the same list.
     """
     weights = weights or ProductionWeights()
-    keep, repairs = drop_dominated(list(options), city)
+    keep, repairs = drop_dominated(list(options), city, context, weights)
     ranked = sorted(
         [*repairs, *keep],
         key=lambda o: (-score(o, city, context, weights), o.category, o.item, o.repair_x or 0),
@@ -458,11 +492,13 @@ class RefusalMemory:
         # Once expired or changed it is free again, but the count stays so a repeat waits longer.
         return turn < until and _circumstances(city) == seen
 
-    def refused(self, city: City, item: str, turn: int) -> None:
+    def refused(self, city: City, item: str, turn: int) -> int:
+        """Record a refusal and return how many turns the item is now skipped for."""
         key = (city.city_id, item)
         count = self._entries[key][1] + 1 if key in self._entries else 1
         wait = min(REFUSAL_BACKOFF_TURNS * 2 ** (count - 1), REFUSAL_BACKOFF_MAX_TURNS)
         self._entries[key] = (turn + wait, count, _circumstances(city))
+        return wait
 
     def accepted(self, city: City, item: str) -> None:
         self._entries.pop((city.city_id, item), None)
@@ -477,9 +513,21 @@ def _advisor_failed(item: str, reply: Any) -> str:
     return f"ERR:ADVISOR_READ|{item}: {reply}"
 
 
-async def _start(game: ProductionGame, city: City, option: ProductionChoice) -> str:
+@dataclass
+class StartTrace:
+    """What `_start` did besides the reply, for the construction events."""
+
+    placements: int | None = None  # How many tiles the advisor offered.
+    tile: tuple[int, int] | None = None  # The tile it chose.
+
+
+async def _start(
+    game: ProductionGame, city: City, option: ProductionChoice, trace: StartTrace | None = None
+) -> str:
     """Set production, finding a tile first where the item needs one."""
+    trace = trace if trace is not None else StartTrace()
     if option.is_repair:
+        trace.tile = (option.repair_x, option.repair_y)
         return await game.set_city_production(
             city.city_id, option.category, option.item, option.repair_x, option.repair_y
         )
@@ -487,9 +535,11 @@ async def _start(game: ProductionGame, city: City, option: ProductionChoice) -> 
         placements = await game.get_district_advisor(city.city_id, option.item)
         if not isinstance(placements, list):
             return _advisor_failed(option.item, placements)
+        trace.placements = len(placements)
         if not placements:
             return f"ERR:NO_PLACEMENT|{option.item}: no valid tile"
         best = min(placements, key=lambda p: (-p.total_adjacency, p.x, p.y))
+        trace.tile = (best.x, best.y)
         return await game.set_city_production(
             city.city_id, option.category, option.item, best.x, best.y
         )
@@ -499,9 +549,11 @@ async def _start(game: ProductionGame, city: City, option: ProductionChoice) -> 
         placements = await game.get_wonder_advisor(city.city_id, option.item)
         if not isinstance(placements, list):
             return _advisor_failed(option.item, placements)
+        trace.placements = len(placements)
         if not placements:
             return f"ERR:NO_PLACEMENT|{option.item}: no valid tile"
         best = min(placements, key=lambda p: (p.displacement_score, p.x, p.y))
+        trace.tile = (best.x, best.y)
         return await game.set_city_production(
             city.city_id, option.category, option.item, best.x, best.y
         )
@@ -516,11 +568,13 @@ async def choose_for_city(
     weights: ProductionWeights,
     only_defence: bool = False,
     memory: RefusalMemory | None = None,
+    emit: Callable[[Event], None] | None = None,
 ) -> ProductionChoice | None:
     """Start the best option that the game accepts. Returns it, or None if all were refused.
 
     With `only_defence`, the city's current build is replaced only if the best option is a
     defender or walls, and only defence is tried. Items in `memory` for this city are skipped.
+    `emit` receives a `ProductionSet` or `ProductionRefused` for each attempt.
     """
     ranked = rank_production(city, options, context, weights)
     if memory is not None:
@@ -530,15 +584,43 @@ async def choose_for_city(
             return None
         ranked = [o for o in ranked if is_defence(o)]
     for option in ranked[:MAX_ATTEMPTS]:
-        result = await _start(game, city, option)
+        trace = StartTrace()
+        result = await _start(game, city, option, trace)
+        where = (context.turn, city.city_id, city.name, city.x, city.y)
         if not _failed(result):
             log.info("%s builds %s", city.name, option.item)
+            if emit is not None:
+                tile = trace.tile or (None, None)
+                emit(
+                    ProductionSet(
+                        *where,
+                        item=option.item,
+                        category=option.category,
+                        tile_x=tile[0],
+                        tile_y=tile[1],
+                        placements_offered=trace.placements,
+                    )
+                )
             if memory is not None:
                 memory.accepted(city, option.item)
             return option
         log.info("%s can't build %s: %s", city.name, option.item, result[:120])
-        if memory is not None and is_refusal(result):
-            memory.refused(city, option.item, context.turn)
+        refusal = is_refusal(result)
+        wait = 0
+        if memory is not None and refusal:
+            wait = memory.refused(city, option.item, context.turn)
+        if emit is not None:
+            emit(
+                ProductionRefused(
+                    *where,
+                    item=option.item,
+                    category=option.category,
+                    reply=result[:200],
+                    is_refusal=refusal,
+                    placements_offered=trace.placements,
+                    backoff_turns=wait,
+                )
+            )
     return None
 
 
@@ -555,7 +637,10 @@ class CityProductionPolicy:
 
     name = "city_production"
 
-    def __init__(self, weights: ProductionWeights | None = None) -> None:
+    def __init__(
+        self, weights: ProductionWeights | None = None, bus: EventBus | None = None
+    ) -> None:
+        self._emit = bus.publish if bus is not None else None
         self.weights = weights or ProductionWeights()  # The strategist replaces this later.
         self.refusals = RefusalMemory()
 
@@ -583,18 +668,25 @@ class CityProductionPolicy:
         # building, and a refused switch leaves it building, so the count below stays true.
         for city in sorted(switching, key=lambda c: c.city_id):
             options = await _read_production(game, city.city_id)
-            context = build_context(empire, units, building.values())
+            context = build_context(empire, units, building.values(), cities)
             picked = await choose_for_city(
-                game, city, options, context, self.weights, only_defence=True, memory=self.refusals
+                game,
+                city,
+                options,
+                context,
+                self.weights,
+                only_defence=True,
+                memory=self.refusals,
+                emit=self._emit,
             )
             if picked is not None:
                 building[city.city_id] = picked.item
-        context = build_context(empire, units, building.values())
+        context = build_context(empire, units, building.values(), cities)
         unfinished = []
         for city in sorted(idle, key=lambda c: (not c.is_threatened, c.city_id)):
             options = await _read_production(game, city.city_id)
             picked = await choose_for_city(
-                game, city, options, context, self.weights, memory=self.refusals
+                game, city, options, context, self.weights, memory=self.refusals, emit=self._emit
             )
             if picked is None:
                 unfinished.append(city.name)

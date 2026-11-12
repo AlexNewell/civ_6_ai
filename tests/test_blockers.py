@@ -155,6 +155,11 @@ def person(individual_id, can_recruit):
     )
 
 
+# From Run 6: "No handler for blocker UNKNOWN: LOC_NOTIFICATION_WORLD_CONGRESS_RESULTS_MESSAGE".
+# The game names no type for this notification, so the fake prints it the way the query does.
+RESULTS_LINE = "BLOCKING|UNKNOWN|LOC_NOTIFICATION_WORLD_CONGRESS_RESULTS_MESSAGE"
+
+
 class FakeGame:
     """A game whose open blockers are cleared by the same calls that clear them in civ6-mcp."""
 
@@ -221,7 +226,19 @@ class FakeGame:
     async def execute_lua(self, code, context="gamecore"):
         self.calls.append(("execute_lua", context))
         self.lua.append(code)
-        return "\n".join(f"BLOCKING|{found}|message" for found in self.open) or "NONE"
+        if "WORLD_CONGRESS_LOOKED_AT_AVAILABLE" in code:
+            dismissed = 0
+            if self.result.startswith("OK"):
+                dismissed = self.open.count(BlockerType.WORLD_CONGRESS_RESULTS)
+                self.clear(BlockerType.WORLD_CONGRESS_RESULTS)
+            return f"OK:DISMISSED|{dismissed}"
+        lines = [
+            RESULTS_LINE
+            if found == BlockerType.WORLD_CONGRESS_RESULTS
+            else f"BLOCKING|{found}|message"
+            for found in self.open
+        ]
+        return "\n".join(lines) or "NONE"
 
     async def get_notifications(self):
         return self.notifications
@@ -1064,7 +1081,7 @@ def test_a_long_game_with_a_blocker_every_turn_never_stops(tmp_path):
 
 
 def test_dismissing_a_popup_first_answers_an_open_diplomacy_session():
-    """Run 5, turn 102: dismissing the leader screen alone left Khmer's statement unanswered."""
+    """Run 6, turn 102: dismissing the leader screen alone left Khmer's statement unanswered."""
     game = FakeGame()
     game.sessions = [session(player=2)]
     seen = []
@@ -1097,3 +1114,36 @@ def test_dismissing_a_popup_still_works_if_answering_fails():
     game.dismiss_popup = dismiss_popup
 
     assert asyncio.run(ResolvingGame(game, resolver).dismiss_popup()) == "No popups to dismiss."
+
+
+def test_unnamed_results_blocker_is_renamed_and_dismissed():
+    game = FakeGame([BlockerType.WORLD_CONGRESS_RESULTS])
+    game.result = "OK"
+
+    assert resolve(game) == []
+
+    assert any("WORLD_CONGRESS_LOOKED_AT_AVAILABLE" in code for code in game.lua)
+    assert not game.called("queue_wc_votes")
+
+
+def test_results_blocker_stays_open_when_nothing_is_dismissed():
+    game = FakeGame([BlockerType.WORLD_CONGRESS_RESULTS])
+    game.result = "ERR:nothing"
+    assert [found.type for found in resolve(game)] == [BlockerType.WORLD_CONGRESS_RESULTS]
+
+
+def test_results_line_from_run_6_is_renamed():
+    found = blockers.parse_end_turn_blocking([RESULTS_LINE])
+    assert [blockers._name_blocker(Blocker(*item)).type for item in found] == [
+        BlockerType.WORLD_CONGRESS_RESULTS
+    ]
+
+
+def test_other_unknown_blockers_are_still_unhandled():
+    found = blockers._name_blocker(Blocker("UNKNOWN", "LOC_SOMETHING_ELSE"))
+    assert found.type == "UNKNOWN"
+
+
+def test_results_lua_touches_no_votes():
+    assert "WORLD_CONGRESS_SUBMIT" not in blockers._DISMISS_RESULTS_LUA
+    assert BlockerType.WORLD_CONGRESS_RESULTS in blockers.DEFAULT_RESOLVERS

@@ -47,6 +47,7 @@ from typing import Any
 
 from civ6_ai.blockers import BlockerResolver, ResolvingGame
 from civ6_ai.call_timer import CallTimer
+from civ6_ai.construction import ConstructionWatcher
 from civ6_ai.defeat import is_defeated
 from civ6_ai.monitors import EventBus, Monitors
 from civ6_ai.orchestrator import Handler, Orchestrator, TurnLog
@@ -253,7 +254,7 @@ def build_orchestrator(
     It is checked every turn (see `strategy.tasks`) and overdue tasks are published on `bus`. A file
     changed by another writer is re-read first. With none, there are no tasks.
     """
-    production = CityProductionPolicy()
+    production = CityProductionPolicy(bus=bus)
     government = GovernmentPolicy()  # One instance, so handler and blockers share its bounds.
     secondary = SecondaryPolicy()
     military = MilitaryPolicy()
@@ -295,6 +296,7 @@ def build_orchestrator(
             if task_db is not None
             else []
         ),
+        ConstructionWatcher(bus),
         diplomacy,
         WarPolicy(state_path=wars_state),
         *([TradeOfferPolicy(diplomacy.weights)] if trade_offers else []),

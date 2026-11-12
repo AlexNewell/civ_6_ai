@@ -7,9 +7,13 @@ from civ6_ai.effectiveness import (
     NO_DATA,
     PASS,
     RunLogs,
+    city_losses,
+    end_of_run_lines,
     format_report,
+    gate_failures,
     load_run,
     run_checks,
+    warnings,
 )
 
 STAMP = "2026-11-11 17:00:00,000"
@@ -404,3 +408,205 @@ def test_a_refused_rejection_does_not_cancel_an_accepted_deal():
         ("diplomacy", "deals offered vs accepted")
     ]
     assert (check.created, check.used) == (6, 2)
+
+
+def test_cities_lost_separates_flips_that_came_back_and_loyalty_losses():
+    events = [
+        {"kind": "city_loyalty_warning", "turn": 120, "city_id": 7},
+        {"kind": "city_lost", "turn": 125, "city_id": 7},  # a loyalty loss that came back
+        {"kind": "city_gained", "turn": 130, "city_id": 7},
+        {"kind": "city_lost", "turn": 135, "city_id": 1},  # captured, never returned
+        {"kind": "city_lost", "turn": 200, "city_id": 9},  # warned too long ago to count
+        {"kind": "city_loyalty_warning", "turn": 100, "city_id": 9},
+        {"kind": "city_gained", "turn": 50, "city_id": 1},  # before the loss, so no return
+    ]
+    summary = city_losses(events)
+    assert (summary.lost, summary.returned, summary.permanent, summary.loyalty) == (3, 1, 2, 1)
+    run = RunLogs(records=[turn(1)], events=events, has_events=True)
+    check = by_name(run)[("settling", "cities lost")]
+    assert check.created == 2 and check.status == FAIL
+    assert "1 came back" in check.note and "1 after a loyalty warning" in check.note
+
+
+def test_cities_lost_passes_when_every_loss_came_back():
+    events = [
+        {"kind": "city_lost", "turn": 5, "city_id": 3},
+        {"kind": "city_gained", "turn": 9, "city_id": 3},
+    ]
+    run = RunLogs(records=[turn(1)], events=events, has_events=True)
+    assert by_name(run)[("settling", "cities lost")].status == PASS
+
+
+def test_a_stop_that_is_not_game_over_or_the_turn_limit_fails_the_gate():
+    cases = (("blocked", True), ("hung", True), ("game_over", False), ("turn_limit", False))
+    for stop, fails in cases:
+        run = RunLogs(records=[turn(1), turn(2, stop=stop)])
+        names = {(c.policy, c.name) for c in gate_failures(run_checks(run))}
+        assert (("run", "stops that were not the game ending") in names) is fails
+
+
+def test_gate_and_warning_checks_are_separate():
+    errors = [turn(n, errors={"h": "boom"}) for n in range(1, 11)]
+    run = RunLogs(
+        records=errors,
+        bot=[gp_line(1, [f"P{i}" for i in range(9)])],
+        has_bot_log=True,
+    )
+    checks = run_checks(run)
+    gate = {(c.policy, c.name) for c in gate_failures(checks)}
+    assert ("handlers", "turn-handler failures") in gate
+    assert ("great people", "most waiting at once") in gate
+    assert not gate & {(c.policy, c.name) for c in warnings(checks)}
+
+
+def test_end_of_run_lines_put_gate_failures_first(tmp_path: Path):
+    log = tmp_path / "STD_T1_01_20261111T000000Z.jsonl"
+    rows = [turn(n, errors={"h": "boom"}) for n in range(1, 10)] + [turn(10, stop="blocked")]
+    log.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    lines = end_of_run_lines([log])
+    assert lines[0].startswith("Policy effectiveness: G1 gate FAILED")
+    assert any(ln.strip().startswith("GATE handlers") for ln in lines)
+    assert any(ln.strip().startswith("GATE run") for ln in lines)
+
+
+def test_end_of_run_lines_for_a_clean_log(tmp_path: Path):
+    log = tmp_path / "STD_T1_01_20261111T000000Z.jsonl"
+    log.write_text(json.dumps(turn(1)) + "\n", encoding="utf-8")
+    assert end_of_run_lines([log])[0].startswith("Policy effectiveness: G1 gate clean")
+
+
+def logged(logger, msg):
+    return (f"policies.{logger}", "INFO", msg)
+
+
+def test_logged_activations_are_the_used_count_and_wasted_people_are_flagged():
+    bot = [gp_line(1, [f"P{i}" for i in range(6)])]
+    bot += [
+        logged(
+            "secondary",
+            f"great_people activated turn {n}: P{n} (UNIT_GREAT_ENGINEER) at A after 2",
+        )
+        for n in range(5)
+    ]
+    bot += [
+        logged(
+            "secondary",
+            f"great_people wasted turn {n}: P{n} (UNIT_GREAT_ENGINEER) left the map unused",
+        )
+        for n in range(4)
+    ]
+    run = RunLogs(records=[turn(1, {"activate_great_person": 0})], bot=bot, has_bot_log=True)
+    checks = by_name(run)
+    assert checks[("great people", "seen vs activated")].used == 5
+    wasted = checks[("great people", "wasted (left the map unused or idle 20 turns)")]
+    assert (wasted.created, wasted.status) == (4, FAIL)
+
+
+def test_gold_totals_logged_per_turn_replace_the_call_based_bound():
+    bot = [
+        logged("gold", f"gold_spent turn total: {s} of 100 to spend") for s in (0, 0, 40, 60, 100)
+    ]
+    run = RunLogs(records=[turn(1)], bot=bot, has_bot_log=True)
+    checks = by_name(run)
+    idle = checks[("gold", "turns above reserve with nothing bought")]
+    assert (idle.created, idle.used, idle.status) == (5, 2, PASS)
+    assert checks[("gold", "gold spent")].used == 200
+
+
+def test_envoy_tokens_held_on_turns_with_no_envoy_sent_are_flagged():
+    held = lambda n: int(10 <= n <= 20)  # noqa: E731
+    bot = [logged("wars", f"envoy_tokens turn {n}: {held(n)} available") for n in range(5, 30)]
+    records = [
+        turn(n, {"send_envoy": 1} if n in (10, 11, 12, 13, 14) else {}) for n in range(5, 30)
+    ]
+    run = RunLogs(records=records, bot=bot, has_bot_log=True)
+    check = by_name(run)[("diplomacy", "turns an envoy token stayed unspent")]
+    assert (check.created, check.status) == (6, FAIL)
+
+
+def test_a_token_spent_the_turn_it_is_read_is_not_unspent():
+    bot = [logged("wars", f"envoy_tokens turn {n}: 1 available") for n in range(5, 25)]
+    records = [turn(n, {"send_envoy": 1}) for n in range(5, 25)]
+    run = RunLogs(records=records, bot=bot, has_bot_log=True)
+    assert by_name(run)[("diplomacy", "turns an envoy token stayed unspent")].created == 0
+
+
+def test_a_wasted_person_idle_then_gone_counts_once_and_prophets_count_as_used():
+    names = [f"P{i}" for i in range(6)]
+    bot = [gp_line(1, names)]
+    for n in names[:2]:
+        bot.append(
+            logged(
+                "secondary",
+                f"great_people idle turn 30: {n} (UNIT_GREAT_ENGINEER) on the map for 20 turns",
+            )
+        )
+        bot.append(
+            logged(
+                "secondary",
+                f"great_people wasted turn 40: {n} (UNIT_GREAT_ENGINEER) left the map unused",
+            )
+        )
+    bot.append(
+        logged(
+            "secondary",
+            "great_people activated turn 5: P2 (UNIT_GREAT_ENGINEER) at A after 2 turns",
+        )
+    )
+    for _ in range(3):
+        bot.append(logged("faith", "Great Prophet founded a religion in Ur: RELIGION_FOUNDED|x"))
+    run = RunLogs(records=[turn(1, {"activate_great_person": 0})], bot=bot, has_bot_log=True)
+    checks = by_name(run)
+    assert checks[("great people", "wasted (left the map unused or idle 20 turns)")].created == 2
+    assert checks[("great people", "seen vs activated")].used == 4
+
+
+def test_envoy_tokens_without_lines_are_no_data():
+    run = RunLogs(records=[turn(1)], bot=[logged("wars", "x")], has_bot_log=True)
+    assert by_name(run)[("diplomacy", "turns an envoy token stayed unspent")].status == NO_DATA
+
+
+def test_older_logs_without_the_new_great_person_lines_have_no_wasted_figure():
+    run = RunLogs(records=[turn(1)], bot=[gp_line(1, ["P1", "P2"])], has_bot_log=True)
+    check = by_name(run)[("great people", "wasted (left the map unused or idle 20 turns)")]
+    assert check.status == NO_DATA
+
+
+def test_envoy_tokens_need_call_counts_to_judge_unspent_turns():
+    bot = [logged("wars", f"envoy_tokens turn {n}: 1 available") for n in range(5, 12)]
+    run = RunLogs(records=[{"turn": 5, "detail": ""}], bot=bot, has_bot_log=True)
+    assert by_name(run)[("diplomacy", "turns an envoy token stayed unspent")].status == NO_DATA
+
+
+def test_the_activation_fallback_is_chosen_per_session(tmp_path: Path):
+    old = tmp_path / "STD_T1_01_20261111T000000Z.jsonl"
+    new = tmp_path / "STD_T1_01_20261111T010000Z.jsonl"
+    old.write_text(json.dumps(turn(1, {"activate_great_person": 3})) + "\n", encoding="utf-8")
+    new.write_text(json.dumps(turn(2, {"activate_great_person": 1})) + "\n", encoding="utf-8")
+    names = [f"P{i}" for i in range(6)]
+    gp = f"{STAMP} civ6_ai.policies.secondary INFO great_people turn 1: 6 on the map: " + "; ".join(
+        f"{n} (UNIT_GREAT_ENGINEER) at 1,1: x" for n in names
+    )
+    act = (
+        f"{STAMP} civ6_ai.policies.secondary INFO great_people activated turn 2: "
+        "P3 (UNIT_GREAT_ENGINEER) at A after 2 turns"
+    )
+    old.with_name(old.stem + "_bot.log").write_text(gp + "\n", encoding="utf-8")
+    new.with_name(new.stem + "_bot.log").write_text(act + "\n", encoding="utf-8")
+    check = by_name(load_run([old, new]))[("great people", "seen vs activated")]
+    assert check.used == 4
+
+
+def test_the_gold_measure_is_chosen_per_session(tmp_path: Path):
+    old = tmp_path / "STD_T1_01_20261111T000000Z.jsonl"
+    new = tmp_path / "STD_T1_01_20261111T010000Z.jsonl"
+    rows = [turn(n) for n in range(1, 7)]
+    for row in rows:
+        row["handler_calls"] = {"gold": {"list_city_production": [1, 0.1]}}
+    old.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    new.write_text(json.dumps(turn(7, {"purchase_item": 1})) + "\n", encoding="utf-8")
+    old.with_name(old.stem + "_bot.log").write_text("", encoding="utf-8")
+    line = f"{STAMP} civ6_ai.policies.gold INFO gold_spent turn total: 50 of 100 to spend\n"
+    new.with_name(new.stem + "_bot.log").write_text(line, encoding="utf-8")
+    check = by_name(load_run([old, new]))[("gold", "turns above reserve with nothing bought")]
+    assert (check.created, check.used) == (7, 6)

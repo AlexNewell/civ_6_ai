@@ -565,6 +565,16 @@ def test_a_great_person_that_never_gets_closer_is_set_aside_then_retried():
     assert len(acted(game, "move")) == moves + 1
 
 
+def test_standing_in_a_district_the_advisor_refuses_is_not_activated_every_turn():
+    # Real log: an engineer in a district with no wonder under way was refused
+    # `CANNOT_ACTIVATE ... Must be on a wonder` 60+ times.
+    game = make_game(units=[gp_unit()], advisor=advisor(gp_city(distance=0, can=False)))
+    policy = SecondaryPolicy()
+    run(policy, game)
+    assert not acted(game, "activate")
+    assert policy._great[40].skip_until > 10
+
+
 def test_failed_activation_is_counted_and_not_hidden():
     game = make_game(units=[gp_unit()], advisor=advisor(gp_city(distance=0, can=True)))
     game.replies["activate"] = ["Error: CANNOT_ACTIVATE|x"] * 10
@@ -711,3 +721,57 @@ def test_waiting_great_people_are_logged_with_a_reason(caplog):
     assert "2 on the map" in line
     assert "Boudica (UNIT_GREAT_GENERAL)" in line and "never activated by this policy" in line
     assert "nowhere to activate" in caplog.text
+
+
+def test_an_activation_is_logged_as_a_success_with_the_wait(caplog):
+    game = make_game(units=[gp_unit()], advisor=advisor(gp_city(distance=2)))
+    policy = SecondaryPolicy()
+    with caplog.at_level("INFO", logger="civ6_ai.policies.secondary"):
+        run(policy, game)
+        game.data["overview"] = overview(turn=53)
+        game.data["advisor"] = advisor(gp_city(distance=0, can=True))
+        run(policy, game)
+    assert (
+        "great_people activated turn 53: Hypatia (UNIT_GREAT_SCIENTIST) at Alpha after 3 turns"
+        in (caplog.text)
+    )
+    # The person leaves the map after the activation, and that is not a waste.
+    game.data["units"] = []
+    with caplog.at_level("INFO", logger="civ6_ai.policies.secondary"):
+        run(policy, game)
+    assert "wasted" not in caplog.text
+
+
+def test_a_great_person_that_leaves_the_map_unused_is_logged_as_wasted(caplog):
+    game = make_game(units=[gp_unit()], advisor=advisor(gp_city(distance=2)))
+    policy = SecondaryPolicy()
+    with caplog.at_level("INFO", logger="civ6_ai.policies.secondary"):
+        run(policy, game)
+        game.data["overview"] = overview(turn=56)
+        game.data["units"] = []
+        run(policy, game)
+    assert "great_people wasted turn 56: Hypatia (UNIT_GREAT_SCIENTIST) left the map unused" in (
+        caplog.text
+    )
+
+
+def test_a_great_person_idle_for_many_turns_is_logged_once(caplog):
+    game = make_game(units=[gp_unit()], advisor=advisor(gp_city(distance=2)))
+    policy = SecondaryPolicy()
+    with caplog.at_level("INFO", logger="civ6_ai.policies.secondary"):
+        run(policy, game)
+        for turn in (70, 71):
+            game.data["overview"] = overview(turn=turn)
+            run(policy, game)
+    assert caplog.text.count("great_people idle turn 70") == 1
+    assert "great_people idle turn 71" not in caplog.text
+
+
+def test_idle_time_restarts_after_a_use_that_leaves_the_person_on_the_map(caplog):
+    game = make_game(units=[gp_unit()], advisor=advisor(gp_city(distance=0, can=True)))
+    policy = SecondaryPolicy()
+    with caplog.at_level("INFO", logger="civ6_ai.policies.secondary"):
+        for turn in (50, 65, 80):
+            game.data["overview"] = overview(turn=turn)
+            run(policy, game)
+    assert "great_people idle" not in caplog.text

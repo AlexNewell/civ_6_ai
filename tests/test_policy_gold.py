@@ -298,3 +298,26 @@ def test_a_turn_with_gold_to_spend_still_reads_the_full_empire():
     game = GoldGame(gold_amount=reserve_for(2, 5.0) + 100)
     run(game)
     assert {"get_policies", "get_governors", "get_trade_routes"} <= set(game.calls)
+
+
+def test_the_spent_gold_total_is_logged_whether_or_not_anything_was_bought(caplog):
+    caplog.set_level(logging.INFO, logger=gold.log.name)
+    reserve = reserve_for(2, 5.0)
+    run(GoldGame(gold_amount=reserve + 100, units=[], production=[], tiles={}))
+    assert "gold_spent turn total: 0 of 100 to spend" in caplog.text
+    caplog.clear()
+    run(GoldGame(gold_amount=reserve + 100, units=[upgradable(1, 60)], production=[], tiles={}))
+    assert "gold_spent turn total: 60 of 100 to spend" in caplog.text
+
+
+def test_upgrade_reply_without_ok_prefix_is_a_success(caplog):
+    # Real reply, from the logs: the game sends `UPGRADED|UNIT_WARRIOR -> UNIT_SWORDSMAN` bare.
+    caplog.set_level(logging.INFO, logger=gold.log.name)
+    game = GoldGame(
+        replies={"upgrade": "UPGRADED|UNIT_WARRIOR -> UNIT_SWORDSMAN"},
+        units=[upgradable(1)],
+        production=[],
+    )
+    run(game)
+    assert "Upgraded UNIT_WARRIOR" in caplog.text
+    assert "refused" not in caplog.text

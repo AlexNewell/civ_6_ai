@@ -300,3 +300,15 @@ def test_a_restart_keeps_a_city_states_war_and_its_suzerain(tmp_path):
 def test_without_a_path_nothing_is_written(tmp_path):
     play(WarPolicy(), Game([civ(war=True)]), 20)
     assert list(tmp_path.iterdir()) == []
+
+
+def test_envoy_tokens_are_logged_from_the_city_state_read(caplog):
+    caplog.set_level(logging.INFO, LOGGER)
+    game = Game([civ()])
+
+    async def tokens_read():
+        return lq.EnvoyStatus(2, [])
+
+    game.get_city_states = tokens_read
+    play(WarPolicy(), game, 50)
+    assert "envoy_tokens turn 50: 2 available" in texts(caplog)

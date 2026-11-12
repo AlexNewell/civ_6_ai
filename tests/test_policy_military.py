@@ -431,13 +431,30 @@ def test_a_far_unit_is_not_called():
     assert not any(a[2:] == (10, 10) for a in game.orders("move"))
 
 
-def test_a_heavily_threatened_city_asks_for_a_second_defender():
+def test_a_heavily_threatened_city_does_not_get_a_second_unit_sent_onto_its_tile():
+    # The game refuses it: `STACKING_CONFLICT|Friendly UNIT_WARRIOR already on (10,10)`.
     threats = [barbarian(x=11, y=10 + i) for i in range(3)]
     game = MilitaryGame(
         [warrior(uid=1), warrior(uid=2, x=12, y=10), warrior(uid=3, x=40, y=40)], threats
     )
     run(MilitaryPolicy(), game)
+    assert (10, 10) not in [a[2:] for a in game.orders("move")]
+
+
+def test_an_empty_city_tile_still_gets_its_defender():
+    game = MilitaryGame(
+        [warrior(uid=2, x=12, y=10)], [barbarian(x=11, y=11)], cities=[city_info(garrison_unit="")]
+    )
+    run(MilitaryPolicy(), game)
     assert game.orders("move") == [("move", 2, 10, 10)]
+
+
+def test_flee_to_a_city_held_by_a_same_class_unit_sends_no_refused_move():
+    # Real log: a slinger fleeing to (66,25) was refused 123 times with STACKING_CONFLICT.
+    game = MilitaryGame([warrior(uid=1), warrior(uid=2, x=12, y=10)], [barbarian(x=13, y=11)])
+    game.replies["move"] = STACKING
+    run(MilitaryPolicy(), game)
+    assert (10, 10) not in [a[2:] for a in game.orders("move")]
 
 
 def test_a_refused_garrison_move_tries_the_next_unit_and_stops():
@@ -534,8 +551,9 @@ def test_a_reserved_escort_does_not_count_as_a_defender():
     units = [settler(uid=8, x=10, y=10), warrior(uid=1), warrior(uid=2), warrior(uid=3, x=12, y=10)]
     game = MilitaryGame(units, [barbarian(x=11, y=11)] * 3, cities=cities)
     run(MilitaryPolicy(), game)
-    # Warrior 1 (escort) is untouched. The crowd asks for two defenders, so 3 is called in.
-    assert game.orders("move") == [("move", 3, 10, 10)]
+    # Warrior 1 (escort) is untouched. Warrior 2 holds the tile and the game allows no second
+    # unit there, so 3 is not sent onto it.
+    assert (10, 10) not in [a[2:] for a in game.orders("move")]
 
 
 # ----- barbarian camps -----

@@ -119,7 +119,7 @@ class WarPolicy:
         self._last_turn = turn
         try:
             majors = await game.get_diplomacy()
-            states = await self._city_states(game)
+            states = await self._city_states(game, turn)
         except ConnectionError:
             raise
         except Exception:
@@ -199,7 +199,7 @@ class WarPolicy:
         self._checked.clear()
         self._summary = None
 
-    async def _city_states(self, game: WarGame) -> list[Any]:
+    async def _city_states(self, game: WarGame, turn: int) -> list[Any]:
         try:
             status = await game.get_city_states()
         except ConnectionError:
@@ -207,6 +207,9 @@ class WarPolicy:
         except Exception:
             log.warning("wars: reading city-states failed", exc_info=True)
             return []
+        tokens = getattr(status, "tokens_available", None)
+        if isinstance(tokens, int):  # Same read as above, logged for the effectiveness checks.
+            log.info("envoy_tokens turn %d: %d available", turn, tokens)
         return list(getattr(status, "city_states", None) or [])
 
     # ----- tracking -----

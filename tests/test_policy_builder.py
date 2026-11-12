@@ -525,3 +525,17 @@ def test_veto_keeps_a_claim_on_a_different_job():
     policy._claims[1] = (12, 10, "IMPROVEMENT_MINE")
     assert not asyncio.run(policy._work_on(ActionGame(), unit, vetoed, 1.0, 5))
     assert 1 not in policy._claims
+
+
+def test_feature_blocked_tile_is_set_aside_at_once_for_a_plain_job():
+    # Real reply, 42 times over the runs: mines and lumber mills on forest and jungle tiles.
+    game = ActionGame([task()], [worker()])
+    game.replies["improve"] = (
+        "Error: CANNOT_IMPROVE|unknown reason. tile has FEATURE_JUNGLE (use remove_feature "
+        "first). no improvements can be built on this tile. Builder at 10,10"
+    )
+    policy = BuilderPolicy()
+    run(policy, game)
+    run(policy, game)
+    assert [a[0] for a in game.actions] == ["improve"]  # Not tried again.
+    assert "tile set aside" in policy.decisions[0].reason

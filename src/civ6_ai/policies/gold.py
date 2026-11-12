@@ -79,7 +79,12 @@ class GoldGame(Protocol):
 
 
 def _ok(result: str, marker: str) -> bool:
-    return isinstance(result, str) and result.startswith("OK:") and marker in result
+    """The game replies `OK:...` for some buys and a bare `UPGRADED|...` for an upgrade."""
+    return (
+        isinstance(result, str)
+        and (result.startswith("OK:") or result.startswith(marker))
+        and marker in result
+    )
 
 
 def _strength(unit_type: str) -> int:
@@ -144,6 +149,7 @@ class GoldPolicy:
         await self._buy(game, turn, empire, cities, units, notes)
         await self._tiles(game, turn, cities, notes)
         spent = budget - turn.budget
+        log.info("gold_spent turn total: %d of %d to spend", spent, budget)
         if spent == 0:
             log.info(
                 "Gold %d is above the reserve %d, nothing bought: %s",
@@ -214,7 +220,7 @@ class GoldPolicy:
                 log.exception("Production read failed for %s", city.name)
                 continue
             others = [item for cid, item in building.items() if cid != city.city_id]
-            context = build_context(empire, units, [*others, *bought])
+            context = build_context(empire, units, [*others, *bought], cities)
             ranked = rank_production(city, options, context, self.weights)
             await self._buy_in(game, turn, city, ranked, context, bought, notes)
 

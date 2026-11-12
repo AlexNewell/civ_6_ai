@@ -145,6 +145,8 @@ Ranked by how much of the policy's purpose was lost, then by how early the signa
 
 The others (production refusals, builder idle, policy re-sets, military refusals) should warn only. They are real losses, but a game can still be won with them, and gating on them would block G1 on fixes that haven't been written.
 
+**Logged since issue 141.** `great_people activated|wasted|idle turn N` (secondary), `gold_spent turn total: S of B to spend` (gold) and `envoy_tokens turn N: K available` (wars, from the read it already makes). The checks use them when present and fall back to call counts on older logs.
+
 **Cost.** Nothing in the script touches the game. All the data is in the logs the bot already writes. Two measures need new logging, with no new game calls:
 
 - an activation success line next to the refusal line (great-person flow),

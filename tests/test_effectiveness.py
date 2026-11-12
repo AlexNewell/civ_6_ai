@@ -445,3 +445,56 @@ def test_end_of_run_lines_for_a_clean_log(tmp_path: Path):
     log = tmp_path / "STD_T1_01_20261111T000000Z.jsonl"
     log.write_text(json.dumps(turn(1)) + "\n", encoding="utf-8")
     assert end_of_run_lines([log])[0].startswith("Policy effectiveness: G1 gate clean")
+
+
+def logged(logger, msg):
+    return (f"policies.{logger}", "INFO", msg)
+
+
+def test_logged_activations_are_the_used_count_and_wasted_people_are_flagged():
+    bot = [gp_line(1, [f"P{i}" for i in range(6)])]
+    bot += [
+        logged(
+            "secondary",
+            f"great_people activated turn {n}: P{n} (UNIT_GREAT_ENGINEER) at A after 2",
+        )
+        for n in range(5)
+    ]
+    bot += [
+        logged(
+            "secondary",
+            f"great_people wasted turn {n}: P{n} (UNIT_GREAT_ENGINEER) left the map unused",
+        )
+        for n in range(4)
+    ]
+    run = RunLogs(records=[turn(1, {"activate_great_person": 0})], bot=bot, has_bot_log=True)
+    checks = by_name(run)
+    assert checks[("great people", "seen vs activated")].used == 5
+    wasted = checks[("great people", "wasted (left the map unused or idle 20 turns)")]
+    assert (wasted.created, wasted.status) == (4, FAIL)
+
+
+def test_gold_totals_logged_per_turn_replace_the_call_based_bound():
+    bot = [
+        logged("gold", f"gold_spent turn total: {s} of 100 to spend") for s in (0, 0, 40, 60, 100)
+    ]
+    run = RunLogs(records=[turn(1)], bot=bot, has_bot_log=True)
+    checks = by_name(run)
+    idle = checks[("gold", "turns above reserve with nothing bought")]
+    assert (idle.created, idle.used, idle.status) == (5, 2, PASS)
+    assert checks[("gold", "gold spent")].used == 200
+
+
+def test_envoy_tokens_held_two_turns_running_are_flagged():
+    bot = [
+        logged("wars", f"envoy_tokens turn {n}: {1 if 10 <= n <= 20 else 0} available")
+        for n in range(5, 30)
+    ]
+    run = RunLogs(records=[turn(1)], bot=bot, has_bot_log=True)
+    check = by_name(run)[("diplomacy", "turns an envoy token stayed unspent")]
+    assert (check.created, check.status) == (10, FAIL)
+
+
+def test_envoy_tokens_without_lines_are_no_data():
+    run = RunLogs(records=[turn(1)], bot=[logged("wars", "x")], has_bot_log=True)
+    assert by_name(run)[("diplomacy", "turns an envoy token stayed unspent")].status == NO_DATA

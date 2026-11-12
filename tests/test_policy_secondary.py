@@ -711,3 +711,47 @@ def test_waiting_great_people_are_logged_with_a_reason(caplog):
     assert "2 on the map" in line
     assert "Boudica (UNIT_GREAT_GENERAL)" in line and "never activated by this policy" in line
     assert "nowhere to activate" in caplog.text
+
+
+def test_an_activation_is_logged_as_a_success_with_the_wait(caplog):
+    game = make_game(units=[gp_unit()], advisor=advisor(gp_city(distance=2)))
+    policy = SecondaryPolicy()
+    with caplog.at_level("INFO", logger="civ6_ai.policies.secondary"):
+        run(policy, game)
+        game.data["overview"] = overview(turn=53)
+        game.data["advisor"] = advisor(gp_city(distance=0, can=True))
+        run(policy, game)
+    assert (
+        "great_people activated turn 53: Hypatia (UNIT_GREAT_SCIENTIST) at Alpha after 3 turns"
+        in (caplog.text)
+    )
+    # The person leaves the map after the activation, and that is not a waste.
+    game.data["units"] = []
+    with caplog.at_level("INFO", logger="civ6_ai.policies.secondary"):
+        run(policy, game)
+    assert "wasted" not in caplog.text
+
+
+def test_a_great_person_that_leaves_the_map_unused_is_logged_as_wasted(caplog):
+    game = make_game(units=[gp_unit()], advisor=advisor(gp_city(distance=2)))
+    policy = SecondaryPolicy()
+    with caplog.at_level("INFO", logger="civ6_ai.policies.secondary"):
+        run(policy, game)
+        game.data["overview"] = overview(turn=56)
+        game.data["units"] = []
+        run(policy, game)
+    assert "great_people wasted turn 56: Hypatia (UNIT_GREAT_SCIENTIST) left the map unused" in (
+        caplog.text
+    )
+
+
+def test_a_great_person_idle_for_many_turns_is_logged_once(caplog):
+    game = make_game(units=[gp_unit()], advisor=advisor(gp_city(distance=2)))
+    policy = SecondaryPolicy()
+    with caplog.at_level("INFO", logger="civ6_ai.policies.secondary"):
+        run(policy, game)
+        for turn in (70, 71):
+            game.data["overview"] = overview(turn=turn)
+            run(policy, game)
+    assert caplog.text.count("great_people idle turn 70") == 1
+    assert "great_people idle turn 71" not in caplog.text

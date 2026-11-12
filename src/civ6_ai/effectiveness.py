@@ -27,6 +27,10 @@ GP_NAME = re.compile(r"(?:^|; )(.+?) \((UNIT_GREAT_\w+)\) at ")
 FAITH_IDLE = re.compile(r"Faith (\d+) above reserve (\d+) but nothing bought")
 CANT_BUILD = re.compile(r"^(?P<city>.+?) can't build (?P<item>\w+): (?P<why>[A-Za-z_:]+)")
 BUILDS = re.compile(r"^(.+?) builds (\w+)")
+GP_ACTIVATED = re.compile(r"^great_people activated turn (\d+): ")
+GP_WASTED = re.compile(r"^great_people (?:wasted|idle) turn (\d+): (.+)$")
+GOLD_SPENT = re.compile(r"^gold_spent turn total: (\d+) of (\d+) to spend")
+ENVOY_TOKENS = re.compile(r"^envoy_tokens turn (\d+): (\d+) available")
 NO_HANDLER = re.compile(r"No handler for blocker (\w+)")
 SLOT_TAKES = re.compile(r"^Slot (\d+) takes (\w+)")
 FINISHED = re.compile(r"^\s*>> (.+?) finished building (\w+)\.")
@@ -59,6 +63,8 @@ MAX_GOVERNOR_KEPT = 10
 MIN_DEAL_ACCEPT_SHARE = 0.25
 MIN_ROUTE_SUCCESS = 0.5
 MAX_STARVING_NOTICES = 25
+MAX_WASTED_GREAT_PEOPLE = 3
+MAX_IDLE_ENVOY_TURNS = 5
 PLANNED_STOPS = ("game_over", "turn_limit")
 
 # The checks that gate G1 (a run is clean only if none fails); the rest only warn. See
@@ -279,15 +285,17 @@ def great_people_checks(run: RunLogs) -> list[Check]:
             )
         )
     else:
+        logged = sum(1 for m in run.messages("policies.secondary") if GP_ACTIVATED.match(m))
         out.append(
             _ratio_check(
                 "great people",
                 "seen vs activated",
                 len(seen),
-                max(run.calls("activate_great_person") - activation_refused(run), 0),
+                logged or max(run.calls("activate_great_person") - activation_refused(run), 0),
                 GP_MIN_USED_RATIO,
                 rule_used,
-                "activate calls minus the refusals logged; a person seen twice counts once",
+                "activation lines when logged, else activate calls minus the refusals; "
+                "a person seen twice counts once",
             )
         )
     if seen:
@@ -316,6 +324,18 @@ def great_people_checks(run: RunLogs) -> list[Check]:
             "at most 100 waits; many means a class is parked",
         )
     )
+    if seen:
+        wasted = [m for m in run.messages("policies.secondary") if GP_WASTED.match(m)]
+        out.append(
+            _count_check(
+                "great people",
+                "wasted (left the map unused or idle 20 turns)",
+                len(wasted),
+                MAX_WASTED_GREAT_PEOPLE,
+                f"at most {MAX_WASTED_GREAT_PEOPLE} wasted",
+                "; ".join(GP_WASTED.match(m)[2][:60] for m in wasted[:2]),
+            )
+        )
     out.append(
         _count_check(
             "great people",
@@ -422,7 +442,34 @@ def gold_turns(run: RunLogs) -> tuple[int, int]:
 
 def gold_checks(run: RunLogs) -> list[Check]:
     out: list[Check] = []
-    if run.has_calls:
+    totals = [
+        (int(m[1]), int(m[2]))
+        for msg in run.messages("policies.gold")
+        if (m := GOLD_SPENT.match(msg))
+    ]
+    if totals:
+        idle_turns = sum(1 for spent, _ in totals if spent == 0)
+        out.append(
+            _share_check(
+                "gold",
+                "turns above reserve with nothing bought",
+                idle_turns,
+                len(totals),
+                MAX_IDLE_GOLD_SHARE,
+                f"nothing bought on at most {MAX_IDLE_GOLD_SHARE:.0%} of turns above the reserve",
+                "from the logged spent-gold totals",
+            )
+        )
+        out.append(
+            _info(
+                "gold",
+                "gold spent",
+                sum(spent for spent, _ in totals),
+                f"of {sum(budget for _, budget in totals)} above the reserve, over "
+                f"{len(totals)} turns",
+            )
+        )
+    elif run.has_calls:
         eligible, spent = gold_turns(run)
         out.append(
             _share_check(
@@ -737,9 +784,36 @@ def diplomacy_checks(run: RunLogs) -> list[Check]:
             "at most 5 sessions closed without an answer",
         ),
     ]
+    tokens = [
+        (int(m[1]), int(m[2]))
+        for msg in run.messages("policies.wars")
+        if (m := ENVOY_TOKENS.match(msg))
+    ]
     if run.has_calls:
         sent = run.calls("send_envoy")
-        out.append(_info("diplomacy", "envoys sent", sent, "tokens available are not logged"))
+        out.append(_info("diplomacy", "envoys sent", sent, "send_envoy calls"))
+    if tokens:
+        held = {turn for turn, n in tokens if n > 0}
+        stuck = sum(1 for turn in held if turn - 1 in held)
+        out.append(
+            _count_check(
+                "diplomacy",
+                "turns an envoy token stayed unspent",
+                stuck,
+                MAX_IDLE_ENVOY_TURNS,
+                f"at most {MAX_IDLE_ENVOY_TURNS} turns holding a token two turns running",
+                f"most held at once: {max(n for _, n in tokens)}",
+            )
+        )
+    elif run.has_bot_log:
+        out.append(
+            _no_data(
+                "diplomacy",
+                "turns an envoy token stayed unspent",
+                "see rule",
+                "no envoy_tokens lines",
+            )
+        )
     return out
 
 

@@ -144,6 +144,7 @@ class GoldPolicy:
         await self._buy(game, turn, empire, cities, units, notes)
         await self._tiles(game, turn, cities, notes)
         spent = budget - turn.budget
+        log.info("gold_spent turn total: %d of %d to spend", spent, budget)
         if spent == 0:
             log.info(
                 "Gold %d is above the reserve %d, nothing bought: %s",

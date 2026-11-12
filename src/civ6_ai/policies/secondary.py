@@ -331,6 +331,7 @@ class SecondaryPolicy:
         return {
             BlockerType.PANTHEON: self.resolve_pantheon,
             BlockerType.GREAT_PERSON_CLAIM: self.resolve_great_people,
+            BlockerType.CLAIM_GREAT_PERSON: self.resolve_great_people,
         }
 
     async def resolve_pantheon(self, game: SecondaryGame, blocker: Blocker) -> bool:

@@ -70,6 +70,7 @@ class BlockerType(StrEnum):
     WORLD_CONGRESS_VOTE = "WORLD_CONGRESS_VOTE"
     GREAT_PERSON_CLAIM = "GREAT_PERSON_CLAIM"
     # The game's own end-turn blocking types.
+    CLAIM_GREAT_PERSON = "ENDTURN_BLOCKING_CLAIM_GREAT_PERSON"  # Held the turn in Runs 3 to 5.
     RESEARCH = "ENDTURN_BLOCKING_RESEARCH"
     CIVIC = "ENDTURN_BLOCKING_CIVIC"
     PRODUCTION = "ENDTURN_BLOCKING_PRODUCTION"
@@ -431,7 +432,12 @@ async def skip_units(game: BlockerGame, blocker: Blocker) -> bool:
 
 
 async def recruit_great_people(game: BlockerGame, blocker: Blocker) -> bool:
-    """Recruit everyone available, which spends points but no gold or faith."""
+    """Recruit everyone available, which spends points but no gold or faith.
+
+    Also the default for `ENDTURN_BLOCKING_CLAIM_GREAT_PERSON`. Patronage is left to the faith
+    policy, which keeps its reserve, so this never spends gold or faith. A failed recruit returns
+    False and the resolver leaves the blocker open for `end_turn` to judge.
+    """
     people = [person for person in await game.get_great_people() if person.can_recruit]
     results = [await game.recruit_great_person(person.individual_id) for person in people]
     return all(_succeeded(result) for result in results)
@@ -442,6 +448,7 @@ DEFAULT_RESOLVERS: Mapping[str, Resolve] = {
     BlockerType.TRADE_DEAL: reject_deals,
     BlockerType.WORLD_CONGRESS_VOTE: register_default_votes,
     BlockerType.GREAT_PERSON_CLAIM: recruit_great_people,
+    BlockerType.CLAIM_GREAT_PERSON: recruit_great_people,
     BlockerType.RESEARCH: research_fastest,
     BlockerType.CIVIC: study_fastest,
     BlockerType.PRODUCTION: build_cheapest,

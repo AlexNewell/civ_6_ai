@@ -2,7 +2,8 @@
 
 Order within a turn:
 
-1. `Monitors` read the turn first, so they see it before anything acts on it.
+1. `Monitors` read the turn first, so they see it before anything acts on it. When there is a
+   policy document, `PolicyDocumentHandler` follows them and sets the weights for the turn.
 2. `DiplomacyPolicy` answers every open proposal next, before anything else spends gold or acts.
    It moves no unit, and a deal it accepts changes gold and resources that production and trade
    then see. Leaving a session open while the rest of the turn plays is what can hold the game.
@@ -62,6 +63,7 @@ from civ6_ai.policies.trade_offers import TradeOfferPolicy
 from civ6_ai.policies.wars import WarPolicy
 from civ6_ai.screenshots import Screenshotter
 from civ6_ai.state.reader import IncompleteRead, check_cities_complete
+from civ6_ai.strategy.apply import PolicyDocumentHandler
 
 SETTLING_LOGGER = "civ6_ai.policies.settling"
 _DECISION_PREFIX = "settle_decision "
@@ -233,17 +235,22 @@ def build_orchestrator(
     turn_log: TurnLog,
     trade_offers: bool = True,
     screenshots: Screenshotter | None = None,
+    policy_document: Path | None = None,
 ) -> Orchestrator:
     """Wire the handlers to a game. `game` is civ6-mcp's `GameState`, or a fake with its reads.
 
     `trade_offers=False` leaves out `TradeOfferPolicy`. `screenshots` saves the screen when a turn
     stops the run or a handler first fails.
+    `policy_document` is a JSON file of strategy (see `strategy.policy_document`) that sets the
+    policies' weights, re-read whenever it changes. With none, every policy keeps its defaults.
     """
     production = CityProductionPolicy()
     government = GovernmentPolicy()  # One instance, so handler and blockers share its bounds.
     secondary = SecondaryPolicy()
     military = MilitaryPolicy()
     diplomacy = DiplomacyPolicy()
+    research_policy = research.ResearchPolicy()
+    gold = GoldPolicy()
     tables = [
         production.blocker_policies(),
         research.blocker_policies(),
@@ -260,15 +267,29 @@ def build_orchestrator(
     resolver = BlockerResolver(merged)
     handlers: list[Handler] = [
         Monitors(bus),
+        *(
+            [
+                PolicyDocumentHandler(
+                    policy_document,
+                    production=production,
+                    research=research_policy,
+                    secondary=secondary,
+                    military=military,
+                    gold=gold,
+                )
+            ]
+            if policy_document is not None
+            else []
+        ),
         diplomacy,
         WarPolicy(),
         *([TradeOfferPolicy(diplomacy.weights)] if trade_offers else []),
         SettlingPolicy(),
         military,
-        research.ResearchPolicy(),
+        research_policy,
         government,
         production,
-        GoldPolicy(),
+        gold,
         BuilderPolicy(),
         secondary,
         FaithPolicy(),

@@ -691,13 +691,19 @@ def diplomacy_checks(run: RunLogs) -> list[Check]:
     if not run.has_bot_log:
         return [_no_data("diplomacy", "deals answered", "see rule", "needs the bot log")]
     msgs = run.messages("policies.diplomacy")
-    # The acceptance is logged before the game is asked, so take off the answers it refused.
-    answers_refused = sum(
-        1 for m in msgs if m.startswith("The game refused our answer to the deal")
-    )
-    logged = sum(1 for m in msgs if re.match(r"Deal from player \d+ accepted", m))
-    accepted = max(logged - answers_refused, 0)
-    refused = sum(1 for m in msgs if re.match(r"Deal from player \d+ refused", m))
+    # The decision is logged before the game is asked, and a refused answer follows it. Pair each
+    # refusal with the decision just before, and take off only the acceptances that failed.
+    logged = refused = failed_accepts = 0
+    last = None
+    for m in msgs:
+        if re.match(r"Deal from player \d+ accepted", m):
+            logged, last = logged + 1, "accepted"
+        elif re.match(r"Deal from player \d+ refused", m):
+            refused, last = refused + 1, "refused"
+        elif m.startswith("The game refused our answer to the deal"):
+            failed_accepts += last == "accepted"
+            last = None
+    accepted = logged - failed_accepts
     unanswered = sum(1 for m in msgs if "unanswered" in m or "was still open" in m)
     out = [
         _ratio_check(

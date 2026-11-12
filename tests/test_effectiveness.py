@@ -371,7 +371,9 @@ def test_a_log_with_no_faith_lines_is_no_data_for_faith():
 def test_deal_acceptances_the_game_refused_do_not_count():
     accepted = "Deal from player 3 accepted: it returns 5 for 4"
     refused = "The game refused our answer to the deal: Error"
-    lines = [bot("diplomacy", accepted)] * 6 + [bot("diplomacy", refused, "WARNING")] * 6
+    lines = []
+    for _ in range(6):
+        lines += [bot("diplomacy", accepted), bot("diplomacy", refused, "WARNING")]
     check = by_name(RunLogs(records=[turn(1)], bot=lines, has_bot_log=True))[
         ("diplomacy", "deals offered vs accepted")
     ]
@@ -389,3 +391,16 @@ def test_faith_purchase_calls_are_not_gold_purchases():
     }
     check = by_name(RunLogs(records=[record], has_bot_log=True))[("gold", "purchase calls")]
     assert check.used == 1
+
+
+def test_a_refused_rejection_does_not_cancel_an_accepted_deal():
+    accepted = "Deal from player 3 accepted: it returns 5 for 4"
+    declined = "Deal from player 3 refused: it was refused before"
+    failed = "The game refused our answer to the deal: Error"
+    lines = [bot("diplomacy", accepted)] * 2
+    for _ in range(4):
+        lines += [bot("diplomacy", declined), bot("diplomacy", failed, "WARNING")]
+    check = by_name(RunLogs(records=[turn(1)], bot=lines, has_bot_log=True))[
+        ("diplomacy", "deals offered vs accepted")
+    ]
+    assert (check.created, check.used) == (6, 2)

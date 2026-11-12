@@ -216,3 +216,26 @@ def test_gold_idle_turns_come_from_the_gold_handler_calls():
     check = by_name(RunLogs(records=records))[("gold", "turns above reserve with nothing bought")]
     assert (check.created, check.used) == (9, 8)
     assert check.status == FAIL
+
+
+def test_gold_upgrade_only_turns_count_as_eligible_and_spent():
+    def gold_turn(n, calls):
+        return {**turn(n), "handler_calls": {"gold": {k: [1, 0.1] for k in calls}}}
+
+    records = [gold_turn(i, ["upgrade_unit"]) for i in range(8)]
+    records += [gold_turn(8 + i, ["list_city_production"]) for i in range(5)]
+    check = by_name(RunLogs(records=records))[("gold", "turns above reserve with nothing bought")]
+    assert (check.created, check.used) == (13, 5)
+    assert check.status == PASS
+
+
+def test_faith_buying_twice_in_one_turn_counts_one_spending_turn():
+    idle = "Faith 500 above reserve 60 but nothing bought: great people: cheapest 550 faith"
+    bought = "Faith bought A (Great Engineer) for 300 faith"
+    records = [turn(i, {"x": 1}) for i in range(8)]
+    records.append({**turn(8), "handler_calls": {"faith": {"patronize_great_person": [2, 0.2]}}})
+    lines = [bot("faith", idle)] * 8 + [bot("faith", bought)] * 2
+    run = RunLogs(records=records, bot=lines, has_bot_log=True)
+    check = by_name(run)[("faith", "turns idle vs turns spent")]
+    assert (check.created, check.used) == (9, 1)
+    assert check.status == FAIL

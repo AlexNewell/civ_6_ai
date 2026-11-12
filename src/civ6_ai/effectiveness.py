@@ -314,18 +314,27 @@ def faith_checks(run: RunLogs) -> list[Check]:
         if (m := FAITH_IDLE.search(msg))
     ]
     bought = sum(1 for m in run.messages("policies.faith") if m.startswith("Faith bought"))
-    patronised = run.calls("patronize_great_person") if run.has_calls else None
+    # A turn can buy twice, so spending turns come from the calls when the run has them.
+    spending_turns = sum(
+        1
+        for r in run.records
+        if any(
+            c in r.get("handler_calls", {}).get("faith", {})
+            for c in ("patronize_great_person", "purchase_item")
+        )
+    )
+    turns_spent = spending_turns if run.has_calls else bought
     worst = max(idle, default=0)
     return [
         _ratio_check(
             "faith",
             "turns idle vs turns spent",
-            len(idle) + bought,
-            bought,
+            len(idle) + turns_spent,
+            turns_spent,
             0.2,
             "faith spent on at least 20% of the turns it was above reserve",
-            f"{len(idle)} idle turns, {bought} purchases"
-            + (f", {patronised} patronize calls" if patronised is not None else ""),
+            f"{len(idle)} idle turns, {bought} purchases logged"
+            + ("" if run.has_calls else "; no call counts, so a turn buying twice counts twice"),
         ),
         _count_check(
             "faith",
@@ -346,9 +355,11 @@ def gold_turns(run: RunLogs) -> tuple[int, int]:
     eligible = spent = 0
     for record in run.records:
         gold = record.get("handler_calls", {}).get("gold", {})
-        if "list_city_production" in gold or "get_purchasable_tiles" in gold:
+        bought = any(c in gold for c in ("purchase_item", "purchase_tile", "upgrade_unit"))
+        # An upgrade can use the budget before the city and tile reads, so a buy marks a turn too.
+        if bought or "list_city_production" in gold or "get_purchasable_tiles" in gold:
             eligible += 1
-            spent += any(c in gold for c in ("purchase_item", "purchase_tile", "upgrade_unit"))
+            spent += bought
     return eligible, spent
 
 

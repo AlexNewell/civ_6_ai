@@ -12,11 +12,13 @@ balanced game.
 
 import logging
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, fields, replace
 from typing import Any, Protocol
 
 from civ6_ai.blockers import Blocker, BlockerGame, BlockerType
+from civ6_ai.construction import ProductionRefused, ProductionSet
+from civ6_ai.monitors import Event, EventBus
 from civ6_ai.policies.districts import BASE_VALUE, PLANNED_VALUE, is_planned, wants_district
 from civ6_ai.policies.game_data import COMBAT_UNITS, REPLACES, UPGRADES, WONDERS
 from civ6_ai.state import City, Empire, ProductionChoice, Unit
@@ -490,11 +492,13 @@ class RefusalMemory:
         # Once expired or changed it is free again, but the count stays so a repeat waits longer.
         return turn < until and _circumstances(city) == seen
 
-    def refused(self, city: City, item: str, turn: int) -> None:
+    def refused(self, city: City, item: str, turn: int) -> int:
+        """Record a refusal and return how many turns the item is now skipped for."""
         key = (city.city_id, item)
         count = self._entries[key][1] + 1 if key in self._entries else 1
         wait = min(REFUSAL_BACKOFF_TURNS * 2 ** (count - 1), REFUSAL_BACKOFF_MAX_TURNS)
         self._entries[key] = (turn + wait, count, _circumstances(city))
+        return wait
 
     def accepted(self, city: City, item: str) -> None:
         self._entries.pop((city.city_id, item), None)
@@ -509,9 +513,21 @@ def _advisor_failed(item: str, reply: Any) -> str:
     return f"ERR:ADVISOR_READ|{item}: {reply}"
 
 
-async def _start(game: ProductionGame, city: City, option: ProductionChoice) -> str:
+@dataclass
+class StartTrace:
+    """What `_start` did besides the reply, for the construction events."""
+
+    placements: int | None = None  # How many tiles the advisor offered.
+    tile: tuple[int, int] | None = None  # The tile it chose.
+
+
+async def _start(
+    game: ProductionGame, city: City, option: ProductionChoice, trace: StartTrace | None = None
+) -> str:
     """Set production, finding a tile first where the item needs one."""
+    trace = trace if trace is not None else StartTrace()
     if option.is_repair:
+        trace.tile = (option.repair_x, option.repair_y)
         return await game.set_city_production(
             city.city_id, option.category, option.item, option.repair_x, option.repair_y
         )
@@ -519,9 +535,11 @@ async def _start(game: ProductionGame, city: City, option: ProductionChoice) -> 
         placements = await game.get_district_advisor(city.city_id, option.item)
         if not isinstance(placements, list):
             return _advisor_failed(option.item, placements)
+        trace.placements = len(placements)
         if not placements:
             return f"ERR:NO_PLACEMENT|{option.item}: no valid tile"
         best = min(placements, key=lambda p: (-p.total_adjacency, p.x, p.y))
+        trace.tile = (best.x, best.y)
         return await game.set_city_production(
             city.city_id, option.category, option.item, best.x, best.y
         )
@@ -531,9 +549,11 @@ async def _start(game: ProductionGame, city: City, option: ProductionChoice) -> 
         placements = await game.get_wonder_advisor(city.city_id, option.item)
         if not isinstance(placements, list):
             return _advisor_failed(option.item, placements)
+        trace.placements = len(placements)
         if not placements:
             return f"ERR:NO_PLACEMENT|{option.item}: no valid tile"
         best = min(placements, key=lambda p: (p.displacement_score, p.x, p.y))
+        trace.tile = (best.x, best.y)
         return await game.set_city_production(
             city.city_id, option.category, option.item, best.x, best.y
         )
@@ -548,11 +568,13 @@ async def choose_for_city(
     weights: ProductionWeights,
     only_defence: bool = False,
     memory: RefusalMemory | None = None,
+    emit: Callable[[Event], None] | None = None,
 ) -> ProductionChoice | None:
     """Start the best option that the game accepts. Returns it, or None if all were refused.
 
     With `only_defence`, the city's current build is replaced only if the best option is a
     defender or walls, and only defence is tried. Items in `memory` for this city are skipped.
+    `emit` receives a `ProductionSet` or `ProductionRefused` for each attempt.
     """
     ranked = rank_production(city, options, context, weights)
     if memory is not None:
@@ -562,15 +584,43 @@ async def choose_for_city(
             return None
         ranked = [o for o in ranked if is_defence(o)]
     for option in ranked[:MAX_ATTEMPTS]:
-        result = await _start(game, city, option)
+        trace = StartTrace()
+        result = await _start(game, city, option, trace)
+        where = (context.turn, city.city_id, city.name, city.x, city.y)
         if not _failed(result):
             log.info("%s builds %s", city.name, option.item)
+            if emit is not None:
+                tile = trace.tile or (None, None)
+                emit(
+                    ProductionSet(
+                        *where,
+                        item=option.item,
+                        category=option.category,
+                        tile_x=tile[0],
+                        tile_y=tile[1],
+                        placements_offered=trace.placements,
+                    )
+                )
             if memory is not None:
                 memory.accepted(city, option.item)
             return option
         log.info("%s can't build %s: %s", city.name, option.item, result[:120])
-        if memory is not None and is_refusal(result):
-            memory.refused(city, option.item, context.turn)
+        refusal = is_refusal(result)
+        wait = 0
+        if memory is not None and refusal:
+            wait = memory.refused(city, option.item, context.turn)
+        if emit is not None:
+            emit(
+                ProductionRefused(
+                    *where,
+                    item=option.item,
+                    category=option.category,
+                    reply=result[:200],
+                    is_refusal=refusal,
+                    placements_offered=trace.placements,
+                    backoff_turns=wait,
+                )
+            )
     return None
 
 
@@ -587,7 +637,10 @@ class CityProductionPolicy:
 
     name = "city_production"
 
-    def __init__(self, weights: ProductionWeights | None = None) -> None:
+    def __init__(
+        self, weights: ProductionWeights | None = None, bus: EventBus | None = None
+    ) -> None:
+        self._emit = bus.publish if bus is not None else None
         self.weights = weights or ProductionWeights()  # The strategist replaces this later.
         self.refusals = RefusalMemory()
 
@@ -617,7 +670,14 @@ class CityProductionPolicy:
             options = await _read_production(game, city.city_id)
             context = build_context(empire, units, building.values(), cities)
             picked = await choose_for_city(
-                game, city, options, context, self.weights, only_defence=True, memory=self.refusals
+                game,
+                city,
+                options,
+                context,
+                self.weights,
+                only_defence=True,
+                memory=self.refusals,
+                emit=self._emit,
             )
             if picked is not None:
                 building[city.city_id] = picked.item
@@ -626,7 +686,7 @@ class CityProductionPolicy:
         for city in sorted(idle, key=lambda c: (not c.is_threatened, c.city_id)):
             options = await _read_production(game, city.city_id)
             picked = await choose_for_city(
-                game, city, options, context, self.weights, memory=self.refusals
+                game, city, options, context, self.weights, memory=self.refusals, emit=self._emit
             )
             if picked is None:
                 unfinished.append(city.name)

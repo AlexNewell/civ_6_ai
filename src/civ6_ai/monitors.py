@@ -183,6 +183,7 @@ def event_from_json(line: str) -> Event:
     if kind not in _EVENTS_BY_KIND:
         # Events from other modules register themselves on import. Import them now, so a process
         # that only reads event logs can still read them.
+        import civ6_ai.construction  # noqa: F401
         import civ6_ai.strategy.tasks  # noqa: F401
     return _EVENTS_BY_KIND[kind](**fields)
 

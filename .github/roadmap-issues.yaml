@@ -464,6 +464,113 @@ issues:
     depends: ["1.3", "1.5"]
     budget: none
 
+  - id: "1.35"
+    title: Raise defence when a war starts or a threat appears
+    type: feature
+    parallel: true
+    goal: Stop losing cities in the first turns of a war.
+    scope: "11 of 15 city losses in Runs 3 to 6 were captures within 10 turns of an AI's war, held by Warriors or Man-at-Arms against Knights and later units, while the gold policy bought nothing (docs/research/cities-lost.md). When a war is declared, or a rival denounces us and has units within 3 tiles of a city, drop the gold reserve to zero, upgrade or buy defenders, and build walls in threatened cities. Stop building Warriors once a better melee unit is available and upgrade border-city Warriors. The city at (64,22) on STD_T1_01 fell before turn 90 in 3 of 4 runs and is the test case. Source: issues 147 and 153."
+    acceptance:
+      - "Live: no city is lost within 10 turns of a war starting."
+      - "Live: no city falls in a run before turn 200, and the score at turn 200 is at least 480."
+      - "Live: the gold log shows purchases or upgrades on the turns after a war starts."
+    depends: ["1.9", "1.14", "1.15"]
+    budget: none
+  - id: "1.36"
+    title: Get defenders into threatened cities
+    type: feature
+    parallel: true
+    goal: Keep at least two defenders in or beside a threatened city.
+    scope: "Garrison orders often ended in STACKING_CONFLICT, leaving units outside the city they were meant to hold. PR 163 now checks the destination first and falls back; this item makes sure a threatened city actually ends up defended, swapping units or covering an adjacent tile. Source: docs/research/cities-lost.md."
+    acceptance:
+      - "Live: refused military moves under 25%."
+      - "Live: a city with rival units within 3 tiles has 2 defenders in or adjacent to it."
+    depends: ["1.9"]
+    budget: none
+  - id: "1.37"
+    title: Loyalty-aware settling and loyalty response
+    type: feature
+    parallel: true
+    goal: Stop losing new cities to loyalty.
+    scope: "4 of 15 losses were loyalty flips of new cities 9 to 12 tiles from the capital near a rival, lost 6 to 9 turns after the loyalty warning; two fell within 9 turns of founding. Add a loyalty term to site scoring (distance from our cities, nearby rival cities) and respond to loyalty warnings (governor, garrison, amenities, policy card). Source: docs/research/cities-lost.md."
+    acceptance:
+      - "Live: no city lost to loyalty in a run."
+      - Site scoring has unit tests for the loyalty term.
+    depends: ["1.8", "1.10"]
+    budget: none
+  - id: "1.38"
+    title: "Richer city events: who took a city, why, and across restarts"
+    type: feature
+    parallel: true
+    goal: Make every city loss and gain explainable from the event log.
+    scope: "city_lost lacks the taker and the cause (capture or loyalty), and the monitor's city set is not kept across a restart, so a loss between sessions is missed. PR 168 added city_gained. Also explain why Run 6's founded and lost events imply 1 city at the end while the game reported 2. Source: issues 147 and 153."
+    acceptance:
+      - city_lost carries the taker and a cause, with unit tests from real replies.
+      - A restart keeps the city set, tested.
+      - The Run 6 city-count difference is explained in docs/research/cities-lost.md.
+    depends: ["1.3"]
+    budget: none
+  - id: "1.39"
+    title: Log rival scores, cities and population each turn
+    type: feature
+    parallel: true
+    goal: Make the score gap to each rival measurable.
+    scope: "No log records any rival's score, so issue 153 could not measure the gap to the leader. get_victory_progress (read every 5 turns) already fills Rival.score in state/reader.py, and get_game_overview (read every turn) gives our cities and population. Write these to the turn log with no new game calls."
+    acceptance:
+      - The turn log carries each rival's score when read, and our cities and population every turn, with no new game calls.
+    depends: ["1.4"]
+    budget: none
+  - id: "1.40"
+    title: Score-vs-leader report against the CivBench baselines
+    type: feature
+    parallel: true
+    goal: Show after every run how far we trail the leader and the baselines.
+    scope: "Add our score against the leader and the CivBench medians at turns 100, 150, 200 and 250 to compare_runs.py and the end-of-run summary. Source: docs/research/strength-run6.md."
+    acceptance:
+      - The end-of-run summary prints the score gap to the leader and to the CivBench medians at the listed turns.
+    depends: ["1.39", "1.22"]
+    budget: none
+  - id: "1.41"
+    title: "Expansion target: 6 cities by turn 150"
+    type: feature
+    parallel: true
+    goal: Grow the empire enough to compete on score.
+    scope: "Cities and what is in them make up most of the score gap (docs/research/strength-run6.md). Set an expansion target of 6 living cities by turn 150, balanced against defender count so new cities are not lost (see 1.35 and 1.37)."
+    acceptance:
+      - "Live: 6 cities alive at turn 150 in a run."
+    depends: ["1.8"]
+    budget: none
+  - id: "1.42"
+    title: Close the early-game score gap (research)
+    type: research
+    parallel: true
+    goal: Find why every run trails the baselines by turn 100.
+    scope: "At turn 100 every run scored 145 to 179 against CivBench's 239 to 254, before any war. Using turn logs, find what the first 100 turns spend production, research and settling on, and propose changes with targets. No model or game calls. Related: E.5 first-city timing."
+    acceptance:
+      - A research doc explains the turn-100 gap and ranks fixes with measurable targets.
+    depends: []
+    budget: none
+  - id: "1.43"
+    title: Keep science rank at or above the median
+    type: feature
+    parallel: true
+    goal: Stop trailing the science leader by a wide margin.
+    scope: "Science ranked 3rd or 4th at 25 to 40% of the leader in every run (docs/research/strength-run6.md). Find the cause (Campus count, buildings, research choices) and fix it."
+    acceptance:
+      - "Live: science rank at or above the median from turn 100 to the end of a run."
+    depends: ["1.5", "1.7"]
+    budget: none
+  - id: "1.44"
+    title: Log wonder completions
+    type: feature
+    parallel: true
+    goal: Count wonders built, a score component the logs miss.
+    scope: "Wonder completions are not logged, so the strength review could not price them. Add a wonder_completed event to the construction events (PR 168) by diffing reads the bot already makes, and count it in the effectiveness checks."
+    acceptance:
+      - A wonder_completed event is written with turn and city, with unit tests, and no new game calls.
+    depends: ["1.34"]
+    budget: none
+
   # Workstream "E"
   - id: E.1
     title: Ingest CivBench dataset and extract baselines

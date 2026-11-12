@@ -219,7 +219,7 @@ class GoldPolicy:
                 log.exception("Production read failed for %s", city.name)
                 continue
             others = [item for cid, item in building.items() if cid != city.city_id]
-            context = build_context(empire, units, [*others, *bought])
+            context = build_context(empire, units, [*others, *bought], cities)
             ranked = rank_production(city, options, context, self.weights)
             await self._buy_in(game, turn, city, ranked, context, bought, notes)
 

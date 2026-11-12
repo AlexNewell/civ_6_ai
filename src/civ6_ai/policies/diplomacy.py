@@ -14,7 +14,8 @@ What it does with each incoming proposal (see `respond`):
   acceptance a raw read lists every item of the deal, and a deal is refused if the raw count
   differs from the parsed count or the read fails. Only a deal with no parsed item at all can be
   accepted, and only if `accept_unreadable_deals` is set (off by default).
-- Conversations with no deal: a first meeting or a delegation gets a friendly answer. Friendship
+- Conversations with no deal: a first meeting, a delegation or a complaint that we settled too
+  close (apologise, never the reply that generates grievances) gets a friendly answer. Friendship
   is accepted unless we are at war with them, they are denounced, or nothing is known about them.
   Alliances, war talk and demands to stop something are refused.
 - War declarations (a session while at war, with no deal) are closed, as `end_turn` does.
@@ -96,6 +97,11 @@ _DEMAND_WORDS = (
     "border",
 )
 _FRIEND_WORDS = ("friend",)
+# A leader's complaint that we settled too close ("Your people settle too close! You should
+# consider seeking land elsewhere."). The first reply apologises (+30 Diplomatic Favor in Run 5)
+# and the second ("My people will settle where they please!") generates grievances, so the
+# friendly reply is the right one. Checked before the demand words, which also match "settl".
+_SETTLING_STATEMENT = re.compile(r"settle too close|seeking land elsewhere|settling too close")
 _LEADER_SAYS = re.compile(r'Leader says: "(.*)"')
 # Text that says a resolution takes points away, or gives them. Lower case.
 _REMOVES = re.compile(r"\b(?:lose|loses|remov\w*|minus|deduct\w*|reduc\w*|strip\w*)\b|-\s?\d")
@@ -341,6 +347,8 @@ def deal_signature(deal: Any) -> tuple:
 def classify_talk(text: str) -> str:
     """Sort a leader's words into alliance, war, demand, friendship or greeting."""
     lowered = text.casefold()
+    if _SETTLING_STATEMENT.search(lowered):
+        return "settling"
     for kind, words in (
         ("alliance", _ALLIANCE_WORDS),
         ("war", _WAR_WORDS),
@@ -354,8 +362,8 @@ def classify_talk(text: str) -> str:
 
 def answer_talk(kind: str, counterpart: Counterpart | None, weights: DiplomacyWeights) -> str:
     """POSITIVE or NEGATIVE for one kind of conversation."""
-    if kind == "greeting":
-        return POSITIVE
+    if kind in ("greeting", "settling"):
+        return POSITIVE  # Settling: apologising costs nothing and commits us to nothing priced.
     if kind == "friendship":
         if counterpart is None:
             return NEGATIVE  # Nothing known about them, so we cannot tell if they are denounced.
@@ -774,6 +782,12 @@ class DiplomacyPolicy:
 
     async def _answer_session(self, game: DiplomacyGame, session: Any, deal: Any | None) -> None:
         player_id = session.other_player_id
+        if deal is not None and not session.deal_summary and self._is_settling_statement(session):
+            # Run 5, turn 102: Khmer's complaint and a trade deal were open together. Answering
+            # only the deal left the complaint open, and the turn stopped. Apologise first.
+            await self._answer_talk(game, session)
+            await self._answer_deal(game, player_id, deal, None)
+            return
         if session.deal_summary or deal is not None:
             await self._answer_deal(game, player_id, deal, session)
             return
@@ -782,6 +796,11 @@ class DiplomacyPolicy:
             await self._exit(game, player_id)
             return
         await self._answer_talk(game, session)
+
+    @staticmethod
+    def _is_settling_statement(session: Any) -> bool:
+        text = f"{session.dialogue_text} {session.reason_text}"
+        return classify_talk(text) == "settling"
 
     async def _answer_deal(
         self, game: DiplomacyGame, player_id: int, deal: Any | None, session: Any | None
@@ -841,6 +860,14 @@ class DiplomacyPolicy:
         kind = classify_talk(text)
         signature: tuple = ("talk", player_id, kind)
         answer = answer_talk(kind, counterpart, self.weights)
+        log.info(
+            "Talk from player %s (%s): %r buttons=%r, answering %s",
+            player_id,
+            kind,
+            text.strip()[:200],
+            getattr(session, "buttons", ""),
+            answer,
+        )
         if signature in self._refused and kind != "friendship":
             answer = NEGATIVE  # A friendship answer depends on standing now, so it is judged again.
         if not self._within_bounds(signature):

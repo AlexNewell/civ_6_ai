@@ -613,6 +613,17 @@ class ResolvingGame:
             report = await self._watched_end_turn()
         return report
 
+    async def dismiss_popup(self) -> str:
+        """Answer open diplomacy, then dismiss popups.
+
+        The orchestrator calls this when a turn did not advance. Run 5 stopped on turn 102 there:
+        a leader's statement opened during the AI turn, `end_turn` returned an ordinary report,
+        and dismissing the leader screen alone left the session open and unanswered. So any open
+        session or deal is answered first, by the same rules as at the start of a turn.
+        """
+        await self._clear(diplomacy_only=True)
+        return await self._game.dismiss_popup()
+
     async def _watched_end_turn(self) -> str:
         """Run `end_turn`, clearing what holds the turn while it waits. Never sends a duplicate."""
         turn_before = await self._turn()

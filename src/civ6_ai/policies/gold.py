@@ -79,7 +79,12 @@ class GoldGame(Protocol):
 
 
 def _ok(result: str, marker: str) -> bool:
-    return isinstance(result, str) and result.startswith("OK:") and marker in result
+    """The game replies `OK:...` for some buys and a bare `UPGRADED|...` for an upgrade."""
+    return (
+        isinstance(result, str)
+        and (result.startswith("OK:") or result.startswith(marker))
+        and marker in result
+    )
 
 
 def _strength(unit_type: str) -> int:

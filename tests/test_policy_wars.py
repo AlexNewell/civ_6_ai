@@ -223,3 +223,80 @@ def test_failed_city_state_read_keeps_civ_wars():
     game.city_state_error = RuntimeError("timeout")
     play(policy, game, 11)
     assert policy.at_war_with(SUMERIA)
+
+
+def test_a_restart_keeps_the_turn_a_war_was_first_seen(tmp_path, caplog):
+    path = tmp_path / "wars.json"
+    first = WarPolicy(state_path=path)
+    play(first, Game([civ(war=False)]), 20)
+    play(first, Game([civ(war=True)]), 23)
+    assert first.wars()[SUMERIA].started == 23
+
+    restarted = WarPolicy(state_path=path)  # A new process: nothing in memory.
+    caplog.set_level(logging.INFO, logger=LOGGER)
+    play(restarted, Game([civ(war=True)]), 40)
+    assert restarted.wars()[SUMERIA].started == 23
+    assert not any("start unknown" in t for t in texts(caplog))
+    assert any("read back from turn 23" in t for t in texts(caplog))
+
+
+def test_a_war_that_began_while_the_bot_was_down_is_first_seen_after_the_restart(tmp_path, caplog):
+    path = tmp_path / "wars.json"
+    play(WarPolicy(state_path=path), Game([civ(war=False)]), 20)
+
+    caplog.set_level(logging.INFO, logger=LOGGER)
+    restarted = WarPolicy(state_path=path)
+    play(restarted, Game([civ(war=True)]), 30)
+    assert restarted.wars()[SUMERIA].started == 30
+    assert any("first seen turn 30" in t for t in texts(caplog))
+
+
+def test_a_war_that_ended_while_the_bot_was_down_is_logged_as_ended(tmp_path, caplog):
+    path = tmp_path / "wars.json"
+    first = WarPolicy(state_path=path)
+    play(first, Game([civ(war=False)]), 18)
+    play(first, Game([civ(war=True)]), 20)
+
+    caplog.set_level(logging.INFO, logger=LOGGER)
+    restarted = WarPolicy(state_path=path)
+    play(restarted, Game([civ(war=False)]), 35)
+    assert restarted.wars() == {}
+    assert any("ended, lasted 15 turns" in t for t in texts(caplog))
+
+
+def test_saved_wars_from_a_later_turn_are_not_used(tmp_path):
+    path = tmp_path / "wars.json"
+    play(WarPolicy(state_path=path), Game([civ(war=True)]), 90)
+
+    other_game = WarPolicy(state_path=path)  # A save from turn 40 loaded, or a new game.
+    play(other_game, Game([civ(war=True)]), 40)
+    assert other_game.wars()[SUMERIA].started is None
+
+
+def test_a_missing_or_broken_file_means_start_unknown(tmp_path):
+    path = tmp_path / "wars.json"
+    missing = WarPolicy(state_path=path)
+    play(missing, Game([civ(war=True)]), 40)
+    assert missing.wars()[SUMERIA].started is None
+
+    path.write_text("{not json", encoding="utf-8")
+    broken = WarPolicy(state_path=path)
+    play(broken, Game([civ(war=True)]), 41)
+    assert broken.wars()[SUMERIA].started is None
+
+
+def test_a_restart_keeps_a_city_states_war_and_its_suzerain(tmp_path):
+    path = tmp_path / "wars.json"
+    first = WarPolicy(state_path=path)
+    play(first, Game([civ(war=False)], [state()]), 20)
+    play(first, Game([civ(war=True)], [state()]), 25)
+
+    restarted = WarPolicy(state_path=path)
+    play(restarted, Game([civ(war=True)], [state()]), 33)
+    wars = restarted.wars()
+    assert wars[KANDY].started == 25 and wars[KANDY].via == SUMERIA
+
+
+def test_without_a_path_nothing_is_written(tmp_path):
+    play(WarPolicy(), Game([civ(war=True)]), 20)
+    assert list(tmp_path.iterdir()) == []

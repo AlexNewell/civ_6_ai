@@ -108,7 +108,12 @@ async def play_game(
         game_id = game_id_for_new_session(ROOT / "runs", name, first_turn, f"{name}_{stamp}")
         shots = Screenshotter(ROOT / "runs" / "screenshots", game_id)
         orchestrator = build_orchestrator(
-            game, bus, turn_log, trade_offers=TRADE_OFFERS, screenshots=shots
+            game,
+            bus,
+            turn_log,
+            trade_offers=TRADE_OFFERS,
+            screenshots=shots,
+            wars_state=ROOT / "runs" / f"{name}_wars.json",  # Same for every restart of this game.
         )
         reason = await orchestrator.play(turns)
     finally:

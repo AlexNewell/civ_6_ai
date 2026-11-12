@@ -236,6 +236,7 @@ def build_orchestrator(
     trade_offers: bool = True,
     screenshots: Screenshotter | None = None,
     policy_document: Path | None = None,
+    wars_state: Path | None = None,
 ) -> Orchestrator:
     """Wire the handlers to a game. `game` is civ6-mcp's `GameState`, or a fake with its reads.
 
@@ -243,6 +244,8 @@ def build_orchestrator(
     stops the run or a handler first fails.
     `policy_document` is a JSON file of strategy (see `strategy.policy_document`) that sets the
     policies' weights, re-read whenever it changes. With none, every policy keeps its defaults.
+    `wars_state` is a file where the war tracker keeps its wars, so a restart of the same game
+    keeps each war's start turn.
     """
     production = CityProductionPolicy()
     government = GovernmentPolicy()  # One instance, so handler and blockers share its bounds.
@@ -282,7 +285,7 @@ def build_orchestrator(
             else []
         ),
         diplomacy,
-        WarPolicy(),
+        WarPolicy(state_path=wars_state),
         *([TradeOfferPolicy(diplomacy.weights)] if trade_offers else []),
         SettlingPolicy(),
         military,

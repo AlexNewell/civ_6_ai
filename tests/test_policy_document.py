@@ -397,3 +397,10 @@ def test_bot_document_changes_the_wired_policies(tmp_path):
     gold = next(h for h in orchestrator._handlers if isinstance(h, GoldPolicy))
     assert production.weights.target_cities == 13
     assert gold.weights.target_cities == 13
+
+
+def test_resolve_passes_the_victory_target_to_production_and_gold():
+    resolved = resolve(parse_policy_document({"victory": "science"}))
+    assert resolved.production.victory == "science"
+    assert resolved.gold.victory == "science"
+    assert resolve(DEFAULT_DOCUMENT).production.victory == "any"

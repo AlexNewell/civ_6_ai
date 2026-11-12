@@ -62,6 +62,7 @@ MAX_POLICY_CHURN = 3.0
 MAX_GOVERNOR_KEPT = 10
 MIN_DEAL_ACCEPT_SHARE = 0.25
 MIN_ROUTE_SUCCESS = 0.5
+LOYALTY_LOOKBACK_TURNS = 30  # A loyalty warning this close before a loss makes it a loyalty loss.
 MAX_STARVING_NOTICES = 25
 MAX_WASTED_GREAT_PEOPLE = 3
 MAX_IDLE_ENVOY_TURNS = 5
@@ -257,6 +258,56 @@ def _info(policy: str, name: str, value: int, note: str = "") -> Check:
 
 def _no_data(policy: str, name: str, rule: str, why: str) -> Check:
     return Check(policy, name, None, None, NO_DATA, rule, why)
+
+
+@dataclass(frozen=True)
+class CityLosses:
+    """City-loss events split into permanent losses, flips that came back, and their causes."""
+
+    lost: int
+    returned: int
+    loyalty: int
+
+    @property
+    def permanent(self) -> int:
+        return self.lost - self.returned
+
+    def note(self) -> str:
+        if not self.lost:
+            return ""
+        parts = [f"{self.lost} lost events", f"{self.returned} came back"]
+        parts.append(f"{self.loyalty} after a loyalty warning")
+        return ", ".join(parts)
+
+
+def city_losses(events: list[dict]) -> CityLosses:
+    """Count `city_lost` events, separating cities that came back and loyalty losses.
+
+    A loss is a loyalty loss when the same city had a `city_loyalty_warning` up to
+    LOYALTY_LOOKBACK_TURNS before it. A loss "came back" when a later `city_gained` event names the
+    same city id (the monitor logs the gain from issue 156 on; older logs never carry one, so they
+    count every loss as permanent). A lost event with no city id is counted as lost for good.
+    """
+    warned: dict[object, list[int]] = {}
+    for e in events:
+        if e.get("kind") == "city_loyalty_warning" and "city_id" in e:
+            warned.setdefault(e["city_id"], []).append(int(e.get("turn", 0)))
+    lost = returned = loyalty = 0
+    for e in events:
+        if e.get("kind") != "city_lost":
+            continue
+        lost += 1
+        city, turn = e.get("city_id"), int(e.get("turn", 0))
+        if any(0 <= turn - t <= LOYALTY_LOOKBACK_TURNS for t in warned.get(city, [])):
+            loyalty += 1
+        if city is not None and any(
+            g.get("kind") == "city_gained"
+            and g.get("city_id") == city
+            and int(g.get("turn", 0)) >= turn
+            for g in events
+        ):
+            returned += 1
+    return CityLosses(lost, returned, loyalty)
 
 
 def activation_refused(run: RunLogs) -> int:
@@ -744,8 +795,17 @@ def settling_checks(run: RunLogs) -> list[Check]:
     else:
         out.append(_no_data("settling", "no-site decisions", "see rule", "no settle log"))
     if run.has_events:
-        lost = sum(1 for e in run.events if e.get("kind") == "city_lost")
-        out.append(_count_check("settling", "cities lost", lost, 0, "no city lost"))
+        lost = city_losses(run.events)
+        out.append(
+            _count_check(
+                "settling",
+                "cities lost",
+                lost.permanent,
+                0,
+                "no city lost for good",
+                lost.note(),
+            )
+        )
     else:
         out.append(_no_data("settling", "cities lost", "no city lost", "no events log"))
     return out

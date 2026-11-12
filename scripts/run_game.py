@@ -27,8 +27,17 @@ from civ6_ai.metrics.costs import game_id_for_new_session, game_id_of_log
 from civ6_ai.metrics.speed import summarise as summarise_speed
 from civ6_ai.monitors import EventBus, EventLog
 from civ6_ai.orchestrator import StopReason, TurnLog, TurnRecord
+from civ6_ai.preflight import (
+    Status,
+    check_patches,
+    check_screenshot_imports,
+    check_standard_save,
+    check_tuner,
+    report,
+)
 from civ6_ai.saves import disable_mcp_saves, use_real_save_dirs
 from civ6_ai.screenshots import Screenshotter
+from civ6_ai.victory_check import fix_victory_check
 
 ROOT = Path(__file__).parent.parent
 # Off since Run 4 (turn 105): civ6-mcp's propose_trade accepts whatever counter-offer the AI
@@ -72,24 +81,42 @@ async def play_game(
     on_turn: Callable[[TurnRecord], None] | None = None,
 ) -> GameRun | None:
     """Play `turns` turns in the open game. None if it is not a standard save (or `expect_save`)."""
-    use_real_save_dirs()
-    disable_mcp_saves()
-    narrow_popup_scan()
-    shorten_call_waits()
-    fix_gp_advisor()
-    fix_city_attack()
-    connection = GameConnection()
-    await connection.connect()
-    game = GameState(connection)
-
-    _, seed = await game.get_game_identity()
-    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
-    name = identify_save(manifest, seed)
-    if name is None:
-        print("FAILED: the open game isn't a standard save")
+    # Preflight: the screenshot warning must show now, not at a stop. Patches fail fast.
+    early = [
+        check_screenshot_imports(),
+        check_patches(
+            [
+                ("use_real_save_dirs", use_real_save_dirs),
+                ("disable_mcp_saves", disable_mcp_saves),
+                ("narrow_popup_scan", narrow_popup_scan),
+                ("shorten_call_waits", shorten_call_waits),
+                ("fix_gp_advisor", fix_gp_advisor),
+                ("fix_city_attack", fix_city_attack),
+                ("fix_victory_check", fix_victory_check),
+            ]
+        ),
+    ]
+    if not report(early):
+        print("FAILED: preflight")
         return None
-    if expect_save is not None and name != expect_save:
-        print(f"FAILED: the open game is {name}, not {expect_save}")
+    connection = GameConnection()
+    game = GameState(connection)
+    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+
+    async def get_seed() -> int:
+        return (await game.get_game_identity())[1]
+
+    # The tuner allows one connection, so this is the one the run goes on to use.
+    late = [await check_tuner(connection.connect)]
+    name = None
+    if late[0].status is not Status.FAIL:
+        save, name = await check_standard_save(
+            get_seed, lambda seed: identify_save(manifest, seed), expect_save
+        )
+        late.append(save)
+    if not report(late) or name is None:
+        await connection.disconnect()
+        print("FAILED: preflight")
         return None
 
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")

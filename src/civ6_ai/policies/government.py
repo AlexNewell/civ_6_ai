@@ -9,7 +9,9 @@ Three jobs, each deterministic. The same game state and the same weights give th
   lists no unlocked governments, so each candidate is tried best first. One the game calls locked
   is not tried again until another civic is completed, because that is what unlocks one.
 - Policy cards: each empty slot takes the best-scoring unused card that fits, one slot at a time,
-  so one refused card strands nothing. Slots of a fixed type are filled before wildcard slots,
+  so one refused card strands nothing. A card the game accepted but that was gone again the next
+  turn is not set a third time in the same slot (Run 5 set one pair 81 times, a game call each).
+  Slots of a fixed type are filled before wildcard slots,
   so a wildcard slot can't take the card a fixed slot needed. A card in a slot is never swapped.
 - Governors: every point is spent, appointing a new governor first and promoting after. A new
   governor is placed in the best free city for its role. A placed governor never moves, because
@@ -23,6 +25,7 @@ later, so the slots would still look like the old ones. They are filled on the n
 
 import logging
 import math
+from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, fields
 from typing import Any, Protocol
@@ -35,6 +38,8 @@ log = logging.getLogger(__name__)
 
 MAX_GOVERNMENT_REFUSALS = 3  # Refusals other than locked, per turn. Locked ones don't count.
 MAX_CARDS_PER_SLOT = 4  # Cards tried per slot before leaving it until next turn.
+MAX_SETS_PER_PAIR = 2  # Times one card is set in one slot before it is left alone as not sticking.
+MAX_ASSIGNS_PER_PAIR = 2  # Times one governor is sent to one city before it is left alone.
 MAX_GOVERNOR_ACTIONS = 8  # Appointments and promotions per turn. Each one spends a point.
 MAX_OPTIONS_PER_POINT = 6  # Governors or promotions tried for one point.
 MAX_CITIES_PER_GOVERNOR = 3  # Cities tried for one governor.
@@ -198,8 +203,16 @@ def _policies_set(result: str) -> bool:
     return action_succeeded(result) and "POLICIES_SET" in result and "SILENT_FAILURE" not in result
 
 
-async def fill_empty_slots(game: GovernmentGame, weights: GovernmentWeights) -> bool:
-    """Fill every empty slot it can. True if none is left empty."""
+async def fill_empty_slots(
+    game: GovernmentGame, weights: GovernmentWeights, sets: Counter[tuple[int, str]] | None = None
+) -> bool:
+    """Fill every empty slot it can. True if none is left empty.
+
+    `sets` counts how often each (slot, card) pair was set. A slot that is empty again on a later
+    turn after its card was accepted is a card that doesn't stick, so a pair already set
+    `MAX_SETS_PER_PAIR` times is skipped in favour of the next card. A new government clears it.
+    """
+    counts = sets if sets is not None else Counter()
     government = await read_government(game)
     if government.government == _NO_GOVERNMENT and not government.policy_slots:
         log.warning("No government read, so no policy slots to fill")
@@ -210,9 +223,15 @@ async def fill_empty_slots(game: GovernmentGame, weights: GovernmentWeights) -> 
     empty = sorted(government.empty_policy_slots, key=lambda s: (s.slot_type == _WILDCARD, s.index))
     filled = 0
     for slot in empty:
-        for card in rank_cards(slot, spare, weights)[:MAX_CARDS_PER_SLOT]:
+        ranked = rank_cards(slot, spare, weights)
+        fresh = [c for c in ranked if counts[(slot.index, c.policy_type)] < MAX_SETS_PER_PAIR]
+        if ranked and not fresh:
+            filled += 1  # Every fitting card was set enough; more calls would repeat them. This
+            continue  # also keeps the blocker fallback, which ignores the counts, from running.
+        for card in fresh[:MAX_CARDS_PER_SLOT]:
             result = await game.set_policies({slot.index: card.policy_type})
             if _policies_set(result):
+                counts[(slot.index, card.policy_type)] += 1
                 log.info("Slot %s takes %s", slot.index, card.policy_type)
                 spare.remove(card)
                 filled += 1
@@ -306,19 +325,38 @@ async def _spend_one(
     return None
 
 
-async def place_governors(game: GovernmentGame, weights: GovernmentWeights) -> bool:
-    """Send each governor without a city to the best free one. True if none is left waiting."""
+async def place_governors(
+    game: GovernmentGame,
+    weights: GovernmentWeights,
+    assigns: Counter[tuple[str, int]] | None = None,
+) -> bool:
+    """Send each governor without a city to the best free one. True if none is left waiting.
+
+    With no free city there is nothing to do until a city is founded, so that is not a failure
+    (Run 5 warned about it every turn, 230 times). `assigns` counts each (governor, city) send; a
+    pair already sent `MAX_ASSIGNS_PER_PAIR` times that still reads as waiting is left alone.
+    """
+    counts = assigns if assigns is not None else Counter()
     government = await read_government(game)
     waiting = [g.governor_type for g in government.governors if g.city_id is None]
     if not waiting:
         return True
     taken = {g.city_id for g in government.governors if g.city_id is not None}
     free = [city for city in await read_cities(game) if city.city_id not in taken]
+    if not free:
+        log.debug("%d governor(s) waiting and no free city", len(waiting))
+        return True
     placed = 0
     for governor_type in _by_priority(tuple(waiting), weights):
-        for city in rank_cities(free, governor_type, weights)[:MAX_CITIES_PER_GOVERNOR]:
+        options = [c for c in rank_cities(free, governor_type, weights)]
+        options = [c for c in options if counts[(governor_type, c.city_id)] < MAX_ASSIGNS_PER_PAIR]
+        if not options:
+            placed += 1  # Every city was tried enough; more calls would repeat them.
+            continue
+        for city in options[:MAX_CITIES_PER_GOVERNOR]:
             result = await game.assign_governor(governor_type, city.city_id)
             if _took(result, "ASSIGNED"):
+                counts[(governor_type, city.city_id)] += 1
                 log.info("%s goes to %s", governor_type, city.name)
                 free.remove(city)
                 placed += 1
@@ -343,6 +381,8 @@ class GovernmentPolicy:
         self._locked_at: dict[str, int] = {}
         # Governors whose appointment the game accepted without spending the point.
         self._unappointable: set[str] = set()
+        self._card_sets: Counter[tuple[int, str]] = Counter()
+        self._governor_assigns: Counter[tuple[str, int]] = Counter()
 
     async def change_government(self, game: GovernmentGame) -> bool:
         """Move up one government if a better one is unlocked. True if the game accepted a change.
@@ -372,6 +412,7 @@ class GovernmentPolicy:
                 self._changes += 1
                 self._last_change_turn = turn
                 self._locked_at.clear()
+                self._card_sets.clear()  # A new government is a fresh set of slots.
                 return True
             if "GOV_LOCKED" in result or "GOV_NOT_FOUND" in result:
                 self._locked_at[candidate] = civics  # Free: it's remembered, so tried once.
@@ -386,12 +427,15 @@ class GovernmentPolicy:
         failures: list[str] = []
         changed = False
         steps: list[tuple[str, Callable[[], Awaitable[bool]]]] = [
-            ("policy cards", lambda: fill_empty_slots(game, self.weights)),
+            ("policy cards", lambda: fill_empty_slots(game, self.weights, self._card_sets)),
             (
                 "governor points",
                 lambda: spend_governor_points(game, self.weights, self._unappointable),
             ),
-            ("governor placement", lambda: place_governors(game, self.weights)),
+            (
+                "governor placement",
+                lambda: place_governors(game, self.weights, self._governor_assigns),
+            ),
         ]
         try:
             changed = await self.change_government(game)
@@ -418,13 +462,13 @@ class GovernmentPolicy:
         """Policies for `BlockerResolver`. Use the same instance as the turn handler."""
 
         async def fill(game: Any, blocker: Blocker) -> bool:
-            return await fill_empty_slots(game, self.weights)
+            return await fill_empty_slots(game, self.weights, self._card_sets)
 
         async def appoint(game: Any, blocker: Blocker) -> bool:
             return await spend_governor_points(game, self.weights, self._unappointable)
 
         async def idle(game: Any, blocker: Blocker) -> bool:
-            return await place_governors(game, self.weights)
+            return await place_governors(game, self.weights, self._governor_assigns)
 
         async def consider(game: Any, blocker: Blocker) -> bool:
             await self.change_government(game)

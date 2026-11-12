@@ -91,6 +91,18 @@ Issue 2.2. `src/civ6_ai/strategy/tasks.py` turns the strategist's intentions int
 - Loading an earlier save leaves tasks as they are, because their deadlines are turn numbers in the run. Re-plan by cancelling and adding.
 - `build_orchestrator(task_db=path)` adds the handler. With no path there are no tasks.
 
+## Special districts
+
+Issue 1.29. `src/civ6_ai/policies/districts.py` replaces the fixed `_UNWANTED_DISTRICTS` list (Spaceport, Aerodrome, Dam, Canal, Stadium), which had no recorded reason. `wants_district` decides per city from what production already reads (city, turn, districts any city has built) and the policy document's victory target, which `resolve` now puts in `ProductionWeights.victory`. No new game calls.
+
+- Spaceport: needed for the space race projects, one per empire. Wanted at once for a `science` victory. With `any` it waits until turn 200 (`LATE_TURN`), so early production goes elsewhere. Never for other targets, and never when any city already has one.
+- Aerodrome: only air units need it. Wanted for a `domination` victory.
+- Dam: housing for a river city. Wanted when housing is within 1 of population and the city is size 4 or more. The game offers it only where the geography allows.
+- Canal: same housing test, and not before turn 80, since it pays back slowly.
+- Stadium: wanted for a `culture` victory in a city of size 4 or more after turn 80. Net amenities are not read (the overview gives provided plus needed), so a shortage alone does not ask for one.
+- A wanted district is scored at a flat value (3 to 4), or 10 when the victory target asks for it, so a science game puts a Spaceport ahead of ordinary districts. An unwanted one is dropped as before.
+- Other districts keep their yield-table scoring. The `DISTRICT_GOVERNMENT` name mismatch stays with issue 138.
+
 ## Dependencies
 
 - [civ6-mcp](https://github.com/lmwilki/civ6-mcp) (MIT) is pinned to commit `dd2019056371b92ea4854e879ddf05a8cad95e8a` (v1.1.11), then vendored under `third_party/` in Phase 6, because a GitHub fork of a public repo can't be private.

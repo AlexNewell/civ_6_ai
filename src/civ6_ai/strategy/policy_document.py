@@ -318,7 +318,9 @@ def resolve(document: PolicyDocument) -> ResolvedPolicies:
             if target is None:
                 target = weights.target_cities + _POSTURE_CITY_DELTA[document.posture]
             weights = replace(
-                weights, target_cities=max(MIN_TARGET_CITIES, min(MAX_TARGET_CITIES, target))
+                weights,
+                target_cities=max(MIN_TARGET_CITIES, min(MAX_TARGET_CITIES, target)),
+                victory=document.victory.value,  # Decides which special districts are wanted.
             )
         if domain in overrides:
             weights = replace(weights, **overrides[domain])

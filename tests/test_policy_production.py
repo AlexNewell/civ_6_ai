@@ -825,3 +825,80 @@ def test_an_advisor_read_error_is_not_remembered_as_a_refusal():
     for _ in range(3):
         run(policy.assign(game))
     assert policy.refusals._entries == {}
+
+
+# Special districts: each is wanted in a situation that needs it and skipped in one that doesn't.
+def _districts_kept(name, c=None, ctx=None, victory="any"):
+    from civ6_ai.policies.production import ProductionWeights
+
+    menu = [option("DISTRICT", f"DISTRICT_{name}", 6)]
+    kept, _ = drop_dominated(
+        menu,
+        c or city(),
+        ctx or ProductionContext(turn=100, num_cities=4),
+        ProductionWeights(victory=victory),
+    )
+    return bool(kept)
+
+
+def _capped():
+    return city(population=6, housing=6.0)
+
+
+def test_spaceport_wanted_for_science_even_early_and_skipped_with_no_aim():
+    early = ProductionContext(turn=60, num_cities=4)
+    assert _districts_kept("SPACEPORT", ctx=early, victory="science")
+    assert not _districts_kept("SPACEPORT", ctx=early, victory="any")
+    assert not _districts_kept("SPACEPORT", victory="culture")
+
+
+def test_spaceport_with_no_aim_waits_for_the_late_game_and_is_built_once():
+    late = ProductionContext(turn=250, num_cities=4)
+    assert _districts_kept("SPACEPORT", ctx=late, victory="any")
+    held = ProductionContext(turn=250, num_cities=4, districts=frozenset({"SPACEPORT"}))
+    assert not _districts_kept("SPACEPORT", ctx=held, victory="science")
+
+
+def test_aerodrome_wanted_only_for_domination():
+    assert _districts_kept("AERODROME", victory="domination")
+    assert not _districts_kept("AERODROME", victory="any")
+    assert not _districts_kept("AERODROME", victory="science")
+
+
+def test_dam_wanted_when_housing_caps_a_grown_city():
+    assert _districts_kept("DAM", c=_capped())
+    assert not _districts_kept("DAM", c=city(population=6, housing=12.0))
+    assert not _districts_kept("DAM", c=city(population=2, housing=2.0))
+
+
+def test_canal_wanted_in_a_capped_city_but_not_early():
+    assert _districts_kept("CANAL", c=_capped())
+    assert not _districts_kept("CANAL", c=_capped(), ctx=ProductionContext(turn=30, num_cities=2))
+    assert not _districts_kept("CANAL", c=city(population=6, housing=12.0))
+
+
+def test_stadium_wanted_for_culture_in_an_established_city():
+    assert _districts_kept("STADIUM", c=city(population=6), victory="culture")
+    assert not _districts_kept("STADIUM", c=city(population=6), victory="any")
+    assert not _districts_kept("STADIUM", c=city(population=2), victory="culture")
+    early = ProductionContext(turn=30, num_cities=2)
+    assert not _districts_kept("STADIUM", c=city(population=6), ctx=early, victory="culture")
+
+
+def test_wanted_special_district_scores_above_unknown_and_planned_above_base():
+    from civ6_ai.policies.production import ProductionWeights
+
+    spaceport = option("DISTRICT", "DISTRICT_SPACEPORT", 6)
+    ctx = ProductionContext(turn=100, num_cities=4)
+    planned = score(spaceport, city(), ctx, ProductionWeights(victory="science"))
+    base = score(spaceport, city(), ctx, ProductionWeights())
+    assert planned > base > 0
+
+
+def test_context_collects_the_districts_every_city_built():
+    from civ6_ai.state.models import District
+
+    built = city(population=5)
+    built = replace(built, districts=(District("DISTRICT_SPACEPORT", 1, 1),))
+    empire = run(read_empire(fx.FakeGame()))
+    assert "SPACEPORT" in build_context(empire, [], (), [built]).districts

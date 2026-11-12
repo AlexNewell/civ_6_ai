@@ -17,6 +17,7 @@ from dataclasses import dataclass, fields, replace
 from typing import Any, Protocol
 
 from civ6_ai.blockers import Blocker, BlockerGame, BlockerType
+from civ6_ai.policies.districts import BASE_VALUE, PLANNED_VALUE, is_planned, wants_district
 from civ6_ai.policies.game_data import COMBAT_UNITS, REPLACES, UPGRADES, WONDERS
 from civ6_ai.state import City, Empire, ProductionChoice, Unit
 from civ6_ai.state import read_cities as _read_cities
@@ -62,11 +63,14 @@ class ProductionWeights:
     trade: float = 1.0  # Traders, while the empire has route capacity no trader fills.
     wonders: float = 0.5
     target_cities: int = 6  # Stop building settlers at this many cities.
+    victory: str = "any"  # The policy document's victory target. Decides the special districts.
     army_per_city: float = 1.5  # Combat units wanted per city before military stops scoring.
 
     def __post_init__(self) -> None:
         for item in fields(self):
             value = getattr(self, item.name)
+            if isinstance(value, str):
+                continue
             if value < 0 or not math.isfinite(value):
                 raise ValueError(f"Weight {item.name} must be a finite number of at least 0")
 
@@ -83,6 +87,7 @@ class ProductionContext:
     army: int = 0
     traders: int = 0  # Traders that exist, on a route or not, plus those being built.
     trade_capacity: int = 0  # Routes the empire can run at once.
+    districts: frozenset[str] = frozenset()  # Short names of districts any city has built.
 
     def after_choosing(self, item: str, unknown_combat: bool = False) -> "ProductionContext":
         """Count a pick, so two cities don't both build the one builder the empire needs."""
@@ -112,11 +117,17 @@ def _counted_as(item: str) -> tuple[str, ...]:
 
 
 def build_context(
-    empire: Empire, units: Iterable[Unit], in_progress: Iterable[str] = ()
+    empire: Empire,
+    units: Iterable[Unit],
+    in_progress: Iterable[str] = (),
+    cities: Iterable[City] = (),
 ) -> ProductionContext:
     """Count what exists plus what cities are already building, so picks don't double up."""
     ctx = ProductionContext(
-        turn=empire.turn, num_cities=empire.num_cities, trade_capacity=empire.trade_capacity
+        turn=empire.turn,
+        num_cities=empire.num_cities,
+        trade_capacity=empire.trade_capacity,
+        districts=frozenset(_short(d.district_type) for c in cities for d in c.districts),
     )
     for unit in units:
         ctx = ctx.after_choosing(
@@ -218,7 +229,6 @@ _DISTRICT_YIELDS: dict[str, tuple[float, float, float, float, float, float]] = {
     "GOVERNMENT_PLAZA": (0, 0, 3.0, 3.0, 3.0, 0),
     "DIPLOMATIC_QUARTER": (0, 0, 3.0, 3.0, 3.0, 0),
 }
-_UNWANTED_DISTRICTS = frozenset({"SPACEPORT", "AERODROME", "DAM", "CANAL", "STADIUM"})
 _WEIGHT_ORDER = ("food", "production", "gold", "science", "culture", "faith")
 
 _SETTLER_MIN_POP = 2
@@ -238,13 +248,19 @@ def _yield_value(profile: tuple[float, ...], weights: ProductionWeights) -> floa
 
 
 def drop_dominated(
-    options: Iterable[ProductionChoice], city: City
+    options: Iterable[ProductionChoice],
+    city: City,
+    context: ProductionContext | None = None,
+    weights: ProductionWeights | None = None,
 ) -> tuple[list[ProductionChoice], list[ProductionChoice]]:
     """Split options into those worth ranking and those that are never worth building.
 
     Dominated means another offered option does the same job better, or the city already has it.
-    Repairs are kept apart because they have their own coordinates. Returns (choices, repairs).
+    Special districts are kept only when `wants_district` says so. Repairs are kept apart because
+    they have their own coordinates. Returns (choices, repairs).
     """
+    context = context or ProductionContext(turn=0, num_cities=1)
+    victory = (weights or ProductionWeights()).victory
     offered = {o.item for o in options if not o.is_repair}
     built = {_short(b) for b in city.buildings}
     districts = {_short(d.district_type) for d in city.districts}
@@ -263,7 +279,17 @@ def drop_dominated(
         name = _short(option.item)
         if option.category == "BUILDING" and name in built:
             continue
-        if option.category == "DISTRICT" and (name in districts or name in _UNWANTED_DISTRICTS):
+        if option.category == "DISTRICT" and (
+            name in districts
+            or not wants_district(
+                name,
+                victory=victory,
+                turn=context.turn,
+                pop=city.pop,
+                housing=city.housing,
+                empire_districts=context.districts,
+            )
+        ):
             continue
         if option.category == "UNIT":
             if any(better in offered for better in _upgrades_of(option.item)):
@@ -370,7 +396,10 @@ def _building_score(
 
 
 def _district_score(option: ProductionChoice, city: City, w: ProductionWeights) -> float:
-    profile = _DISTRICT_YIELDS.get(_short(option.item))
+    name = _short(option.item)
+    if name in BASE_VALUE:  # It passed `wants_district`, so it is worth building.
+        return PLANNED_VALUE if is_planned(name, w.victory) else BASE_VALUE[name]
+    profile = _DISTRICT_YIELDS.get(name)
     if profile is None:
         return _UNKNOWN_BUILDING * 2.0
     value = _yield_value(profile, w)
@@ -412,7 +441,7 @@ def rank_production(
     input gives the same list.
     """
     weights = weights or ProductionWeights()
-    keep, repairs = drop_dominated(list(options), city)
+    keep, repairs = drop_dominated(list(options), city, context, weights)
     ranked = sorted(
         [*repairs, *keep],
         key=lambda o: (-score(o, city, context, weights), o.category, o.item, o.repair_x or 0),
@@ -583,13 +612,13 @@ class CityProductionPolicy:
         # building, and a refused switch leaves it building, so the count below stays true.
         for city in sorted(switching, key=lambda c: c.city_id):
             options = await _read_production(game, city.city_id)
-            context = build_context(empire, units, building.values())
+            context = build_context(empire, units, building.values(), cities)
             picked = await choose_for_city(
                 game, city, options, context, self.weights, only_defence=True, memory=self.refusals
             )
             if picked is not None:
                 building[city.city_id] = picked.item
-        context = build_context(empire, units, building.values())
+        context = build_context(empire, units, building.values(), cities)
         unfinished = []
         for city in sorted(idle, key=lambda c: (not c.is_threatened, c.city_id)):
             options = await _read_production(game, city.city_id)

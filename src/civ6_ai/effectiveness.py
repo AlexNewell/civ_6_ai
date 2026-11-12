@@ -353,6 +353,8 @@ def faith_checks(run: RunLogs) -> list[Check]:
     )
     # A refused buy is still a call, but only a success is logged as bought: bound by that.
     turns_spent = min(spending_turns, bought) if run.has_calls else bought
+    if not idle and not bought and not spending_turns:
+        return [_no_data("faith", "held vs spent", "see rule", "no faith lines in this log")]
     worst = max(idle, default=0)
     return [
         _ratio_check(

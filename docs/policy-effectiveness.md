@@ -55,8 +55,8 @@ Each cell is the measure's figure; F means the check failed. For ratio checks th
 | Most great people waiting at once | no data | no data | 21 F | 21 F |
 | Activations refused by the game | 0 | 0 | 0 | 79 F |
 | Turns held by an unhandled blocker | 66 F | 48 F | 57 F | 12 F |
-| Faith: turns spent vs idle | no data | 5 of 258 F | 5 of 195 F | 4 of 53 F |
-| Faith: most idle above reserve | 0 | 919 F | 360 F | 1101 F |
+| Faith: turns spent vs idle | no data | 5 of 258 F | 5 of 195 F | 2 of 51 F |
+| Faith: most idle above reserve | no data | 919 F | 360 F | 1101 F |
 | Gold: turns above reserve, nothing bought | no data | 194 of 252 F | 138 of 181 F | 39 of 46 F |
 | Upgrade logged as refused when it succeeded | 0 | 21 F | 11 F | 7 F |
 | Production choices refused | 971 of 1127 F | 491 of 693 F | 629 of 799 F | 260 of 305 F |

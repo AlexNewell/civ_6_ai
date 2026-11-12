@@ -359,3 +359,10 @@ def test_refused_prophet_activations_are_not_counted_as_used():
     check = by_name(run)[("great people", "seen vs activated")]
     assert (check.created, check.used) == (5, 0)
     assert check.status == FAIL
+
+
+def test_a_log_with_no_faith_lines_is_no_data_for_faith():
+    run = RunLogs(
+        records=[turn(1)], bot=[bot("gold", "Gold 5, reserve 3, 2 to spend")], has_bot_log=True
+    )
+    assert by_name(run)[("faith", "held vs spent")].status == NO_DATA

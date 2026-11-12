@@ -19,7 +19,7 @@ Issues are generated from [`.github/roadmap-issues.yaml`](.github/roadmap-issues
 |---|---|
 | Phase 0: Repo Setup | 🟩 Done |
 | Workstream "T": Game <ins>Toolchain</ins> | 🟩 Done. G0 passed. |
-| Phase 1: Deterministic Bot | 🟨 In progress: 3 of 34 done, 30 in progress, 1 in backlog. Runs 3 to 6 played full games to the end, but each needed a restart or hands-on help, so G1 has no unattended game yet. [Details](#phase-1-deterministic-bot). |
+| Phase 1: Deterministic Bot | 🟨 In progress: 4 of 34 done, 29 in progress, 1 in backlog. Runs 3 to 6 played full games to the end, but each needed a restart or hands-on help, so G1 has no unattended game yet. [Details](#phase-1-deterministic-bot). |
 | Workstream "E": <ins>Evaluator</ins> and Data | 🟨 In progress: 3 of 5 done. |
 | Workstream "S": Puppeteering <ins>Spike</ins> | 🟨 In progress: 1 of 6 done. |
 | Phase 2: Strategist | 🟥 Blocked: waits on G1. 2 of 6 done ahead of the gate (2.1 and 2.2, built offline). |
@@ -136,8 +136,8 @@ flowchart TD
     classDef progress fill:#fff0b3,stroke:#9a6700,color:#3d2a00
     classDef blocked fill:#ffd1cc,stroke:#cf222e,color:#4a0a0a
     classDef backlog fill:#eaeef2,stroke:#57606a,color:#1f2328
-    class P11,P13,P14 done
-    class P12,P15,P16,P17,P18,P19,P110,P111,P112,P113,P114,P115,P116,P117,P118,P119,P120,P121,P122,P123,P124,P125,P126,P127,P129,P130,P131,P132,P133,P134 progress
+    class P11,P13,P14,P130 done
+    class P12,P15,P16,P17,P18,P19,P110,P111,P112,P113,P114,P115,P116,P117,P118,P119,P120,P121,P122,P123,P124,P125,P126,P127,P129,P131,P132,P133,P134 progress
     class P128 backlog
 ```
 
@@ -163,20 +163,20 @@ flowchart TD
 | [`1.18`](https://github.com/AlexNewell/civ_6_ai/issues/112) | Cut civ6-mcp's per-call wait | 🟨 In progress | PR 116 shortened the waits: Run 6 decision mean 11.1 s. The remaining wait and its live check are open. |
 | [`1.19`](https://github.com/AlexNewell/civ_6_ai/issues/137) | Handle the claim-great-person blocker | 🟨 In progress | PR 144 merged with unit tests. Not checked live. |
 | [`1.20`](https://github.com/AlexNewell/civ_6_ai/issues/138) | Production refusal memory | 🟨 In progress | PR 143 merged with unit tests. Not checked live. |
-| [`1.21`](https://github.com/AlexNewell/civ_6_ai/issues/139) | Stop re-setting policy cards; finish governor placement | 🟨 In progress |  |
-| [`1.22`](https://github.com/AlexNewell/civ_6_ai/issues/140) | Wire policy_effectiveness into the run summary | 🟨 In progress |  |
-| [`1.23`](https://github.com/AlexNewell/civ_6_ai/issues/141) | Log activation success, wasted great people and envoy tokens | 🟨 In progress |  |
-| [`1.24`](https://github.com/AlexNewell/civ_6_ai/issues/142) | Builder, faith and military refusals | 🟨 In progress |  |
-| [`1.25`](https://github.com/AlexNewell/civ_6_ai/issues/145) | Handle the World Congress results blocker | 🟨 In progress |  |
-| [`1.26`](https://github.com/AlexNewell/civ_6_ai/issues/146) | Faith: treat an unreachable great-person cost as not buyable | 🟨 In progress |  |
-| [`1.27`](https://github.com/AlexNewell/civ_6_ai/issues/147) | Why were cities lost? (research) | 🟨 In progress |  |
+| [`1.21`](https://github.com/AlexNewell/civ_6_ai/issues/139) | Stop re-setting policy cards; finish governor placement | 🟨 In progress | PR 164 merged with unit tests: each card is set at most twice per government. Not checked live. Unknown: why a card the game accepted reads empty the next turn. |
+| [`1.22`](https://github.com/AlexNewell/civ_6_ai/issues/140) | Wire policy_effectiveness into the run summary | 🟨 In progress | PR 160 merged: the run summary prints the G1 gate checks and warnings. Not checked live. |
+| [`1.23`](https://github.com/AlexNewell/civ_6_ai/issues/141) | Log activation success, wasted great people and envoy tokens | 🟨 In progress | PR 170 merged: great-person, gold-spent and envoy-token lines feed the checks. Not checked live. |
+| [`1.24`](https://github.com/AlexNewell/civ_6_ai/issues/142) | Builder, faith and military refusals | 🟨 In progress | PR 163 merged (builder, military, activation, upgrades) and PR 159 (faith). Not checked live. Missionary purchases wait on a religion-spreading policy. |
+| [`1.25`](https://github.com/AlexNewell/civ_6_ai/issues/145) | Handle the World Congress results blocker | 🟨 In progress | PR 169 merged with unit tests. Not checked live. |
+| [`1.26`](https://github.com/AlexNewell/civ_6_ai/issues/146) | Faith: treat an unreachable great-person cost as not buyable | 🟨 In progress | PR 159 merged with unit tests. Not checked live. |
+| [`1.27`](https://github.com/AlexNewell/civ_6_ai/issues/147) | Why were cities lost? (research) | 🟨 In progress | PR 167 merged: [`docs/research/cities-lost.md`](docs/research/cities-lost.md). 11 of 15 losses were captures within 10 turns of an AI's war, and 4 were loyalty losses. |
 | [`1.28`](https://github.com/AlexNewell/civ_6_ai/issues/148) | Live-check checklist for the next run | ⬜ Backlog | Needs the next full game. |
-| [`1.29`](https://github.com/AlexNewell/civ_6_ai/issues/149) | Replace the hard-coded unwanted-district list with a planned policy | 🟨 In progress |  |
-| [`1.30`](https://github.com/AlexNewell/civ_6_ai/issues/150) | Docs: record Runs 5 and 6, fix run labels, add 1.19 to 1.29 to the roadmap | 🟨 In progress |  |
-| [`1.31`](https://github.com/AlexNewell/civ_6_ai/issues/151) | Review the pinned civ6-mcp: our patches, upstream fixes and the noise we see | 🟨 In progress |  |
-| [`1.32`](https://github.com/AlexNewell/civ_6_ai/issues/152) | Preflight check in run_game.py for dependencies and screenshots | 🟨 In progress |  |
-| [`1.33`](https://github.com/AlexNewell/civ_6_ai/issues/153) | Strength review: where we trailed Germany on score in Run 6 | 🟨 In progress |  |
-| [`1.34`](https://github.com/AlexNewell/civ_6_ai/issues/156) | Construction event log and a build tracker that spots gaps | 🟨 In progress |  |
+| [`1.29`](https://github.com/AlexNewell/civ_6_ai/issues/149) | Replace the hard-coded unwanted-district list with a planned policy | 🟨 In progress | PR 166 merged: `policies/districts.py` decides each special district per city. Not checked live. |
+| [`1.30`](https://github.com/AlexNewell/civ_6_ai/issues/150) | Docs: record Runs 5 and 6, fix run labels, add 1.19 to 1.29 to the roadmap | 🟩 Done | PRs 157 and 158 merged (Run 5 and 6 write-ups, run labels), and this roadmap update. |
+| [`1.31`](https://github.com/AlexNewell/civ_6_ai/issues/151) | Review the pinned civ6-mcp: our patches, upstream fixes and the noise we see | 🟨 In progress | PR 165 merged: a patch table in [`docs/decisions.md`](docs/decisions.md) and a fix for the victory-check decimal. The pin is upstream's latest commit, so there's no bump to make. |
+| [`1.32`](https://github.com/AlexNewell/civ_6_ai/issues/152) | Preflight check in run_game.py for dependencies and screenshots | 🟨 In progress | PR 161 merged with unit tests. Not checked live. |
+| [`1.33`](https://github.com/AlexNewell/civ_6_ai/issues/153) | Strength review: where we trailed Germany on score in Run 6 | 🟨 In progress | PR 162 merged: [`docs/research/strength-run6.md`](docs/research/strength-run6.md). Open: no log records rival scores, so the gap to the leader can't be measured yet. |
+| [`1.34`](https://github.com/AlexNewell/civ_6_ai/issues/156) | Construction event log and a build tracker that spots gaps | 🟨 In progress | Part 1 merged (PR 168: construction events). Part 2, the gap tracker, is underway. |
 
 ## Workstream "E": <ins>Evaluator</ins> and Data
 

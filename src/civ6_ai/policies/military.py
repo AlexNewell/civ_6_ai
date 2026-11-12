@@ -496,6 +496,22 @@ class MilitaryPolicy:
             city, self.settings
         )
 
+    def _held(self, t: _Turn, where: tuple[int, int], unit: Unit) -> bool:
+        """True if another land military unit already stands on the tile.
+
+        The game refuses a second one (`STACKING_CONFLICT`: same formation class), so the move
+        is not sent. Units that left the tile this turn are no longer counted.
+        """
+        if t.at_city.get(where, 0) > 0:
+            return True
+        return any(
+            u.unit_id != unit.unit_id
+            and u.unit_id in t.reserved
+            and (u.x, u.y) == where
+            and is_land_military(u)
+            for u in t.units
+        )
+
     def _leave(self, t: _Turn, unit: Unit) -> None:
         if (unit.x, unit.y) in t.at_city:
             t.at_city[unit.x, unit.y] -= 1
@@ -834,6 +850,11 @@ class MilitaryPolicy:
         kind = "move"
         if not self._available(t, unit, kind):
             return False
+        if self._held(t, where, unit):
+            # The city tile already holds a unit of this class: skip the refused move.
+            self._refuse(t, unit, kind)
+            await self._fallback(game, t, unit, city, action)
+            return False
         result = await self._order(t, unit, kind, game.move_unit(unit.unit_index, *where))
         if result is not None and move_succeeded(result):
             t.acted.add(unit.unit_id)
@@ -919,6 +940,8 @@ class MilitaryPolicy:
             if not city.is_threatened:
                 continue
             while t.at_city.get((city.x, city.y), 0) < garrison_required(city, s):
+                if t.at_city.get((city.x, city.y), 0) > 0:
+                    break  # One land unit per tile: the game refuses a second to stack.
                 candidates = [
                     (hex_distance(u.x, u.y, city.x, city.y, s.map_width), u.unit_id, u)
                     for u in t.mine

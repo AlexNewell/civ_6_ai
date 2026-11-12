@@ -478,6 +478,15 @@ class SecondaryPolicy:
             key=lambda c: (not c.can_activate, c.distance, -c.city_yield, c.city_id),
         )
         target = cities[0]
+        if target.distance == 0 and not target.can_activate:
+            # Standing in the district, but the game says it can't be used yet (an engineer needs
+            # a wonder under construction, an artist an empty great work slot). Calling anyway
+            # is refused as CANNOT_ACTIVATE every turn.
+            log.info(
+                "%s is at %s but can't activate yet, asking later", unit.name, target.city_name
+            )
+            state.skip_until = turn + NO_DISTRICT_WAIT
+            return
         if target.distance == 0:
             result = await game.activate_great_person(unit.unit_index)
             if "GP_ACTIVATED" in result:

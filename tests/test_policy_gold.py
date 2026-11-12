@@ -298,3 +298,16 @@ def test_a_turn_with_gold_to_spend_still_reads_the_full_empire():
     game = GoldGame(gold_amount=reserve_for(2, 5.0) + 100)
     run(game)
     assert {"get_policies", "get_governors", "get_trade_routes"} <= set(game.calls)
+
+
+def test_upgrade_reply_without_ok_prefix_is_a_success(caplog):
+    # Real reply, from the logs: the game sends `UPGRADED|UNIT_WARRIOR -> UNIT_SWORDSMAN` bare.
+    caplog.set_level(logging.INFO, logger=gold.log.name)
+    game = GoldGame(
+        replies={"upgrade": "UPGRADED|UNIT_WARRIOR -> UNIT_SWORDSMAN"},
+        units=[upgradable(1)],
+        production=[],
+    )
+    run(game)
+    assert "Upgraded UNIT_WARRIOR" in caplog.text
+    assert "refused" not in caplog.text

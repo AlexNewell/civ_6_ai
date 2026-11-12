@@ -7,6 +7,7 @@ from civ6_ai.effectiveness import (
     NO_DATA,
     PASS,
     RunLogs,
+    city_losses,
     end_of_run_lines,
     format_report,
     gate_failures,
@@ -407,6 +408,33 @@ def test_a_refused_rejection_does_not_cancel_an_accepted_deal():
         ("diplomacy", "deals offered vs accepted")
     ]
     assert (check.created, check.used) == (6, 2)
+
+
+def test_cities_lost_separates_flips_that_came_back_and_loyalty_losses():
+    events = [
+        {"kind": "city_loyalty_warning", "turn": 120, "city_id": 7},
+        {"kind": "city_lost", "turn": 125, "city_id": 7},  # a loyalty loss that came back
+        {"kind": "city_gained", "turn": 130, "city_id": 7},
+        {"kind": "city_lost", "turn": 135, "city_id": 1},  # captured, never returned
+        {"kind": "city_lost", "turn": 200, "city_id": 9},  # warned too long ago to count
+        {"kind": "city_loyalty_warning", "turn": 100, "city_id": 9},
+        {"kind": "city_gained", "turn": 50, "city_id": 1},  # before the loss, so no return
+    ]
+    summary = city_losses(events)
+    assert (summary.lost, summary.returned, summary.permanent, summary.loyalty) == (3, 1, 2, 1)
+    run = RunLogs(records=[turn(1)], events=events, has_events=True)
+    check = by_name(run)[("settling", "cities lost")]
+    assert check.created == 2 and check.status == FAIL
+    assert "1 came back" in check.note and "1 after a loyalty warning" in check.note
+
+
+def test_cities_lost_passes_when_every_loss_came_back():
+    events = [
+        {"kind": "city_lost", "turn": 5, "city_id": 3},
+        {"kind": "city_gained", "turn": 9, "city_id": 3},
+    ]
+    run = RunLogs(records=[turn(1)], events=events, has_events=True)
+    assert by_name(run)[("settling", "cities lost")].status == PASS
 
 
 def test_a_stop_that_is_not_game_over_or_the_turn_limit_fails_the_gate():

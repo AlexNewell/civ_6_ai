@@ -79,6 +79,18 @@ Issue 2.1. `src/civ6_ai/strategy/policy_document.py` defines how strategy steers
 - An invalid document is rejected whole, with every problem listed, and the weights in force stay. Partial application was ruled out because a half-applied document is hard to reason about.
 - `PolicyDocumentHandler` (`strategy/apply.py`) is a turn-loop handler that runs right after `Monitors`. It re-reads one file when its modified time or size changes. `build_orchestrator(policy_document=path)` adds it. With no path nothing changes. The blocker resolver's fallback policies keep their defaults.
 
+## Task database
+
+Issue 2.2. `src/civ6_ai/strategy/tasks.py` turns the strategist's intentions into tracked work, with no model call.
+
+- A task has a title, a priority (0 to 9, higher first), an optional deadline turn, optional dependencies and an optional target: a figure from our own overview (`cities`, `gold`, `science`, `score` and so on), `>=` or `<=`, and a value. A task with no target is finished by hand.
+- `TaskHandler` runs each turn after `Monitors` (and the policy document handler). It finishes tasks whose target is met and whose dependencies are done, and publishes one `TaskOverdue` event, once, for each open task past its deadline. An overdue task stays open and can still finish, which is then recorded as late.
+- Dependencies must exist when a task is added and can't be edited, so there are no cycles. A task with open dependents can't be cancelled, so nothing waits on work that will never finish. The deadline counts regardless of dependencies, so a late prerequisite is reported.
+- State is one JSON file, written atomically (temp file then replace) after every change, and read at start. An unreadable file is moved to `<name>.corrupt` and the database starts empty, so nothing is lost silently. The overdue flag is saved before the event is published, so an event is delivered at most once, and a crash between the two loses it.
+- The handler re-reads the file first when something else changed it, so tasks added by another `TaskDB` on the same path are kept and never overwritten. `build_orchestrator` also takes a shared `TaskDB`.
+- Loading an earlier save leaves tasks as they are, because their deadlines are turn numbers in the run. Re-plan by cancelling and adding.
+- `build_orchestrator(task_db=path)` adds the handler. With no path there are no tasks.
+
 ## Dependencies
 
 - [civ6-mcp](https://github.com/lmwilki/civ6-mcp) (MIT) is pinned to commit `dd2019056371b92ea4854e879ddf05a8cad95e8a` (v1.1.11), then vendored under `third_party/` in Phase 6, because a GitHub fork of a public repo can't be private.

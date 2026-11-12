@@ -248,3 +248,10 @@ Written against civ6-mcp's source at the pin, not yet run live.
 | 20 diplomatic points to win | Not reached. |
 | Victory monitor with no city | Refuted, then fixed (stop 1). |
 | Threat, resource and victory monitors ran without errors | Threat and resource: confirmed on turns 35 to 38. Victory: failed on turn 39 (stop 1). |
+
+### Live checks for screenshots
+
+| Check | Status |
+|---|---|
+| `capture_game_window` returns the game frame | Confirmed on a borderless 2560x1440 game at turn 1: a legible 1280-pixel JPEG of about 130 KB. Not checked in exclusive fullscreen, where `PrintWindow` may return a black frame (reported as a failed capture). |
+| A stopped run or a first handler error saves a file and names it in the turn log | Not reached live. Covered by `tests/test_screenshots.py` with a fake capture. |

@@ -146,7 +146,7 @@ flowchart TD
 | [`1.10`](https://github.com/AlexNewell/civ_6_ai/issues/14) | Government, policies and governors | 🟨 In progress | Merged and played in Run 3. |
 | [`1.11`](https://github.com/AlexNewell/civ_6_ai/issues/15) | Trade, religion and great people | 🟨 In progress | Merged and played in Run 3. Great people are not met: Run 4 turn 227 showed many left unactivated, so the criteria now require that they don't pile up. |
 | [`1.12`](https://github.com/AlexNewell/civ_6_ai/issues/16) | Basic diplomacy and World Congress rules | 🟨 In progress | Merged and played in Run 3. |
-| [`1.13`](https://github.com/AlexNewell/civ_6_ai/issues/17) | Unattended runner: watchdog, crash recovery and overnight queue | 🟨 In progress | Offline parts merged (run queue, stall watchdog, run records). Not checked live. |
+| [`1.13`](https://github.com/AlexNewell/civ_6_ai/issues/17) | Unattended runner: watchdog, crash recovery and overnight queue | 🟨 In progress | Offline parts merged (run queue, stall watchdog, run records, stop-time screenshots and a triage summary). Not checked live, except that the screenshot capture works on a loaded save. |
 | [`1.14`](https://github.com/AlexNewell/civ_6_ai/issues/87) | Spend gold: purchases and unit upgrades | 🟨 In progress | Merged with unit tests. Not checked live. |
 | [`1.15`](https://github.com/AlexNewell/civ_6_ai/issues/88) | Peace-making and war awareness | 🟨 In progress | Merged with unit tests. Not checked live. |
 | [`1.16`](https://github.com/AlexNewell/civ_6_ai/issues/89) | Propose resource trades | 🟨 In progress | Merged with unit tests. Not checked live. |

@@ -10,6 +10,8 @@ dependencies = [
     "civ6-mcp",
     # civ6-mcp closes game crash dialogs with this, and skips that silently if it's missing.
     "pywin32>=311; sys_platform == 'win32'",
+    # Screenshots of the game window for triage (src/civ6_ai/screenshots.py).
+    "pillow>=10; sys_platform == 'win32'",
 ]
 
 [tool.uv.sources]

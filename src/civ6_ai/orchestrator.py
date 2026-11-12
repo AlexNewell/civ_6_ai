@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Protocol
 
 from civ6_ai.call_timer import CallTimer
+from civ6_ai.screenshots import Screenshotter
 
 log = logging.getLogger(__name__)
 
@@ -118,8 +119,13 @@ class Orchestrator:
         turn_log: TurnLog,
         defeat_check: DefeatCheck | None = None,
         call_timer: CallTimer | None = None,
+        screenshots: Screenshotter | None = None,
     ) -> None:
         self._call_timer = call_timer
+        # The newest turn a notification has shown the game reached, for a UI that reads stale.
+        self._confirmed_turn = 0
+        self._screenshots = screenshots
+        self._shot_handlers: set[str] = set()
         self._game = game
         self._handlers = handlers
         self._log = turn_log
@@ -138,7 +144,7 @@ class Orchestrator:
             return StopReason.GAME_OVER  # The run was started on a game that's already over.
 
         started = time.perf_counter()
-        turn = await self._read_turn()
+        turn = max(await self._read_turn(), self._confirmed_turn)
         seconds, errors = await self._run_handlers()
         calls = self._call_timer.take() if self._call_timer else {}
 
@@ -162,6 +168,9 @@ class Orchestrator:
             # With no city, the game-over check can't see a defeat, so the turn just never ends.
             reason = StopReason.GAME_OVER
 
+        detail = result[:MAX_DETAIL_LENGTH]
+        if shot := await self._screenshot(turn, reason, errors):
+            detail += f" [screenshot: {shot}]"
         self._log.write(
             TurnRecord(
                 turn=turn,
@@ -171,10 +180,32 @@ class Orchestrator:
                 end_turn_seconds=end_turn_seconds,
                 total_seconds=time.perf_counter() - started,
                 stop_reason=reason,
-                detail=result[:MAX_DETAIL_LENGTH],
+                detail=detail,
             )
         )
         return reason
+
+    async def _screenshot(
+        self, turn: int, reason: StopReason | None, errors: dict[str, str]
+    ) -> str | None:
+        """Save a screenshot for triage when the run stops or a handler fails for the first time.
+
+        Returns the file name, or None. Never raises, so it can't stop a turn.
+        """
+        if self._screenshots is None:
+            return None
+        if reason is not None:
+            label, stop = reason.value, True
+        else:
+            new = [name for name in errors if name not in self._shot_handlers]
+            if not new:
+                return None
+            label, stop = f"handler-{new[0]}", False
+        path = await asyncio.to_thread(self._screenshots.take, turn, label, stop)
+        if path is not None:
+            self._shot_handlers.update(errors)
+            return path.name
+        return None
 
     async def _check_after_end_turn(self, turn_before: int) -> StopReason | None:
         """Confirm the turn advanced. Only called when the report shows the game can be read."""
@@ -198,10 +229,12 @@ class Orchestrator:
             # Run 5 stopped here on turns 248 and 264 with the game on the next turn, the second
             # time with its "Make Dedication" notification (era change) up. The notifications are
             # stamped with the turn they were raised on, so one from a later turn shows it moved.
-            if await self._notified_after(turn_before):
-                log.warning(
-                    "Turn still read %d, but the game has notifications from later", turn_before
-                )
+            # The turn it shows is remembered, so the same notification can't vouch for a later
+            # end-turn attempt that did not advance.
+            reached = await self._notified_turn_after(turn_before)
+            if reached:
+                self._confirmed_turn = reached
+                log.warning("Turn read %d, but notifications show turn %d", turn_before, reached)
                 return None
             return StopReason.BLOCKED
         except ConnectionError:
@@ -211,18 +244,19 @@ class Orchestrator:
                 return StopReason.GAME_OVER  # Reads can fail once the defeat screen is up.
             raise
 
-    async def _notified_after(self, turn: int) -> bool:
-        """True if the game lists a notification raised after `turn`."""
+    async def _notified_turn_after(self, turn: int) -> int:
+        """The newest turn a notification was raised on, if it is after `turn`, else 0."""
         get = getattr(self._game, "get_notifications", None)
         if get is None:
-            return False
+            return 0
         try:
-            return any(n.turn > turn for n in await get())
+            newest = max((n.turn for n in await get()), default=0)
         except ConnectionError:
             raise
         except Exception:
             log.exception("Reading notifications failed")
-            return False
+            return 0
+        return newest if newest > turn else 0
 
     async def _dismiss_popup(self) -> bool:
         """Clear any popup through civ6-mcp (Lua only, no clicks). True if the call was made."""

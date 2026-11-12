@@ -250,3 +250,21 @@ def test_a_notification_from_the_next_turn_shows_the_turn_moved(tmp_path):
     reason, turn_log = play(NotifiedGame(stale_reads=99), [DoNothing()], 2, tmp_path)
     assert reason is StopReason.TURN_LIMIT
     assert [record.stop_reason for record in turn_log.records] == [None, None]
+
+
+class StuckAfterNotifiedGame(NotifiedGame):
+    """The first end-turn advances. Later ones report an advance but the game stays on turn 2."""
+
+    async def end_turn(self):
+        self.ended = getattr(self, "ended", 0) + 1
+        if self.ended == 1:
+            return await super().end_turn()
+        self.calls.append("end_turn")
+        return f"Turn {self.turn} -> {self.turn + 1}"
+
+
+def test_an_old_notification_does_not_vouch_for_a_later_stuck_turn(tmp_path):
+    # Codex on PR 126: the same notification must not certify every later end-turn attempt.
+    reason, turn_log = play(StuckAfterNotifiedGame(stale_reads=99), [DoNothing()], 5, tmp_path)
+    assert reason is StopReason.BLOCKED
+    assert len(turn_log.records) == 2

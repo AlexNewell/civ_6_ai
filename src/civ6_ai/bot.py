@@ -33,8 +33,11 @@ Order within a turn:
    the same blocker type raise `ValueError` when the bot is built.
 """
 
+import asyncio
+import inspect
 import json
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from functools import partial
 from pathlib import Path
@@ -87,6 +90,41 @@ _SHARED_READS = frozenset(
 )
 _PLAIN_READS = ("get_", "list_", "check_")
 
+LOGGER = logging.getLogger(__name__)
+
+# A game read now and then returns a stray Lua log line (for instance "Omitting feature label:
+# CHOCOLATE HILLS") in place of data, and civ6-mcp's parser raises a ValueError naming it. The
+# read is fine a moment later. The noise is not one string ("Request to BulkHide( true, Diplomacy )"
+# is another), so what is retried is the shape: a field-count error whose reply has no "|"
+# delimiter at all, so it is not data. Any other error is real and goes up at once.
+_NOISE_ERROR = re.compile(r"has \d+ fields, expected [^:]*: [^|]*$", re.DOTALL)
+NOISE_RETRIES = 2
+NOISE_PAUSE_SECONDS = 0.3
+
+
+def is_log_noise(error: BaseException) -> bool:
+    """True for a parse ValueError whose only 'field' is a stray Lua log line."""
+    return isinstance(error, ValueError) and _NOISE_ERROR.search(str(error)) is not None
+
+
+async def read_retrying_noise(name: str, read: Callable[[], Awaitable[Any]]) -> Any:
+    """Make a read, asking again (up to `NOISE_RETRIES` times) only if it hit log noise."""
+    for attempt in range(NOISE_RETRIES + 1):
+        try:
+            return await read()
+        except ValueError as error:
+            if attempt == NOISE_RETRIES or not is_log_noise(error):
+                raise
+            LOGGER.warning(
+                "Read %s returned a stray log line, retrying (%d of %d): %s",
+                name,
+                attempt + 1,
+                NOISE_RETRIES,
+                error,
+            )
+            await asyncio.sleep(NOISE_PAUSE_SECONDS)
+    raise AssertionError("unreachable")
+
 
 def _is_empty(value: Any) -> bool:
     """True for a read that came back with nothing, which civ6-mcp also returns on a timeout."""
@@ -115,13 +153,22 @@ class SharedReads:
         if name in _SHARED_READS:
             return partial(self._shared, name, attribute)
         if name.startswith(_PLAIN_READS):
+            if inspect.iscoroutinefunction(attribute):
+                return self._plain(name, attribute)
             return attribute
         return partial(self._changing, attribute)
+
+    @staticmethod
+    def _plain(name: str, read: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
+        async def plain(*args: Any, **kwargs: Any) -> Any:
+            return await read_retrying_noise(name, lambda: read(*args, **kwargs))
+
+        return plain
 
     async def _shared(self, name: str, read: Callable[[], Awaitable[Any]]) -> Any:
         if name in self._kept:
             return self._kept[name]
-        value = await read()
+        value = await read_retrying_noise(name, read)  # A raised read is never kept.
         if name == "get_cities":
             # Kept only once checked against a real overview. On a mismatch either read may be the
             # short one, so both are dropped and the next ask reads them again.

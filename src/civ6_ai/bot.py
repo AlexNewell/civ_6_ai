@@ -239,7 +239,6 @@ def build_orchestrator(
     screenshots: Screenshotter | None = None,
     policy_document: Path | None = None,
     wars_state: Path | None = None,
-    task_db: Path | None = None,
     task_db: Path | TaskDB | None = None,
 ) -> Orchestrator:
     """Wire the handlers to a game. `game` is civ6-mcp's `GameState`, or a fake with its reads.
@@ -250,8 +249,6 @@ def build_orchestrator(
     policies' weights, re-read whenever it changes. With none, every policy keeps its defaults.
     `wars_state` is a file where the war tracker keeps its wars, so a restart of the same game
     keeps each war's start turn.
-    `task_db` is the strategist's task file, checked every turn (see `strategy.tasks`). Overdue
-    tasks are published on `bus`. With none, there are no tasks.
     `task_db` is the strategist's task file, or a `TaskDB` to share with the code that adds tasks.
     It is checked every turn (see `strategy.tasks`) and overdue tasks are published on `bus`. A file
     changed by another writer is re-read first. With none, there are no tasks.

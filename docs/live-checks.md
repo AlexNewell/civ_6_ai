@@ -255,3 +255,10 @@ Written against civ6-mcp's source at the pin, not yet run live.
 |---|---|
 | `capture_game_window` returns the game frame | Confirmed on a borderless 2560x1440 game at turn 1: a legible 1280-pixel JPEG of about 130 KB. Not checked in exclusive fullscreen, where `PrintWindow` may return a black frame (reported as a failed capture). |
 | A stopped run or a first handler error saves a file and names it in the turn log | Not reached live. Covered by `tests/test_screenshots.py` with a fake capture. |
+
+### Stray log lines in game reads (retry)
+
+- **What was seen live (Run STD_T1_01):** `ValueError: Overview response has 1 fields, expected >=14: Omitting feature label: CHOCOLATE HILLS` and `... Request to BulkHide( true, Diplomacy ), Show on 0 = 1`, raised by `get_game_overview` for the military, secondary and wars handlers. A Lua log line came back in place of data.
+- **Fix:** `SharedReads` (src/civ6_ai/bot.py) retries a read up to 2 times, 0.3 s apart, when it raises a `ValueError` that is a field-count error whose reply has no `|` delimiter. This covers the shared reads and every plain `get_`/`list_`/`check_` read. Each retry logs one warning ("stray log line"). Other errors are not retried, and a failed read is never kept. Calls are added only on failure.
+- **Not checked live:** whether the noise clears on a second read, and whether other parsers phrase the error differently.
+

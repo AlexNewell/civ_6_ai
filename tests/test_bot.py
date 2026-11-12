@@ -512,3 +512,106 @@ def test_a_turn_log_line_counts_each_handlers_game_calls(tmp_path):
     assert count >= 1 and seconds >= 0
     line = json.loads((tmp_path / "game.jsonl").read_text(encoding="utf-8"))
     assert line["handler_calls"]["research"]["get_tech_civics"][0] == 1
+
+
+NOISE = "Overview response has 1 fields, expected >=14: Omitting feature label: CHOCOLATE HILLS"
+NOISE_BULK_HIDE = (
+    "Overview response has 1 fields, expected >=14: Request to BulkHide( true, Diplomacy ), "
+    "Show on 0 = 1"
+)
+
+
+class NoisyGame:
+    """Raises the given errors, one per call, then answers."""
+
+    def __init__(self, errors):
+        self.errors = list(errors)
+        self.calls = 0
+
+    async def _answer(self, value):
+        self.calls += 1
+        if self.errors:
+            raise self.errors.pop(0)
+        return value
+
+    async def get_game_overview(self):
+        return await self._answer(["overview"])
+
+    async def get_notifications(self, owner=None):
+        return await self._answer(["note", owner])
+
+
+@pytest.fixture
+def no_pause(monkeypatch):
+    async def instant(_seconds):
+        return None
+
+    monkeypatch.setattr(bot.asyncio, "sleep", instant)
+
+
+def test_log_noise_is_recognised_only_in_the_real_shape():
+    assert bot.is_log_noise(ValueError(NOISE))
+    assert bot.is_log_noise(ValueError(NOISE_BULK_HIDE))
+    assert not bot.is_log_noise(ValueError("Overview response has 3 fields, expected >=14: a|b|c"))
+    assert not bot.is_log_noise(RuntimeError(NOISE))
+
+
+def test_a_shared_read_retries_log_noise_once_logged_and_keeps_the_answer(no_pause, caplog):
+    game = NoisyGame([ValueError(NOISE)])
+    shared = bot.SharedReads(game)
+
+    async def go():
+        with caplog.at_level(logging.WARNING, logger="civ6_ai.bot"):
+            assert await shared.get_game_overview() == ["overview"]
+        assert await shared.get_game_overview() == ["overview"]  # Kept after the good read.
+
+    asyncio.run(go())
+    assert game.calls == 2
+    assert sum("stray log line" in r.getMessage() for r in caplog.records) == 1
+
+
+def test_a_read_that_keeps_returning_noise_gives_up_after_two_retries_and_is_not_kept(no_pause):
+    game = NoisyGame([ValueError(NOISE)] * 3)
+    shared = bot.SharedReads(game)
+
+    async def go():
+        with pytest.raises(ValueError, match="Omitting feature label"):
+            await shared.get_game_overview()
+        assert await shared.get_game_overview() == ["overview"]
+
+    asyncio.run(go())
+    assert game.calls == 4
+
+
+def test_a_real_parse_error_is_not_retried(no_pause):
+    game = NoisyGame([ValueError("Overview response has 3 fields, expected >=14: a|b|c")])
+    shared = bot.SharedReads(game)
+
+    async def go():
+        with pytest.raises(ValueError):
+            await shared.get_game_overview()
+
+    asyncio.run(go())
+    assert game.calls == 1
+
+
+def test_plain_reads_with_arguments_also_retry_log_noise(no_pause):
+    game = NoisyGame([ValueError(NOISE)])
+    shared = bot.SharedReads(game)
+
+    async def go():
+        assert await shared.get_notifications(owner=3) == ["note", 3]
+
+    asyncio.run(go())
+    assert game.calls == 2
+
+
+def test_the_second_noise_string_is_retried_too(no_pause):
+    game = NoisyGame([ValueError(NOISE_BULK_HIDE)])
+    shared = bot.SharedReads(game)
+
+    async def go():
+        assert await shared.get_game_overview() == ["overview"]
+
+    asyncio.run(go())
+    assert game.calls == 2

@@ -46,10 +46,11 @@ from pathlib import Path
 from typing import Any
 
 from civ6_ai.blockers import BlockerResolver, ResolvingGame
+from civ6_ai.build_ledger import BuildLedger, BuildTracker, EventFlush
 from civ6_ai.call_timer import CallTimer
 from civ6_ai.construction import ConstructionWatcher
 from civ6_ai.defeat import is_defeated
-from civ6_ai.monitors import EventBus, Monitors
+from civ6_ai.monitors import EventBus, EventLog, Monitors
 from civ6_ai.orchestrator import Handler, Orchestrator, TurnLog
 from civ6_ai.policies import research
 from civ6_ai.policies.builder import BuilderPolicy
@@ -241,6 +242,8 @@ def build_orchestrator(
     policy_document: Path | None = None,
     wars_state: Path | None = None,
     task_db: Path | TaskDB | None = None,
+    ledger: BuildLedger | None = None,
+    event_log: EventLog | None = None,
 ) -> Orchestrator:
     """Wire the handlers to a game. `game` is civ6-mcp's `GameState`, or a fake with its reads.
 
@@ -253,6 +256,9 @@ def build_orchestrator(
     `task_db` is the strategist's task file, or a `TaskDB` to share with the code that adds tasks.
     It is checked every turn (see `strategy.tasks`) and overdue tasks are published on `bus`. A file
     changed by another writer is re-read first. With none, there are no tasks.
+    `ledger` is the build ledger, restored from earlier sessions' events (see `build_ledger`). It
+    is fed from `bus`, and a gap line is logged each turn. `event_log` is flushed at the end of each
+    turn, since it buffers its writes.
     """
     production = CityProductionPolicy(bus=bus)
     government = GovernmentPolicy()  # One instance, so handler and blockers share its bounds.
@@ -274,7 +280,10 @@ def build_orchestrator(
         if overlap := merged.keys() & table.keys():
             raise ValueError(f"Two policies claim the same blocker: {sorted(overlap)}")
         merged.update(table)
-    resolver = BlockerResolver(merged)
+    watcher = ConstructionWatcher(bus)
+    resolver = BlockerResolver(merged, emit=bus.publish, turn=lambda: watcher.turn)
+    ledger = ledger if ledger is not None else BuildLedger()
+    ledger.subscribe(bus)
     handlers: list[Handler] = [
         Monitors(bus),
         *(
@@ -296,7 +305,7 @@ def build_orchestrator(
             if task_db is not None
             else []
         ),
-        ConstructionWatcher(bus),
+        watcher,
         diplomacy,
         WarPolicy(state_path=wars_state),
         *([TradeOfferPolicy(diplomacy.weights)] if trade_offers else []),
@@ -309,7 +318,9 @@ def build_orchestrator(
         BuilderPolicy(),
         secondary,
         FaithPolicy(),
+        BuildTracker(ledger, victory=lambda: production.weights.victory, watcher=watcher),
         resolver,
+        *([EventFlush(event_log)] if event_log is not None else []),
     ]
     timer = CallTimer(game)  # Under SharedReads, so it times real calls and not remembered ones.
     shared = ResolvingGame(SharedReads(timer), resolver, defeat_check=partial(is_defeated, game))

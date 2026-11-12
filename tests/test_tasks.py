@@ -246,7 +246,9 @@ def test_turn_going_backwards_keeps_task_state():
 
 def test_overdue_event_round_trips_through_the_event_log(tmp_path):
     event = TaskOverdue(turn=21, task_id=1, title="Six cities", deadline=20, priority=7)
-    EventLog(tmp_path / "events.jsonl").write(event)
+    log = EventLog(tmp_path / "events.jsonl")
+    log.write(event)
+    log.flush()
     line = (tmp_path / "events.jsonl").read_text(encoding="utf-8").strip()
     assert json.loads(line)["kind"] == "task_overdue"
     assert event_from_json(line) == event

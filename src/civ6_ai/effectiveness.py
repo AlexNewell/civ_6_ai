@@ -203,11 +203,14 @@ def load_run(turn_logs: list[Path]) -> RunLogs:
                     part.bot.append((m["logger"], m["level"], m["msg"]))
         run.records += part.records
         run.bot += part.bot
+        part.has_bot_log = bot.exists()
         run.sessions.append(part)
         events = sibling(log, "_events.jsonl")
         if events.exists():
             run.has_events = True
-            run.events += _jsonl(events)
+            part.has_events = True
+            part.events = _jsonl(events)
+            run.events += part.events
         if settle.exists():
             run.has_settle = True
             run.settle += _jsonl(settle)
@@ -620,22 +623,53 @@ def gold_checks(run: RunLogs) -> list[Check]:
     return out
 
 
-def production_checks(run: RunLogs) -> list[Check]:
-    if not run.has_bot_log:
-        return [_no_data("production", "builds refused", "see rule", "needs the bot log")]
-    msgs = run.messages("policies.production")
+def _production_facts(
+    run: RunLogs,
+) -> tuple[Counter[tuple[str, str]], Counter[str], int, bool] | None:
+    """Refused builds by (city, item), the reasons, accepted builds, and whether any came from the
+    structured events. A session with `production_*` events reads those, and one without (an old
+    log) falls back to the bot log's text. None if neither has anything to read."""
     refused: Counter[tuple[str, str]] = Counter()
     reasons: Counter[str] = Counter()
     ok = 0
-    for msg in msgs:
-        if m := CANT_BUILD.match(msg):
-            refused[(m["city"], m["item"])] += 1
-            reasons[m["why"].split(":")[0] if m["why"].startswith("ERR") else m["why"]] += 1
-        elif BUILDS.match(msg):
-            ok += 1
+    structured = False
+    readable = False
+    for part in run.sessions or [run]:
+        kinds = ("production_set", "production_refused")
+        facts = [e for e in part.events if e.get("kind") in kinds]
+        if facts:
+            structured = readable = True
+            for e in facts:
+                if e["kind"] == "production_set":
+                    ok += 1
+                else:
+                    refused[(e.get("city_name", ""), e.get("item", ""))] += 1
+                    reply = str(e.get("reply", ""))
+                    why = re.match(r"[A-Za-z_:]+", reply)
+                    word = why.group(0) if why else reply[:30]
+                    reasons[word.split(":")[0] if word.startswith("ERR") else word] += 1
+        elif part.has_bot_log:
+            readable = True
+            for msg in part.messages("policies.production"):
+                if m := CANT_BUILD.match(msg):
+                    refused[(m["city"], m["item"])] += 1
+                    why = m["why"]
+                    reasons[why.split(":")[0] if why.startswith("ERR") else why] += 1
+                elif BUILDS.match(msg):
+                    ok += 1
+    return (refused, reasons, ok, structured) if readable else None
+
+
+def production_checks(run: RunLogs) -> list[Check]:
+    facts = _production_facts(run)
+    if facts is None:
+        return [_no_data("production", "builds refused", "see rule", "needs the bot log")]
+    refused, reasons, ok, structured = facts
     total = sum(refused.values())
     worst = refused.most_common(1)[0] if refused else (("", ""), 0)
     top = ", ".join(f"{k} x{v}" for k, v in reasons.most_common(3))
+    if structured:
+        top = f"{top} (from events)" if top else "from events"
     return [
         _share_check(
             "production",

@@ -610,3 +610,63 @@ def test_the_gold_measure_is_chosen_per_session(tmp_path: Path):
     new.with_name(new.stem + "_bot.log").write_text(line, encoding="utf-8")
     check = by_name(load_run([old, new]))[("gold", "turns above reserve with nothing bought")]
     assert (check.created, check.used) == (7, 6)
+
+
+def _refused_event(city="Coba", item="DISTRICT_HARBOR", reply="ERR:NO_PLACEMENT|x: none"):
+    return {
+        "kind": "production_refused",
+        "turn": 3,
+        "city_name": city,
+        "item": item,
+        "reply": reply,
+    }
+
+
+def test_production_facts_read_the_structured_events_without_a_bot_log():
+    events = [_refused_event()] * 30
+    run = RunLogs(records=[turn(1)], events=events, has_events=True)
+    check = by_name(run)[("production", "most repeats of one refused build")]
+    assert check.status == FAIL
+    assert "Coba DISTRICT_HARBOR" in check.note
+    shares = by_name(run)[("production", "refused vs accepted choices")]
+    assert "ERR x30" in shares.note and "from events" in shares.note
+
+
+def test_production_facts_fall_back_to_text_for_a_session_with_old_events():
+    text = "Coba can't build DISTRICT_HARBOR: ERR:NO_PLACEMENT|DISTRICT_HARBOR: none"
+    old = RunLogs(
+        records=[turn(1)],
+        bot=[bot("production", text)] * 30,
+        has_bot_log=True,
+        events=[{"kind": "war_declared", "turn": 1}],
+        has_events=True,
+    )
+    new = RunLogs(records=[turn(2)], events=[_refused_event("Rome")] * 2, has_events=True)
+    run = RunLogs(
+        records=old.records + new.records,
+        bot=old.bot,
+        events=old.events + new.events,
+        has_bot_log=True,
+        has_events=True,
+        sessions=[old, new],
+    )
+    check = by_name(run)[("production", "most repeats of one refused build")]
+    assert check.created == 30  # The old session's text counts, and the new one's events.
+
+
+def test_production_facts_say_no_data_when_nothing_was_logged():
+    run = RunLogs(records=[turn(1)], events=[{"kind": "war_declared", "turn": 1}], has_events=True)
+    assert by_name(run)[("production", "builds refused")].status == NO_DATA
+
+
+def test_loaded_legacy_session_falls_back_to_its_bot_log_text(tmp_path: Path):
+    log = tmp_path / "STD_T1_01_20261111T000000Z.jsonl"
+    log.write_text(json.dumps(turn(1)) + "\n", encoding="utf-8")
+    msg = "Coba can't build DISTRICT_HARBOR: ERR:NO_PLACEMENT|DISTRICT_HARBOR: none"
+    line = f"{STAMP} civ6_ai.policies.production INFO {msg}\n"
+    log.with_name(log.stem + "_bot.log").write_text(line * 30, encoding="utf-8")
+    log.with_name(log.stem + "_events.jsonl").write_text(
+        json.dumps({"kind": "war_declared", "turn": 1}) + "\n", encoding="utf-8"
+    )
+    run = load_run([log])
+    assert by_name(run)[("production", "most repeats of one refused build")].created == 30

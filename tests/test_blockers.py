@@ -1147,3 +1147,19 @@ def test_other_unknown_blockers_are_still_unhandled():
 def test_results_lua_touches_no_votes():
     assert "WORLD_CONGRESS_SUBMIT" not in blockers._DISMISS_RESULTS_LUA
     assert BlockerType.WORLD_CONGRESS_RESULTS in blockers.DEFAULT_RESOLVERS
+
+
+def test_cheapest_production_reports_what_it_started():
+    from civ6_ai.construction import ProductionSet
+
+    game = FakeGame([BlockerType.PRODUCTION])
+    game.cities = [city(1)]
+    game.production = [option("BUILDING", "BUILDING_MONUMENT", 30)]
+    seen = []
+    resolver = BlockerResolver(emit=seen.append, turn=lambda: 42)
+
+    resolve(game, resolver)
+
+    assert len(seen) == 1 and isinstance(seen[0], ProductionSet)
+    assert (seen[0].turn, seen[0].city_id, seen[0].item) == (42, 1, "BUILDING_MONUMENT")
+    assert seen[0].category == "BUILDING"

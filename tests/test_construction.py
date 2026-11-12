@@ -133,7 +133,8 @@ def test_handler_skips_a_short_read_and_resets_after_a_reload():
 def test_events_round_trip_through_the_events_file(tmp_path):
     path = tmp_path / "game_events.jsonl"
     bus = EventBus()
-    bus.subscribe(EventLog(path).write)
+    log = EventLog(path)
+    bus.subscribe(log.write)
     sent = [
         ProductionSet(
             3,
@@ -168,6 +169,7 @@ def test_events_round_trip_through_the_events_file(tmp_path):
     assert len(sent) == len(CONSTRUCTION_EVENTS)
     for event in sent:
         bus.publish(event)
+    log.flush()
     lines = path.read_text(encoding="utf-8").splitlines()
     assert [event_from_json(line) for line in lines] == sent
 

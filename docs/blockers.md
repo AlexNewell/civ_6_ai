@@ -102,7 +102,7 @@ The function returns True once it's done. If it returns False or raises, the def
 
 ## Diplomacy statements
 
-Run 5 stopped `blocked` on turn 102 with a leader's statement open, and the same message pair ("Dismissed: LeaderScene. Also: diplomacy session active") had been held and closed on turns 58, 80 and 95. Khmer said "Your people settle too close! You should consider seeking land elsewhere." The two replies were "Apologies, I will look elsewhere in the future." (+30 Diplomatic Favor) and "My people will settle where they please!" (generates grievances). A trade deal from Khmer was pending at the same time.
+Run 6 stopped `blocked` on turn 102 with a leader's statement open, and the same message pair ("Dismissed: LeaderScene. Also: diplomacy session active") had been held and closed on turns 58, 80 and 95. Khmer said "Your people settle too close! You should consider seeking land elsewhere." The two replies were "Apologies, I will look elsewhere in the future." (+30 Diplomatic Favor) and "My people will settle where they please!" (generates grievances). A trade deal from Khmer was pending at the same time.
 
 Three causes:
 

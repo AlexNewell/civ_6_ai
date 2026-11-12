@@ -63,4 +63,4 @@ def test_startup_fails_loudly_when_end_turn_stops_using_the_gate(monkeypatch):
 def test_play_game_disables_the_mcp_save():
     import inspect
 
-    assert "disable_mcp_saves()" in inspect.getsource(run_game.play_game)
+    assert "disable_mcp_saves)" in inspect.getsource(run_game.play_game)

@@ -628,7 +628,7 @@ class ResolvingGame:
     async def dismiss_popup(self) -> str:
         """Answer open diplomacy, then dismiss popups.
 
-        The orchestrator calls this when a turn did not advance. Run 5 stopped on turn 102 there:
+        The orchestrator calls this when a turn did not advance. Run 6 stopped on turn 102 there:
         a leader's statement opened during the AI turn, `end_turn` returned an ordinary report,
         and dismissing the leader screen alone left the session open and unanswered. So any open
         session or deal is answered first, by the same rules as at the start of a turn.

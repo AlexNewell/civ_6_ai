@@ -33,6 +33,7 @@ Furthermore, wherever possible, this project will explore locally hosting miniat
 
 - [Roadmap](roadmap.md)
 - [Decisions and public-ready rules](docs/decisions.md)
+- [Offline work beside a live game](docs/offline-work.md)
 - [Research notes](docs/research/reducing-frontier-model-cost.md)
 - [Review: Airbnb's fine-tuned vs frontier classifier benchmark](docs/research/airbnb-llm-classifier-benchmark.md)
 - [Third-party notices](THIRD_PARTY_NOTICES.md)
@@ -54,6 +55,8 @@ uv run ruff format --check .
 uv run python scripts/check_public_ready.py --history
 uv run python scripts/seed_github.py --dry-run
 ```
+
+Run `uv sync` after pulling: a `.venv` out of sync with `pyproject.toml` (say, no Pillow) quietly breaks features such as screenshots. `scripts/run_game.py` runs a preflight at startup that reports this.
 
 If this folder is synced by a cloud drive, set `UV_PROJECT_ENVIRONMENT` to a path outside it so the virtual environment doesn't sync.
 

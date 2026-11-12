@@ -98,7 +98,7 @@ _DEMAND_WORDS = (
 )
 _FRIEND_WORDS = ("friend",)
 # A leader's complaint that we settled too close ("Your people settle too close! You should
-# consider seeking land elsewhere."). The first reply apologises (+30 Diplomatic Favor in Run 5)
+# consider seeking land elsewhere."). The first reply apologises (+30 Diplomatic Favor in Run 6)
 # and the second ("My people will settle where they please!") generates grievances, so the
 # friendly reply is the right one. Checked before the demand words, which also match "settl".
 _SETTLING_STATEMENT = re.compile(r"settle too close|seeking land elsewhere|settling too close")
@@ -783,7 +783,7 @@ class DiplomacyPolicy:
     async def _answer_session(self, game: DiplomacyGame, session: Any, deal: Any | None) -> None:
         player_id = session.other_player_id
         if deal is not None and not session.deal_summary and self._is_settling_statement(session):
-            # Run 5, turn 102: Khmer's complaint and a trade deal were open together. Answering
+            # Run 6, turn 102: Khmer's complaint and a trade deal were open together. Answering
             # only the deal left the complaint open, and the turn stopped. Apologise first.
             await self._answer_talk(game, session)
             await self._answer_deal(game, player_id, deal, None)

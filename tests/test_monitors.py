@@ -831,8 +831,12 @@ def test_events_are_immutable(event):
 def test_event_log_appends_one_json_line_per_event(tmp_path):
     path = tmp_path / "runs" / "events.jsonl"
     bus = EventBus()
-    bus.subscribe(EventLog(path).write)
+    log = EventLog(path)
+    bus.subscribe(log.write)
     bus.publish(SAMPLES[0])
     bus.publish(SAMPLES[1])
+    assert not path.exists()  # Buffered until the turn's flush.
+    log.flush()
+    log.flush()  # Nothing more to write, and no repeat.
     lines = path.read_text(encoding="utf-8").splitlines()
     assert [json.loads(line)["kind"] for line in lines] == ["war_declared", "city_lost"]

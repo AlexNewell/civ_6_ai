@@ -210,16 +210,33 @@ class EventBus:
 
 @dataclass
 class EventLog:
-    """Writes one JSON line per event, flushed as it goes so a crash loses nothing."""
+    """Writes one JSON line per event. Lines are buffered and written by `flush`, which the turn
+    loop calls once a turn and the run calls when it stops (including on a crash), so the file is
+    opened once a turn and not once per event. If the process dies without reaching either, up to
+    one turn's events are lost."""
 
     path: Path
+    max_buffered: int = 500  # A burst this large is written at once rather than held.
 
     def __post_init__(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._buffer: list[str] = []
 
     def write(self, event: Event) -> None:
-        with self.path.open("a", encoding="utf-8") as file:
-            file.write(event.to_json() + "\n")
+        self._buffer.append(event.to_json() + "\n")
+        if len(self._buffer) >= self.max_buffered:
+            self.flush()
+
+    def flush(self) -> None:
+        if not self._buffer:
+            return
+        lines, self._buffer = self._buffer, []
+        try:
+            with self.path.open("a", encoding="utf-8") as file:
+                file.writelines(lines)
+        except OSError:
+            self._buffer = lines + self._buffer  # Kept for the next flush.
+            raise
 
 
 class MonitorGame(Protocol):

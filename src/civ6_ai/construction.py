@@ -146,6 +146,11 @@ class ConstructionWatcher:
                 else:
                     self._paused.add(key)
 
+    @property
+    def turn(self) -> int:
+        """The turn of the last read, or 0 before the first."""
+        return self._last_turn or 0
+
     def reset(self) -> None:
         self._seen: dict[int, _Seen] | None = None
         self._ever: set[int] = set()

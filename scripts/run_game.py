@@ -19,6 +19,7 @@ from civ_mcp.connection import GameConnection
 from civ_mcp.game_state import GameState
 
 from civ6_ai.bot import SettleDecisionLog, build_orchestrator
+from civ6_ai.build_ledger import BuildLedger, earlier_event_files
 from civ6_ai.city_attack import fix_city_attack
 from civ6_ai.effectiveness import end_of_run_lines
 from civ6_ai.fastcalls import narrow_popup_scan, shorten_call_waits
@@ -123,7 +124,8 @@ async def play_game(
     turn_log = _NotifyingTurnLog(ROOT / "runs" / f"{name}_{stamp}.jsonl")
     turn_log.on_turn = on_turn
     bus = EventBus()
-    bus.subscribe(EventLog(ROOT / "runs" / f"{name}_{stamp}_events.jsonl").write)
+    event_log = EventLog(ROOT / "runs" / f"{name}_{stamp}_events.jsonl")
+    bus.subscribe(event_log.write)
     # Policy decisions are logged at INFO. Keep them beside the turn log, since they explain it.
     file_log = logging.FileHandler(ROOT / "runs" / f"{name}_{stamp}_bot.log", encoding="utf-8")
     file_log.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
@@ -135,6 +137,17 @@ async def play_game(
         first_turn = (await game.get_game_overview()).turn
         game_id = game_id_for_new_session(ROOT / "runs", name, first_turn, f"{name}_{stamp}")
         shots = Screenshotter(ROOT / "runs" / "screenshots", game_id)
+        ledger = BuildLedger()
+        restored = ledger.restore(
+            earlier_event_files(
+                ROOT / "runs",
+                name,
+                game_id,
+                f"{name}_{stamp}",
+                lambda log: game_id_of_log(ROOT / "runs", log),
+            )
+        )
+        print(f"Build ledger restored from {restored} earlier events")
         orchestrator = build_orchestrator(
             game,
             bus,
@@ -142,9 +155,15 @@ async def play_game(
             trade_offers=TRADE_OFFERS,
             screenshots=shots,
             wars_state=ROOT / "runs" / f"{name}_wars.json",  # Same for every restart of this game.
+            ledger=ledger,
+            event_log=event_log,
         )
         reason = await orchestrator.play(turns)
     finally:
+        try:
+            event_log.flush()  # Also on a crash, so the turn's events are not lost.
+        except OSError:
+            logging.getLogger("civ6_ai").exception("Could not write the last events")
         decisions.detach()
         logging.getLogger("civ6_ai").removeHandler(file_log)
         file_log.close()

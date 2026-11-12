@@ -13,6 +13,7 @@ import logging
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from functools import partial
 from typing import Any, Protocol
 
 from civ_mcp.lua import (
@@ -21,6 +22,8 @@ from civ_mcp.lua import (
     build_end_turn_blocking_query,
     parse_end_turn_blocking,
 )
+
+from civ6_ai.construction import ProductionSet
 
 log = logging.getLogger(__name__)
 
@@ -329,14 +332,29 @@ async def study_fastest(game: BlockerGame, blocker: Blocker) -> bool:
     return _succeeded(await game.set_civic(fastest.civic_type))
 
 
-async def build_cheapest(game: BlockerGame, blocker: Blocker) -> bool:
-    """Start the cheapest item in each idle city, leaving units until last for their upkeep."""
+async def build_cheapest(
+    game: BlockerGame,
+    blocker: Blocker,
+    emit: Callable[[Any], None] | None = None,
+    turn: Callable[[], int] = lambda: 0,
+) -> bool:
+    """Start the cheapest item in each idle city, leaving units until last for their upkeep.
+
+    `emit` receives a `ProductionSet` for each item started, so a build chosen here is on the
+    construction record like any other (a district paused by it is not read as finished).
+    """
     cities, _ = await game.get_cities()
-    idle = [city.city_id for city in cities if city.currently_building == _NO_PRODUCTION]
-    return all([await _start_production(game, city_id) for city_id in idle])
+    idle = [city for city in cities if city.currently_building == _NO_PRODUCTION]
+    return all([await _start_production(game, city, emit, turn) for city in idle])
 
 
-async def _start_production(game: BlockerGame, city_id: int) -> bool:
+async def _start_production(
+    game: BlockerGame,
+    city: Any,
+    emit: Callable[[Any], None] | None = None,
+    turn: Callable[[], int] = lambda: 0,
+) -> bool:
+    city_id = city.city_id
     options = await game.list_city_production(city_id)
     # Districts need a tile, and choosing one is a job for the build policy.
     buildable = [o for o in options if o.category != "DISTRICT" and not o.is_repair]
@@ -346,6 +364,18 @@ async def _start_production(game: BlockerGame, city_id: int) -> bool:
     for option in buildable:
         result = await game.set_city_production(city_id, option.category, option.item_name)
         if _succeeded(result):
+            if emit is not None:
+                emit(
+                    ProductionSet(
+                        turn(),
+                        city_id,
+                        city.name,
+                        city.x,
+                        city.y,
+                        item=option.item_name,
+                        category=option.category,
+                    )
+                )
             return True
     return False
 
@@ -582,8 +612,15 @@ class BlockerResolver:
 
     name = "blockers"
 
-    def __init__(self, policies: Mapping[str, Resolve] | None = None) -> None:
+    def __init__(
+        self,
+        policies: Mapping[str, Resolve] | None = None,
+        emit: Callable[[Any], None] | None = None,
+        turn: Callable[[], int] = lambda: 0,
+    ) -> None:
         self._policies = dict(policies or {})
+        self._emit = emit  # Where the cheapest-item default reports what it started.
+        self._turn = turn
 
     async def run(self, game: BlockerGame) -> None:
         unresolved = await self.resolve(game)
@@ -612,6 +649,8 @@ class BlockerResolver:
     async def _act_on(self, game: BlockerGame, blocker: Blocker) -> bool:
         policy = self._policies.get(blocker.type)
         default = DEFAULT_RESOLVERS.get(blocker.type)
+        if default is build_cheapest and self._emit is not None:
+            default = partial(build_cheapest, emit=self._emit, turn=self._turn)
         if policy is None and default is None:
             log.warning("No handler for blocker %s: %s", blocker.type, blocker.message)
         for resolve in (policy, default):

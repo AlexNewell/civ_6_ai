@@ -902,3 +902,8 @@ def test_context_collects_the_districts_every_city_built():
     built = replace(built, districts=(District("DISTRICT_SPACEPORT", 1, 1),))
     empire = run(read_empire(fx.FakeGame()))
     assert "SPACEPORT" in build_context(empire, [], (), [built]).districts
+
+
+def test_a_district_being_chosen_counts_toward_the_one_spaceport():
+    ctx = ProductionContext(turn=250, num_cities=4).after_choosing("DISTRICT_SPACEPORT")
+    assert not _districts_kept("SPACEPORT", ctx=ctx, victory="science")

@@ -92,7 +92,10 @@ class ProductionContext:
     def after_choosing(self, item: str, unknown_combat: bool = False) -> "ProductionContext":
         """Count a pick, so two cities don't both build the one builder the empire needs."""
         kinds = _counted_as(item) or (("army",) if unknown_combat else ())
-        return replace(self, **{kind: getattr(self, kind) + 1 for kind in kinds})
+        counted = replace(self, **{kind: getattr(self, kind) + 1 for kind in kinds})
+        if item.startswith("DISTRICT_"):  # A district being built counts, so two cities don't.
+            counted = replace(counted, districts=counted.districts | {_short(item)})
+        return counted
 
 
 def canonical(item: str) -> str:

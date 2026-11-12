@@ -290,3 +290,14 @@ def test_tracker_uses_the_watchers_finished_districts():
     ledger = BuildLedger()
     ledger.observe(12, [paused], watcher.finished_districts())
     assert ledger.district_types() == set()
+
+
+def test_a_unique_district_counts_as_its_base_district():
+    ledger = BuildLedger()
+    ledger.apply(completed(20, "DISTRICT_OBSERVATORY"))
+    ledger.apply(started(10, 1, "DISTRICT_ACROPOLIS"))
+    subjects = {g.subject for g in find_gaps(ledger, 60, "any", [city()])}
+    assert "no CAMPUS" not in subjects
+    assert "no THEATER" in subjects and "never started" not in next(
+        g.detail for g in find_gaps(ledger, 60, "any", [city()]) if g.subject == "no THEATER"
+    )

@@ -62,8 +62,26 @@ DISTRICT_BUILDINGS = {
 }
 
 
+# Unique districts count as the base district they replace, so a civilization that builds one
+# is not told its base district is missing.
+UNIQUE_DISTRICTS = {
+    "OBSERVATORY": "CAMPUS",  # Maya.
+    "SEOWON": "CAMPUS",  # Korea.
+    "ACROPOLIS": "THEATER",  # Greece.
+    "LAVRA": "HOLY_SITE",  # Russia.
+    "SUGUBA": "COMMERCIAL_HUB",  # Mali.
+    "HANSA": "INDUSTRIAL_ZONE",  # Germany.
+    "ROYAL_NAVY_DOCKYARD": "HARBOR",  # England.
+    "COTHON": "HARBOR",  # Phoenicia.
+    "STREET_CARNIVAL": "ENTERTAINMENT_COMPLEX",  # Brazil.
+    "BASILIKOI_PAIDES": "ENCAMPMENT",  # Macedon.
+}
+
+
 def bare(name: str) -> str:
-    return name.removeprefix("DISTRICT_").removeprefix("BUILDING_")
+    """The district or building without its prefix, a unique district as its base district."""
+    short = name.removeprefix("DISTRICT_").removeprefix("BUILDING_")
+    return UNIQUE_DISTRICTS.get(short, short)
 
 
 @dataclass(frozen=True)

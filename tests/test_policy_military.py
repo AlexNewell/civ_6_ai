@@ -1172,3 +1172,15 @@ def test_spare_orders_are_bounded_per_turn_and_the_rest_logged():
     run(policy, game)
     assert len(game.orders("fortify")) == 1
     assert sum("used up" in d.reason for d in policy.decisions) == 2
+
+
+def test_a_lua_error_from_a_strike_is_logged_once_and_backs_off(caplog):
+    game = MilitaryGame([warrior()], [barbarian(), barbarian(x=11, y=9)], cities=[walled()])
+    game.raises["city_attack"] = RuntimeError("ERR:Runtime Error: operator .. is not supported")
+    policy = MilitaryPolicy()
+    with caplog.at_level("ERROR"):
+        run(policy, game)
+        run(policy, game)  # The next turn: still inside the back-off.
+    assert len(game.orders("city_attack")) == 1
+    assert len([r for r in caplog.records if "City strike" in r.getMessage()]) == 1
+    assert any(d.action == "city_strike" and "refused" in d.reason for d in policy.decisions)

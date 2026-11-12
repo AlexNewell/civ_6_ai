@@ -93,6 +93,9 @@ class RunLogs:
     has_events: bool = False
     has_settle: bool = False
     dropped: list[str] = field(default_factory=list)  # sessions left out for lacking a bot log
+    # Each session's own records and bot lines, for figures that must be judged per session
+    # because the logging changed between sessions. Empty when built by hand: the run is one.
+    sessions: list["RunLogs"] = field(default_factory=list)
 
     @property
     def turns(self) -> int:
@@ -189,13 +192,17 @@ def load_run(turn_logs: list[Path]) -> RunLogs:
     run.has_bot_log = bool(with_bot)
     for log in logs:
         settle = sibling(log, "_settle.jsonl")
+        part = RunLogs()
         for record in _jsonl(log):
-            run.records.append({**record, "_settle": settle.exists()})
+            part.records.append({**record, "_settle": settle.exists()})
         bot = sibling(log, "_bot.log")
         if bot.exists():
             for line in bot.read_text(encoding="utf-8", errors="replace").splitlines():
                 if m := LOG_LINE.match(line):
-                    run.bot.append((m["logger"], m["level"], m["msg"]))
+                    part.bot.append((m["logger"], m["level"], m["msg"]))
+        run.records += part.records
+        run.bot += part.bot
+        run.sessions.append(part)
         events = sibling(log, "_events.jsonl")
         if events.exists():
             run.has_events = True
@@ -259,6 +266,19 @@ def activation_refused(run: RunLogs) -> int:
     return secondary + prophets
 
 
+def _activations_used(run: RunLogs) -> int:
+    """Great people used in one session: its logged activations, or its calls less refusals.
+
+    A session from before the activation line was added has no such lines, so it falls back.
+    """
+    logged = sum(1 for m in run.messages("policies.secondary") if GP_ACTIVATED.match(m))
+    if logged:  # Prophets are used by the faith policy, which logs its own success line.
+        return logged + sum(
+            1 for m in run.messages("policies.faith") if " founded a religion in " in m
+        )
+    return max(run.calls("activate_great_person") - activation_refused(run), 0)
+
+
 def great_people_checks(run: RunLogs) -> list[Check]:
     rule_used = f"activated >= {GP_MIN_USED_RATIO:.0%} of those seen"
     out: list[Check] = []
@@ -285,17 +305,13 @@ def great_people_checks(run: RunLogs) -> list[Check]:
             )
         )
     else:
-        logged = sum(1 for m in run.messages("policies.secondary") if GP_ACTIVATED.match(m))
-        if logged:  # Prophets are used by the faith policy, which logs its own success line.
-            logged += sum(
-                1 for m in run.messages("policies.faith") if " founded a religion in " in m
-            )
+        used = sum(_activations_used(part) for part in run.sessions or [run])
         out.append(
             _ratio_check(
                 "great people",
                 "seen vs activated",
                 len(seen),
-                logged or max(run.calls("activate_great_person") - activation_refused(run), 0),
+                used,
                 GP_MIN_USED_RATIO,
                 rule_used,
                 "activation lines when logged, else activate calls minus the refusals; "

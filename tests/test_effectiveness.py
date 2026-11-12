@@ -548,3 +548,22 @@ def test_envoy_tokens_need_call_counts_to_judge_unspent_turns():
     bot = [logged("wars", f"envoy_tokens turn {n}: 1 available") for n in range(5, 12)]
     run = RunLogs(records=[{"turn": 5, "detail": ""}], bot=bot, has_bot_log=True)
     assert by_name(run)[("diplomacy", "turns an envoy token stayed unspent")].status == NO_DATA
+
+
+def test_the_activation_fallback_is_chosen_per_session(tmp_path: Path):
+    old = tmp_path / "STD_T1_01_20261111T000000Z.jsonl"
+    new = tmp_path / "STD_T1_01_20261111T010000Z.jsonl"
+    old.write_text(json.dumps(turn(1, {"activate_great_person": 3})) + "\n", encoding="utf-8")
+    new.write_text(json.dumps(turn(2, {"activate_great_person": 1})) + "\n", encoding="utf-8")
+    names = [f"P{i}" for i in range(6)]
+    gp = f"{STAMP} civ6_ai.policies.secondary INFO great_people turn 1: 6 on the map: " + "; ".join(
+        f"{n} (UNIT_GREAT_ENGINEER) at 1,1: x" for n in names
+    )
+    act = (
+        f"{STAMP} civ6_ai.policies.secondary INFO great_people activated turn 2: "
+        "P3 (UNIT_GREAT_ENGINEER) at A after 2 turns"
+    )
+    old.with_name(old.stem + "_bot.log").write_text(gp + "\n", encoding="utf-8")
+    new.with_name(new.stem + "_bot.log").write_text(act + "\n", encoding="utf-8")
+    check = by_name(load_run([old, new]))[("great people", "seen vs activated")]
+    assert check.used == 4

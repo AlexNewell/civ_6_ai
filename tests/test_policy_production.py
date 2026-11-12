@@ -694,3 +694,124 @@ def test_a_long_siege_by_barbarians_does_not_stop_expansion_once_defended():
     assert best(c, MENU, held) == "UNIT_SETTLER"
     thin = ProductionContext(turn=25, num_cities=1, army=2, recon=1)
     assert best(c, MENU, thin) in {"UNIT_WARRIOR", "BUILDING_WALLS"}
+
+
+# Replies copied from live bot logs.
+NO_PLACEMENT = "ERR:NO_PLACEMENT|DISTRICT_HARBOR: no valid tile"
+CANNOT_START = (
+    "Error: CANNOT_START|BUILDING_TAJ_MAHAL cannot start. Hint: TAJ_MAHAL may require a "
+    "completed district or prerequisite building"
+)
+SILENT_FAILURE = (
+    "Error: SILENT_FAILURE|DISTRICT_THEATER appeared to set but the game engine did not persist it"
+)
+
+
+def attempts(game, item):
+    return sum(1 for c in game.set_calls if c[2] == item)
+
+
+def memory_game(reply, item="BUILDING_TAJ_MAHAL", cities=None):
+    options = [
+        lq.ProductionOption("BUILDING", item, 200, 9, -1),
+        lq.ProductionOption("UNIT", "UNIT_WARRIOR", 40, 4, -1),
+    ]
+    return ScriptedGame(refuse={item: reply}, cities=cities or idle_cities(), production=options)
+
+
+@pytest.mark.parametrize("reply", [CANNOT_START, SILENT_FAILURE])
+def test_a_refused_item_is_not_tried_again_until_the_backoff_ends(reply):
+    item = "BUILDING_TAJ_MAHAL" if reply is CANNOT_START else "DISTRICT_THEATER"
+    kind = "BUILDING" if reply is CANNOT_START else "DISTRICT"
+    options = [
+        lq.ProductionOption(kind, item, 200, 9, -1),
+        lq.ProductionOption("UNIT", "UNIT_WARRIOR", 40, 4, -1),
+    ]
+    game = ScriptedGame(refuse={item: reply}, cities=idle_cities(), production=options)
+    if kind == "DISTRICT":
+        game.districts = [lq.DistrictPlacement(5, 5, {}, 1, "Plains")]
+    policy = CityProductionPolicy()
+    for _ in range(3):
+        run(policy.assign(game))
+    assert attempts(game, item) == 1
+
+
+def test_no_placement_is_remembered_and_the_pair_is_not_retried():
+    options = [
+        lq.ProductionOption("DISTRICT", "DISTRICT_HARBOR", 60, 5, -1),
+        lq.ProductionOption("UNIT", "UNIT_WARRIOR", 40, 4, -1),
+    ]
+    game = ScriptedGame(cities=idle_cities(), production=options)
+    game.districts = []  # The advisor finds no tile, as in the live harbor case.
+    policy = CityProductionPolicy()
+    for _ in range(4):
+        run(policy.assign(game))
+    assert attempts(game, "DISTRICT_HARBOR") == 0  # Never reached set_city_production
+    assert [c[2] for c in game.set_calls] == ["UNIT_WARRIOR"] * 4
+    assert (65536, "DISTRICT_HARBOR") in policy.refusals._entries
+
+
+def test_refusal_expires_and_a_repeat_waits_longer():
+    from civ6_ai.policies.production import (
+        REFUSAL_BACKOFF_MAX_TURNS,
+        REFUSAL_BACKOFF_TURNS,
+        RefusalMemory,
+    )
+
+    mem = RefusalMemory()
+    c = city()
+    item = "BUILDING_TAJ_MAHAL"
+    mem.refused(c, item, 10)
+    assert mem.blocked(c, item, 10 + REFUSAL_BACKOFF_TURNS - 1)
+    assert not mem.blocked(c, item, 10 + REFUSAL_BACKOFF_TURNS)
+    mem.refused(c, item, 20)
+    assert mem.blocked(c, item, 20 + REFUSAL_BACKOFF_TURNS)  # Doubled.
+    assert not mem.blocked(c, item, 20 + 2 * REFUSAL_BACKOFF_TURNS)
+    for _ in range(10):
+        mem.refused(c, item, 300)
+    assert mem.blocked(c, item, 300 + REFUSAL_BACKOFF_MAX_TURNS - 1)
+    assert not mem.blocked(c, item, 300 + REFUSAL_BACKOFF_MAX_TURNS)
+
+
+def test_a_new_building_clears_the_refusal():
+    from civ6_ai.policies.production import RefusalMemory
+
+    mem = RefusalMemory()
+    before = city()
+    mem.refused(before, "BUILDING_TAJ_MAHAL", 10)
+    grown = replace(before, buildings=(*before.buildings, "BUILDING_MONUMENT"))
+    assert mem.blocked(before, "BUILDING_TAJ_MAHAL", 11)
+    assert not mem.blocked(grown, "BUILDING_TAJ_MAHAL", 11)
+
+
+def test_refusals_are_kept_per_city():
+    from civ6_ai.policies.production import RefusalMemory
+
+    mem = RefusalMemory()
+    one = city()
+    other = replace(one, city_id=one.city_id + 1)
+    mem.refused(one, "BUILDING_TAJ_MAHAL", 10)
+    assert not mem.blocked(other, "BUILDING_TAJ_MAHAL", 11)
+
+
+@pytest.mark.parametrize(
+    "reply",
+    ["Error: Could not read cities: timeout", "Error: LUA_ERROR|nil value", "ERR:GAME_BUSY"],
+)
+def test_transient_failures_are_not_remembered(reply):
+    game = memory_game(reply)
+    policy = CityProductionPolicy()
+    for _ in range(3):
+        run(policy.assign(game))
+    assert attempts(game, "BUILDING_TAJ_MAHAL") == 3
+    assert policy.refusals._entries == {}
+
+
+def test_an_accepted_item_clears_its_memory():
+    game = memory_game(CANNOT_START)
+    policy = CityProductionPolicy()
+    run(policy.assign(game))
+    game.refuse = {}
+    policy.refusals._entries.clear()
+    run(policy.assign(game))
+    assert policy.refusals._entries == {}

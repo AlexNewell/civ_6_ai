@@ -31,6 +31,11 @@ MAX_ATTEMPTS = 6  # Per city per turn. Every refusal costs a call, and a unit al
 # "Error: MISSING_COORDS|BUILDING_X is a wonder and requires target_x/target_y". Run 4 matched only
 # the "ERR:" form, so no wonder was ever placed.
 _NO_COORDS_WONDER = ("ERR:MISSING_COORDS", "Error: MISSING_COORDS")
+# Replies that mean the game will not build the item here. Anything else that fails (a read
+# failure, a timeout) may pass next turn, so it is never remembered.
+_REFUSAL_CODES = ("NO_PLACEMENT", "CANNOT_START", "SILENT_FAILURE", "CANNOT_PRODUCE")
+REFUSAL_BACKOFF_TURNS = 5  # Turns to skip an item after its first refusal for a city.
+REFUSAL_BACKOFF_MAX_TURNS = 40  # Each repeat refusal doubles the wait, up to this.
 _TURN_SCALE = 20.0  # A build this many turns away scores half as much as an instant one.
 _URGENT_SCALE = 10.0
 _FINISHING_TURNS = 2  # A build this close to done is let finish.
@@ -423,6 +428,46 @@ class ProductionGame(BlockerGame, Protocol):
     async def get_wonder_advisor(self, city_id: int, wonder_name: str) -> Any: ...
 
 
+def is_refusal(result: str) -> bool:
+    """The game said it won't build this item, not a call that failed for another reason."""
+    return _failed(result) and any(code in result for code in _REFUSAL_CODES)
+
+
+def _circumstances(city: City) -> tuple[int, int]:
+    """What changes whether an item can be built: a new district or building."""
+    return len(city.districts), len(city.buildings)
+
+
+class RefusalMemory:
+    """Items the game refused for a city, skipped until a back-off passes.
+
+    The wait is `REFUSAL_BACKOFF_TURNS`, doubled for each repeat refusal of the same city and item,
+    up to `REFUSAL_BACKOFF_MAX_TURNS`. It ends early when the city gains a district or building.
+    Kept in memory only: a restart forgets it, which costs one retry per item (a few calls).
+    """
+
+    def __init__(self) -> None:
+        # (city_id, item) -> (skip until this turn, refusals so far, city circumstances)
+        self._entries: dict[tuple[int, str], tuple[int, int, tuple[int, int]]] = {}
+
+    def blocked(self, city: City, item: str, turn: int) -> bool:
+        entry = self._entries.get((city.city_id, item))
+        if entry is None:
+            return False
+        until, _, seen = entry
+        # Once expired or changed it is free again, but the count stays so a repeat waits longer.
+        return turn < until and _circumstances(city) == seen
+
+    def refused(self, city: City, item: str, turn: int) -> None:
+        key = (city.city_id, item)
+        count = self._entries[key][1] + 1 if key in self._entries else 1
+        wait = min(REFUSAL_BACKOFF_TURNS * 2 ** (count - 1), REFUSAL_BACKOFF_MAX_TURNS)
+        self._entries[key] = (turn + wait, count, _circumstances(city))
+
+    def accepted(self, city: City, item: str) -> None:
+        self._entries.pop((city.city_id, item), None)
+
+
 def _failed(result: str) -> bool:
     return result.startswith(("Error", "ERR:"))
 
@@ -461,13 +506,16 @@ async def choose_for_city(
     context: ProductionContext,
     weights: ProductionWeights,
     only_defence: bool = False,
+    memory: RefusalMemory | None = None,
 ) -> ProductionChoice | None:
     """Start the best option that the game accepts. Returns it, or None if all were refused.
 
     With `only_defence`, the city's current build is replaced only if the best option is a
-    defender or walls, and only defence is tried.
+    defender or walls, and only defence is tried. Items in `memory` for this city are skipped.
     """
     ranked = rank_production(city, options, context, weights)
+    if memory is not None:
+        ranked = [o for o in ranked if not memory.blocked(city, o.item, context.turn)]
     if only_defence:
         if not ranked or not is_defence(ranked[0]) or score(ranked[0], city, context, weights) <= 0:
             return None
@@ -476,8 +524,12 @@ async def choose_for_city(
         result = await _start(game, city, option)
         if not _failed(result):
             log.info("%s builds %s", city.name, option.item)
+            if memory is not None:
+                memory.accepted(city, option.item)
             return option
         log.info("%s can't build %s: %s", city.name, option.item, result[:120])
+        if memory is not None and is_refusal(result):
+            memory.refused(city, option.item, context.turn)
     return None
 
 
@@ -496,6 +548,7 @@ class CityProductionPolicy:
 
     def __init__(self, weights: ProductionWeights | None = None) -> None:
         self.weights = weights or ProductionWeights()  # The strategist replaces this later.
+        self.refusals = RefusalMemory()
 
     async def run(self, game: ProductionGame) -> None:
         unfinished = await self.assign(game)
@@ -523,7 +576,7 @@ class CityProductionPolicy:
             options = await _read_production(game, city.city_id)
             context = build_context(empire, units, building.values())
             picked = await choose_for_city(
-                game, city, options, context, self.weights, only_defence=True
+                game, city, options, context, self.weights, only_defence=True, memory=self.refusals
             )
             if picked is not None:
                 building[city.city_id] = picked.item
@@ -531,7 +584,9 @@ class CityProductionPolicy:
         unfinished = []
         for city in sorted(idle, key=lambda c: (not c.is_threatened, c.city_id)):
             options = await _read_production(game, city.city_id)
-            picked = await choose_for_city(game, city, options, context, self.weights)
+            picked = await choose_for_city(
+                game, city, options, context, self.weights, memory=self.refusals
+            )
             if picked is None:
                 unfinished.append(city.name)
             else:

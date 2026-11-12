@@ -485,14 +485,52 @@ def test_gold_totals_logged_per_turn_replace_the_call_based_bound():
     assert checks[("gold", "gold spent")].used == 200
 
 
-def test_envoy_tokens_held_two_turns_running_are_flagged():
-    bot = [
-        logged("wars", f"envoy_tokens turn {n}: {1 if 10 <= n <= 20 else 0} available")
-        for n in range(5, 30)
+def test_envoy_tokens_held_on_turns_with_no_envoy_sent_are_flagged():
+    held = lambda n: int(10 <= n <= 20)  # noqa: E731
+    bot = [logged("wars", f"envoy_tokens turn {n}: {held(n)} available") for n in range(5, 30)]
+    records = [
+        turn(n, {"send_envoy": 1} if n in (10, 11, 12, 13, 14) else {}) for n in range(5, 30)
     ]
-    run = RunLogs(records=[turn(1)], bot=bot, has_bot_log=True)
+    run = RunLogs(records=records, bot=bot, has_bot_log=True)
     check = by_name(run)[("diplomacy", "turns an envoy token stayed unspent")]
-    assert (check.created, check.status) == (10, FAIL)
+    assert (check.created, check.status) == (6, FAIL)
+
+
+def test_a_token_spent_the_turn_it_is_read_is_not_unspent():
+    bot = [logged("wars", f"envoy_tokens turn {n}: 1 available") for n in range(5, 25)]
+    records = [turn(n, {"send_envoy": 1}) for n in range(5, 25)]
+    run = RunLogs(records=records, bot=bot, has_bot_log=True)
+    assert by_name(run)[("diplomacy", "turns an envoy token stayed unspent")].created == 0
+
+
+def test_a_wasted_person_idle_then_gone_counts_once_and_prophets_count_as_used():
+    names = [f"P{i}" for i in range(6)]
+    bot = [gp_line(1, names)]
+    for n in names[:2]:
+        bot.append(
+            logged(
+                "secondary",
+                f"great_people idle turn 30: {n} (UNIT_GREAT_ENGINEER) on the map for 20 turns",
+            )
+        )
+        bot.append(
+            logged(
+                "secondary",
+                f"great_people wasted turn 40: {n} (UNIT_GREAT_ENGINEER) left the map unused",
+            )
+        )
+    bot.append(
+        logged(
+            "secondary",
+            "great_people activated turn 5: P2 (UNIT_GREAT_ENGINEER) at A after 2 turns",
+        )
+    )
+    for _ in range(3):
+        bot.append(logged("faith", "Great Prophet founded a religion in Ur: RELIGION_FOUNDED|x"))
+    run = RunLogs(records=[turn(1, {"activate_great_person": 0})], bot=bot, has_bot_log=True)
+    checks = by_name(run)
+    assert checks[("great people", "wasted (left the map unused or idle 20 turns)")].created == 2
+    assert checks[("great people", "seen vs activated")].used == 4
 
 
 def test_envoy_tokens_without_lines_are_no_data():

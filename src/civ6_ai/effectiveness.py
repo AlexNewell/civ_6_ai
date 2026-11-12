@@ -286,6 +286,10 @@ def great_people_checks(run: RunLogs) -> list[Check]:
         )
     else:
         logged = sum(1 for m in run.messages("policies.secondary") if GP_ACTIVATED.match(m))
+        if logged:  # Prophets are used by the faith policy, which logs its own success line.
+            logged += sum(
+                1 for m in run.messages("policies.faith") if " founded a religion in " in m
+            )
         out.append(
             _ratio_check(
                 "great people",
@@ -325,7 +329,12 @@ def great_people_checks(run: RunLogs) -> list[Check]:
         )
     )
     if seen:
-        wasted = [m for m in run.messages("policies.secondary") if GP_WASTED.match(m)]
+        # A person idle for 20 turns that then leaves the map has an idle and a wasted line.
+        by_person: dict[str, str] = {}
+        for m in run.messages("policies.secondary"):
+            if found := GP_WASTED.match(m):
+                by_person.setdefault(found[2].split(" (")[0], found[2])
+        wasted = list(by_person.values())
         out.append(
             _count_check(
                 "great people",
@@ -333,7 +342,7 @@ def great_people_checks(run: RunLogs) -> list[Check]:
                 len(wasted),
                 MAX_WASTED_GREAT_PEOPLE,
                 f"at most {MAX_WASTED_GREAT_PEOPLE} wasted",
-                "; ".join(GP_WASTED.match(m)[2][:60] for m in wasted[:2]),
+                "; ".join(w[:60] for w in wasted[:2]),
             )
         )
     out.append(
@@ -793,15 +802,21 @@ def diplomacy_checks(run: RunLogs) -> list[Check]:
         sent = run.calls("send_envoy")
         out.append(_info("diplomacy", "envoys sent", sent, "send_envoy calls"))
     if tokens:
-        held = {turn for turn, n in tokens if n > 0}
-        stuck = sum(1 for turn in held if turn - 1 in held)
+        # The wars handler reads tokens before the blockers spend them, so a positive balance
+        # only means a token sat unspent on a turn where no envoy was sent.
+        sent_on = {
+            r["turn"]
+            for r in run.records
+            if any("send_envoy" in calls for calls in r.get("handler_calls", {}).values())
+        }
+        stuck = len({turn for turn, n in tokens if n > 0 and turn not in sent_on})
         out.append(
             _count_check(
                 "diplomacy",
                 "turns an envoy token stayed unspent",
                 stuck,
                 MAX_IDLE_ENVOY_TURNS,
-                f"at most {MAX_IDLE_ENVOY_TURNS} turns holding a token two turns running",
+                f"at most {MAX_IDLE_ENVOY_TURNS} turns with a token and no envoy sent",
                 f"most held at once: {max(n for _, n in tokens)}",
             )
         )

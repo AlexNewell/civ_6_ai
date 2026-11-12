@@ -639,6 +639,47 @@ def test_an_open_session_is_voted_then_submitted():
     assert game.lua[-1][1] == "ingame" and "WORLD_CONGRESS_SUBMIT_TURN" in game.lua[-1][0]
 
 
+def test_an_open_session_logs_each_vote_and_each_resolution_left_alone(caplog):
+    game = Game()
+    game.congress = wc_status([dv_resolution(), other_resolution()])
+    game.victory = victory_with(rows=[(ME, "America", 0), (ROME, "Rome", 7)])
+    with caplog.at_level("INFO", logger=dp.__name__):
+        run(
+            DiplomacyPolicy().vote_in_open_session(
+                game, Blocker(BlockerType.WORLD_CONGRESS_SESSION)
+            )
+        )
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("congress:")]
+    assert any("session open" in line and "2 resolution(s)" in line for line in lines)
+    assert any("voted ok" in line and "option B" in line and "2 vote(s)" in line for line in lines)
+    assert any("left unvoted by the rules" in line for line in lines)
+
+
+def test_a_refused_vote_is_logged_as_refused(caplog):
+    class Refuses(Game):
+        async def vote_world_congress(self, resolution_hash, option, target_index, num_votes):
+            return "Error: NOT_ALLOWED|no"
+
+    game = Refuses()
+    game.congress = wc_status([dv_resolution()])
+    with caplog.at_level("INFO", logger=dp.__name__):
+        run(
+            DiplomacyPolicy().vote_in_open_session(
+                game, Blocker(BlockerType.WORLD_CONGRESS_SESSION)
+            )
+        )
+    assert any("voted REFUSED" in r.getMessage() for r in caplog.records)
+
+
+def test_registering_the_voter_logs_who_it_will_vote_down(caplog):
+    game = Game()
+    game.congress = wc_status([], in_session=False)
+    game.victory = victory_with(rows=[(ME, "America", 0), (ROME, "Rome", 7)])
+    with caplog.at_level("INFO", logger=dp.__name__):
+        run(DiplomacyPolicy().queue_voter(game, Blocker(BlockerType.WORLD_CONGRESS_VOTE)))
+    assert any("voter registered for the next session" in r.getMessage() for r in caplog.records)
+
+
 def test_an_open_session_registers_the_voter_end_turn_requires_before_submitting():
     game = Game()
     game.congress = wc_status([dv_resolution()])

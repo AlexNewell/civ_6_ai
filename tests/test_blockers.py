@@ -629,6 +629,16 @@ def test_open_session_gets_a_free_vote_on_each_open_resolution_and_a_submit():
     assert game.called("queue_wc_votes") == [("queue_wc_votes", [])]
 
 
+def test_the_default_open_session_vote_is_logged(caplog):
+    game = FakeGame([BlockerType.WORLD_CONGRESS_SESSION])
+    game.congress = congress(in_session=True, resolutions=[resolution(7)])
+
+    with caplog.at_level("INFO", logger=blockers.__name__):
+        resolve(game)
+
+    assert any("congress (default voter)" in r.getMessage() for r in caplog.records)
+
+
 def test_research_and_civic_pick_the_fastest():
     game = FakeGame([BlockerType.RESEARCH, BlockerType.CIVIC])
     game.techs = tech_status(

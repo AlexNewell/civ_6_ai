@@ -933,6 +933,11 @@ class DiplomacyPolicy:
                 output[:200],
             )
             return False
+        log.info(
+            "congress: voter registered for the next session: rivals voted down %s, favor %s",
+            [rival for rival, _ in strip] or "none",
+            context.favor,
+        )
         return True
 
     async def vote_in_open_session(self, game: DiplomacyGame, blocker: Blocker) -> bool:
@@ -956,9 +961,18 @@ class DiplomacyPolicy:
         context = await self._vote_context(game, status)
         favor = context.favor
         failed = False
+        log.info(
+            "congress: session open, favor %s, %s resolution(s), rivals voted down %s, "
+            "voter registered=%s",
+            favor,
+            len(status.resolutions),
+            [rival for rival, _ in context.strip] or "none",
+            registered,
+        )
         try:
             for resolution in status.resolutions:
                 if resolution.is_passed:
+                    log.info("congress: %s already passed, not voted on", resolution.name)
                     continue
                 vote = choose_vote(
                     resolution,
@@ -966,9 +980,20 @@ class DiplomacyPolicy:
                     self.weights,
                 )
                 if vote is None:
+                    log.info("congress: %s left unvoted by the rules", resolution.name)
                     continue
                 result = await game.vote_world_congress(
                     resolution.resolution_hash, vote.option, vote.target_index, vote.num_votes
+                )
+                log.info(
+                    "congress: voted %s on %s: option %s, target %s, %s vote(s), favor %s: %s",
+                    "ok" if action_succeeded(result) else "REFUSED",
+                    resolution.name,
+                    "AB"[vote.option - 1] if vote.option in (1, 2) else vote.option,
+                    vote.target_index,
+                    vote.num_votes,
+                    favor,
+                    str(result)[:200],
                 )
                 if action_succeeded(result):
                     if vote.num_votes <= len(context.favor_costs):

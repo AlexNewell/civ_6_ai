@@ -20,6 +20,7 @@ from civ_mcp.game_state import GameState
 
 from civ6_ai.bot import SettleDecisionLog, build_orchestrator
 from civ6_ai.city_attack import fix_city_attack
+from civ6_ai.effectiveness import end_of_run_lines
 from civ6_ai.fastcalls import narrow_popup_scan, shorten_call_waits
 from civ6_ai.gp_advisor import fix_gp_advisor
 from civ6_ai.metrics.costs import game_id_for_new_session, game_id_of_log
@@ -141,6 +142,11 @@ async def run(turns: int) -> int:
         speed = summarise_speed((r.total_seconds, r.end_turn_seconds) for r in records)
         for line in speed.lines() if speed else []:
             print(line)
+        try:
+            for line in end_of_run_lines([turn_log.path]):
+                print(line)
+        except Exception as exc:  # A summary must never turn a finished run into a crash.
+            print(f"Policy effectiveness: not available ({exc!r})")
         if reason != StopReason.TURN_LIMIT:
             print(f"Last result: {records[-1].detail}")
     print(f"Log: {turn_log.path.relative_to(ROOT)}")

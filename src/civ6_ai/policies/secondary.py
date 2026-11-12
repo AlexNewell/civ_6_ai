@@ -56,6 +56,7 @@ MAX_FOUND_ATTEMPTS = 6  # Religion founding attempts in a game. Each rotates the
 PROPHET_WINDOW = 3  # Turns after activating a prophet in which the religion is looked for.
 NO_DISTRICT_WAIT = 3  # Turns before asking again where a great person can activate.
 MAX_MOVE_TARGETS = 3
+GREAT_IDLE_TURNS = 20  # A great person on the map this long, unused, is logged as wasted.
 GP_STUCK_TURNS = 6  # Turns without getting closer, or failing, before a great person is set aside.
 GP_SET_ASIDE_TURNS = 10
 
@@ -298,6 +299,11 @@ class SecondaryPolicy:
     name: str = "secondary"
     _trade_wait: dict[int, int] = field(default_factory=dict, init=False, repr=False)
     _great: dict[int, _GreatPersonState] = field(default_factory=dict, init=False, repr=False)
+    # Every great person on the map: id -> (name, kind, turn first seen, idle already logged).
+    _great_seen: dict[int, tuple[str, str, int, bool]] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _great_done: set[int] = field(default_factory=set, init=False, repr=False)
     _pantheon_retry: int = field(default=-1, init=False, repr=False)
     _found_attempts: int = field(default=0, init=False, repr=False)
     _prophet_turn: int | None = field(default=None, init=False, repr=False)
@@ -423,6 +429,7 @@ class SecondaryPolicy:
         units = await read_units(game)
         alive = {u.unit_id for u in units}
         self._great = {k: v for k, v in self._great.items() if k in alive}
+        self._track_great(units, alive, turn)
         for unit in sorted(units, key=lambda u: u.unit_id):
             kind = canonical(unit.unit_type)
             if kind not in _ACTIVATABLE or not unit.can_move:
@@ -431,6 +438,38 @@ class SecondaryPolicy:
                 continue  # A religion exists already, or none is left to found.
             await self._activate(game, unit, turn)
         self._log_waiting(units, turn, can_found)
+
+    def _track_great(self, units: Iterable[Unit], alive: set[int], turn: int) -> None:
+        """Log great people that left the map unused, and ones idle for a long time.
+
+        For the policy-effectiveness checks (issue 141). A prophet is left out of the lost count:
+        the faith policy founds religions with it, and that is not seen here.
+        """
+        for unit in units:
+            if unit.unit_type.startswith("UNIT_GREAT_") and unit.unit_id not in self._great_seen:
+                self._great_seen[unit.unit_id] = (unit.name, canonical(unit.unit_type), turn, False)
+        for uid, (name, kind, first, logged) in list(self._great_seen.items()):
+            if uid not in alive:
+                del self._great_seen[uid]
+                if uid in self._great_done:
+                    self._great_done.discard(uid)
+                elif kind != _PROPHET:
+                    log.info(
+                        "great_people wasted turn %d: %s (%s) left the map unused after %d turns",
+                        turn,
+                        name,
+                        kind,
+                        turn - first,
+                    )
+            elif not logged and turn - first >= GREAT_IDLE_TURNS:
+                self._great_seen[uid] = (name, kind, first, True)
+                log.info(
+                    "great_people idle turn %d: %s (%s) on the map for %d turns",
+                    turn,
+                    name,
+                    kind,
+                    turn - first,
+                )
 
     def _log_waiting(self, units: Iterable[Unit], turn: int, can_found: bool) -> None:
         """Say which great people are still on the map, and why each one isn't being used.
@@ -490,6 +529,20 @@ class SecondaryPolicy:
         if target.distance == 0:
             result = await game.activate_great_person(unit.unit_index)
             if "GP_ACTIVATED" in result:
+                first = self._great_seen.get(unit.unit_id, (None, None, turn, False))[2]
+                self._great_done.add(unit.unit_id)
+                # A person with charges left stays on the map: idle time restarts from this use.
+                if unit.unit_id in self._great_seen:
+                    name, kind, _, _ = self._great_seen[unit.unit_id]
+                    self._great_seen[unit.unit_id] = (name, kind, turn, False)
+                log.info(
+                    "great_people activated turn %d: %s (%s) at %s after %d turns",
+                    turn,
+                    unit.name,
+                    canonical(unit.unit_type),
+                    target.city_name,
+                    turn - first,
+                )
                 if canonical(unit.unit_type) == _PROPHET:
                     self._prophet_turn = turn
                 self._great.pop(unit.unit_id, None)

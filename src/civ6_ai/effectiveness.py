@@ -27,6 +27,10 @@ GP_NAME = re.compile(r"(?:^|; )(.+?) \((UNIT_GREAT_\w+)\) at ")
 FAITH_IDLE = re.compile(r"Faith (\d+) above reserve (\d+) but nothing bought")
 CANT_BUILD = re.compile(r"^(?P<city>.+?) can't build (?P<item>\w+): (?P<why>[A-Za-z_:]+)")
 BUILDS = re.compile(r"^(.+?) builds (\w+)")
+GP_ACTIVATED = re.compile(r"^great_people activated turn (\d+): ")
+GP_WASTED = re.compile(r"^great_people (?:wasted|idle) turn (\d+): (.+)$")
+GOLD_SPENT = re.compile(r"^gold_spent turn total: (\d+) of (\d+) to spend")
+ENVOY_TOKENS = re.compile(r"^envoy_tokens turn (\d+): (\d+) available")
 NO_HANDLER = re.compile(r"No handler for blocker (\w+)")
 SLOT_TAKES = re.compile(r"^Slot (\d+) takes (\w+)")
 FINISHED = re.compile(r"^\s*>> (.+?) finished building (\w+)\.")
@@ -60,6 +64,8 @@ MIN_DEAL_ACCEPT_SHARE = 0.25
 MIN_ROUTE_SUCCESS = 0.5
 LOYALTY_LOOKBACK_TURNS = 30  # A loyalty warning this close before a loss makes it a loyalty loss.
 MAX_STARVING_NOTICES = 25
+MAX_WASTED_GREAT_PEOPLE = 3
+MAX_IDLE_ENVOY_TURNS = 5
 PLANNED_STOPS = ("game_over", "turn_limit")
 
 # The checks that gate G1 (a run is clean only if none fails); the rest only warn. See
@@ -88,6 +94,9 @@ class RunLogs:
     has_events: bool = False
     has_settle: bool = False
     dropped: list[str] = field(default_factory=list)  # sessions left out for lacking a bot log
+    # Each session's own records and bot lines, for figures that must be judged per session
+    # because the logging changed between sessions. Empty when built by hand: the run is one.
+    sessions: list["RunLogs"] = field(default_factory=list)
 
     @property
     def turns(self) -> int:
@@ -184,13 +193,17 @@ def load_run(turn_logs: list[Path]) -> RunLogs:
     run.has_bot_log = bool(with_bot)
     for log in logs:
         settle = sibling(log, "_settle.jsonl")
+        part = RunLogs()
         for record in _jsonl(log):
-            run.records.append({**record, "_settle": settle.exists()})
+            part.records.append({**record, "_settle": settle.exists()})
         bot = sibling(log, "_bot.log")
         if bot.exists():
             for line in bot.read_text(encoding="utf-8", errors="replace").splitlines():
                 if m := LOG_LINE.match(line):
-                    run.bot.append((m["logger"], m["level"], m["msg"]))
+                    part.bot.append((m["logger"], m["level"], m["msg"]))
+        run.records += part.records
+        run.bot += part.bot
+        run.sessions.append(part)
         events = sibling(log, "_events.jsonl")
         if events.exists():
             run.has_events = True
@@ -304,6 +317,19 @@ def activation_refused(run: RunLogs) -> int:
     return secondary + prophets
 
 
+def _activations_used(run: RunLogs) -> int:
+    """Great people used in one session: its logged activations, or its calls less refusals.
+
+    A session from before the activation line was added has no such lines, so it falls back.
+    """
+    logged = sum(1 for m in run.messages("policies.secondary") if GP_ACTIVATED.match(m))
+    if logged:  # Prophets are used by the faith policy, which logs its own success line.
+        return logged + sum(
+            1 for m in run.messages("policies.faith") if " founded a religion in " in m
+        )
+    return max(run.calls("activate_great_person") - activation_refused(run), 0)
+
+
 def great_people_checks(run: RunLogs) -> list[Check]:
     rule_used = f"activated >= {GP_MIN_USED_RATIO:.0%} of those seen"
     out: list[Check] = []
@@ -330,15 +356,17 @@ def great_people_checks(run: RunLogs) -> list[Check]:
             )
         )
     else:
+        used = sum(_activations_used(part) for part in run.sessions or [run])
         out.append(
             _ratio_check(
                 "great people",
                 "seen vs activated",
                 len(seen),
-                max(run.calls("activate_great_person") - activation_refused(run), 0),
+                used,
                 GP_MIN_USED_RATIO,
                 rule_used,
-                "activate calls minus the refusals logged; a person seen twice counts once",
+                "activation lines when logged, else activate calls minus the refusals; "
+                "a person seen twice counts once",
             )
         )
     if seen:
@@ -367,6 +395,33 @@ def great_people_checks(run: RunLogs) -> list[Check]:
             "at most 100 waits; many means a class is parked",
         )
     )
+    instrumented = any(
+        GP_ACTIVATED.match(m) or GP_WASTED.match(m) for m in run.messages("policies.secondary")
+    )
+    wasted_name = "wasted (left the map unused or idle 20 turns)"
+    if seen and not instrumented:
+        out.append(
+            _no_data(
+                "great people", wasted_name, "see rule", "log predates the wasted-person lines"
+            )
+        )
+    elif seen:
+        # A person idle for 20 turns that then leaves the map has an idle and a wasted line.
+        by_person: dict[str, str] = {}
+        for m in run.messages("policies.secondary"):
+            if found := GP_WASTED.match(m):
+                by_person.setdefault(found[2].split(" (")[0], found[2])
+        wasted = list(by_person.values())
+        out.append(
+            _count_check(
+                "great people",
+                wasted_name,
+                len(wasted),
+                MAX_WASTED_GREAT_PEOPLE,
+                f"at most {MAX_WASTED_GREAT_PEOPLE} wasted",
+                "; ".join(w[:60] for w in wasted[:2]),
+            )
+        )
     out.append(
         _count_check(
             "great people",
@@ -473,22 +528,68 @@ def gold_turns(run: RunLogs) -> tuple[int, int]:
 
 def gold_checks(run: RunLogs) -> list[Check]:
     out: list[Check] = []
-    if run.has_calls:
-        eligible, spent = gold_turns(run)
+    # Each session is measured by its logged totals if it has them, else by its calls, so a run
+    # that spans the logging change doesn't count only the newer sessions.
+    eligible = idle = spent_total = budget_total = 0
+    logged_turns = fallback_turns = 0
+    for part in run.sessions or [run]:
+        totals = [
+            (int(m[1]), int(m[2]))
+            for msg in part.messages("policies.gold")
+            if (m := GOLD_SPENT.match(msg))
+        ]
+        if totals:
+            eligible += len(totals)
+            idle += sum(1 for spent, _ in totals if spent == 0)
+            spent_total += sum(spent for spent, _ in totals)
+            budget_total += sum(budget for _, budget in totals)
+            logged_turns += len(totals)
+        elif part.has_calls:
+            turns, bought = gold_turns(part)
+            eligible += turns
+            idle += turns - bought
+            fallback_turns += turns
+    if eligible:
+        source = (
+            "from the logged spent-gold totals"
+            if not fallback_turns
+            else f"{fallback_turns} turns from the handler's calls, an upper bound"
+        )
         out.append(
             _share_check(
                 "gold",
                 "turns above reserve with nothing bought",
-                eligible - spent,
+                idle,
                 eligible,
                 MAX_IDLE_GOLD_SHARE,
                 f"nothing bought on at most {MAX_IDLE_GOLD_SHARE:.0%} of turns above the reserve",
-                "from the gold handler's calls; no gold-spent total is logged",
+                source,
+            )
+        )
+    elif run.has_calls:
+        out.append(
+            _share_check(
+                "gold",
+                "turns above reserve with nothing bought",
+                0,
+                0,
+                MAX_IDLE_GOLD_SHARE,
+                f"nothing bought on at most {MAX_IDLE_GOLD_SHARE:.0%} of turns above the reserve",
+                "from the gold handler's calls",
             )
         )
     else:
         out.append(
             _no_data("gold", "turns above reserve with nothing bought", "see rule", "needs calls")
+        )
+    if logged_turns:
+        out.append(
+            _info(
+                "gold",
+                "gold spent",
+                spent_total,
+                f"of {budget_total} above the reserve, over {logged_turns} logged turns",
+            )
         )
     if not run.has_bot_log:
         return [*out, _no_data("gold", "upgrade logged as refused", "see rule", "needs bot log")]
@@ -797,9 +898,48 @@ def diplomacy_checks(run: RunLogs) -> list[Check]:
             "at most 5 sessions closed without an answer",
         ),
     ]
+    tokens = [
+        (int(m[1]), int(m[2]))
+        for msg in run.messages("policies.wars")
+        if (m := ENVOY_TOKENS.match(msg))
+    ]
     if run.has_calls:
         sent = run.calls("send_envoy")
-        out.append(_info("diplomacy", "envoys sent", sent, "tokens available are not logged"))
+        out.append(_info("diplomacy", "envoys sent", sent, "send_envoy calls"))
+    if tokens and not run.has_calls:
+        out.append(
+            _no_data(
+                "diplomacy", "turns an envoy token stayed unspent", "see rule", "needs call counts"
+            )
+        )
+    elif tokens:
+        # The wars handler reads tokens before the blockers spend them, so a positive balance
+        # only means a token sat unspent on a turn where no envoy was sent.
+        sent_on = {
+            r["turn"]
+            for r in run.records
+            if any("send_envoy" in calls for calls in r.get("handler_calls", {}).values())
+        }
+        stuck = len({turn for turn, n in tokens if n > 0 and turn not in sent_on})
+        out.append(
+            _count_check(
+                "diplomacy",
+                "turns an envoy token stayed unspent",
+                stuck,
+                MAX_IDLE_ENVOY_TURNS,
+                f"at most {MAX_IDLE_ENVOY_TURNS} turns with a token and no envoy sent",
+                f"most held at once: {max(n for _, n in tokens)}",
+            )
+        )
+    elif run.has_bot_log:
+        out.append(
+            _no_data(
+                "diplomacy",
+                "turns an envoy token stayed unspent",
+                "see rule",
+                "no envoy_tokens lines",
+            )
+        )
     return out
 
 

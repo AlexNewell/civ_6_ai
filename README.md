@@ -55,6 +55,8 @@ uv run python scripts/check_public_ready.py --history
 uv run python scripts/seed_github.py --dry-run
 ```
 
+Run `uv sync` after pulling: a `.venv` out of sync with `pyproject.toml` (say, no Pillow) quietly breaks features such as screenshots. `scripts/run_game.py` runs a preflight at startup that reports this.
+
 If this folder is synced by a cloud drive, set `UV_PROJECT_ENVIRONMENT` to a path outside it so the virtual environment doesn't sync.
 
 Put API keys in an untracked `.env`, using [`.env.example`](.env.example) as the template. Personal strings to block from commits go in `.local/public-ready-patterns.txt`, one regular expression per line.

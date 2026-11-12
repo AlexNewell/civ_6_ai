@@ -82,13 +82,18 @@ class RunLogs:
     def has_calls(self) -> bool:
         return any(any(d.values()) for r in self.records for d in [r.get("handler_calls", {})])
 
-    def calls(self, name: str, records: list[dict] | None = None) -> int:
-        """How many times a game call was made, across the run or the given records."""
+    def calls(
+        self, name: str, records: list[dict] | None = None, handler: str | None = None
+    ) -> int:
+        """How many times a game call was made, across the run or the given records.
+
+        With `handler`, only that handler's calls count (faith buys with the same call as gold).
+        """
         return sum(
             d[name][0]
             for r in (self.records if records is None else records)
-            for d in r.get("handler_calls", {}).values()
-            if name in d
+            for h, d in r.get("handler_calls", {}).items()
+            if name in d and handler in (None, h)
         )
 
     def messages(self, logger: str) -> list[str]:
@@ -434,7 +439,10 @@ def gold_checks(run: RunLogs) -> list[Check]:
         )
     )
     if run.has_calls:
-        spent = run.calls("purchase_item") + run.calls("purchase_tile") + run.calls("upgrade_unit")
+        spent = sum(
+            run.calls(name, handler="gold")
+            for name in ("purchase_item", "purchase_tile", "upgrade_unit")
+        )
         out.append(
             _info(
                 "gold",
@@ -683,14 +691,19 @@ def diplomacy_checks(run: RunLogs) -> list[Check]:
     if not run.has_bot_log:
         return [_no_data("diplomacy", "deals answered", "see rule", "needs the bot log")]
     msgs = run.messages("policies.diplomacy")
-    accepted = sum(1 for m in msgs if re.match(r"Deal from player \d+ accepted", m))
+    # The acceptance is logged before the game is asked, so take off the answers it refused.
+    answers_refused = sum(
+        1 for m in msgs if m.startswith("The game refused our answer to the deal")
+    )
+    logged = sum(1 for m in msgs if re.match(r"Deal from player \d+ accepted", m))
+    accepted = max(logged - answers_refused, 0)
     refused = sum(1 for m in msgs if re.match(r"Deal from player \d+ refused", m))
     unanswered = sum(1 for m in msgs if "unanswered" in m or "was still open" in m)
     out = [
         _ratio_check(
             "diplomacy",
             "deals offered vs accepted",
-            accepted + refused,
+            logged + refused,
             accepted,
             MIN_DEAL_ACCEPT_SHARE,
             f"at least {MIN_DEAL_ACCEPT_SHARE:.0%} of deals accepted",

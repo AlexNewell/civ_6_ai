@@ -366,3 +366,26 @@ def test_a_log_with_no_faith_lines_is_no_data_for_faith():
         records=[turn(1)], bot=[bot("gold", "Gold 5, reserve 3, 2 to spend")], has_bot_log=True
     )
     assert by_name(run)[("faith", "held vs spent")].status == NO_DATA
+
+
+def test_deal_acceptances_the_game_refused_do_not_count():
+    accepted = "Deal from player 3 accepted: it returns 5 for 4"
+    refused = "The game refused our answer to the deal: Error"
+    lines = [bot("diplomacy", accepted)] * 6 + [bot("diplomacy", refused, "WARNING")] * 6
+    check = by_name(RunLogs(records=[turn(1)], bot=lines, has_bot_log=True))[
+        ("diplomacy", "deals offered vs accepted")
+    ]
+    assert (check.created, check.used) == (6, 0)
+    assert check.status == FAIL
+
+
+def test_faith_purchase_calls_are_not_gold_purchases():
+    record = {
+        **turn(1),
+        "handler_calls": {
+            "faith": {"purchase_item": [4, 0.4]},
+            "gold": {"purchase_item": [1, 0.1]},
+        },
+    }
+    check = by_name(RunLogs(records=[record], has_bot_log=True))[("gold", "purchase calls")]
+    assert check.used == 1

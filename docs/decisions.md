@@ -88,6 +88,13 @@ A review of the pinned commit found nothing malicious. These rules still apply:
 - [`archi-max/jev-civ6`](https://github.com/archi-max/jev-civ6) (MIT) is a usable reference.
 - [`Roarpeng/jev-civ6`](https://github.com/Roarpeng/jev-civ6) has no licence, so it is read for ideas only and no code is copied.
 
+### Screenshots for triage
+
+- When a turn stops the run (blocked, hung, game over) or a handler fails for the first time, `src/civ6_ai/screenshots.py` saves a 1280-pixel JPEG of the game window, with at most 20 per game. The last 3 slots are kept for stops, and there is at most one per turn.
+- The count is the number of files already saved for the game id, so it carries across sessions. It uses the same id as the budget ledger.
+- They go under the git-ignored `runs/screenshots/`, because they can show player names. The turn log's `detail` names the file.
+- It uses `pywin32` and `Pillow` (win32 only) directly, not civ6-mcp's private launcher helpers, which can change with the pin. It captures with `PrintWindow`, so the game must be windowed or borderless. A blank frame counts as a failed capture.
+
 ## Public-ready rules
 
 A public repo exposes all of its history and issues, so these rules apply from the first commit.

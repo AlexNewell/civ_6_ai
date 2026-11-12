@@ -57,6 +57,7 @@ from civ6_ai.policies.secondary import SecondaryPolicy
 from civ6_ai.policies.settling import SettlingPolicy
 from civ6_ai.policies.trade_offers import TradeOfferPolicy
 from civ6_ai.policies.wars import WarPolicy
+from civ6_ai.screenshots import Screenshotter
 from civ6_ai.state.reader import IncompleteRead, check_cities_complete
 
 SETTLING_LOGGER = "civ6_ai.policies.settling"
@@ -180,11 +181,16 @@ class SettleDecisionLog(logging.Handler):
 
 
 def build_orchestrator(
-    game: Any, bus: EventBus, turn_log: TurnLog, trade_offers: bool = True
+    game: Any,
+    bus: EventBus,
+    turn_log: TurnLog,
+    trade_offers: bool = True,
+    screenshots: Screenshotter | None = None,
 ) -> Orchestrator:
     """Wire the handlers to a game. `game` is civ6-mcp's `GameState`, or a fake with its reads.
 
-    `trade_offers=False` leaves out `TradeOfferPolicy`.
+    `trade_offers=False` leaves out `TradeOfferPolicy`. `screenshots` saves the screen when a turn
+    stops the run or a handler first fails.
     """
     production = CityProductionPolicy()
     government = GovernmentPolicy()  # One instance, so handler and blockers share its bounds.
@@ -224,5 +230,10 @@ def build_orchestrator(
     timer = CallTimer(game)  # Under SharedReads, so it times real calls and not remembered ones.
     shared = ResolvingGame(SharedReads(timer), resolver, defeat_check=partial(is_defeated, game))
     return Orchestrator(
-        shared, handlers, turn_log, defeat_check=partial(is_defeated, game), call_timer=timer
+        shared,
+        handlers,
+        turn_log,
+        defeat_check=partial(is_defeated, game),
+        call_timer=timer,
+        screenshots=screenshots,
     )

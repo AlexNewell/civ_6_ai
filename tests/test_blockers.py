@@ -1018,3 +1018,39 @@ def test_a_long_game_with_a_blocker_every_turn_never_stops(tmp_path):
     assert reason == StopReason.TURN_LIMIT
     assert game.turn == len(types) * 3 + 1
     assert all(record.handler_errors == {} for record in turn_log.records)
+
+
+def test_dismissing_a_popup_first_answers_an_open_diplomacy_session():
+    """Run 5, turn 102: dismissing the leader screen alone left Khmer's statement unanswered."""
+    game = FakeGame()
+    game.sessions = [session(player=2)]
+    seen = []
+
+    async def dismiss_popup():
+        seen.append(list(game.sessions))
+        return "Dismissed: LeaderScene. Also: diplomacy session active"
+
+    game.dismiss_popup = dismiss_popup
+
+    result = asyncio.run(ResolvingGame(game, BlockerResolver()).dismiss_popup())
+
+    assert result.startswith("Dismissed: LeaderScene")
+    assert game.called("diplomacy_respond")
+    assert seen == [[]]  # The session was answered before the popup was dismissed.
+
+
+def test_dismissing_a_popup_still_works_if_answering_fails():
+    game = FakeGame()
+    resolver = BlockerResolver()
+
+    async def broken(*args):
+        raise RuntimeError("bug")
+
+    resolver.resolve = broken
+
+    async def dismiss_popup():
+        return "No popups to dismiss."
+
+    game.dismiss_popup = dismiss_popup
+
+    assert asyncio.run(ResolvingGame(game, resolver).dismiss_popup()) == "No popups to dismiss."

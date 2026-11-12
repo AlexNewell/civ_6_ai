@@ -311,6 +311,19 @@ def test_classifying_what_a_leader_says():
     assert classify_talk("") == "greeting"
 
 
+KHMER = 2
+SETTLE_STATEMENT = "Your people settle too close! You should consider seeking land elsewhere."
+APOLOGISE = "Apologies, I will look elsewhere in the future."
+DEFY = "My people will settle where they please!"
+
+
+def test_a_complaint_about_settling_too_close_is_its_own_kind_and_is_answered_friendly():
+    assert classify_talk(SETTLE_STATEMENT) == "settling"
+    assert classify_talk("Stop settling near my borders") == "demand"
+    for counterpart in (None, dp.Counterpart(KHMER, True, "DENOUNCED", True)):
+        assert answer_talk("settling", counterpart, W) == "POSITIVE"
+
+
 def test_friendship_is_accepted_unless_at_war_denounced_or_unknown():
     ok = dp.Counterpart(ROME, False, "NEUTRAL")
     assert answer_talk("friendship", ok, W) == "POSITIVE"
@@ -892,3 +905,40 @@ def test_the_raw_read_uses_only_calls_the_pending_deals_query_makes():
     ):
         assert call in query and call in code
     assert "DealAgreementTypes" not in code
+
+
+def test_run_5_turn_102_khmer_statement_is_apologised_to_and_the_deal_is_priced():
+    """The real text: reply 1 apologises for +30 favor, reply 2 generates grievances."""
+    statement = session_from(KHMER, said=SETTLE_STATEMENT, buttons=f"{APOLOGISE};{DEFY}", reason="")
+    pending = deal_from(
+        "THEM|AGREEMENT|Open Borders|0|25",
+        "THEM|GOLD|Gold (lump sum)|7|0",
+        "THEM|GOLD|Gold per turn|1|30",
+        "US|RESOURCE|Wine|0|30",
+        player=KHMER,
+    )
+    game = Game(sessions=[statement], deals=[pending], civs=[civ(KHMER)])
+    asyncio.run(DiplomacyPolicy().respond(game))
+    answers = game.answers()
+    assert ("respond", KHMER, "POSITIVE") in answers
+    assert all(a[2] not in ("NEGATIVE", "EXIT") for a in answers if a[0] == "respond")
+    assert not game.sessions
+
+
+def test_a_statement_alone_is_apologised_to_and_never_defied():
+    game = Game(
+        sessions=[session_from(KHMER, said=SETTLE_STATEMENT, buttons=f"{APOLOGISE};{DEFY}")],
+        civs=[civ(KHMER)],
+    )
+    assert run(DiplomacyPolicy().respond(game)) is True
+    assert game.answers() == [("respond", KHMER, "POSITIVE")]
+
+
+def test_a_statement_session_that_stays_open_is_exited_not_left_blocking():
+    game = Game(sessions=[session_from(KHMER, said=SETTLE_STATEMENT)], civs=[civ(KHMER)])
+    game.respond_text[KHMER] = [
+        f'OK:RESPONDED|POSITIVE|SESSION_CONTINUES\nLeader says: "{SETTLE_STATEMENT}"'
+    ] * 10
+    assert run(DiplomacyPolicy().respond(game)) is True
+    assert game.sessions == []
+    assert game.answers()[-1] == ("respond", KHMER, "EXIT")

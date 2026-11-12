@@ -23,7 +23,7 @@ Everything that can stop a turn from ending, how it's found and what clears it. 
 
 | Type | How detected | How resolved |
 |---|---|---|
-| `DIPLOMACY_SESSION` | `get_diplomacy_sessions` | War declarations are closed with `EXIT`, as `end_turn` does, because they can't be declined. Sessions with a deal are refused. Anything else gets `POSITIVE` for up to 4 rounds, then `EXIT` as a last resort. |
+| `DIPLOMACY_SESSION` | `get_diplomacy_sessions` | War declarations are closed with `EXIT`, as `end_turn` does, because they can't be declined. Sessions with a deal are refused. Anything else gets `POSITIVE` for up to 4 rounds, then `EXIT` as a last resort. A leader's statement that we settled too close is answered `POSITIVE` (see [Diplomacy statements](#diplomacy-statements)). |
 | `TRADE_DEAL` | `get_pending_deals` | Refused, because the bot can't value a deal yet. |
 | `WORLD_CONGRESS_VOTE` | `get_world_congress`, using `end_turn`'s own gate: it fires this turn with resolutions, or is in session | `queue_wc_votes([])` queues civ6-mcp's default voter, which spreads favor evenly on option A and target 0 during `end_turn`. The session opens and closes inside `end_turn`, so this must be done beforehand. It's dropped when the game also reports `ENDTURN_BLOCKING_WORLD_CONGRESS_SESSION`, because the handler only fires on a later session and the open one is voted directly. |
 | `GREAT_PERSON_CLAIM` | `NOTIFICATION_CLAIM_GREAT_PERSON` in `get_notifications` | Recruits everyone with `can_recruit`. civ6-mcp lists no blocking type for this, so it may never block a turn. It's handled anyway because the issue names it and recruiting has no downside. |
@@ -98,3 +98,15 @@ The function returns True once it's done. If it returns False or raises, the def
 
 - These defaults only keep a game moving. They aren't good play. Roadmap items 1.5 to 1.12 replace them.
 - If the game's Auto End Turn option is on, skipping the last unit can end the turn before the loop does, and the handlers wouldn't run on the next turn. civ6-mcp notes this can happen, so standard games need the option off.
+
+## Diplomacy statements
+
+Run 5 stopped `blocked` on turn 102 with a leader's statement open, and the same message pair ("Dismissed: LeaderScene. Also: diplomacy session active") had been held and closed on turns 58, 80 and 95. Khmer said "Your people settle too close! You should consider seeking land elsewhere." The two replies were "Apologies, I will look elsewhere in the future." (+30 Diplomatic Favor) and "My people will settle where they please!" (generates grievances). A trade deal from Khmer was pending at the same time.
+
+Three causes:
+
+- **The statement was never answered.** The session opened during the AI turn, `end_turn` returned an ordinary report (no hold prefix), and the turn loop's only response to a turn that did not advance was `dismiss_popup`, which closes the leader screen and leaves the session open. `ResolvingGame.dismiss_popup` now clears open diplomacy first, with the same rules as at the start of a turn, then dismisses.
+- **The words matched a demand.** `settl` is a demand word, so even a reached statement would have got `NEGATIVE`, the reply that generates grievances. A statement that says we settle too close is now its own kind (`settling`), answered `POSITIVE` (apologise): it costs nothing and commits to no war, gold or agreement.
+- **The deal shadowed the statement.** With a deal pending for the same player the policy answered only the deal. It now answers a settling statement first, then the deal through the usual deal logic (priced, raw items checked, refused if unreadable).
+
+A session still open after the answer is exited and logged by `DiplomacyPolicy` as before, so a statement cannot leave the turn silently blocked. Other statements with a pending deal are not yet answered first, because a deal session with unparsed items looks the same.

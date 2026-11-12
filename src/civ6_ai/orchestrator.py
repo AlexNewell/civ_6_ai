@@ -195,6 +195,14 @@ class Orchestrator:
                 await asyncio.sleep(TURN_READ_RETRY_SECONDS)
                 if await self._read_turn() > turn_before:
                     return None
+            # Run 5 stopped here on turns 248 and 264 with the game on the next turn, the second
+            # time with its "Make Dedication" notification (era change) up. The notifications are
+            # stamped with the turn they were raised on, so one from a later turn shows it moved.
+            if await self._notified_after(turn_before):
+                log.warning(
+                    "Turn still read %d, but the game has notifications from later", turn_before
+                )
+                return None
             return StopReason.BLOCKED
         except ConnectionError:
             raise
@@ -202,6 +210,19 @@ class Orchestrator:
             if await self._defeated():
                 return StopReason.GAME_OVER  # Reads can fail once the defeat screen is up.
             raise
+
+    async def _notified_after(self, turn: int) -> bool:
+        """True if the game lists a notification raised after `turn`."""
+        get = getattr(self._game, "get_notifications", None)
+        if get is None:
+            return False
+        try:
+            return any(n.turn > turn for n in await get())
+        except ConnectionError:
+            raise
+        except Exception:
+            log.exception("Reading notifications failed")
+            return False
 
     async def _dismiss_popup(self) -> bool:
         """Clear any popup through civ6-mcp (Lua only, no clicks). True if the call was made."""

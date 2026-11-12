@@ -1,6 +1,7 @@
 import asyncio
 import json
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 
@@ -236,3 +237,16 @@ def test_a_slow_ui_that_catches_up_is_not_a_block(tmp_path):
 def test_a_ui_that_never_catches_up_is_still_a_block(tmp_path):
     reason, _ = play(SlowUiGame(stale_reads=99), [DoNothing()], 2, tmp_path)
     assert reason is StopReason.BLOCKED
+
+
+class NotifiedGame(SlowUiGame):
+    """The UI never reads the new turn, but a notification from it is up (Run 5, turn 264)."""
+
+    async def get_notifications(self):
+        return [SimpleNamespace(turn=self.turn)]
+
+
+def test_a_notification_from_the_next_turn_shows_the_turn_moved(tmp_path):
+    reason, turn_log = play(NotifiedGame(stale_reads=99), [DoNothing()], 2, tmp_path)
+    assert reason is StopReason.TURN_LIMIT
+    assert [record.stop_reason for record in turn_log.records] == [None, None]

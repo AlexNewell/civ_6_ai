@@ -565,6 +565,16 @@ def test_a_great_person_that_never_gets_closer_is_set_aside_then_retried():
     assert len(acted(game, "move")) == moves + 1
 
 
+def test_standing_in_a_district_the_advisor_refuses_is_not_activated_every_turn():
+    # Real log: an engineer in a district with no wonder under way was refused
+    # `CANNOT_ACTIVATE ... Must be on a wonder` 60+ times.
+    game = make_game(units=[gp_unit()], advisor=advisor(gp_city(distance=0, can=False)))
+    policy = SecondaryPolicy()
+    run(policy, game)
+    assert not acted(game, "activate")
+    assert policy._great[40].skip_until > 10
+
+
 def test_failed_activation_is_counted_and_not_hidden():
     game = make_game(units=[gp_unit()], advisor=advisor(gp_city(distance=0, can=True)))
     game.replies["activate"] = ["Error: CANNOT_ACTIVATE|x"] * 10

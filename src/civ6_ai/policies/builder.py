@@ -328,6 +328,12 @@ class BuilderPolicy:
                 record("remove_feature", "a feature blocks the improvement", removed)
                 return True
             result = f"{result} / {removed}"
+        elif "remove_feature first" in result:
+            # A feature stands on the tile (forest or jungle) and the job is not a resource we
+            # would clear for. Pick another tile now instead of retrying this one.
+            self._give_up(unit, key, turn)
+            record("failed", "a feature blocks the improvement, tile set aside", result)
+            return False
         self._fail(key, turn)
         record("failed", "improvement refused", result)
         return False

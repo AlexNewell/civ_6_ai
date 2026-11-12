@@ -48,6 +48,7 @@ All of these come from civ6-mcp's blocking query, run through `execute_lua` in t
 | `ENDTURN_BLOCKING_GIVE_INFLUENCE_TOKEN` | Sends each envoy to the first city-state that accepts it. With no envoys left it's stale, and `end_turn` clears it. |
 | `ENDTURN_BLOCKING_WORLD_CONGRESS_SESSION` | If a session is open, casts one free vote on option A, target 0, for each open resolution, then submits. Otherwise queues the default voter. civ6-mcp's `submit_congress` isn't used, because it also ends the turn and a second end-turn request can skip turns. |
 | `ENDTURN_BLOCKING_WORLD_CONGRESS_LOOK` | Left to `end_turn`, which marks the results as seen. |
+| `ENDTURN_BLOCKING_WORLD_CONGRESS_RESULTS` | Not a game name. The query reports the results notification as `UNKNOWN` with the message `LOC_NOTIFICATION_WORLD_CONGRESS_RESULTS_MESSAGE`, so it is renamed by that message. civ6-mcp's World Congress clearing matches on the type name and misses it. One Lua call in the InGame context asks for `WORLD_CONGRESS_LOOKED_AT_AVAILABLE`, dismisses the end-turn blocking notifications whose message or type name says `WORLD_CONGRESS_RESULTS`, and hides the two World Congress screens, as civ6-mcp does for its named types. It casts no vote and spends no favor. A reply that dismissed nothing leaves the blocker open for `end_turn` to judge. Run 6 held 3 turns on it (`No handler for blocker UNKNOWN`). **Live check pending**: see issue 145. |
 | `ENDTURN_BLOCKING_WORLD_CONGRESS_SPECIAL_SESSION` | Left to `end_turn`, which passes on it, as any other World Congress type. |
 | `ENDTURN_BLOCKING_CONSIDER_GOVERNMENT_CHANGE` | Left to `end_turn`, which keeps the current government. |
 | `ENDTURN_BLOCKING_CONSIDER_RAZE_CITY` | Left to `end_turn`, which keeps the city. |
@@ -102,7 +103,7 @@ The function returns True once it's done. If it returns False or raises, the def
 
 ## Diplomacy statements
 
-Run 5 stopped `blocked` on turn 102 with a leader's statement open, and the same message pair ("Dismissed: LeaderScene. Also: diplomacy session active") had been held and closed on turns 58, 80 and 95. Khmer said "Your people settle too close! You should consider seeking land elsewhere." The two replies were "Apologies, I will look elsewhere in the future." (+30 Diplomatic Favor) and "My people will settle where they please!" (generates grievances). A trade deal from Khmer was pending at the same time.
+Run 6 stopped `blocked` on turn 102 with a leader's statement open, and the same message pair ("Dismissed: LeaderScene. Also: diplomacy session active") had been held and closed on turns 58, 80 and 95. Khmer said "Your people settle too close! You should consider seeking land elsewhere." The two replies were "Apologies, I will look elsewhere in the future." (+30 Diplomatic Favor) and "My people will settle where they please!" (generates grievances). A trade deal from Khmer was pending at the same time.
 
 Three causes:
 

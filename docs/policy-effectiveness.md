@@ -131,6 +131,8 @@ Ranked by how much of the policy's purpose was lost, then by how early the signa
 
 **Where it lives.** `scripts/policy_effectiveness.py` is a standalone script on the same pattern as `triage_run.py`. It is cheap enough to call from the end of `run_game.py` next, printing the failing checks beside the existing speed summary. `score_run.py` takes one number per metric for comparing runs, so these ratios don't belong there. Per turn it's not worth running: the checks need counts over many turns, so end of run is the right place. A small per-turn exception is the great-person line (it is already logged).
 
+**Wired in.** `run_game.py` now prints `end_of_run_lines` after the speed summary: the G1 gate result, the failing gate checks (`GATE_CHECKS` in `effectiveness.py`), then the warnings. It does not change the exit code.
+
 **Thresholds.** The constants at the top of `effectiveness.py` are a first guess from these three runs. They are set where the runs' failures cross them and are meant to be tightened as the fixes land.
 
 **Gate G1?** Yes for a short list, warn for the rest. A "clean run" should fail on checks where the bot did nothing for a feature or left a screen unhandled:

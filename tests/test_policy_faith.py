@@ -457,3 +457,37 @@ def test_a_successful_spread_resets_the_refusal_count():
     game.replies["spread"] = ["RELIGION_SPREAD|ok"]
     play(FaithPolicy(), game, 3, start=200)
     assert acted(game, "delete") == []
+
+
+UNBUYABLE = 2147483647
+
+
+def test_an_unreachable_great_person_cost_is_not_buyable_and_buildings_follow():
+    game = Game(
+        overview=overview(turn=100, faith=1634.0),
+        people=[person(1, faith=UNBUYABLE), person(2, "Great Writer", "Homer", faith=UNBUYABLE)],
+    )
+    asyncio.run(FaithPolicy(FaithSettings(reserve=60.0)).run(game))
+    assert not [a for a in game.actions if a[0] == "patronize"]
+    assert [a for a in game.actions if a[0] == "buy"]
+
+
+def test_the_sentinel_is_not_logged_as_the_cheapest_price(caplog):
+    game = Game(
+        overview=overview(turn=100, faith=1634.0),
+        people=[person(1, faith=UNBUYABLE)],
+        production=[],
+    )
+    with caplog.at_level(logging.INFO):
+        asyncio.run(FaithPolicy(FaithSettings(reserve=60.0)).run(game))
+    assert "cheapest 2147483647" not in caplog.text
+    assert "unreachable" in caplog.text
+
+
+def test_a_real_person_is_still_bought_beside_an_unreachable_one():
+    game = Game(
+        overview=overview(turn=100, faith=1634.0),
+        people=[person(1, faith=UNBUYABLE), person(2, name="Real", faith=500)],
+    )
+    asyncio.run(FaithPolicy(FaithSettings(reserve=60.0)).run(game))
+    assert ("patronize", 2, "YIELD_FAITH") in game.actions

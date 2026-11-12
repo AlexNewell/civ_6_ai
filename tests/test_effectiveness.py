@@ -8,9 +8,12 @@ from civ6_ai.effectiveness import (
     PASS,
     RunLogs,
     city_losses,
+    end_of_run_lines,
     format_report,
+    gate_failures,
     load_run,
     run_checks,
+    warnings,
 )
 
 STAMP = "2026-11-11 17:00:00,000"
@@ -432,3 +435,41 @@ def test_cities_lost_passes_when_every_loss_came_back():
     ]
     run = RunLogs(records=[turn(1)], events=events, has_events=True)
     assert by_name(run)[("settling", "cities lost")].status == PASS
+
+
+def test_a_stop_that_is_not_game_over_or_the_turn_limit_fails_the_gate():
+    cases = (("blocked", True), ("hung", True), ("game_over", False), ("turn_limit", False))
+    for stop, fails in cases:
+        run = RunLogs(records=[turn(1), turn(2, stop=stop)])
+        names = {(c.policy, c.name) for c in gate_failures(run_checks(run))}
+        assert (("run", "stops that were not the game ending") in names) is fails
+
+
+def test_gate_and_warning_checks_are_separate():
+    errors = [turn(n, errors={"h": "boom"}) for n in range(1, 11)]
+    run = RunLogs(
+        records=errors,
+        bot=[gp_line(1, [f"P{i}" for i in range(9)])],
+        has_bot_log=True,
+    )
+    checks = run_checks(run)
+    gate = {(c.policy, c.name) for c in gate_failures(checks)}
+    assert ("handlers", "turn-handler failures") in gate
+    assert ("great people", "most waiting at once") in gate
+    assert not gate & {(c.policy, c.name) for c in warnings(checks)}
+
+
+def test_end_of_run_lines_put_gate_failures_first(tmp_path: Path):
+    log = tmp_path / "STD_T1_01_20261111T000000Z.jsonl"
+    rows = [turn(n, errors={"h": "boom"}) for n in range(1, 10)] + [turn(10, stop="blocked")]
+    log.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    lines = end_of_run_lines([log])
+    assert lines[0].startswith("Policy effectiveness: G1 gate FAILED")
+    assert any(ln.strip().startswith("GATE handlers") for ln in lines)
+    assert any(ln.strip().startswith("GATE run") for ln in lines)
+
+
+def test_end_of_run_lines_for_a_clean_log(tmp_path: Path):
+    log = tmp_path / "STD_T1_01_20261111T000000Z.jsonl"
+    log.write_text(json.dumps(turn(1)) + "\n", encoding="utf-8")
+    assert end_of_run_lines([log])[0].startswith("Policy effectiveness: G1 gate clean")

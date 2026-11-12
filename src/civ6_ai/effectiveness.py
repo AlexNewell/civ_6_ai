@@ -60,6 +60,20 @@ MIN_DEAL_ACCEPT_SHARE = 0.25
 MIN_ROUTE_SUCCESS = 0.5
 LOYALTY_LOOKBACK_TURNS = 30  # A loyalty warning this close before a loss makes it a loyalty loss.
 MAX_STARVING_NOTICES = 25
+PLANNED_STOPS = ("game_over", "turn_limit")
+
+# The checks that gate G1 (a run is clean only if none fails); the rest only warn. See
+# docs/policy-effectiveness.md, "Standing check".
+GATE_CHECKS = frozenset(
+    {
+        ("blockers", "turns held by an unhandled blocker"),
+        ("great people", "seen vs activated"),
+        ("great people", "most waiting at once"),
+        ("faith", "most faith idle above reserve"),
+        ("handlers", "turn-handler failures"),
+        ("run", "stops that were not the game ending"),
+    }
+)
 
 
 @dataclass
@@ -824,10 +838,12 @@ def health_checks(run: RunLogs) -> list[Check]:
             f"handler errors on at most {MAX_ERROR_TURN_SHARE:.0%} of turns",
             ", ".join(f"{k} x{v}" for k, v in errored.most_common(3)),
         ),
-        _info(
+        _count_check(
             "run",
             "stops that were not the game ending",
-            sum(v for k, v in stops.items() if k != "game_over"),
+            sum(v for k, v in stops.items() if k not in PLANNED_STOPS),
+            0,
+            "no stop except game over or the turn limit",
             ", ".join(f"{k} x{v}" for k, v in stops.most_common()),
         ),
         _count_check(
@@ -876,3 +892,25 @@ def format_report(label: str, run: RunLogs, checks: list[Check]) -> str:
             + (f" | {c.note}" if c.note else "")
         )
     return "\n".join(lines)
+
+
+def gate_failures(checks: list[Check]) -> list[Check]:
+    return [c for c in checks if c.status == FAIL and (c.policy, c.name) in GATE_CHECKS]
+
+
+def warnings(checks: list[Check]) -> list[Check]:
+    return [c for c in checks if c.status == FAIL and (c.policy, c.name) not in GATE_CHECKS]
+
+
+def _line(c: Check) -> str:
+    return f"{c.policy}: {c.name}: {c.figures()}; {c.rule}" + (f" ({c.note})" if c.note else "")
+
+
+def end_of_run_lines(turn_logs: list[Path]) -> list[str]:
+    """The failing checks for the end-of-run summary: gate failures first, then warnings."""
+    checks = run_checks(load_run(turn_logs))
+    gate, warn = gate_failures(checks), warnings(checks)
+    lines = [f"Policy effectiveness: G1 gate {'FAILED' if gate else 'clean'}, {len(warn)} warnings"]
+    lines += [f"  GATE {_line(c)}" for c in gate]
+    lines += [f"  warn {_line(c)}" for c in warn]
+    return lines

@@ -36,3 +36,14 @@ def test_fix_replaces_the_method(monkeypatch):
     monkeypatch.setattr(GameState, "get_gp_advisor", None, raising=False)
     with pytest.raises(RuntimeError):
         gp_advisor.fix_gp_advisor()
+
+
+def test_an_engineer_is_offered_only_the_tiles_the_game_highlights():
+    lua = gp_advisor.build_gp_advisor_query(3)
+    # A Great Engineer needs a wonder being built ("Must be on a wonder..."), Run 5 turns 265-315.
+    engineer_branch = lua.split('gpClass == "GREAT_PERSON_CLASS_ENGINEER"', 1)[1].split(
+        "local yieldIdx"
+    )[0]
+    assert "for plotIdx, _ in pairs(validPlotSet)" in engineer_branch
+    assert "do return end" in engineer_branch  # A bare return before more code is a Lua error.
+    assert "GetPlotPurchaseCity(x, y)" in engineer_branch

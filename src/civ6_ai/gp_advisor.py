@@ -61,6 +61,22 @@ if gp then
         end
     end)
 end
+-- A Great Engineer is used on a wonder (or district) being built, not in its own district. The game
+-- lists those tiles as its highlight plots, so they are the only places it offers.
+if gpClass == "GREAT_PERSON_CLASS_ENGINEER" then
+    for plotIdx, _ in pairs(validPlotSet) do
+        pcall(function()
+            local plot = Map.GetPlotByIndex(plotIdx)
+            local x, y = plot:GetX(), plot:GetY()
+            local dist = Map.GetPlotDistance(unit:GetX(), unit:GetY(), x, y)
+            local owner = ""
+            pcall(function() owner = Locale.Lookup(Cities.GetPlotPurchaseCity(x, y):GetName()) end)
+            print("GP_CITY|" .. (owner:gsub("|", "/")) .. "|-1|" .. x .. "|" .. y .. "|true|" .. dist .. "|0|-1|-1")
+        end)
+    end
+    print("{SENTINEL}")
+    do return end
+end
 local yieldIdx = -1
 local yieldType = classToYield[gpClass]
 if yieldType then pcall(function() yieldIdx = GameInfo.Yields[yieldType].Index end) end

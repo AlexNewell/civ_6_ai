@@ -30,7 +30,7 @@ The live run in progress when this was written is not included.
 | Great people | people on the map (`great_people turn N: K on the map` lines) | `activate_great_person` calls minus `can't activate at` refusals | bot log; turn log `handler_calls` | No activation success line, and no "wasted" count (killed or idle for N turns). Run 4 and older logs have no `great_people` lines. |
 | Blockers | turns the game held | holds with a handler | bot log (`No handler for blocker ...`) | None: names the blocker. |
 | Faith | turns above the reserve | faith purchases (`Faith bought` lines, `patronize_great_person` calls) | bot log; calls | Only idle turns log the balance; spent faith has no total. |
-| Gold | turns above the reserve | purchases (`purchase_item`, `purchase_tile`, `upgrade_unit` calls) | bot log; calls | No gold-spent total, and no balance per turn. |
+| Gold | turns the handler got past its reserve gate (from its calls) | turns with a purchase or upgrade call | turn log `handler_calls` | No gold-spent total, and no balance per turn. |
 | Production | choices tried | choices the game accepted (`builds` vs `can't build` lines) | bot log | Items finished are read from the `finished building` notices in the turn detail. |
 | Builders | improve jobs tried | jobs the game accepted (`builder_decision`) | bot log | Tiles wanted vs improved is not recorded. |
 | Military | combat units built (completion notices) | `attack_unit` and `city_attack` calls | turn detail; calls | Units that fought is only attacks by calls; no per-unit record. Units lost come from "was killed" notices. |
@@ -57,7 +57,7 @@ Each cell is the measure's figure; F means the check failed. For ratio checks th
 | Turns held by an unhandled blocker | 66 F | 48 F | 57 F | 12 F |
 | Faith: turns spent vs idle | no data | 5 of 258 F | 5 of 195 F | 2 of 51 F |
 | Faith: most idle above reserve | 0 | 919 F | 360 F | 1101 F |
-| Gold: turns above reserve, nothing bought | no data | 255 of 510 | 181 of 362 | 46 of 92 |
+| Gold: turns above reserve, nothing bought | no data | 191 of 252 F | 138 of 181 F | 28 of 46 F |
 | Upgrade logged as refused when it succeeded | 0 | 21 F | 11 F | 7 F |
 | Production choices refused | 971 of 1127 F | 491 of 693 F | 629 of 799 F | 260 of 305 F |
 | Most repeats of one refused build | 59 F | 50 F | 37 F | 17 |
@@ -109,7 +109,8 @@ Ranked by how much of the policy's purpose was lost, then by how early the signa
 6. **Military.** 42-55% of unit decisions end in a refused move (stacking). In the last session, no attacks were made.
 7. **Settling and city health.** Cities were lost every run and starving notices stayed high. Run 3 had no site on 125 of 202 decisions; this is fixed in Runs 4 and 5.
 8. **Blockers and handlers.** 5-14% of turns had a handler error, and one blocker type has no handler.
-9. **Gold, research, diplomacy, trade.** These look healthy: gold is spent about half the turns it's above the reserve, routes work 83-100% of the time, and 35-73% of deals offered were accepted. Envoys are only counted.
+9. **Gold.** Nothing was bought on 61-76% of the turns the handler got past its reserve (138 of 181 in Run 5 sessions 1-2). Often nothing was worth buying, and the log's own reason is a short list of costs, so this is the one to read before changing anything.
+10. **Research, diplomacy, trade.** These look healthy: routes work 83-100% of the time, and 35-73% of deals offered were accepted. Envoys are only counted.
 
 ## Suggested fixes
 

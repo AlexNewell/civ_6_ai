@@ -23,7 +23,6 @@ LOG_LINE = re.compile(r"^\S+ \S+ civ6_ai\.(?P<logger>\S+) (?P<level>[A-Z]+) (?P<
 GP_LINE = re.compile(r"great_people turn (\d+): (\d+) on the map: (.*)$")
 GP_NAME = re.compile(r"(?:^|; )(.+?) \((UNIT_GREAT_\w+)\) at ")
 FAITH_IDLE = re.compile(r"Faith (\d+) above reserve (\d+) but nothing bought")
-GOLD_IDLE = re.compile(r"Gold (\d+) is above the reserve (\d+), nothing bought")
 CANT_BUILD = re.compile(r"^(?P<city>.+?) can't build (?P<item>\w+): (?P<why>[A-Za-z_:]+)")
 BUILDS = re.compile(r"^(.+?) builds (\w+)")
 NO_HANDLER = re.compile(r"No handler for blocker (\w+)")
@@ -78,7 +77,7 @@ class RunLogs:
 
     @property
     def has_calls(self) -> bool:
-        return any("handler_calls" in r for r in self.records)
+        return any(any(d.values()) for r in self.records for d in [r.get("handler_calls", {})])
 
     def calls(self, name: str) -> int:
         """How many times a game call was made, across the run."""
@@ -338,23 +337,43 @@ def faith_checks(run: RunLogs) -> list[Check]:
     ]
 
 
+def gold_turns(run: RunLogs) -> tuple[int, int]:
+    """Turns the gold handler got past its reserve gate, and how many of those it bought on.
+
+    Below the reserve the handler reads only the overview. Above it, it reads the cities or tiles,
+    so those reads mark an eligible turn, and a purchase or upgrade call marks a turn that spent.
+    """
+    eligible = spent = 0
+    for record in run.records:
+        gold = record.get("handler_calls", {}).get("gold", {})
+        if "list_city_production" in gold or "get_purchasable_tiles" in gold:
+            eligible += 1
+            spent += any(c in gold for c in ("purchase_item", "purchase_tile", "upgrade_unit"))
+    return eligible, spent
+
+
 def gold_checks(run: RunLogs) -> list[Check]:
-    if not run.has_bot_log:
-        return [_no_data("gold", "above reserve vs spent", "see rule", "needs the bot log")]
-    msgs = run.messages("policies.gold")
-    idle = [m for m in msgs if GOLD_IDLE.search(m)]
-    tried = sum(1 for m in msgs if re.match(r"Gold \d+, reserve \d+, \d+ to spend", m))
-    out = [
-        _share_check(
-            "gold",
-            "turns above reserve with nothing bought",
-            len(idle),
-            len(idle) + tried,
-            MAX_IDLE_GOLD_SHARE,
-            f"nothing bought on at most {MAX_IDLE_GOLD_SHARE:.0%} of turns above the reserve",
-            f"{tried} lines say gold was to spend; a purchase may follow",
+    out: list[Check] = []
+    if run.has_calls:
+        eligible, spent = gold_turns(run)
+        out.append(
+            _share_check(
+                "gold",
+                "turns above reserve with nothing bought",
+                eligible - spent,
+                eligible,
+                MAX_IDLE_GOLD_SHARE,
+                f"nothing bought on at most {MAX_IDLE_GOLD_SHARE:.0%} of turns above the reserve",
+                "from the gold handler's calls; no gold-spent total is logged",
+            )
         )
-    ]
+    else:
+        out.append(
+            _no_data("gold", "turns above reserve with nothing bought", "see rule", "needs calls")
+        )
+    if not run.has_bot_log:
+        return [*out, _no_data("gold", "upgrade logged as refused", "see rule", "needs bot log")]
+    msgs = run.messages("policies.gold")
     false_refusals = sum(1 for m in msgs if "refused: UPGRADED|" in m)
     out.append(
         _count_check(
@@ -646,6 +665,7 @@ def trade_checks(run: RunLogs) -> list[Check]:
 
 def health_checks(run: RunLogs) -> list[Check]:
     errored = Counter(h for r in run.records for h in r.get("handler_errors", {}))
+    error_turns = {r["turn"] for r in run.records if r.get("handler_errors")}
     turns = max(run.turns, 1)
     stops = Counter(r.get("stop_reason") for r in run.records if r.get("stop_reason"))
     starving = sum(1 for ln in run.detail_lines() if STARVING.match(ln))
@@ -653,7 +673,7 @@ def health_checks(run: RunLogs) -> list[Check]:
         _share_check(
             "handlers",
             "turn-handler failures",
-            sum(errored.values()),
+            len(error_turns),
             turns,
             MAX_ERROR_TURN_SHARE,
             f"handler errors on at most {MAX_ERROR_TURN_SHARE:.0%} of turns",

@@ -188,3 +188,31 @@ def test_the_report_lists_failures_and_figures():
     assert "Run X" in text
     assert "[FAIL   ] great people" in text
     assert "checks failed" in text
+
+
+def test_several_handlers_failing_on_one_turn_count_that_turn_once():
+    errors = {"secondary": "boom", "military": "boom", "wars": "boom"}
+    records = [turn(i, errors=errors if i == 0 else None) for i in range(100)]
+    check = by_name(RunLogs(records=records))[("handlers", "turn-handler failures")]
+    assert (check.created, check.used) == (100, 1)
+    assert check.status == PASS
+
+
+def test_empty_call_counts_are_not_measured_zeros():
+    notice = "  >> Coba finished building UNIT_SWORDSMAN. Now: nothing."
+    records = [turn(i, {}, detail=notice) for i in range(6)]
+    run = RunLogs(records=records)
+    assert not run.has_calls
+    assert by_name(run)[("military", "units built vs attacks")].status == NO_DATA
+
+
+def test_gold_idle_turns_come_from_the_gold_handler_calls():
+    def gold_turn(n, calls):
+        return {**turn(n), "handler_calls": {"gold": {k: [1, 0.1] for k in calls}}}
+
+    records = [gold_turn(i, ["list_city_production"]) for i in range(8)]
+    records += [gold_turn(8, ["list_city_production", "purchase_item"])]
+    records += [gold_turn(9, ["get_game_overview"])]
+    check = by_name(RunLogs(records=records))[("gold", "turns above reserve with nothing bought")]
+    assert (check.created, check.used) == (9, 8)
+    assert check.status == FAIL

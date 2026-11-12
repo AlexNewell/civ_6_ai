@@ -19,7 +19,7 @@ Issues are generated from [`.github/roadmap-issues.yaml`](.github/roadmap-issues
 |---|---|
 | Phase 0: Repo Setup | 🟩 Done |
 | Workstream "T": Game <ins>Toolchain</ins> | 🟩 Done. G0 passed. |
-| Phase 1: Deterministic Bot | 🟨 In progress: 4 of 34 done, 29 in progress, 1 in backlog. Runs 3 to 6 played full games to the end, but each needed a restart or hands-on help, so G1 has no unattended game yet. [Details](#phase-1-deterministic-bot). |
+| Phase 1: Deterministic Bot | 🟨 In progress: 4 of 44 done, 29 in progress, 11 in backlog. Runs 3 to 6 played full games to the end, but each needed a restart or hands-on help, so G1 has no unattended game yet. [Details](#phase-1-deterministic-bot). |
 | Workstream "E": <ins>Evaluator</ins> and Data | 🟨 In progress: 3 of 5 done. |
 | Workstream "S": Puppeteering <ins>Spike</ins> | 🟨 In progress: 1 of 6 done. |
 | Phase 2: Strategist | 🟥 Blocked: waits on G1. 2 of 6 done ahead of the gate (2.1 and 2.2, built offline). |
@@ -130,7 +130,16 @@ flowchart TD
     P16 & P19 & P117 --> P124["1.24 Refusals"]
     P117 --> P126["1.26 Unbuyable GP cost"]
     P19 --> P127["1.27 Cities lost"]
-    P128["1.28 Live checks"] ~~~ P130["1.30 Run docs"] ~~~ P131["1.31 civ6-mcp review"] ~~~ P133["1.33 Strength review"]
+    P19 & P114 & P115 --> P135["1.35 War-time defence"]
+    P19 --> P136["1.36 Defenders in cities"]
+    P18 & P110 --> P137["1.37 Loyalty-aware settling"]
+    P13 --> P138["1.38 Richer city events"]
+    P14 --> P139["1.39 Rival score logging"] --> P140["1.40 Score vs leader"]
+    P122 --> P140
+    P18 --> P141["1.41 Six cities by T150"]
+    P15 & P17 --> P143["1.43 Science rank"]
+    P134 --> P144["1.44 Wonder log"]
+    P128["1.28 Live checks"] ~~~ P142["1.42 Early-game gap"] ~~~ P130["1.30 Run docs"] ~~~ P131["1.31 civ6-mcp review"] ~~~ P133["1.33 Strength review"]
 
     classDef done fill:#c7f0d2,stroke:#1a7f37,color:#0b2e13
     classDef progress fill:#fff0b3,stroke:#9a6700,color:#3d2a00
@@ -138,7 +147,7 @@ flowchart TD
     classDef backlog fill:#eaeef2,stroke:#57606a,color:#1f2328
     class P11,P13,P14,P130 done
     class P12,P15,P16,P17,P18,P19,P110,P111,P112,P113,P114,P115,P116,P117,P118,P119,P120,P121,P122,P123,P124,P125,P126,P127,P129,P131,P132,P133,P134 progress
-    class P128 backlog
+    class P128,P135,P136,P137,P138,P139,P140,P141,P142,P143,P144 backlog
 ```
 
 | Item | Task | Status | Notes |
@@ -177,6 +186,16 @@ flowchart TD
 | [`1.32`](https://github.com/AlexNewell/civ_6_ai/issues/152) | Preflight check in run_game.py for dependencies and screenshots | 🟨 In progress | PR 161 merged with unit tests. Not checked live. |
 | [`1.33`](https://github.com/AlexNewell/civ_6_ai/issues/153) | Strength review: where we trailed Germany on score in Run 6 | 🟨 In progress | PR 162 merged: [`docs/research/strength-run6.md`](docs/research/strength-run6.md). Open: no log records rival scores, so the gap to the leader can't be measured yet. |
 | [`1.34`](https://github.com/AlexNewell/civ_6_ai/issues/156) | Construction event log and a build tracker that spots gaps | 🟨 In progress | PRs 168 and 172 merged: construction events, a build ledger restored on restart, a per-turn gap line, and buffered event writes (about 0.7 ms a turn in tests). Not checked live. Feeding gaps into production scoring is left. |
+| [`1.35`](https://github.com/AlexNewell/civ_6_ai/issues/174) | Raise defence when a war starts or a threat appears | ⬜ Backlog | From the cities-lost research (1.27). |
+| [`1.36`](https://github.com/AlexNewell/civ_6_ai/issues/175) | Get defenders into threatened cities | ⬜ Backlog | From 1.27. |
+| [`1.37`](https://github.com/AlexNewell/civ_6_ai/issues/176) | Loyalty-aware settling and loyalty response | ⬜ Backlog | From 1.27. |
+| [`1.38`](https://github.com/AlexNewell/civ_6_ai/issues/177) | Richer city events: who took a city, why, and across restarts | ⬜ Backlog | From 1.27 and 1.33. |
+| [`1.39`](https://github.com/AlexNewell/civ_6_ai/issues/178) | Log rival scores, cities and population each turn | ⬜ Backlog | From the strength review (1.33). |
+| [`1.40`](https://github.com/AlexNewell/civ_6_ai/issues/179) | Score-vs-leader report against the CivBench baselines | ⬜ Backlog | Waits on 1.39. |
+| [`1.41`](https://github.com/AlexNewell/civ_6_ai/issues/180) | Expansion target: 6 cities by turn 150 | ⬜ Backlog | From 1.33. |
+| [`1.42`](https://github.com/AlexNewell/civ_6_ai/issues/181) | Close the early-game score gap (research) | ⬜ Backlog | From 1.33. |
+| [`1.43`](https://github.com/AlexNewell/civ_6_ai/issues/182) | Keep science rank at or above the median | ⬜ Backlog | From 1.33. |
+| [`1.44`](https://github.com/AlexNewell/civ_6_ai/issues/183) | Log wonder completions | ⬜ Backlog | From 1.33. |
 
 ## Workstream "E": <ins>Evaluator</ins> and Data
 

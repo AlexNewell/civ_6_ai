@@ -19,6 +19,18 @@ from typing import Any, Protocol
 from civ6_ai.blockers import Blocker, BlockerGame, BlockerType
 from civ6_ai.construction import ProductionRefused, ProductionSet
 from civ6_ai.monitors import Event, EventBus
+from civ6_ai.placement import (
+    ELSEWHERE,
+    MAX_UNCHANGED_REFUSALS,
+    OTHER,
+    SAFETY_RECHECK_TURNS,
+    UNKNOWN,
+    UNKNOWN_WAIT_TURNS,
+    OwnedTile,
+    PlacementReads,
+    Planner,
+    classify,
+)
 from civ6_ai.policies.districts import BASE_VALUE, PLANNED_VALUE, is_planned, wants_district
 from civ6_ai.policies.expansion import ExpansionState, expected_cities
 from civ6_ai.policies.game_data import COMBAT_UNITS, REPLACES, UPGRADES, WONDERS
@@ -38,19 +50,6 @@ _NO_COORDS_WONDER = ("ERR:MISSING_COORDS", "Error: MISSING_COORDS")
 # Replies that mean the game will not build the item here. Anything else that fails (a read
 # failure, a timeout) may pass next turn, so it is never remembered.
 _REFUSAL_CODES = ("NO_PLACEMENT", "CANNOT_START", "SILENT_FAILURE", "CANNOT_PRODUCE")
-REFUSAL_BACKOFF_TURNS = 5  # Turns to skip an item after its first refusal for a city.
-REFUSAL_BACKOFF_MAX_TURNS = 40  # Each repeat refusal doubles the wait, up to this.
-# A city with no tile for a district only gains one when its borders grow, which takes many turns
-# and is not visible in the reads. Run 8 asked 16 to 20 times for the same Harbor, because the
-# short wait above also ended whenever the city built anything. So it waits much longer, and only
-# the clock ends it.
-NO_PLACEMENT_BACKOFF_TURNS = 15
-NO_PLACEMENT_BACKOFF_MAX_TURNS = 120
-# `CANNOT_START` means a prerequisite is missing: a district, or a building. The wait ends early
-# when the city gains a new kind of district (or, for a plain building, a new building), not for
-# every building as before.
-CANNOT_START_BACKOFF_TURNS = 10
-CANNOT_START_BACKOFF_MAX_TURNS = 80
 STARVING_FOCUS_RECOVERED = 2.0  # Food per turn at which a food-focused city goes back to default.
 _TURN_SCALE = 20.0  # A build this many turns away scores half as much as an instant one.
 _URGENT_SCALE = 10.0
@@ -579,65 +578,89 @@ def is_refusal(result: str) -> bool:
     return _failed(result) and any(code in result for code in _REFUSAL_CODES)
 
 
-def _circumstances(city: City) -> tuple[int, int]:
-    """What changes whether an item can be built: a new district or building."""
-    return len(city.districts), len(city.buildings)
+@dataclass
+class _Refusal:
+    """One remembered refusal: why, under which placement state, and what ends it."""
 
-
-def _refusal_kind(reply: str) -> str:
-    if "NO_PLACEMENT" in reply:
-        return "placement"
-    if "CANNOT_START" in reply:
-        return "start"
-    return "other"
-
-
-def _signature(city: City, item: str, kind: str) -> Any:
-    """What must change in the city before the refused item could be accepted."""
-    if kind == "placement":
-        return None  # Only time (borders growing) changes it.
-    if kind == "start":
-        districts = frozenset(d.district_type for d in city.districts)
-        if item in WONDERS:
-            return districts
-        return districts, frozenset(city.buildings)
-    return len(city.districts), len(city.buildings)
+    reason: str
+    signature: str | None  # The city's placement signature when it was refused.
+    count: int  # Refusals in a row under that same signature.
+    until: int | None  # Turn at which it is asked again regardless. None: only a change ends it.
+    needs: str | None = None  # A tech or civic whose arrival ends it.
+    permanent: bool = False  # Dropped for the game.
 
 
 class RefusalMemory:
-    """Items the game refused for a city, skipped until a back-off passes.
+    """What the game refused for a city, and what would change the answer (issue 187).
 
-    The wait doubles for each repeat refusal of the same city and item. Its base and cap depend on
-    the reply: `REFUSAL_BACKOFF_TURNS` up to `REFUSAL_BACKOFF_MAX_TURNS` for most, a much longer
-    one for `NO_PLACEMENT` (only borders growing helps, so only time ends it), and a middle one for
-    `CANNOT_START`, which also ends early when the city gains what the item needs (see
-    `_signature`). Kept in memory only: a restart forgets it, which costs one retry per item.
+    There are no long timers. A refusal is kept with the city's placement signature
+    (`placement.build_signatures_query`) and is asked again as soon as that changes, or as soon as
+    the tech or civic it waits for lands. By reason (`placement.classify`):
+
+    - placement or district: ask again when the signature changes. A `SAFETY_RECHECK_TURNS` re-ask
+      covers what the signature cannot show.
+    - unlock: ask again when the tech or civic is held.
+    - elsewhere (the wonder is built or under way elsewhere): dropped for the game.
+    - unknown or other (a flaky set): a wait of `UNKNOWN_WAIT_TURNS`, at most three times under an
+      unchanged signature, then only a change ends it.
+    - no signature could be read: the short wait, whatever the reason.
+
+    Kept in memory only: a restart forgets it, which costs one retry per item.
     """
 
     def __init__(self) -> None:
-        # (city_id, item) -> (skip until this turn, refusals so far, kind, city signature)
-        self._entries: dict[tuple[int, str], tuple[int, int, str, Any]] = {}
+        self._entries: dict[tuple[int, str], _Refusal] = {}
 
-    def blocked(self, city: City, item: str, turn: int) -> bool:
+    def watched(self) -> tuple[str, ...]:
+        """The techs and civics some refusal is waiting for."""
+        return tuple(sorted({e.needs for e in self._entries.values() if e.needs}))
+
+    def has(self, city: City, item: str) -> bool:
+        return (city.city_id, item) in self._entries
+
+    async def blocked(
+        self, city: City, item: str, turn: int, reads: PlacementReads | None = None
+    ) -> bool:
         entry = self._entries.get((city.city_id, item))
         if entry is None:
             return False
-        until, _, kind, seen = entry
-        # Once expired or changed it is free again, but the count stays so a repeat waits longer.
-        return turn < until and _signature(city, item, kind) == seen
+        if entry.permanent:
+            return True
+        if reads is not None:
+            signature = await reads.signature(city.city_id)
+            if signature is not None and entry.signature not in (None, signature):
+                return False
+            if entry.needs and await reads.unlocked(entry.needs):
+                return False
+        return entry.until is None or turn < entry.until
 
-    def refused(self, city: City, item: str, turn: int, reply: str = "") -> int:
-        """Record a refusal and return how many turns the item is now skipped for."""
+    def refused(
+        self,
+        city: City,
+        item: str,
+        turn: int,
+        reply: str = "",
+        reason: str | None = None,
+        signature: str | None = None,
+        needs: str | None = None,
+    ) -> int:
+        """Record a refusal. Returns the turns until it is asked again, or -1 for only a change."""
+        reason = reason or classify(reply, None)[0]
         key = (city.city_id, item)
-        count = self._entries[key][1] + 1 if key in self._entries else 1
-        kind = _refusal_kind(reply)
-        base, cap = {
-            "placement": (NO_PLACEMENT_BACKOFF_TURNS, NO_PLACEMENT_BACKOFF_MAX_TURNS),
-            "start": (CANNOT_START_BACKOFF_TURNS, CANNOT_START_BACKOFF_MAX_TURNS),
-        }.get(kind, (REFUSAL_BACKOFF_TURNS, REFUSAL_BACKOFF_MAX_TURNS))
-        wait = min(base * 2 ** (count - 1), cap)
-        self._entries[key] = (turn + wait, count, kind, _signature(city, item, kind))
-        return wait
+        before = self._entries.get(key)
+        same = before is not None and before.signature == signature and signature is not None
+        count = before.count + 1 if same and before is not None else 1
+        if reason == ELSEWHERE:
+            entry = _Refusal(reason, signature, count, None, permanent=True)
+        elif signature is None:
+            entry = _Refusal(reason, None, count, turn + UNKNOWN_WAIT_TURNS, needs)
+        elif reason in (UNKNOWN, OTHER):
+            wait = UNKNOWN_WAIT_TURNS if count < MAX_UNCHANGED_REFUSALS else SAFETY_RECHECK_TURNS
+            entry = _Refusal(reason, signature, count, turn + wait)
+        else:
+            entry = _Refusal(reason, signature, count, turn + SAFETY_RECHECK_TURNS, needs)
+        self._entries[key] = entry
+        return -1 if entry.until is None else entry.until - turn
 
     def accepted(self, city: City, item: str) -> None:
         self._entries.pop((city.city_id, item), None)
@@ -661,9 +684,17 @@ class StartTrace:
 
 
 async def _start(
-    game: ProductionGame, city: City, option: ProductionChoice, trace: StartTrace | None = None
+    game: ProductionGame,
+    city: City,
+    option: ProductionChoice,
+    trace: StartTrace | None = None,
+    plan: "PlanContext | None" = None,
 ) -> str:
-    """Set production, finding a tile first where the item needs one."""
+    """Set production, finding a tile first where the item needs one.
+
+    With `plan`, an item with no valid tile (or, for a district, a clearly better tile the city
+    could buy) goes through the planner, which may buy a tile; the advisor is then asked again.
+    """
     trace = trace if trace is not None else StartTrace()
     if option.is_repair:
         trace.tile = (option.repair_x, option.repair_y)
@@ -674,6 +705,13 @@ async def _start(
         placements = await game.get_district_advisor(city.city_id, option.item)
         if not isinstance(placements, list):
             return _advisor_failed(option.item, placements)
+        if plan is not None:
+            offered = [OwnedTile(p.x, p.y, p.total_adjacency) for p in placements]
+            if await plan.chain(game, city, option, offered):
+                placements = await game.get_district_advisor(city.city_id, option.item)
+                if not isinstance(placements, list):
+                    return _advisor_failed(option.item, placements)
+                await plan.verify(city, option, [OwnedTile(p.x, p.y, 0) for p in placements])
         trace.placements = len(placements)
         if not placements:
             return f"ERR:NO_PLACEMENT|{option.item}: no valid tile"
@@ -688,6 +726,13 @@ async def _start(
         placements = await game.get_wonder_advisor(city.city_id, option.item)
         if not isinstance(placements, list):
             return _advisor_failed(option.item, placements)
+        if plan is not None:
+            offered = [OwnedTile(p.x, p.y, 0) for p in placements]
+            if await plan.chain(game, city, option, offered):
+                placements = await game.get_wonder_advisor(city.city_id, option.item)
+                if not isinstance(placements, list):
+                    return _advisor_failed(option.item, placements)
+                await plan.verify(city, option, [OwnedTile(p.x, p.y, 0) for p in placements])
         trace.placements = len(placements)
         if not placements:
             return f"ERR:NO_PLACEMENT|{option.item}: no valid tile"
@@ -699,6 +744,37 @@ async def _start(
     return result
 
 
+@dataclass
+class PlanContext:
+    """What `_start` needs to chain a tile purchase: the planner and this turn's reads."""
+
+    planner: Planner
+    reads: PlacementReads
+
+    async def chain(
+        self, game: Any, city: City, option: ProductionChoice, offered: list[OwnedTile]
+    ) -> bool:
+        return await self.planner.consider(
+            game, self.reads, city, option.category, option.item, offered
+        )
+
+    async def verify(self, city: City, option: ProductionChoice, offered: list[OwnedTile]) -> None:
+        """After a purchase: log `buy_failed_place` if the game did not offer the bought tile."""
+        await self.planner.placed(self.reads, city, option.item, offered)
+
+
+async def _explain(
+    reads: PlacementReads | None, city: City, option: ProductionChoice, reply: str
+) -> tuple[str, str | None, str | None]:
+    """Why the game refused: the reason class, the unlock it waits for, and the city's signature."""
+    diagnosis = None
+    if reads is not None and ("CANNOT_START" in reply or "CANNOT_PRODUCE" in reply):
+        diagnosis = await reads.diagnose(city.city_id, option.category, option.item)
+    reason, needs = classify(reply, diagnosis)
+    signature = await reads.signature(city.city_id) if reads is not None else None
+    return reason, needs, signature
+
+
 async def choose_for_city(
     game: ProductionGame,
     city: City,
@@ -708,23 +784,37 @@ async def choose_for_city(
     only_defence: bool = False,
     memory: RefusalMemory | None = None,
     emit: Callable[[Event], None] | None = None,
+    reads: PlacementReads | None = None,
+    planner: Planner | None = None,
 ) -> ProductionChoice | None:
     """Start the best option that the game accepts. Returns it, or None if all were refused.
 
     With `only_defence`, the city's current build is replaced only if the best option is a
     defender or walls, and only defence is tried. Items in `memory` for this city are skipped.
-    `emit` receives a `ProductionSet` or `ProductionRefused` for each attempt.
+    `emit` receives a `ProductionSet` or `ProductionRefused` for each attempt. `reads` supplies the
+    placement signatures and diagnoses (see `placement`), and `planner` the chained tile buys.
     """
     ranked = rank_production(city, options, context, weights)
-    if memory is not None:
-        ranked = [o for o in ranked if not memory.blocked(city, o.item, context.turn)]
+    chain = PlanContext(planner, reads) if planner is not None and reads is not None else None
     if only_defence:
         if not ranked or not is_defence(ranked[0]) or score(ranked[0], city, context, weights) <= 0:
             return None
         ranked = [o for o in ranked if is_defence(o)]
-    for option in ranked[:MAX_ATTEMPTS]:
+    tried = 0
+    for option in ranked:
+        if tried >= MAX_ATTEMPTS:
+            break
+        # A remembered refusal is checked only when the item has won its place in the ranking, so
+        # a changed signature by itself costs no call and gives the item no priority.
+        if (
+            memory is not None
+            and memory.has(city, option.item)
+            and await memory.blocked(city, option.item, context.turn, reads)
+        ):
+            continue
+        tried += 1
         trace = StartTrace()
-        result = await _start(game, city, option, trace)
+        result = await _start(game, city, option, trace, chain)
         where = (context.turn, city.city_id, city.name, city.x, city.y)
         if not _failed(result):
             log.info("%s builds %s", city.name, option.item)
@@ -742,12 +832,19 @@ async def choose_for_city(
                 )
             if memory is not None:
                 memory.accepted(city, option.item)
+            placed = option.category == "DISTRICT" or trace.placements is not None
+            if planner is not None and trace.tile is not None and placed and not option.is_repair:
+                planner.reserve(city.city_id, option.item, *trace.tile)
             return option
         log.info("%s can't build %s: %s", city.name, option.item, result[:120])
         refusal = is_refusal(result)
-        wait = 0
-        if memory is not None and refusal:
-            wait = memory.refused(city, option.item, context.turn, result)
+        wait, reason = 0, ""
+        if refusal:
+            reason, needs, signature = await _explain(reads, city, option, result)
+            if memory is not None:
+                wait = memory.refused(
+                    city, option.item, context.turn, result, reason, signature, needs
+                )
         if emit is not None:
             emit(
                 ProductionRefused(
@@ -758,6 +855,7 @@ async def choose_for_city(
                     is_refusal=refusal,
                     placements_offered=trace.placements,
                     backoff_turns=wait,
+                    reason=reason,
                 )
             )
     return None
@@ -793,6 +891,7 @@ class CityProductionPolicy:
         self.defence = defence  # The threat state (`defence.DefenceState`), or None.
         self.weights = weights or ProductionWeights()  # The strategist replaces this later.
         self.refusals = RefusalMemory()
+        self.planner = Planner()  # Chained tile buys. Its `book` is the gold policy's saving list.
         self.expansion = expansion if expansion is not None else ExpansionState()
 
     async def run(self, game: ProductionGame) -> None:
@@ -829,6 +928,8 @@ class CityProductionPolicy:
         if not switching and not idle:
             return []
         empire, units = await _read_empire(game), await _read_units(game)
+        reads = PlacementReads(game, self.refusals.watched())
+        self.planner.begin_turn(empire.turn, self._plan_budget(empire), empire.gold_per_turn)
         building = {c.city_id: c.building for c in cities if c.building is not None}
         # First the switches, which only ever choose defence. Each one replaces what the city was
         # building, and a refused switch leaves it building, so the count below stays true.
@@ -844,6 +945,7 @@ class CityProductionPolicy:
                 only_defence=True,
                 memory=self.refusals,
                 emit=self._emit,
+                reads=reads,
             )
             if picked is not None:
                 building[city.city_id] = picked.item
@@ -853,7 +955,15 @@ class CityProductionPolicy:
         for city in sorted(idle, key=lambda c: (not under_threat(c, context), c.city_id)):
             options = await _read_production(game, city.city_id)
             picked = await choose_for_city(
-                game, city, options, context, self.weights, memory=self.refusals, emit=self._emit
+                game,
+                city,
+                options,
+                context,
+                self.weights,
+                memory=self.refusals,
+                emit=self._emit,
+                reads=reads,
+                planner=self.planner,
             )
             if picked is None:
                 unfinished.append(city.name)
@@ -861,6 +971,14 @@ class CityProductionPolicy:
                 context = context.after_choosing(picked.item)
                 self._note(city, f"production: chose {picked.item}")
         return unfinished
+
+    def _plan_budget(self, empire: Empire) -> int:
+        """Gold the planner may spend on a tile this turn: none while a city is threatened."""
+        from civ6_ai.policies.gold import reserve_for  # Gold imports this module.
+
+        if self.defence is not None and self.defence.any:
+            return 0
+        return int(empire.gold) - reserve_for(empire.num_cities, empire.gold_per_turn)
 
     async def _feed_starving(self, game: ProductionGame, cities: list[City]) -> None:
         """Set a food focus on a starving city, and clear it once the city has recovered.

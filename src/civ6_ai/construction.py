@@ -64,7 +64,8 @@ class ProductionRefused(ConstructionEvent):
     reply: str
     is_refusal: bool  # The game said no, as opposed to a read or call that failed.
     placements_offered: int | None = None
-    backoff_turns: int = 0  # How long the item is now skipped for this city.
+    backoff_turns: int = 0  # Turns until it is asked again. -1: only a change ends it.
+    reason: str = ""  # Why, for a refusal: placement, unlock, elsewhere, district, unknown, other.
 
 
 @dataclass(frozen=True, kw_only=True)

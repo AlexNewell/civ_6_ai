@@ -42,6 +42,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from civ6_ai.placement import PlanBook
 from civ6_ai.policies.game_data import COMBAT_UNITS
 from civ6_ai.policies.production import (
     ProductionContext,
@@ -179,7 +180,15 @@ class GoldPolicy:
 
     name = "gold"
 
-    def __init__(self, weights: ProductionWeights | None = None, defence: Any = None) -> None:
+    def __init__(
+        self,
+        weights: ProductionWeights | None = None,
+        defence: Any = None,
+        plans: PlanBook | None = None,
+    ) -> None:
+        # Tiles production wants for a district or wonder (see `placement`): bought when they fit
+        # the budget, else the saving target.
+        self.plans = plans if plans is not None else PlanBook()
         self.weights = weights or ProductionWeights()
         self.defence = defence  # The threat state (`defence.DefenceState`), or None.
 
@@ -211,6 +220,7 @@ class GoldPolicy:
         cities = sorted(await _read_cities(game), key=lambda c: (not self._marked(c), c.city_id))
         units = list(await _read_units(game))
         await self._upgrade(game, turn, units, notes, cities)
+        await self._plan_tiles(game, turn, empire.turn, notes)
         await self._buy(game, turn, empire, cities, units, notes)
         await self._tiles(game, turn, cities, notes)
         spent = budget - turn.budget
@@ -388,6 +398,46 @@ class GoldPolicy:
             turn.refusals += 1
             log.info("Purchase of %s in %s refused: %s", option.item, city.name, str(result)[:120])
         return False
+
+    async def _plan_tiles(self, game: GoldGame, turn: _Turn, now: int, notes: list[str]) -> None:
+        """Buy the tile a district or wonder is waiting for, or make it the saving target."""
+        if self.defence is not None and self.defence.any:
+            return  # A threatened city's defence comes before any tile.
+        bought_for: set[int] = set()
+        for target in self.plans.current(now):
+            if turn.refused_out:
+                return
+            if target.city_id in bought_for:
+                continue  # One tile per city per turn.
+            if target.cost <= turn.budget:
+                result = await self._call(game.purchase_tile(target.city_id, target.x, target.y))
+                self.plans.drop(target.city_id, target.item)  # Bought or refused, it is spent.
+                if _ok(result, "TILE_PURCHASED"):
+                    bought_for.add(target.city_id)
+                    turn.budget -= target.cost
+                    turn.tiles += 1
+                    log.info(
+                        "placement_plan city=%s item=%s tile=(%d,%d) action=bought cost=%d",
+                        target.city_name,
+                        target.item,
+                        target.x,
+                        target.y,
+                        target.cost,
+                    )
+                else:
+                    turn.refusals += 1
+                    log.info(
+                        "Planned tile (%d,%d) for %s refused: %s",
+                        target.x,
+                        target.y,
+                        target.city_name,
+                        str(result)[:120],
+                    )
+            elif turn.save_for(
+                f"tile ({target.x},{target.y}) for {target.item} in {target.city_name}",
+                target.cost,
+            ):
+                notes.append(f"saving for the {target.item} tile in {target.city_name}")
 
     async def _tiles(self, game: GoldGame, turn: _Turn, cities: list[City], notes: list[str]):
         for city in cities:

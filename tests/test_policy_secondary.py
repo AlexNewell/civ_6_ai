@@ -516,9 +516,7 @@ def gp_unit(kind="UNIT_GREAT_SCIENTIST", uid=40, **changes):
         unit_index=uid,
         unit_type=kind,
         combat_strength=0,
-        x=10,
-        y=10,
-        **{"name": "Hypatia", **changes},
+        **{"name": "Hypatia", "x": 10, "y": 10, **changes},
     )
 
 
@@ -775,3 +773,37 @@ def test_idle_time_restarts_after_a_use_that_leaves_the_person_on_the_map(caplog
             game.data["overview"] = overview(turn=turn)
             run(policy, game)
     assert "great_people idle" not in caplog.text
+
+
+def moves_to(game):
+    return [a[2:] for a in game.actions if a[0] == "move"]
+
+
+def test_a_great_person_is_not_sent_to_a_tile_another_civilian_holds():
+    # Run 7: 110 STACKING_CONFLICT refusals from great people sent onto a tile held by another one.
+    waiting = gp_unit(uid=41, x=12, y=10, moves_remaining=0.0, name="Waiting")
+    mover = gp_unit(uid=40, name="Mover")
+    near, far = gp_city(12, 10, 2, city_id=1), gp_city(13, 10, 5, city_id=2)
+    game = make_game(units=[mover, waiting], advisor=advisor(near, far))
+    run(SecondaryPolicy(), game)
+    assert (12, 10) not in moves_to(game)
+    assert (13, 10) in moves_to(game)
+
+
+def test_a_great_person_with_every_district_held_does_not_try_to_move():
+    waiting = gp_unit(uid=41, x=12, y=10, moves_remaining=0.0, name="Waiting")
+    mover = gp_unit(uid=40, name="Mover")
+    game = make_game(units=[mover, waiting], advisor=advisor(gp_city(12, 10, 2)))
+    run(SecondaryPolicy(), game)
+    assert moves_to(game) == []
+
+
+def test_a_refused_tile_is_not_tried_again_for_a_few_turns():
+    mover = gp_unit(uid=40)
+    game = make_game(units=[mover], advisor=advisor(gp_city(12, 10, 2, city_id=1)))
+    game.replies["move"] = ["Error: STACKING_CONFLICT|Friendly UNIT_GREAT_SCIENTIST already on"]
+    policy = SecondaryPolicy()
+    run(policy, game)
+    assert len(moves_to(game)) == 1
+    run(policy, game)  # Same turn number is a retry inside the window.
+    assert len(moves_to(game)) == 1

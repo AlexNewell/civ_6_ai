@@ -59,6 +59,7 @@ MAX_MOVE_TARGETS = 3
 GREAT_IDLE_TURNS = 20  # A great person on the map this long, unused, is logged as wasted.
 GP_STUCK_TURNS = 6  # Turns without getting closer, or failing, before a great person is set aside.
 GP_SET_ASIDE_TURNS = 10
+REFUSED_TILE_TURNS = 5  # A tile a move was refused to is not tried again for this long.
 
 _PROPHET = "UNIT_GREAT_PROPHET"
 _ACTIVATABLE = frozenset(
@@ -289,6 +290,7 @@ class _GreatPersonState:
     last_distance: int | None = None
     last_target: tuple[int, int] | None = None
     skip_until: int = -1
+    refused: dict[tuple[int, int], int] = field(default_factory=dict)  # Tile -> turn it is open.
 
 
 @dataclass
@@ -430,13 +432,17 @@ class SecondaryPolicy:
         alive = {u.unit_id for u in units}
         self._great = {k: v for k, v in self._great.items() if k in alive}
         self._track_great(units, alive, turn)
+        # Run 7: 110 of 135 STACKING_CONFLICT refusals were great people sent to a district tile
+        # that another civilian (often another great person waiting there) already held. Tiles
+        # held by a civilian are skipped, and moves made this turn are added as they happen.
+        civilians = {(u.x, u.y): u.unit_id for u in units if not u.is_combat}
         for unit in sorted(units, key=lambda u: u.unit_id):
             kind = canonical(unit.unit_type)
             if kind not in _ACTIVATABLE or not unit.can_move:
                 continue
             if kind == _PROPHET and not can_found:
                 continue  # A religion exists already, or none is left to found.
-            await self._activate(game, unit, turn)
+            await self._activate(game, unit, turn, civilians)
         self._log_waiting(units, turn, can_found)
 
     def _track_great(self, units: Iterable[Unit], alive: set[int], turn: int) -> None:
@@ -498,7 +504,14 @@ class SecondaryPolicy:
                 "great_people turn %d: %d on the map: %s", turn, len(waiting), "; ".join(waiting)
             )
 
-    async def _activate(self, game: SecondaryGame, unit: Unit, turn: int) -> None:
+    async def _activate(
+        self,
+        game: SecondaryGame,
+        unit: Unit,
+        turn: int,
+        civilians: dict[tuple[int, int], int] | None = None,
+    ) -> None:
+        civilians = {} if civilians is None else civilians
         state = self._great.setdefault(unit.unit_id, _GreatPersonState())
         if state.skip_until > turn:
             return
@@ -550,15 +563,30 @@ class SecondaryPolicy:
             log.info("%s can't activate at %s: %s", unit.name, target.city_name, result[:120])
             self._no_progress(state, turn, unit.name)
             return
-        for city in cities[:MAX_MOVE_TARGETS]:
+        free = [
+            c
+            for c in cities
+            if civilians.get((c.district_x, c.district_y), unit.unit_id) == unit.unit_id
+            and state.refused.get((c.district_x, c.district_y), -1) <= turn
+        ]
+        if not free:
+            log.info("%s: every district is held by another civilian or was refused", unit.name)
+            self._no_progress(state, turn, unit.name)
+            return
+        for city in free[:MAX_MOVE_TARGETS]:
             result = await game.move_unit(unit.unit_index, city.district_x, city.district_y)
             if move_succeeded(result):
                 moved_to = city
                 break
             log.info("%s can't move to %s: %s", unit.name, city.city_name, result[:120])
+            if "STACKING_CONFLICT" in result:
+                state.refused[(city.district_x, city.district_y)] = turn + REFUSED_TILE_TURNS
         else:
             self._no_progress(state, turn, unit.name)
             return
+        civilians.pop((unit.x, unit.y), None)
+        if "STOPPED_MID_PATH" not in result:
+            civilians[(moved_to.district_x, moved_to.district_y)] = unit.unit_id
         # Progress is measured against the district it actually moved toward.
         goal = (moved_to.district_x, moved_to.district_y)
         if (

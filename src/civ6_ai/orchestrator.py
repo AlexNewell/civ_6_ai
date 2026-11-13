@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
@@ -47,6 +48,9 @@ class DoNothing:
 
 TURN_READ_RETRIES = 3  # Extra looks at the turn before a turn that reported as ended is a block.
 TURN_READ_RETRY_SECONDS = 3.0
+# When the end-turn report itself says "Turn N -> M", the turn did advance and the UI may just be
+# slow to show it (Run 8 stopped on turn 291, the game on 292, after 9 s of looks).
+TURN_READ_RETRIES_REPORTED = 12
 
 
 class StopReason(StrEnum):
@@ -75,6 +79,14 @@ def stop_reason_in_report(report: str) -> StopReason | None:
         if any(line.startswith(prefix) for line in lines):
             return reason
     return None
+
+
+def advance_reported(report: str, turn_before: int) -> bool:
+    """True if `end_turn`'s text says the game moved past `turn_before` ("Turn 291 -> 292")."""
+    for match in re.finditer(r"^\s*Turn (\d+) -> (\d+)", report, re.MULTILINE):
+        if int(match.group(1)) == turn_before and int(match.group(2)) > turn_before:
+            return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -163,7 +175,7 @@ class Orchestrator:
 
         reason = stop_reason_in_report(result)
         if reason is None:
-            reason = await self._check_after_end_turn(turn)
+            reason = await self._check_after_end_turn(turn, advance_reported(result, turn))
         if reason in (StopReason.BLOCKED, StopReason.HUNG) and await self._defeated():
             # With no city, the game-over check can't see a defeat, so the turn just never ends.
             reason = StopReason.GAME_OVER
@@ -207,7 +219,9 @@ class Orchestrator:
             return path.name
         return None
 
-    async def _check_after_end_turn(self, turn_before: int) -> StopReason | None:
+    async def _check_after_end_turn(
+        self, turn_before: int, reported: bool = False
+    ) -> StopReason | None:
         """Confirm the turn advanced. Only called when the report shows the game can be read."""
         # A defeat lands during the AI's turn, and normal reads can fail on the defeat screen.
         if await self._game.check_game_over() is not None:
@@ -222,7 +236,8 @@ class Orchestrator:
                 return None
             # The report said the turn advanced, so a UI that still reads the old turn may only be
             # slow. Run 4 stopped on turn 318 this way, and the next look read 319.
-            for _ in range(TURN_READ_RETRIES):
+            retries = TURN_READ_RETRIES_REPORTED if reported else TURN_READ_RETRIES
+            for _ in range(retries):
                 await asyncio.sleep(TURN_READ_RETRY_SECONDS)
                 if await self._read_turn() > turn_before:
                     return None

@@ -133,7 +133,7 @@ def test_a_changed_signature_asks_again_and_an_unchanged_one_does_not():
     mem.refused(c, "DISTRICT_HARBOR", 10, "ERR:NO_PLACEMENT|x", PLACEMENT, "abc:9")
     _, same = sig_reads(["abc", "9"][0])
     assert run(mem.blocked(c, "DISTRICT_HARBOR", 11, same))
-    assert run(mem.blocked(c, "DISTRICT_HARBOR", 40, same))  # No timer ends it.
+    assert not run(mem.blocked(c, "DISTRICT_HARBOR", 15, same))  # The short re-ask only.
     _, changed = sig_reads("def")
     assert not run(mem.blocked(c, "DISTRICT_HARBOR", 11, changed))
 
@@ -226,7 +226,7 @@ def test_an_unknown_reason_waits_three_turns_then_only_a_change_ends_it():
         waits.append(mem.refused(c, "BUILDING_X", turn, CS, UNKNOWN, "5:9"))
         assert run(mem.blocked(c, "BUILDING_X", turn + 1, same))
         turn += 4
-    assert waits[:2] == [3, 3] and waits[2] >= 30  # The third refusal ends the quick retries.
+    assert waits == [3, 3, -1]  # The third refusal ends the quick retries: only a change now.
     _, changed = sig_reads("6")
     assert not run(mem.blocked(c, "BUILDING_X", turn, changed))
 
@@ -983,3 +983,72 @@ def test_plan_steps_are_published_as_events():
     run(p.placed(reads, c, "DISTRICT_HARBOR", []))
     assert [e.action for e in events][-2:] == ["buy_then_place", "buy_failed_place"]
     assert events[-1].item == "DISTRICT_HARBOR" and events[-1].category == "DISTRICT"
+
+
+def test_a_placement_refusal_is_asked_again_after_five_turns_but_only_three_times_a_signature():
+    mem, c = RefusalMemory(), city()
+    _, same = sig_reads("5")
+    turn, waits = 10, []
+    for _ in range(3):
+        waits.append(
+            mem.refused(c, "DISTRICT_HARBOR", turn, "ERR:NO_PLACEMENT|x", PLACEMENT, "5:9")
+        )
+        assert run(mem.blocked(c, "DISTRICT_HARBOR", turn + 4, same))
+        turn += 5
+        if len(waits) < 3:
+            assert not run(mem.blocked(c, "DISTRICT_HARBOR", turn, same))
+    assert waits == [5, 5, -1]
+    assert run(mem.blocked(c, "DISTRICT_HARBOR", turn + 100, same))
+
+
+def test_the_turn_limit_comes_from_the_game_else_the_speed():
+    assert placement.last_turn_for("GAMESPEED_QUICK", 0) == 330
+    assert placement.last_turn_for("GAMESPEED_QUICK", 250) == 250
+    assert placement.last_turn_for("", 0) == placement.DEFAULT_LAST_TURN
+    assert placement.speed_scale("GAMESPEED_QUICK") == 0.67
+    assert placement.speed_scale("unknown") == placement.GAME_SPEED_COST_SCALE
+
+
+def test_the_planner_takes_its_limit_and_cost_scale_from_the_game_speed():
+    game, reads = setup()
+    p = Planner()
+    p.begin_turn(295, 500, 5.0, "GAMESPEED_QUICK", 0)
+    assert p.last_turn == 330 and p.scale == 0.67
+    assert not consider(p, game, reads, city())  # 35 turns left of 330: too late.
+    p.begin_turn(285, 500, 5.0, "GAMESPEED_QUICK", 0)
+    assert consider(p, game, reads, city())
+
+
+def test_quick_speed_shrinks_the_gold_caps():
+    assert placement.gold_cap(2, 0.67) == int(50 * 0.67)
+    owned = [OwnedTile(5, 5, 2)]
+    assert decide([tile(adj=4, cost=40)], owned, 500, 5, 1.0).action == "buy_then_place"
+    assert decide([tile(adj=4, cost=40)], owned, 500, 5, 0.67) is None
+
+
+def test_a_tile_the_border_claims_within_four_turns_is_waited_for_not_bought():
+    game, reads = setup(["PTILE|7|7|60|5|0", "PBORDER|3|7|7"])
+    p = planner_at()
+    assert not consider(p, game, reads, city())
+    assert game.bought == []
+
+
+def test_a_tile_the_border_claims_later_or_another_tile_is_bought():
+    game, reads = setup(["PTILE|7|7|60|5|0", "PBORDER|5|7|7"])
+    assert consider(planner_at(), game, reads, city())
+    game, reads = setup(["PTILE|7|7|60|5|0", "PBORDER|2|9|9"])
+    assert consider(planner_at(), game, reads, city())
+
+
+def test_an_unconfirmed_border_api_is_logged_and_does_not_stop_the_buy(caplog):
+    caplog.set_level(logging.INFO)
+    game, reads = setup(["PTILE|7|7|60|5|0", "PBORDER|?"])
+    assert consider(planner_at(), game, reads, city())
+    assert "action=border_unknown" in caplog.text
+
+
+def test_the_plan_query_reads_the_border_with_pcall():
+    lua = placement.build_plan_query(65536, "DISTRICT", "DISTRICT_CAMPUS")
+    assert "GetTurnsUntilExpansion" in lua and "GetNextPlot" in lua and "PBORDER" in lua
+    assert placement.parse_plan(["PBORDER|3|7|8"]).border == (3, 7, 8)
+    assert placement.parse_plan(["PBORDER|?"]).border is None

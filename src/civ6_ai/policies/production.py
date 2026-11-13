@@ -597,12 +597,14 @@ class RefusalMemory:
     (`placement.build_signatures_query`) and is asked again as soon as that changes, or as soon as
     the tech or civic it waits for lands. By reason (`placement.classify`):
 
-    - placement or district: ask again when the signature changes. A `SAFETY_RECHECK_TURNS` re-ask
-      covers what the signature cannot show.
+    - placement or district: ask again when the signature changes. A short
+      `SAFETY_RECHECK_TURNS` re-ask covers what the signature cannot show; it only restores
+      eligibility.
     - unlock: ask again when the tech or civic is held.
     - elsewhere (the wonder is built or under way elsewhere): dropped for the game.
-    - unknown or other (a flaky set): a wait of `UNKNOWN_WAIT_TURNS`, at most three times under an
-      unchanged signature, then only a change ends it.
+    - unknown or other (a flaky set): a wait of `UNKNOWN_WAIT_TURNS`.
+    - for every reason, after three refusals in a row under an unchanged signature only a change
+      ends it.
     - no signature could be read: the short wait, whatever the reason.
 
     Kept in memory only: a restart forgets it, which costs one retry per item.
@@ -654,9 +656,10 @@ class RefusalMemory:
             entry = _Refusal(reason, signature, count, None, permanent=True)
         elif signature is None:
             entry = _Refusal(reason, None, count, turn + UNKNOWN_WAIT_TURNS, needs)
+        elif count >= MAX_UNCHANGED_REFUSALS:
+            entry = _Refusal(reason, signature, count, None, needs)  # Only a change ends it.
         elif reason in (UNKNOWN, OTHER):
-            wait = UNKNOWN_WAIT_TURNS if count < MAX_UNCHANGED_REFUSALS else SAFETY_RECHECK_TURNS
-            entry = _Refusal(reason, signature, count, turn + wait)
+            entry = _Refusal(reason, signature, count, turn + UNKNOWN_WAIT_TURNS)
         else:
             entry = _Refusal(reason, signature, count, turn + SAFETY_RECHECK_TURNS, needs)
         self._entries[key] = entry
@@ -945,7 +948,13 @@ class CityProductionPolicy:
             return []
         empire, units = await _read_empire(game), await _read_units(game)
         reads = PlacementReads(game, self.refusals.watched())
-        self.planner.begin_turn(empire.turn, self._plan_budget(empire), empire.gold_per_turn)
+        self.planner.begin_turn(
+            empire.turn,
+            self._plan_budget(empire),
+            empire.gold_per_turn,
+            empire.game_speed,
+            empire.max_turns,
+        )
         building = {c.city_id: c.building for c in cities if c.building is not None}
         # First the switches, which only ever choose defence. Each one replaces what the city was
         # building, and a refused switch leaves it building, so the count below stays true.

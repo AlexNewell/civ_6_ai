@@ -37,16 +37,38 @@ SAVE_TURNS = 8  # Most turns to save for a tile. The gold policy's own bound, ke
 MIN_BETTER_ADJACENCY = 2  # A tile to buy must beat the best owned one by this much.
 GOLD_PER_ADJACENCY_POINT = 25  # Most gold worth paying per net point gained. See `gold_cap`.
 NO_TILE_COST_CAP = 200  # Most worth paying for a tile when it is the only way to place the item.
-GAME_SPEED_COST_SCALE = 1.0  # Standard speed. Gold costs scale with the game speed (marathon 3x).
+# Gold costs scale with the game speed, as production costs do: Quick is two thirds of Standard.
+# The standard saves are GAMESPEED_QUICK, so the bot's runs use 0.67 (the game's own cost multiplier
+# for Quick); the caps below were chosen at Standard and shrink with it.
+GAME_SPEED_COST_SCALE = 1.0  # Standard. `speed_scale` gives the other speeds.
+SPEED_COST_SCALE = {
+    "GAMESPEED_ONLINE": 0.5,
+    "GAMESPEED_QUICK": 0.67,
+    "GAMESPEED_STANDARD": 1.0,
+    "GAMESPEED_EPIC": 1.5,
+    "GAMESPEED_MARATHON": 3.0,
+}
+# The turn a game of each speed ends, when the game gives no limit. Quick: Run 8 ended at 330.
+SPEED_LAST_TURN = {
+    "GAMESPEED_ONLINE": 250,
+    "GAMESPEED_QUICK": 330,
+    "GAMESPEED_STANDARD": 500,
+    "GAMESPEED_EPIC": 750,
+    "GAMESPEED_MARATHON": 1500,
+}
+# Do not buy a tile the border will claim within this many turns. A district takes about 5 turns
+# to build, so a tile free within 4 costs the city little to wait for, and it keeps the gold.
+BORDER_WAIT_TURNS = 4
 MIN_TURNS_LEFT = 40  # A tile bought for adjacency needs this many turns left to pay back.
-DEFAULT_LAST_TURN = 400  # The game's last turn when none is known: standard runs end near 325.
+DEFAULT_LAST_TURN = 500  # The last turn when neither the game nor the speed says (Standard).
 RESERVE_TURNS = 30  # How long a chosen tile is held back from other items in the same city.
 MAX_PLAN_BUYS = 2  # Tiles bought for one city and item, ever, so a wrong rule cannot drain gold.
 PLAN_RADIUS = 3  # A district must be within this many tiles of its city.
 PLAN_MAX_AGE = 12  # Turns a saving target is kept without being renewed.
 UNKNOWN_WAIT_TURNS = 3  # The most an unknown refusal is waited out without a change to go on.
 MAX_UNCHANGED_REFUSALS = 3  # Refusals in a row under one signature before only a change ends it.
-SAFETY_RECHECK_TURNS = 50  # A last-resort re-ask for a refusal the signature cannot show ending.
+SAFETY_RECHECK_TURNS = 5  # A short re-ask for a refusal the signature cannot show ending. It only
+# restores eligibility: the check runs only if the item then wins the scoring.
 
 # The districts whose adjacency the advisor (and so the planner) scores. Others have no gain to buy.
 ADJACENCY_DISTRICTS = frozenset(
@@ -400,6 +422,14 @@ for dy = -{PLAN_RADIUS}, {PLAN_RADIUS} do for dx = -{PLAN_RADIUS}, {PLAN_RADIUS}
         end
     end
 end end
+local bTurns, bX, bY = nil, nil, nil
+pcall(function()
+    local culture = pCity:GetCulture()
+    bTurns = culture:GetTurnsUntilExpansion()
+    local nextPlot = Map.GetPlotByIndex(culture:GetNextPlot())
+    bX, bY = nextPlot:GetX(), nextPlot:GetY()
+end)
+if bTurns and bX then print("PBORDER|" .. bTurns .. "|" .. bX .. "|" .. bY) else print("PBORDER|?") end
 print("{SENTINEL}")
 """
 
@@ -437,6 +467,8 @@ class PlanRead:
     displacement: dict[tuple[int, int], int] = field(default_factory=dict)  # Owned, offered.
     unpredicted: list[tuple[int, int]] = field(default_factory=list)  # Offered, rules said no.
     missed: list[tuple[int, int]] = field(default_factory=list)  # Rules said yes, not offered.
+    border: tuple[int, int, int] | None = None  # Turns until expansion, and the next plot's x, y.
+    border_seen: bool = False  # The game answered `PBORDER` (with or without a value).
 
     @property
     def agrees(self) -> bool:
@@ -463,6 +495,10 @@ def parse_plan(lines: list[str]) -> PlanRead:
                 read.displacement[at] = int(parts[3])
                 if parts[4] != "1":
                     read.unpredicted.append(at)
+            elif parts[0] == "PBORDER":
+                read.border_seen = True
+                if len(parts) >= 4:
+                    read.border = (int(parts[1]), int(parts[2]), int(parts[3]))
             elif parts[0] == "PMISS" and len(parts) >= 3:
                 read.missed.append((int(parts[1]), int(parts[2])))
         except ValueError:
@@ -560,20 +596,35 @@ class Plan:
     cost: int
 
 
-def gold_cap(gain: int | None) -> int:
+def speed_scale(game_speed: str) -> float:
+    return SPEED_COST_SCALE.get(game_speed, GAME_SPEED_COST_SCALE)
+
+
+def last_turn_for(game_speed: str, max_turns: int) -> int:
+    """The game's limit when it has one, else the speed's usual last turn."""
+    if max_turns > 0:
+        return max_turns
+    return SPEED_LAST_TURN.get(game_speed, DEFAULT_LAST_TURN)
+
+
+def gold_cap(gain: int | None, scale: float | None = None) -> int:
     """The most worth paying for a tile: `GOLD_PER_ADJACENCY_POINT` for each net point gained.
 
     With no owned tile (`gain` None) the district or wonder itself is the gain, capped at
     `NO_TILE_COST_CAP`. Both scale with the game speed.
     """
-    scale = GAME_SPEED_COST_SCALE
+    scale = GAME_SPEED_COST_SCALE if scale is None else scale
     if gain is None:
         return int(NO_TILE_COST_CAP * scale)
     return int(GOLD_PER_ADJACENCY_POINT * scale * max(gain, 0))
 
 
 def decide(
-    tiles: list[PlanTile], owned: list[OwnedTile], budget: int, income: float
+    tiles: list[PlanTile],
+    owned: list[OwnedTile],
+    budget: int,
+    income: float,
+    scale: float | None = None,
 ) -> Plan | None:
     """What to do about the tiles the city does not own yet. `owned` holds available tiles only.
 
@@ -592,10 +643,10 @@ def decide(
         best = max(t.net for t in owned)
         for tile in buyable:
             gain = tile.net - best
-            if gain >= MIN_BETTER_ADJACENCY and tile.cost <= min(budget, gold_cap(gain)):
+            if gain >= MIN_BETTER_ADJACENCY and tile.cost <= min(budget, gold_cap(gain, scale)):
                 return Plan("buy_then_place", tile.x, tile.y, tile.cost)
         return None
-    cap = gold_cap(None)
+    cap = gold_cap(None, scale)
     worth = [t for t in buyable if t.cost <= cap]
     if worth:
         tile = worth[0]
@@ -662,6 +713,7 @@ class Planner:
         self._category = "DISTRICT"
         self.book = book if book is not None else PlanBook()
         self.last_turn = last_turn
+        self.scale = GAME_SPEED_COST_SCALE
         self.budget = 0
         self.income = 0.0
         self.turn = 0
@@ -673,8 +725,13 @@ class Planner:
         self._reserved: dict[int, dict[tuple[int, int], tuple[str, int]]] = {}
         self._logged: dict[tuple[int, str], tuple[str, int, int, int]] = {}
 
-    def begin_turn(self, turn: int, budget: int, income: float) -> None:
+    def begin_turn(
+        self, turn: int, budget: int, income: float, game_speed: str = "", max_turns: int = 0
+    ) -> None:
         self.turn, self.budget, self.income = turn, max(0, budget), income
+        if game_speed or max_turns:
+            self.scale = speed_scale(game_speed)
+            self.last_turn = last_turn_for(game_speed, max_turns)
         self._claimed = {}
 
     def reserve(self, city_id: int, item: str, x: int, y: int) -> None:
@@ -749,7 +806,14 @@ class Planner:
         owned = [replace(t, displacement=read.displacement.get((t.x, t.y), 0)) for t in available]
         taken = {*self._claimed, *self.book.claimed_by_others(city.city_id)}
         tiles = [t for t in read.tiles if (t.x, t.y) not in taken]
-        plan = decide(tiles, owned, self.budget, self.income)
+        if read.border is None:
+            log.info("placement_plan city=%s item=%s action=border_unknown", city.name, item)
+        else:
+            soon, bx, by = read.border
+            if soon <= BORDER_WAIT_TURNS:
+                # The border claims this tile within a few turns: wait for it, do not buy it.
+                tiles = [replace(t, cost=-1) if (t.x, t.y) == (bx, by) else t for t in tiles]
+        plan = decide(tiles, owned, self.budget, self.income, self.scale)
         if plan is None or plan.action != "save":
             self.book.drop(city.city_id, item)  # An older saving target no longer applies.
         if plan is None:

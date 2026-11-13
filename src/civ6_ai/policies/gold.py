@@ -19,6 +19,12 @@ enough to buy a defender if it is attacked. The deficit term keeps a negative in
 emptying the treasury. The cap exists because Run 3 banked 1,363 gold by turn 135 and Run 2
 held 625 at turn 100, so a reserve that grows without limit is what we are avoiding.
 
+Threatened cities (roadmap 1.35, see `defence.DefenceState`): while any city is threatened the
+reserve drops to `THREAT_DEFICIT_TURNS` turns of any deficit (zero with income), so war chests
+are spent, not banked. Units in or beside a threatened city upgrade first, a threatened city
+buys only defenders and walls, and the bounds below widen to `THREAT_MAX_UPGRADES` and one
+purchase per threatened city.
+
 Bounds per turn: 3 upgrades, 3 purchases (one per city, since the game allows one per city per
 turn), 2 tiles, and 8 calls that the game refuses. A refusal is logged and the next candidate is
 tried. Costs come from the game's reads, and each spend is taken off the budget at its listed
@@ -35,6 +41,7 @@ from civ6_ai.policies.production import (
     ProductionContext,
     ProductionWeights,
     build_context,
+    is_defence,
     rank_production,
     score,
 )
@@ -56,6 +63,8 @@ MAX_UPGRADES = 3
 MAX_PURCHASES = 3
 MAX_TILES = 2
 MAX_REFUSALS = 8
+THREAT_DEFICIT_TURNS = 2  # The reserve under threat: enough that a deficit cannot disband units.
+THREAT_MAX_UPGRADES = 5
 _PURCHASABLE = ("UNIT", "BUILDING")
 _NAME = re.compile(r"[A-Z0-9_]+")
 _RESOURCE_RANK = {"luxury": 0, "strategic": 1, "bonus": 2}
@@ -92,13 +101,27 @@ def _strength(unit_type: str) -> int:
     return max(stats[0], stats[1]) if stats else 0
 
 
-def upgrade_order(units: list[Unit], hostile: list[tuple[int, int]]) -> list[Unit]:
-    """Upgradable combat units, those nearest a hostile unit first, then the most outdated."""
+def threat_reserve(gold_per_turn: float = 0.0) -> int:
+    """The reserve while a city is threatened: nothing banked beyond a deficit's next turns."""
+    return int(THREAT_DEFICIT_TURNS * max(0.0, -gold_per_turn))
+
+
+def upgrade_order(
+    units: list[Unit],
+    hostile: list[tuple[int, int]],
+    guarded: list[tuple[int, int]] | None = None,
+) -> list[Unit]:
+    """Upgradable combat units, those nearest a hostile unit first, then the most outdated.
+
+    Units in or beside a city in `guarded` (the threatened cities' tiles) come before all others.
+    """
+    guarded = guarded or []
 
     def key(unit: Unit) -> tuple:
         near = min((hex_distance(unit.x, unit.y, x, y) for x, y in hostile), default=10_000)
         gap = _strength(unit.upgrade_to or "") - _strength(unit.unit_type)
-        return (near, -gap, unit.upgrade_cost, unit.unit_id)
+        holds = any(hex_distance(unit.x, unit.y, x, y) <= 1 for x, y in guarded)
+        return (not holds, near, -gap, unit.upgrade_cost, unit.unit_id)
 
     return sorted((u for u in units if u.is_combat and u.can_upgrade and u.upgrade_to), key=key)
 
@@ -123,14 +146,16 @@ class GoldPolicy:
 
     name = "gold"
 
-    def __init__(self, weights: ProductionWeights | None = None) -> None:
+    def __init__(self, weights: ProductionWeights | None = None, defence: Any = None) -> None:
         self.weights = weights or ProductionWeights()
+        self.defence = defence  # The threat state (`defence.DefenceState`), or None.
 
     async def run(self, game: GoldGame) -> None:
         # The overview alone settles whether there is anything to spend. The full empire read is
         # five more game calls, so it waits until there is (Run 3 profile: most turns have none).
         overview = await game.get_game_overview()
-        reserve = reserve_for(overview.num_cities, overview.gold_per_turn)
+        threatened = self.defence is not None and self.defence.any
+        reserve = self._reserve(overview.num_cities, overview.gold_per_turn)
         budget = int(overview.gold) - reserve
         if budget <= 0:
             log.info(
@@ -138,14 +163,21 @@ class GoldPolicy:
             )
             return
         empire = await _read_empire(game)
-        reserve = reserve_for(empire.num_cities, empire.gold_per_turn)
+        reserve = self._reserve(empire.num_cities, empire.gold_per_turn)
         budget = int(empire.gold) - reserve
         turn = _Turn(budget)
         notes: list[str] = []
         log.info("Gold %d, reserve %d, %d to spend", empire.gold, reserve, budget)
-        cities = sorted(await _read_cities(game), key=lambda c: (not c.is_threatened, c.city_id))
+        if threatened:
+            log.info(
+                "defence: %d threatened cities, so the gold reserve is %d, not %d",
+                len(self.defence.cities),
+                reserve,
+                reserve_for(empire.num_cities, empire.gold_per_turn),
+            )
+        cities = sorted(await _read_cities(game), key=lambda c: (not self._marked(c), c.city_id))
         units = list(await _read_units(game))
-        await self._upgrade(game, turn, units, notes)
+        await self._upgrade(game, turn, units, notes, cities)
         await self._buy(game, turn, empire, cities, units, notes)
         await self._tiles(game, turn, cities, notes)
         spent = budget - turn.budget
@@ -166,7 +198,29 @@ class GoldPolicy:
                 turn.tiles,
             )
 
-    async def _upgrade(self, game: GoldGame, turn: _Turn, units: list[Unit], notes: list[str]):
+    def _reserve(self, num_cities: int, gold_per_turn: float) -> int:
+        if self.defence is not None and self.defence.any:
+            return threat_reserve(gold_per_turn)
+        return reserve_for(num_cities, gold_per_turn)
+
+    def _marked(self, city: City) -> bool:
+        """True if hostile units are near the city or the threat state marks it."""
+        return city.is_threatened or (
+            self.defence is not None and self.defence.is_threatened(city.city_id)
+        )
+
+    def _max_upgrades(self) -> int:
+        marked = self.defence is not None and self.defence.any
+        return THREAT_MAX_UPGRADES if marked else MAX_UPGRADES
+
+    async def _upgrade(
+        self,
+        game: GoldGame,
+        turn: _Turn,
+        units: list[Unit],
+        notes: list[str],
+        cities: list[City] | None = None,
+    ):
         try:
             hostile = [(t.x, t.y) for t in await _read_threats(game) if t.hostile]
         except ConnectionError:
@@ -174,12 +228,13 @@ class GoldPolicy:
         except Exception:
             log.exception("Threat read failed, upgrading without threat order")
             hostile = []
-        candidates = upgrade_order(units, hostile)
+        guarded = [(c.x, c.y) for c in cities or [] if self._marked(c)]
+        candidates = upgrade_order(units, hostile, guarded if self.defence is not None else None)
         if not candidates:
             notes.append("no unit can upgrade")
             return
         for unit in candidates:
-            if turn.upgrades >= MAX_UPGRADES or turn.refused_out:
+            if turn.upgrades >= self._max_upgrades() or turn.refused_out:
                 break
             if unit.upgrade_cost > turn.budget:
                 notes.append(f"{unit.unit_type} upgrade costs {unit.upgrade_cost}")
@@ -196,9 +251,19 @@ class GoldPolicy:
                     unit.upgrade_cost,
                     reason,
                 )
+                self._note_upgrade(unit, cities or [], f"{unit.unit_type} to {unit.upgrade_to}")
             else:
                 turn.refusals += 1
                 log.info("Upgrade of %s refused: %s", unit.unit_type, str(result)[:120])
+
+    def _note_upgrade(self, unit: Unit, cities: list[City], text: str) -> None:
+        if self.defence is None:
+            return
+        for city in cities:
+            if self.defence.is_threatened(city.city_id) and (
+                hex_distance(unit.x, unit.y, city.x, city.y) <= 1
+            ):
+                self.defence.note(city.city_id, f"gold: upgraded {text}")
 
     @staticmethod
     def _near(unit: Unit, hostile: list[tuple[int, int]]) -> bool:
@@ -207,8 +272,11 @@ class GoldPolicy:
     async def _buy(self, game, turn, empire, cities: list[City], units, notes: list[str]):
         building = {c.city_id: c.building for c in cities if c.building}
         bought: list[str] = []
+        limit = MAX_PURCHASES
+        if self.defence is not None:
+            limit = max(limit, len(self.defence.cities))
         for city in cities:
-            if turn.purchases >= MAX_PURCHASES or turn.refused_out:
+            if turn.purchases >= limit or turn.refused_out:
                 break
             if turn.budget <= 0:
                 break
@@ -220,8 +288,11 @@ class GoldPolicy:
                 log.exception("Production read failed for %s", city.name)
                 continue
             others = [item for cid, item in building.items() if cid != city.city_id]
-            context = build_context(empire, units, [*others, *bought], cities)
+            context = build_context(empire, units, [*others, *bought], cities, self.defence)
             ranked = rank_production(city, options, context, self.weights)
+            if self.defence is not None and self.defence.is_threatened(city.city_id):
+                # Defenders and walls only. A threatened city does not buy a library.
+                ranked = [o for o in ranked if is_defence(o)]
             await self._buy_in(game, turn, city, ranked, context, bought, notes)
 
     async def _buy_in(
@@ -257,7 +328,11 @@ class GoldPolicy:
                 turn.budget -= option.gold_cost
                 turn.purchases += 1
                 bought.append(option.item)
-                why = "threatened" if city.is_threatened else "top-ranked affordable item"
+                why = "threatened" if self._marked(city) else "top-ranked affordable item"
+                if self.defence is not None:
+                    self.defence.note(
+                        city.city_id, f"gold: bought {option.item} for {option.gold_cost}"
+                    )
                 log.info(
                     "Bought %s in %s for %d (%s)", option.item, city.name, option.gold_cost, why
                 )

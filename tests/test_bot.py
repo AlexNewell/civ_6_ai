@@ -113,6 +113,7 @@ def test_one_turn_runs_handlers_in_order_and_acts(tmp_path):
         "wars",
         "trade_offers",
         "settling",
+        "defence",
         "military",
         "research",
         "government",
@@ -121,6 +122,7 @@ def test_one_turn_runs_handlers_in_order_and_acts(tmp_path):
         "builder",
         "secondary",
         "faith",
+        "defence_report",
         "build_tracker",
         "blockers",
     ]

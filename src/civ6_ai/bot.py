@@ -12,6 +12,10 @@ Order within a turn:
    `TradeOfferPolicy` runs right after it and offers surplus resources to other civs. It closes
    every session it opens.
 3. `SettlingPolicy` moves settlers and scouts, which changes cities and units.
+   `DefencePolicy` then marks the threatened cities (a war with a major civ, or hostile or
+   denouncing units within 3 tiles; see `policies.defence`) for the military, production and gold
+   policies to read. It uses reads they make anyway. `DefenceReport` logs one line per marked city
+   after the faith step.
 4. `MilitaryPolicy` attacks, heals, garrisons and spends promotions. It runs after settling,
    which has moved its escorts and scouts first (it never touches the units settling reserves),
    and before production, builders and the resolver, whose skip must come last.
@@ -54,6 +58,7 @@ from civ6_ai.monitors import EventBus, EventLog, Monitors
 from civ6_ai.orchestrator import Handler, Orchestrator, TurnLog
 from civ6_ai.policies import research
 from civ6_ai.policies.builder import BuilderPolicy
+from civ6_ai.policies.defence import DefencePolicy, DefenceReport, DefenceState
 from civ6_ai.policies.diplomacy import DiplomacyPolicy
 from civ6_ai.policies.faith import FaithPolicy
 from civ6_ai.policies.gold import GoldPolicy
@@ -260,13 +265,14 @@ def build_orchestrator(
     is fed from `bus`, and a gap line is logged each turn. `event_log` is flushed at the end of each
     turn, since it buffers its writes.
     """
-    production = CityProductionPolicy(bus=bus)
+    defence = DefenceState()  # Which cities are threatened this turn, shared by three policies.
+    production = CityProductionPolicy(bus=bus, defence=defence)
     government = GovernmentPolicy()  # One instance, so handler and blockers share its bounds.
     secondary = SecondaryPolicy()
-    military = MilitaryPolicy()
+    military = MilitaryPolicy(defence=defence)
     diplomacy = DiplomacyPolicy()
     research_policy = research.ResearchPolicy()
-    gold = GoldPolicy()
+    gold = GoldPolicy(defence=defence)
     tables = [
         production.blocker_policies(),
         research.blocker_policies(),
@@ -310,6 +316,7 @@ def build_orchestrator(
         WarPolicy(state_path=wars_state),
         *([TradeOfferPolicy(diplomacy.weights)] if trade_offers else []),
         SettlingPolicy(),
+        DefencePolicy(defence),
         military,
         research_policy,
         government,
@@ -318,6 +325,7 @@ def build_orchestrator(
         BuilderPolicy(),
         secondary,
         FaithPolicy(),
+        DefenceReport(defence),
         BuildTracker(ledger, victory=lambda: production.weights.victory, watcher=watcher),
         resolver,
         *([EventFlush(event_log)] if event_log is not None else []),

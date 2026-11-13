@@ -90,6 +90,8 @@ class ProductionContext:
     traders: int = 0  # Traders that exist, on a route or not, plus those being built.
     trade_capacity: int = 0  # Routes the empire can run at once.
     districts: frozenset[str] = frozenset()  # Short names of districts any city has built.
+    threatened: frozenset[int] = frozenset()  # Ids of cities the threat state marks (1.35).
+    short: frozenset[int] = frozenset()  # Of those, the ones with fewer than two defenders.
 
     def after_choosing(self, item: str, unknown_combat: bool = False) -> "ProductionContext":
         """Count a pick, so two cities don't both build the one builder the empire needs."""
@@ -126,12 +128,18 @@ def build_context(
     units: Iterable[Unit],
     in_progress: Iterable[str] = (),
     cities: Iterable[City] = (),
+    defence: Any = None,
 ) -> ProductionContext:
-    """Count what exists plus what cities are already building, so picks don't double up."""
+    """Count what exists plus what cities are already building, so picks don't double up.
+
+    `defence` is the threat state (`defence.DefenceState`), or None.
+    """
     ctx = ProductionContext(
         turn=empire.turn,
         num_cities=empire.num_cities,
         trade_capacity=empire.trade_capacity,
+        threatened=defence.threatened_ids if defence is not None else frozenset(),
+        short=defence.short_ids if defence is not None else frozenset(),
         districts=frozenset(_short(d.district_type) for c in cities for d in c.districts),
     )
     for unit in units:
@@ -299,6 +307,8 @@ def drop_dominated(
         if option.category == "UNIT":
             if any(better in offered for better in _upgrades_of(option.item)):
                 continue  # The game offers its upgrade, which does the same job better.
+            if is_obsolete_melee(option.item, offered):
+                continue  # A clearly stronger melee unit is on offer.
             if option.item not in COMBAT_UNITS and (
                 canonical(option.item) not in _CIVILIAN_UNITS
                 and any(word in option.item for word in _UNPLANNED_WORDS)
@@ -306,6 +316,31 @@ def drop_dominated(
                 continue
         keep.append(option)
     return keep, repairs
+
+
+_MELEE_CLASSES = frozenset({"MELEE", "ANTI_CAVALRY"})
+_OBSOLETE_RATIO = 1.2  # A melee unit is obsolete when another offered one is this much stronger.
+
+
+def is_obsolete_melee(item: str, offered: Iterable[str]) -> bool:
+    """True for a melee unit (a Warrior, say) when the game offers a clearly stronger one.
+
+    The upgrade rule in `drop_dominated` only catches the unit's own line, and a city without Iron
+    is not offered a Swordsman, so a Warrior stayed on offer beside a Spearman or Man-at-Arms.
+    """
+    stats = COMBAT_UNITS.get(item)
+    if stats is None or stats[4] not in _MELEE_CLASSES:
+        return False
+    for other in offered:
+        better = COMBAT_UNITS.get(other)
+        if (
+            other != item
+            and better is not None
+            and better[4] in _MELEE_CLASSES
+            and better[0] >= _OBSOLETE_RATIO * stats[0]
+        ):
+            return True
+    return False
 
 
 def is_defence(option: ProductionChoice) -> bool:
@@ -318,13 +353,22 @@ def is_defence(option: ProductionChoice) -> bool:
 _MAX_DEFENDERS_PER_CITY = 3
 
 
+def under_threat(city: City, ctx: ProductionContext) -> bool:
+    """Hostile units in range, or the threat state marks the city (a war, a rival's units)."""
+    return city.is_threatened or city.city_id in ctx.threatened
+
+
 def is_pressed(city: City, ctx: ProductionContext) -> bool:
     """Threatened and short of defenders, so defence outranks expansion.
+
+    A city the threat state marks with fewer than two defenders is pressed too.
 
     A threat that sits next to a garrisoned city for turns (barbarians camping live on turn 9 to
     25) must not stop settlers and builders forever. Once there are enough defenders, the
     threat only keeps the usual military scoring.
     """
+    if city.city_id in ctx.short:
+        return True
     if not city.is_threatened:
         return False
     wanted = min(len(city.threats) + 1, _MAX_DEFENDERS_PER_CITY) * max(1, ctx.num_cities)
@@ -369,7 +413,9 @@ def _unit_score(
     if strength == 0:
         return 0.0  # Siege and scouts hold no city.
     if threatened:
-        return 14.0 + strength / 4.0 + 2.0 * len(city.threats)
+        # In a marked city a ranged unit, which shoots from behind the front one, gets a lift.
+        ranged = 3.0 if stats[4] == "RANGED" and city.city_id in ctx.threatened else 0.0
+        return 14.0 + strength / 4.0 + 2.0 * len(city.threats) + ranged
     if city.garrison_unit is None:
         return (16.0 if ctx.turn <= _EARLY_TURNS else 12.0) + strength / 10.0
     wanted = w.army_per_city * ctx.num_cities - ctx.army
@@ -384,8 +430,10 @@ def _building_score(
     name = _short(option.item)
     if option.item in WONDERS:
         # Needs a tile, which `_start` finds when the game asks for one.
-        return 0.0 if city.is_threatened else _WONDER_VALUE * w.wonders
+        return 0.0 if under_threat(city, ctx) else _WONDER_VALUE * w.wonders
     if name in _DEFENSIVE_BUILDINGS:
+        if city.city_id in ctx.threatened and not city.has_walls:
+            return 22.0 + len(city.threats)  # Walls come right after the first defender.
         if is_pressed(city, ctx) and not city.has_walls:
             return 17.0 + len(city.threats)
         return 0.0  # Unthreatened, walls are an expense with no return.
@@ -428,7 +476,7 @@ def score(
         value = _building_score(option, city, ctx, weights)
     if value <= 0:
         return 0.0
-    if city.is_threatened and is_defence(option):
+    if under_threat(city, ctx) and is_defence(option):
         # A defender that arrives in time matters most, so speed counts for more than usual.
         return value * _URGENT_SCALE / (_URGENT_SCALE + max(option.turns, 1))
     return value * _TURN_SCALE / (_TURN_SCALE + max(option.turns, 1))
@@ -624,9 +672,10 @@ async def choose_for_city(
     return None
 
 
-def _should_switch(city: City) -> bool:
+def _should_switch(city: City, marked: frozenset[int] = frozenset()) -> bool:
     """A threatened city is building something that isn't defence and won't finish this turn."""
-    if not city.is_threatened or city.is_idle or city.build_turns_left <= _FINISHING_TURNS:
+    threatened = city.is_threatened or city.city_id in marked
+    if not threatened or city.is_idle or city.build_turns_left <= _FINISHING_TURNS:
         return False
     current = city.building or ""
     return not (defence_strength(current) > 0 or _short(current) in _DEFENSIVE_BUILDINGS)
@@ -638,9 +687,13 @@ class CityProductionPolicy:
     name = "city_production"
 
     def __init__(
-        self, weights: ProductionWeights | None = None, bus: EventBus | None = None
+        self,
+        weights: ProductionWeights | None = None,
+        bus: EventBus | None = None,
+        defence: Any = None,
     ) -> None:
         self._emit = bus.publish if bus is not None else None
+        self.defence = defence  # The threat state (`defence.DefenceState`), or None.
         self.weights = weights or ProductionWeights()  # The strategist replaces this later.
         self.refusals = RefusalMemory()
 
@@ -658,7 +711,8 @@ class CityProductionPolicy:
         already building a defender or walls is left alone, so a switch never repeats.
         """
         cities = await _read_cities(game)
-        switching = [c for c in cities if _should_switch(c)]
+        marked = self.defence.threatened_ids if self.defence is not None else frozenset()
+        switching = [c for c in cities if _should_switch(c, marked)]
         idle = [c for c in cities if c.is_idle]
         if not switching and not idle:
             return []
@@ -668,7 +722,7 @@ class CityProductionPolicy:
         # building, and a refused switch leaves it building, so the count below stays true.
         for city in sorted(switching, key=lambda c: c.city_id):
             options = await _read_production(game, city.city_id)
-            context = build_context(empire, units, building.values(), cities)
+            context = build_context(empire, units, building.values(), cities, self.defence)
             picked = await choose_for_city(
                 game,
                 city,
@@ -681,9 +735,10 @@ class CityProductionPolicy:
             )
             if picked is not None:
                 building[city.city_id] = picked.item
-        context = build_context(empire, units, building.values(), cities)
+                self._note(city, f"production: switched to {picked.item}")
+        context = build_context(empire, units, building.values(), cities, self.defence)
         unfinished = []
-        for city in sorted(idle, key=lambda c: (not c.is_threatened, c.city_id)):
+        for city in sorted(idle, key=lambda c: (not under_threat(c, context), c.city_id)):
             options = await _read_production(game, city.city_id)
             picked = await choose_for_city(
                 game, city, options, context, self.weights, memory=self.refusals, emit=self._emit
@@ -692,7 +747,12 @@ class CityProductionPolicy:
                 unfinished.append(city.name)
             else:
                 context = context.after_choosing(picked.item)
+                self._note(city, f"production: chose {picked.item}")
         return unfinished
+
+    def _note(self, city: City, text: str) -> None:
+        if self.defence is not None:
+            self.defence.note(city.city_id, text)
 
     def blocker_policies(self) -> Mapping[str, Any]:
         """Policies to pass to `BlockerResolver`, which takes over the production blocker."""

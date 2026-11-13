@@ -366,6 +366,8 @@ class GoldPolicy:
                 continue
             if tried >= 2 or turn.refused_out:
                 break
+            if turn.target is not None and not is_defence(option):
+                break  # Saving toward a better item: no lesser one is bought meanwhile.
             tried += 1
             result = await self._call(
                 game.purchase_item(city.city_id, option.category, option.item)

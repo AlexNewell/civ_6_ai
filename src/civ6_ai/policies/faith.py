@@ -459,6 +459,9 @@ class FaithPolicy:
             f"not worth saving for at {income:.1f} a turn"
         )
 
+    def _any_threatened(self) -> bool:
+        return self.defence is not None and self.defence.any
+
     def _threatened(self, city: Any) -> bool:
         return self.defence is not None and self.defence.is_threatened(city.city_id)
 
@@ -497,7 +500,7 @@ class FaithPolicy:
     ) -> tuple[float, int, int]:
         """Units, then Shrine or Temple, from the cities' production lists (one call a city)."""
         until, need = self._sink_gate
-        if until > turn and budget < need:
+        if until > turn and budget < need and not self._any_threatened():
             notes.append(f"no unit or building to buy yet (looked again from turn {until})")
             return 0.0, 0, 0
         cities, _ = await game.get_cities()

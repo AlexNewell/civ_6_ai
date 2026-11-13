@@ -406,3 +406,15 @@ def test_a_threatened_city_still_buys_defence_while_gold_is_saved_for_an_upgrade
     asyncio.run(policy.run(game))
     assert ("buy", 65536, "UNIT", "UNIT_ARCHER") in game.actions
     assert ("upgrade", 1) not in game.actions
+
+
+def test_a_saving_target_stops_lesser_purchases_in_the_same_city():
+    reserve = reserve_for(2, 20.0)
+    game = GoldGame(
+        gold_amount=reserve + 60,
+        gold_per_turn=20.0,
+        units=[],
+        production=[option("BUILDING_UNIVERSITY", 100), option("BUILDING_MONUMENT", 30)],
+    )
+    run(game)
+    assert [a for a in game.actions if a[0] == "buy"] == []

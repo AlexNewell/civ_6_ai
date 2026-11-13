@@ -634,3 +634,17 @@ def test_every_turn_logs_faith_reserve_and_the_outcome(caplog):
     with caplog.at_level(logging.INFO):
         run(FaithPolicy(), game)
     assert "Faith 300, reserve 60: spent on BUILDING_SHRINE in Alpha for 70" in caplog.text
+
+
+def test_the_sink_cooldown_is_skipped_when_a_city_becomes_threatened():
+    from civ6_ai.policies.defence import CityThreat, DefenceState
+
+    defence = DefenceState()
+    policy = FaithPolicy(defence=defence)
+    game = Game(production=[], people=[])
+    run(policy, game)  # Nothing offered: the lists are not read for a few turns.
+    game.data["production"] = [lq.ProductionOption("UNIT", "UNIT_CROSSBOWMAN", 80, 8, 120)]
+    defence.cities = {65536: CityThreat.__new__(CityThreat)}
+    set_overview(game, turn=101, faith=300.0)
+    run(policy, game)
+    assert acted(game, "buy")[0][2] == "UNIT_CROSSBOWMAN"

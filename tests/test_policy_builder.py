@@ -539,3 +539,20 @@ def test_feature_blocked_tile_is_set_aside_at_once_for_a_plain_job():
     run(policy, game)
     assert [a[0] for a in game.actions] == ["improve"]  # Not tried again.
     assert "tile set aside" in policy.decisions[0].reason
+
+
+def test_demand_records_idle_builders_and_unclaimed_jobs():
+    empty = ActionGame([], [worker(1), worker(2, x=12, y=12)])
+    policy = BuilderPolicy()
+    run(policy, empty)
+    assert policy.demand.idle == 2 and policy.demand.spare_jobs == 0
+    busy = ActionGame([task(x=10, y=10), task(x=20, y=20)], [worker(1, x=10, y=10)])
+    policy = BuilderPolicy()
+    run(policy, busy)
+    assert policy.demand.idle == 0 and policy.demand.spare_jobs == 1
+
+
+def test_demand_is_unknown_when_no_builder_is_free():
+    policy = BuilderPolicy()
+    run(policy, ActionGame([task()], [unit_info()]))
+    assert policy.demand.idle == 0 and policy.demand.spare_jobs is None

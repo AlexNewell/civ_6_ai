@@ -37,6 +37,19 @@ _UNBUILDABLE = frozenset({"IMPROVEMENT_FISHING_BOATS"})
 _NOW_AT = re.compile(r"now_at:(-?\d+),(-?\d+)")
 
 
+@dataclass
+class BuilderDemand:
+    """What the builders left undone last turn, which production reads to size the builder corps.
+
+    Run 8 had builders idle on 74% of builder-turns. `idle` counts builders that found no job on
+    offer, and `spare_jobs` counts jobs no builder took. `spare_jobs` is None when no builder was
+    free to ask, so the jobs weren't read and nothing is known.
+    """
+
+    idle: int = 0
+    spare_jobs: int | None = None
+
+
 def is_builder(unit_type: str) -> bool:
     """A builder, or a unique unit that replaces one."""
     return REPLACES.get(unit_type, unit_type) == BUILDER
@@ -135,6 +148,7 @@ class BuilderPolicy:
 
     settings: BuilderSettings = field(default_factory=BuilderSettings)
     name: str = "builder"
+    demand: BuilderDemand = field(default_factory=BuilderDemand)
     decisions: list[BuilderDecision] = field(default_factory=list)
     _claims: dict[int, _Key] = field(default_factory=dict, init=False, repr=False)
     _failures: dict[_Key, int] = field(default_factory=dict, init=False, repr=False)
@@ -150,6 +164,7 @@ class BuilderPolicy:
         self._forget_gone_units(builders)
         free = sorted((u for u in builders if u.can_move), key=lambda u: u.unit_id)
         if not free:
+            self.demand.idle, self.demand.spare_jobs = 0, None  # Busy, or none: nothing to infer.
             return
         turn = (await game.get_game_overview()).turn
         jobs = [j for j in await read_builder_jobs(game) if self._buildable(j, turn)]
@@ -240,9 +255,12 @@ class BuilderPolicy:
                 attempts[unit.unit_id] += 1
                 if self._set_aside.get(_key(job), -1) >= turn:
                     del available[tile]  # Refused for every builder, not just this one.
+        self.demand.idle = 0
+        self.demand.spare_jobs = len(available)
         for unit in free:
             if unit.unit_id not in done:
                 reason = "no job on offer" if not available else "every job tried was refused"
+                self.demand.idle += reason == "no job on offer"
                 claim = self._claims.get(unit.unit_id)
                 holds = self._holds.get(unit.unit_id, 0) + 1
                 if claim in unsafe and holds <= s.max_hold_turns:

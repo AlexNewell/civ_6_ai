@@ -77,7 +77,7 @@ def ptile(x, cost, cls=None):
 def test_reserve_grows_with_cities_and_deficit_and_is_capped():
     assert reserve_for(1) == gold.RESERVE_FLOOR + gold.RESERVE_PER_CITY
     assert reserve_for(5) > reserve_for(1)
-    assert reserve_for(2, -10) == reserve_for(2) + 10 * gold.DEFICIT_TURNS
+    assert reserve_for(2, -5) == reserve_for(2) + 5 * gold.DEFICIT_TURNS
     assert reserve_for(50, -100) == RESERVE_CAP
 
 
@@ -256,12 +256,12 @@ def test_tiles_come_last_resource_first_and_are_bounded():
 def test_plain_tile_needs_budget_to_spare():
     reserve = reserve_for(2, 5.0)
     tight = GoldGame(
-        gold_amount=reserve + 50, production=[], units=[], tiles={65536: [ptile(1, 40)]}
+        gold_amount=reserve + 30, production=[], units=[], tiles={65536: [ptile(1, 40)]}
     )
     run(tight)
     assert tight.actions == []
     roomy = GoldGame(
-        gold_amount=reserve + 80, production=[], units=[], tiles={65536: [ptile(1, 40)]}
+        gold_amount=reserve + 45, production=[], units=[], tiles={65536: [ptile(1, 40)]}
     )
     run(roomy)
     assert kinds(roomy) == ["tile"]
@@ -321,3 +321,100 @@ def test_upgrade_reply_without_ok_prefix_is_a_success(caplog):
     run(game)
     assert "Upgraded UNIT_WARRIOR" in caplog.text
     assert "refused" not in caplog.text
+
+
+# ----- a lower reserve and saving (issue 87) -----
+
+
+def test_income_lowers_the_reserve_but_not_below_the_minimum():
+    assert reserve_for(8, 20.0) < reserve_for(8, 0.0)
+    assert reserve_for(8, 1000.0) == gold.RESERVE_MIN
+    assert reserve_for(1, 1000.0) == gold.RESERVE_MIN
+    assert reserve_for(8) <= RESERVE_CAP
+    assert reserve_for(8) < 60 + 20 * 8  # Lower than the old 60 + 20 a city.
+
+
+def test_gold_below_one_price_is_saved_for_the_upgrade_not_spent_on_tiles(caplog):
+    caplog.set_level(logging.INFO, logger=gold.log.name)
+    reserve = reserve_for(2, 20.0)
+    game = GoldGame(
+        gold_amount=reserve + 60,
+        gold_per_turn=20.0,
+        units=[upgradable(1, 100)],
+        production=[],
+        tiles={65536: [ptile(1, 30, "luxury")]},
+    )
+    run(game)
+    assert game.actions == []
+    assert "saving toward UNIT_" in caplog.text  # About 2 turns at 20 a turn.
+
+
+def test_saving_for_a_building_holds_back_tiles_but_the_building_is_bought_when_reached():
+    reserve = reserve_for(2, 20.0)
+    kwargs = dict(
+        gold_per_turn=20.0,
+        units=[],
+        production=[option("BUILDING_LIBRARY", 100)],
+        tiles={65536: [ptile(1, 10, "luxury")]},
+    )
+    saving = GoldGame(gold_amount=reserve + 60, **kwargs)
+    run(saving)
+    assert saving.actions == []
+    reached = GoldGame(gold_amount=reserve + 100, **kwargs)
+    run(reached)
+    assert kinds(reached)[0] == "buy"
+
+
+def test_a_target_too_far_to_reach_does_not_stop_other_spending():
+    reserve = reserve_for(2, 5.0)
+    game = GoldGame(
+        gold_amount=reserve + 60,
+        gold_per_turn=5.0,
+        units=[upgradable(1, 400)],  # 68 turns away at 5 a turn.
+        production=[],
+        tiles={65536: [ptile(1, 30, "luxury")]},
+    )
+    run(game)
+    assert kinds(game) == ["tile"]
+
+
+def test_no_saving_without_income():
+    reserve = reserve_for(2, 0.0)
+    game = GoldGame(
+        gold_amount=reserve + 60,
+        gold_per_turn=0.0,
+        units=[upgradable(1, 100)],
+        production=[],
+        tiles={65536: [ptile(1, 30, "luxury")]},
+    )
+    run(game)
+    assert kinds(game) == ["tile"]
+
+
+def test_a_threatened_city_still_buys_defence_while_gold_is_saved_for_an_upgrade():
+    from civ6_ai.policies.defence import CityThreat, DefenceState
+
+    defence = DefenceState()
+    defence.cities = {65536: CityThreat.__new__(CityThreat)}
+    game = GoldGame(
+        gold_amount=300,
+        gold_per_turn=60.0,
+        units=[upgradable(1, 400)],  # Reachable in 2 turns, so it is the saving target.
+        production=[option("UNIT_ARCHER", 40, category="UNIT")],
+    )
+    policy = GoldPolicy(defence=defence)
+    asyncio.run(policy.run(game))
+    assert ("buy", 65536, "UNIT", "UNIT_ARCHER") in game.actions
+    assert ("upgrade", 1) not in game.actions
+
+
+def test_a_saving_target_stops_lesser_purchases_in_the_same_city():
+    reserve = reserve_for(2, 20.0)
+    game = GoldGame(
+        gold_amount=reserve + 60,
+        gold_per_turn=20.0,
+        units=[],
+        production=[option("BUILDING_UNIVERSITY", 100), option("BUILDING_MONUMENT", 30)],
+    )
+    run(game)
+    assert [a for a in game.actions if a[0] == "buy"] == []

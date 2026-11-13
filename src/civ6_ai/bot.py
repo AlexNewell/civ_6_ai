@@ -334,7 +334,7 @@ def build_orchestrator(
         gold,
         BuilderPolicy(demand=builder_demand),
         secondary,
-        FaithPolicy(),
+        FaithPolicy(defence=defence),
         DefenceReport(defence),
         BuildTracker(ledger, victory=lambda: production.weights.victory, watcher=watcher),
         resolver,

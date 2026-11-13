@@ -26,17 +26,30 @@ before something is attempted, and every try and refusal is logged:
 Faith. Faith above `FaithSettings.reserve` is spent, in this order:
 
 1. Great people, bought with faith. A price of 2147483647 (the game's maximum integer) means
-   the person can't be bought, so it is never the cheapest option and the faith falls through
-   to buildings. The price is read from the Great People screen, so it is
-   exact and the reserve can be kept. One person is worth many turns of points, which makes it
-   the best use of a lump of faith. Ranked by the same class weights as recruiting. A Great
-   Prophet is bought only while a religion can still be founded.
-2. Shrine and Temple, offered by the city's production list. These raise faith and, for the
-   Temple, amenity and housing. The list gives only gold costs, so the faith price is learned
-   from the first purchase and until then an upper estimate is required above the reserve.
+   the person can't be bought, so it is never the cheapest option. The price is read from the
+   Great People screen, so it is exact. Ranked by the class weights used for recruiting. A
+   Great Prophet is bought only while a religion can still be founded. When none is affordable
+   and the cheapest wanted one costs at most `SAVE_CAP` and the estimated income closes the gap
+   within `SAVE_TURNS`, the faith is saved toward it and nothing lower is bought. A person
+   further away than that is not saved for (Run 8 sat on 2,799 idle faith with prices of 550
+   to 1,470), so the faith goes down the list.
+2. Units from the cities' production lists, tried with faith: the best defenders in a
+   threatened city (`DefenceState`), then a Builder. The game allows faith for units only under
+   some policy cards and dedications (Theocracy, Monumentality) and the list shows gold prices
+   only, so a unit is tried and a refusal that is not a price quote is remembered per item for
+   `RULE_WAIT` turns.
+3. Shrine and Temple, offered by the production list (they need a Holy Site). The faith price
+   is learned from the first purchase and until then an upper estimate is required.
 
-Religious units are not bought. Nothing in the bot moves or spreads missionaries yet, so a unit
-bought now would stand idle. Add them when a spreading policy exists.
+Religious units are not bought. Nothing in the bot moves or spreads missionaries yet.
+
+Calls: the great people list is reused for `GP_REFRESH` turns while the cheapest price is out
+of reach, the "can a religion be founded" answer for `RELIGION_REFRESH` turns, the pantheon
+answer for good once settled, and the cities' lists are skipped for `SINK_WAIT` turns when
+nothing could be tried.
+
+Every turn logs one line: faith, reserve and the sink spent on, the saving target, or why
+nothing was bought.
 
 Nothing is spent until a pantheon is chosen, as long as the game still offers one, because
 `SecondaryPolicy` needs that faith. Spending is bounded to `FaithSettings.max_purchases` bought
@@ -52,6 +65,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from civ6_ai.blockers import action_succeeded, move_succeeded
+from civ6_ai.policies.production import defence_strength
 from civ6_ai.policies.secondary import _GP_WEIGHTS, SecondaryWeights, canonical
 from civ6_ai.state import GameReads, Unit, read_units
 
@@ -66,12 +80,19 @@ PROPHET_MAX_MOVES = 15  # Move orders given to one prophet before it is left whe
 MAX_MOVE_TARGETS = 3  # Holy Sites tried, nearest first, when a move is refused.
 SPREAD_GIVE_UP = 8  # Refused spread tries in a row before a prophet with no use is deleted.
 REFUSED_WAIT = 5  # Turns before a refused person or building is tried again.
+RULE_WAIT = 15  # Turns before an item the game's rules refuse (no card or dedication) is retried.
+SINK_WAIT = 3  # Turns the cities' lists are not read again when nothing could be tried.
+GP_REFRESH = 4  # Turns the great people list is reused while the cheapest price is out of reach.
+RELIGION_REFRESH = 10  # Turns the "can a religion be founded" answer is reused.
+SAVE_CAP = 300  # Most a great person may cost, in faith, to be saved toward.
+SAVE_TURNS = 20  # Most turns of saving worth waiting for a great person.
 
 _PROPHET = "UNIT_GREAT_PROPHET"
 _PROPHET_CLASS = "Great Prophet"
 _UNCLAIMED = "Unclaimed"
 _FAITH = "YIELD_FAITH"
 _UNBUYABLE = 2**31 - 1  # The game's max int: the price it reports for a person who can't be bought.
+_BUILDER = "UNIT_BUILDER"
 _UNKNOWN_CLASS = 0.5  # Weight of a great person class the weights don't name.
 
 # Buildings bought with faith, best first, with an upper estimate of the price. The estimate
@@ -80,6 +101,13 @@ _BUILDINGS: tuple[tuple[str, int], ...] = (
     ("BUILDING_SHRINE", 100),
     ("BUILDING_TEMPLE", 250),
 )
+
+
+def _estimate(option: Any) -> int:
+    """An upper guess at a faith price before one is learned: the gold price, else 150."""
+    gold = getattr(option, "gold_cost", -1)
+    return int(gold) if gold and gold > 0 else 150
+
 
 _PAID = re.compile(r"cost[=:]\s*(\d+)\s*f", re.IGNORECASE)
 _QUOTED = re.compile(r"costs\s+(\d+)f", re.IGNORECASE)
@@ -136,7 +164,16 @@ class FaithPolicy:
     name: str = "faith"
     _prophets: dict[int, _Prophet] = field(default_factory=dict, init=False, repr=False)
     _costs: dict[str, int] = field(default_factory=dict, init=False, repr=False)
-    _refused: dict[tuple[str, int, str], int] = field(default_factory=dict, init=False, repr=False)
+    _refused: dict[tuple, int] = field(default_factory=dict, init=False, repr=False)
+    defence: Any = None  # The threat state (`defence.DefenceState`), or None.
+    _last: tuple[int, float] | None = field(default=None, init=False, repr=False)
+    _spent_since: float = field(default=0.0, init=False, repr=False)
+    _income: float | None = field(default=None, init=False, repr=False)
+    _pantheon_done: bool = field(default=False, init=False, repr=False)
+    _gp: tuple | None = field(default=None, init=False, repr=False)
+    _can_found_at: tuple[int, bool] | None = field(default=None, init=False, repr=False)
+    _sink_gate: tuple[int, float] = field(default=(-1, 0.0), init=False, repr=False)
+    _saving: str | None = field(default=None, init=False, repr=False)
 
     async def run(self, game: FaithGame) -> None:
         """Run each part so one failing doesn't strand the other, then raise the first error."""
@@ -263,27 +300,50 @@ class FaithPolicy:
 
     # ----- faith -----
 
+    def _track_income(self, turn: int, faith: float) -> None:
+        """Estimate faith per turn from the balance, adding back what was spent since."""
+        if self._last is not None and turn > self._last[0]:
+            gained = faith - self._last[1] + self._spent_since
+            rate = max(0.0, gained / (turn - self._last[0]))
+            self._income = rate if self._income is None else 0.5 * self._income + 0.5 * rate
+            self._spent_since = 0.0
+        if self._last is None or turn > self._last[0]:
+            self._last = (turn, faith)
+
     async def _spend(self, game: FaithGame, turn: int) -> None:
         faith = (await game.get_game_overview()).faith
         reserve = self.settings.reserve
+        self._track_income(turn, faith)
         if faith <= reserve or self.settings.max_purchases <= 0:
+            log.info("Faith %.0f, reserve %.0f: at or below the reserve", faith, reserve)
             return
-        pantheon = await game.get_pantheon_status()
-        if not pantheon.has_pantheon and pantheon.available_beliefs:
-            log.info("Faith %.0f above reserve %.0f but kept for the pantheon", faith, reserve)
-            return
+        if not self._pantheon_done:
+            pantheon = await game.get_pantheon_status()
+            if not pantheon.has_pantheon and pantheon.available_beliefs:
+                log.info("Faith %.0f above reserve %.0f but kept for the pantheon", faith, reserve)
+                return
+            self._pantheon_done = True  # Not asked again once chosen or none is left.
         budget = faith - reserve
         bought = 0
         attempts = 0
         notes: list[str] = []
-        for step in (self._patronise, self._buildings):
-            spent, count, tried = await step(game, turn, budget, attempts, bought, notes)
+        sinks: list[str] = []
+        self._saving = None
+        for step in (self._patronise, self._production_sinks):
+            spent, count, tried = await step(game, turn, budget, attempts, bought, notes, sinks)
             budget -= spent
             bought += count
             attempts += tried
+            self._spent_since += spent
             if bought >= self.settings.max_purchases or attempts >= MAX_ATTEMPTS:
                 break
-        if not bought:
+            if self._saving is not None:
+                break  # Keep the faith for the great person it is saved toward.
+        if bought:
+            log.info("Faith %.0f, reserve %.0f: spent on %s", faith, reserve, ", ".join(sinks))
+        elif self._saving is not None:
+            log.info("Faith %.0f, reserve %.0f: saving toward %s", faith, reserve, self._saving)
+        else:
             log.info(
                 "Faith %.0f above reserve %.0f but nothing bought: %s",
                 faith,
@@ -293,6 +353,29 @@ class FaithPolicy:
 
     # Each step below returns (faith spent, things bought, calls made).
 
+    async def _great_people(self, game: FaithGame, turn: int, budget: float) -> tuple[list, bool]:
+        """The great people and whether a religion can be founded.
+
+        Reused for `GP_REFRESH` turns while the cheapest known price is out of reach, and the
+        religion answer for `RELIGION_REFRESH` turns, which saves up to two calls a turn.
+        """
+        cached = self._gp
+        if cached is not None and turn - cached[0] < GP_REFRESH:
+            cheapest = min(
+                (p.faith_cost for p in cached[1] if 0 < p.faith_cost < _UNBUYABLE), default=None
+            )
+            if cheapest is None or cheapest > budget:
+                return cached[1], cached[2]
+        people = await game.get_great_people()
+        if self._can_found_at is None or turn - self._can_found_at[0] >= RELIGION_REFRESH:
+            religion = await game.get_religion_founding_status()
+            self._can_found_at = (
+                turn,
+                not religion.has_religion and bool(religion.available_religions),
+            )
+        self._gp = (turn, people, self._can_found_at[1])
+        return people, self._can_found_at[1]
+
     async def _patronise(
         self,
         game: FaithGame,
@@ -301,10 +384,9 @@ class FaithPolicy:
         attempts: int,
         bought: int,
         notes: list[str],
+        sinks: list[str],
     ) -> tuple[float, int, int]:
-        people = await game.get_great_people()
-        religion = await game.get_religion_founding_status()
-        can_found = not religion.has_religion and bool(religion.available_religions)
+        people, can_found = await self._great_people(game, turn, budget)
         offered = [p for p in people if p.claimant == _UNCLAIMED and 0 < p.faith_cost < _UNBUYABLE]
         if not offered:
             notes.append("no great person can be bought with faith (none priced, or unreachable)")
@@ -338,6 +420,7 @@ class FaithPolicy:
             if "PATRONIZED" in result and action_succeeded(result):
                 spent += person.faith_cost
                 count += 1
+                sinks.append(f"{person.individual_name} for {person.faith_cost}")
                 log.info(
                     "Faith bought %s (%s) for %d faith",
                     person.individual_name,
@@ -348,15 +431,64 @@ class FaithPolicy:
                 self._refused[key] = turn + REFUSED_WAIT
                 log.info("Can't buy %s with faith: %s", person.individual_name, result[:120])
         if not count:
-            cheapest = min(p.faith_cost for p in offered)
-            notes.append(
-                f"great people: cheapest {cheapest} faith vs {budget:.0f} above reserve"
-                if cheapest > budget
-                else "great people: none wanted or all refused recently"
-            )
+            self._save_for(wanted, turn, budget, notes)
         return spent, count, tried
 
-    async def _buildings(
+    def _save_for(self, wanted: list[Any], turn: int, budget: float, notes: list[str]) -> None:
+        """Pick the cheapest wanted great person as a saving target when it is reachable.
+
+        Reachable means the price is at most `SAVE_CAP` (so idle faith stays bounded) and the
+        income estimate closes the gap within `SAVE_TURNS` turns. Otherwise the faith goes to
+        the units and buildings below.
+        """
+        pool = [p for p in wanted if self._refused.get(("gp", p.individual_id, ""), -1) <= turn]
+        if not pool:
+            notes.append("great people: none wanted or all refused recently")
+            return
+        target = min(pool, key=lambda p: (p.faith_cost, p.individual_id))
+        gap = target.faith_cost - budget
+        income = self._income or 0.0
+        if target.faith_cost <= SAVE_CAP and income > 0 and gap / income <= SAVE_TURNS:
+            self._saving = (
+                f"{target.individual_name} ({target.class_name}) at {target.faith_cost} faith, "
+                f"about {gap / income:.0f} turns at {income:.1f} a turn"
+            )
+            return
+        notes.append(
+            f"great people: cheapest {target.faith_cost} faith vs {budget:.0f} above reserve, "
+            f"not worth saving for at {income:.1f} a turn"
+        )
+
+    def _any_threatened(self) -> bool:
+        return self.defence is not None and self.defence.any
+
+    def _threatened(self, city: Any) -> bool:
+        return self.defence is not None and self.defence.is_threatened(city.city_id)
+
+    def _candidates(self, city: Any, options: dict[str, Any]) -> list[tuple[str, str, int]]:
+        """(category, item, price estimate) the city could buy with faith, best first.
+
+        Which units faith can buy depends on policy cards and Golden Age dedications
+        (Theocracy: land military, Monumentality: Builders), and the production list gives only
+        gold prices. So a unit is tried, and a refusal for a reason that is not the price is
+        remembered per item for `RULE_WAIT` turns.
+        """
+        out: list[tuple[str, str, int]] = []
+        if self._threatened(city):
+            defenders = [
+                o
+                for o in options.values()
+                if o.category == "UNIT" and defence_strength(o.item_name) > 0
+            ]
+            defenders.sort(key=lambda o: (-defence_strength(o.item_name), o.item_name))
+            out += [("UNIT", o.item_name, _estimate(o)) for o in defenders[:2]]
+        builder = options.get(_BUILDER)
+        if builder is not None and builder.category == "UNIT":
+            out.append(("UNIT", _BUILDER, _estimate(builder)))
+        out += [("BUILDING", item, est) for item, est in _BUILDINGS if item in options]
+        return out
+
+    async def _production_sinks(
         self,
         game: FaithGame,
         turn: int,
@@ -364,48 +496,69 @@ class FaithPolicy:
         attempts: int,
         bought: int,
         notes: list[str],
+        sinks: list[str],
     ) -> tuple[float, int, int]:
+        """Units, then Shrine or Temple, from the cities' production lists (one call a city)."""
+        until, need = self._sink_gate
+        if until > turn and budget < need and not self._any_threatened():
+            notes.append(f"no unit or building to buy yet (looked again from turn {until})")
+            return 0.0, 0, 0
         cities, _ = await game.get_cities()
         ordered = sorted(cities, key=lambda c: c.city_id)
         if ordered:
             start = turn % len(ordered)  # Rotate, so the same cities aren't always read first.
             ordered = ordered[start:] + ordered[:start]
+        ordered.sort(key=lambda c: not self._threatened(c))  # Threatened cities first.
         spent = 0.0
         tried = 0
         count = 0
+        cheapest_short = float("inf")  # The lowest price that was out of reach.
         for city in ordered[:MAX_CITY_SCANS]:
             if bought + count >= self.settings.max_purchases or attempts + tried >= MAX_ATTEMPTS:
                 break
             options = {
                 o.item_name: o
                 for o in await game.list_city_production(city.city_id)
-                if o.category == "BUILDING" and not o.is_repair
+                if o.category in ("BUILDING", "UNIT") and not o.is_repair
             }
-            for item, estimate in _BUILDINGS:
-                if item not in options or self._refused.get(("b", city.city_id, item), -1) > turn:
+            for category, item, estimate in self._candidates(city, options):
+                if self._refused.get(("rule", item), -1) > turn:
+                    continue
+                if self._refused.get((category[0], city.city_id, item), -1) > turn:
                     continue
                 price = self._costs.get(item, estimate)
                 if price > budget - spent:
+                    cheapest_short = min(cheapest_short, price)
                     notes.append(
                         f"{item} in {city.name} needs about {price}, have {budget - spent:.0f}"
                     )
                     continue
                 tried += 1
-                result = await game.purchase_item(city.city_id, "BUILDING", item, _FAITH)
+                result = await game.purchase_item(city.city_id, category, item, _FAITH)
                 if "PURCHASED" in result and action_succeeded(result):
                     paid = _PAID.search(result)
                     cost = int(paid.group(1)) if paid else price
                     self._costs[item] = cost
                     spent += cost
                     count += 1
+                    sinks.append(f"{item} in {city.name} for {cost}")
                     log.info("Faith bought %s in %s for %d faith", item, city.name, cost)
                     break
                 quoted = _QUOTED.search(result)
                 if quoted:
                     self._costs[item] = int(quoted.group(1))
-                self._refused[("b", city.city_id, item)] = turn + REFUSED_WAIT
+                elif "STACKING" not in result.upper():
+                    # The game's rules, not the price, refuse it (no card or dedication yet).
+                    self._refused[("rule", item)] = turn + RULE_WAIT
+                self._refused[(category[0], city.city_id, item)] = turn + REFUSED_WAIT
                 log.info("Can't buy %s in %s with faith: %s", item, city.name, result[:120])
                 notes.append(f"{item} in {city.name} refused")
+                if attempts + tried >= MAX_ATTEMPTS:
+                    break
+        if not tried and not any(self._threatened(c) for c in ordered):
+            # Nothing to try: skip the lists until the faith covers the cheapest candidate that
+            # was short, or a few turns when none was offered at all.
+            self._sink_gate = (turn + SINK_WAIT, cheapest_short)
         if not count and not notes:
-            notes.append("no Shrine or Temple offered in the cities read")
+            notes.append("no unit or Shrine or Temple offered in the cities read")
         return spent, count, tried

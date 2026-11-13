@@ -367,6 +367,7 @@ class _Turn:
     camp_scanned: bool = False
     placed: dict[int, tuple[int, int]] = field(default_factory=dict)  # Where a unit moved to.
     blocked: set[tuple[int, int]] = field(default_factory=set)  # Tiles the game said are full.
+    en_route: dict[int, int] = field(default_factory=dict)  # City id to cover units still walking.
     spare_orders: int = 0
     fired: set[int] = field(default_factory=set)  # Cities that have used their strike.
     struck: set[tuple[int, int]] = field(default_factory=set)  # Targets a city has hit.
@@ -559,6 +560,12 @@ class MilitaryPolicy:
             u.unit_id != unit.unit_id and self._pos(t, u) == where and holds_tile(u)
             for u in t.units
         )
+
+    @staticmethod
+    def _reached(result: str, goal: tuple[int, int]) -> tuple[int, int]:
+        """Where a move ended, from `now_at`, or the goal if the reply does not say."""
+        found = _NOW_AT.search(result)
+        return (int(found.group(1)), int(found.group(2))) if found else goal
 
     @staticmethod
     def _learn_full_tile(t: _Turn, result: str | None) -> None:
@@ -966,7 +973,7 @@ class MilitaryPolicy:
                 if result is not None and move_succeeded(result):
                     t.acted.add(unit.unit_id)
                     self._leave(t, unit)
-                    t.placed[unit.unit_id] = goal
+                    t.placed[unit.unit_id] = self._reached(result, goal)
                     self._log(
                         t,
                         unit,
@@ -1065,7 +1072,10 @@ class MilitaryPolicy:
                 t.acted.add(unit.unit_id)
                 if any(u.unit_id == unit.unit_id for u in t.mine):
                     self._leave(t, unit)  # An engineer was never counted as a defender.
-                t.placed[unit.unit_id] = goal
+                at = self._reached(result, goal)
+                t.placed[unit.unit_id] = at
+                if at != goal:  # Still walking: not a defender yet, but no other unit is sent.
+                    t.en_route[city.city_id] = t.en_route.get(city.city_id, 0) + 1
                 self._log(t, unit, action, reason, goal, result=result)
                 self._note(city, f"{action}: {unit.unit_type} to {goal[0]},{goal[1]}")
                 return True
@@ -1079,7 +1089,7 @@ class MilitaryPolicy:
         s = self.settings
         while t.actions < s.max_actions:
             inside = t.at_city.get((city.x, city.y), 0)
-            if inside + self._beside(t, city) >= WANTED_DEFENDERS:
+            if inside + self._beside(t, city) + t.en_route.get(city.city_id, 0) >= WANTED_DEFENDERS:
                 return
             candidates = [
                 (hex_distance(*self._pos(t, u), city.x, city.y, s.map_width), u.unit_id, u)

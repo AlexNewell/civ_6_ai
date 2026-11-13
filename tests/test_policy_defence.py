@@ -460,3 +460,15 @@ def test_the_counts_after_the_turn_are_handed_to_the_threat_state():
     assert (state.cities[ALPHA].defenders_in, state.cities[ALPHA].defenders_beside) == (1, 1)
     assert not state.cities[ALPHA].short
     assert any(n.startswith("cover:") for n in state.notes[ALPHA])
+
+
+def test_a_cover_unit_that_stops_short_is_not_counted_beside_but_no_other_is_sent():
+    state = marked(ALPHA, inside=1, beside=0)
+    game = MilitaryGame(
+        [warrior(uid=1), warrior(uid=2, x=14, y=10), warrior(uid=3, x=14, y=11)], []
+    )
+    game.replies["move"] = "MOVING_TO|11,10|from:14,10|now_at:13,10|STOPPED_MID_PATH"
+    mil_run(game, state)
+    assert len(moves(game)) == 1
+    assert state.cities[ALPHA].defenders_beside == 0
+    assert state.cities[ALPHA].short

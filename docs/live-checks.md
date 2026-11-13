@@ -40,6 +40,26 @@ Written offline against civ6-mcp's source, so none of this has run in a game yet
 | Ranged units are not hit back by melee defenders, and ranged defenders do hit back (`assess_attack` assumes both) | Not reached |
 | `Unit.targets` lists only targets in range with line of sight, and ranged units fire at adjacent targets | Not reached |
 
+## Run 8: turns 1 to 330, with Batch A (issues 174 to 176 and 180)
+
+STD_T1_01 from turn 1 on main at the merge of PRs 190 and 191, 2026-11-13. It ran turns 1 to 291 in one session, then stopped as `blocked` on turn 291, although the game had already advanced to turn 292 (the screenshot shows turn 292). The run was resumed with no reload and played to the turn limit (330). Game over: `PlayerStatus(alive=True, winning_team=5, cities=7)`, so a rival won at the turn limit. Final score read on turn 291: 796. $0.00 in model spend. Decision time mean 10.1 s (8.3 s after the resume).
+
+| Check | Result |
+|---|---|
+| No city lost within 10 turns of a war (174) | Pass: no city lost all game (Run 7: 7). One war with Sumeria, turns 168 to about 179. |
+| Gold buys or upgrades after a war starts (174) | Pass: the reserve dropped on 97 turns and 32 upgrades were logged, for example Slinger to Archer in a threatened city. |
+| Walls in threatened cities (174) | Pass: 3 switches to walls. |
+| Two defenders in or beside a threatened city (175) | 89 turns with a `defence` line, 35 lines marked SHORT. A swap ran on turn 10. |
+| Refused military moves under 25% (175) | Pass: 2 `STACKING_CONFLICT` among 2,614 military decisions. In all logs, `STACKING_CONFLICT` fell from 135 to 23. |
+| No city lost to loyalty (176) | Pass: no loyalty warning all game, so `loyalty_response` never ran. |
+| 6 cities by turn 150 (180) | Pass: 6 cities on turn 150 and 7 from turn 175 (founded on turns 2, 47, 83, 104, 127, 132 and 175). |
+
+New in this run:
+
+- **False `blocked` stop on turn 291:** `Turn did not read as advanced` when the game was already on turn 292.
+- **A settler stayed on the map from about turn 150 to the end**, while the site survey aged to 139 turns, because no survey ran with the settler idle.
+- **Unchanged waste:** 64% of production choices refused (Harbor refused in 7 cities, issue 187); faith idle up to 2,799; gold not spent on 73% of the turns above the reserve; builders idle on 74% of builder-turns (98% after turn 292); 71 starving notices before the resume and 57 after.
+
 ## Run 7: turns 1 to 309, after offline batch 2 (issues 148 and 127)
 
 STD_T1_01 from turn 1 on main at 6731933, 2026-11-12 evening, one session with no restart and no hands-on help. It stopped on turn 309 on the game-over screen: `PlayerStatus(alive=True, winning_team=1, team=0, cities=2)`, so a rival won and we were still alive with 2 cities: a Germany science victory (the owner read the end screen; the screenshot shows only the backdrop). Germany also won Runs 3 and 6 on this save. Cities: 7 founded (the 4th on turn 72), 2 lost early, then the capital fell on turn 280, three turns after Sumeria declared war on turn 277, and four more fell by turn 302, after peace on turn 288. 6,797 s of bot time, $0.00 in model spend. Decision time mean 11.5 s (p90 15.7 s), end-turn wait mean 10.5 s.

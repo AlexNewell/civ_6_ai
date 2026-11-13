@@ -11,7 +11,9 @@ Order within a turn:
    `WarPolicy` follows it: it logs every war and offers peace. It closes its own sessions.
    `TradeOfferPolicy` runs right after it and offers surplus resources to other civs. It closes
    every session it opens.
-3. `SettlingPolicy` moves settlers and scouts, which changes cities and units.
+   `ExpansionLog` writes the one-line expansion status here, before anything changes the game.
+3. `SettlingPolicy` moves settlers and scouts, which changes cities and units. `LoyaltyResponse`
+   follows it, and acts only for a city that has a loyalty warning: governor, garrison, card.
 4. `MilitaryPolicy` attacks, heals, garrisons and spends promotions. It runs after settling,
    which has moved its escorts and scouts first (it never touches the units settling reserves),
    and before production, builders and the resolver, whose skip must come last.
@@ -55,9 +57,11 @@ from civ6_ai.orchestrator import Handler, Orchestrator, TurnLog
 from civ6_ai.policies import research
 from civ6_ai.policies.builder import BuilderPolicy
 from civ6_ai.policies.diplomacy import DiplomacyPolicy
+from civ6_ai.policies.expansion import ExpansionLog, ExpansionState
 from civ6_ai.policies.faith import FaithPolicy
 from civ6_ai.policies.gold import GoldPolicy
 from civ6_ai.policies.government import GovernmentPolicy
+from civ6_ai.policies.loyalty import LoyaltyResponse
 from civ6_ai.policies.military import MilitaryPolicy
 from civ6_ai.policies.production import CityProductionPolicy
 from civ6_ai.policies.secondary import SecondaryPolicy
@@ -260,7 +264,8 @@ def build_orchestrator(
     is fed from `bus`, and a gap line is logged each turn. `event_log` is flushed at the end of each
     turn, since it buffers its writes.
     """
-    production = CityProductionPolicy(bus=bus)
+    expansion = ExpansionState()  # Settling fills it. Production and the log line read it.
+    production = CityProductionPolicy(bus=bus, expansion=expansion)
     government = GovernmentPolicy()  # One instance, so handler and blockers share its bounds.
     secondary = SecondaryPolicy()
     military = MilitaryPolicy()
@@ -306,10 +311,12 @@ def build_orchestrator(
             else []
         ),
         watcher,
+        ExpansionLog(expansion),
         diplomacy,
         WarPolicy(state_path=wars_state),
         *([TradeOfferPolicy(diplomacy.weights)] if trade_offers else []),
-        SettlingPolicy(),
+        SettlingPolicy(expansion=expansion),
+        LoyaltyResponse(bus),
         military,
         research_policy,
         government,

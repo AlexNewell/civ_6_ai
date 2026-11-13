@@ -20,6 +20,7 @@ from civ6_ai.blockers import Blocker, BlockerGame, BlockerType
 from civ6_ai.construction import ProductionRefused, ProductionSet
 from civ6_ai.monitors import Event, EventBus
 from civ6_ai.policies.districts import BASE_VALUE, PLANNED_VALUE, is_planned, wants_district
+from civ6_ai.policies.expansion import ExpansionState, expected_cities
 from civ6_ai.policies.game_data import COMBAT_UNITS, REPLACES, UPGRADES, WONDERS
 from civ6_ai.state import City, Empire, ProductionChoice, Unit
 from civ6_ai.state import read_cities as _read_cities
@@ -90,6 +91,7 @@ class ProductionContext:
     traders: int = 0  # Traders that exist, on a route or not, plus those being built.
     trade_capacity: int = 0  # Routes the empire can run at once.
     districts: frozenset[str] = frozenset()  # Short names of districts any city has built.
+    sites_ok: bool = True  # False when settling found no safe site to send a settler to.
 
     def after_choosing(self, item: str, unknown_combat: bool = False) -> "ProductionContext":
         """Count a pick, so two cities don't both build the one builder the empire needs."""
@@ -237,6 +239,7 @@ _DISTRICT_YIELDS: dict[str, tuple[float, float, float, float, float, float]] = {
 _WEIGHT_ORDER = ("food", "production", "gold", "science", "culture", "faith")
 
 _SETTLER_MIN_POP = 2
+_BEHIND_SETTLER_SCORE = 19.0  # Above a builder or trader, below defending a threatened city.
 
 
 def _short(item: str) -> str:
@@ -338,14 +341,24 @@ def _unit_score(
     kind = canonical(item)
     threatened = is_pressed(city, ctx)
     if kind == "UNIT_SETTLER":
+        # Behind the expansion schedule (1.41), with safe sites and a defender for every city
+        # (the one in this city included), settlers outrank the rest and a second may be queued.
+        behind = ctx.num_cities < expected_cities(ctx.turn, w.target_cities)
+        boosted = (
+            behind
+            and ctx.sites_ok
+            and city.garrison_unit is not None
+            and ctx.army >= ctx.num_cities
+        )
+        in_flight_cap = 2 if boosted and ctx.num_cities + 2 <= w.target_cities else 1
         if (
             threatened
             or city.pop < _SETTLER_MIN_POP
             or ctx.num_cities + ctx.settlers >= w.target_cities
-            or ctx.settlers >= 1
+            or ctx.settlers >= in_flight_cap
         ):
             return 0.0
-        return 14.0 * w.expansion
+        return (_BEHIND_SETTLER_SCORE if boosted else 14.0) * w.expansion
     if kind == "UNIT_BUILDER":
         wanted = max(1, ctx.num_cities) - ctx.builders
         if wanted <= 0 or threatened:
@@ -638,17 +651,25 @@ class CityProductionPolicy:
     name = "city_production"
 
     def __init__(
-        self, weights: ProductionWeights | None = None, bus: EventBus | None = None
+        self,
+        weights: ProductionWeights | None = None,
+        bus: EventBus | None = None,
+        expansion: ExpansionState | None = None,
     ) -> None:
         self._emit = bus.publish if bus is not None else None
         self.weights = weights or ProductionWeights()  # The strategist replaces this later.
         self.refusals = RefusalMemory()
+        self.expansion = expansion if expansion is not None else ExpansionState()
 
     async def run(self, game: ProductionGame) -> None:
         unfinished = await self.assign(game)
         if unfinished:
             # Not an error: the blocker resolver's cheapest-item default runs after this.
             log.warning("No production chosen for %s", ", ".join(unfinished))
+
+    def _context(self, empire, units, in_progress, cities) -> ProductionContext:
+        context = build_context(empire, units, in_progress, cities)
+        return replace(context, sites_ok=self.expansion.sites_ok(empire.turn))
 
     async def assign(self, game: ProductionGame) -> list[str]:
         """Choose for each idle city, and return the names of any left without a choice.
@@ -668,7 +689,7 @@ class CityProductionPolicy:
         # building, and a refused switch leaves it building, so the count below stays true.
         for city in sorted(switching, key=lambda c: c.city_id):
             options = await _read_production(game, city.city_id)
-            context = build_context(empire, units, building.values(), cities)
+            context = self._context(empire, units, building.values(), cities)
             picked = await choose_for_city(
                 game,
                 city,
@@ -681,7 +702,7 @@ class CityProductionPolicy:
             )
             if picked is not None:
                 building[city.city_id] = picked.item
-        context = build_context(empire, units, building.values(), cities)
+        context = self._context(empire, units, building.values(), cities)
         unfinished = []
         for city in sorted(idle, key=lambda c: (not c.is_threatened, c.city_id)):
             options = await _read_production(game, city.city_id)

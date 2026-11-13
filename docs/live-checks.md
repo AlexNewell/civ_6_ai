@@ -40,6 +40,39 @@ Written offline against civ6-mcp's source, so none of this has run in a game yet
 | Ranged units are not hit back by melee defenders, and ranged defenders do hit back (`assess_attack` assumes both) | Not reached |
 | `Unit.targets` lists only targets in range with line of sight, and ranged units fire at adjacent targets | Not reached |
 
+## Run 7: turns 1 to 309, after offline batch 2 (issues 148 and 127)
+
+STD_T1_01 from turn 1 on main at 6731933, 2026-11-12 evening, one session with no restart and no hands-on help. It stopped on turn 309 on the game-over screen: `PlayerStatus(alive=True, winning_team=1, team=0, cities=2)`, so a rival won and we were still alive with 2 cities. The screenshot shows only the end-screen backdrop, so the victory type is unknown. 6,797 s of bot time, $0.00 in model spend. Decision time mean 11.5 s (p90 15.7 s), end-turn wait mean 10.5 s.
+
+| Check (PR) | Result |
+|---|---|
+| `congress:` lines at each session (129) | Pass in the log: 115 lines, votes answered `VOTED|...`. Not compared with the game's own record. |
+| Wars read back after a mid-war restart (131) | Not reached: no restart. `runs/STD_T1_01_wars.json` was written (turn 309, no wars). |
+| Settle-too-close statement answered (134) | Pass: answered POSITIVE on 2 statements with no turn held. Favor change not read. |
+| `stray log line` retries (135) | Pass: 16 retries, 3 handler failures in the whole game (2 blockers, 1 monitors). |
+| City strike (136) | Pass: 23 `CITY_RANGE_ATTACK|` results, no `City strike from ... failed`. |
+| Production refusals below 30% (143) | Fail: 324 of 549 refused (59%); Wak Kab'nal DISTRICT_HARBOR refused 26 times (HARBOR refused in 5 cities). |
+| Claim-great-person blocker (144) | Pass: no `No handler` line; turn 66 held once, cleared and ended. |
+| Idle faith under 250 (159) | Fail: up to 1,004 idle above the reserve; 15 purchases in 243 turns. |
+| End-of-run "Policy effectiveness" lines (160) | Pass: printed. G1 gate FAILED with 8 warnings. |
+| Preflight lines (161) | Pass: four OK. |
+| Unit refusals (163) | Mixed: no `refused: UPGRADED`, "can't activate yet" replaces "can't activate at" (84). `STACKING_CONFLICT` appears 135 times, not near zero. |
+| Policy cards (164) | 109 `Slot ... takes` lines; the most repeated pair 4 times. |
+| Victory-proximity decimals (165) | Pass: no ValueError. |
+| Spaceport (166) | Set once, on turn 270 (after turn 200). |
+| `production_refused` with tile, `district_completed` (168) | Pass: 324 and 37 events. |
+| `UNKNOWN` blocker at congress (169) | Pass: none. |
+| Great-person, gold, envoy lines (170) | Pass: 17 activated, 239 `gold_spent`, 309 `envoy_tokens` lines. |
+| `build gaps:` lines (172) | Pass: one per turn. Ledger printed "restored from 0 earlier events" at start. |
+| No `0_MCP_*` saves | Pass: the newest in the saves folder is from 2026-11-10. |
+
+New in this run:
+
+- **Unhandled `ENDTURN_BLOCKING_RELIGION` (turn 220):** a prophet was activated after the founding step had already run that turn, so the blocker had no handler 6 times. The next pass founded Confucianism. It cost about 35 s, not a stop.
+- **civ6-mcp post-turn snapshot:** `Post-turn snapshot failed` with `[string "..."]:65: function expected instead of nil` from `build_units_query`, 30 times. The end-turn events are thinner on those turns. Also seen in Run 6's console.
+- **Overview read:** 3 `Overview response has 1 fields` errors caused by the `Omitting feature label: CHOCOLATE` stray line.
+- **Policy effectiveness gate:** great people waiting at once 6 (limit 5); faith idle 1,004 (limit 250); 7 cities lost, 5 after a loyalty warning; builders idle on 68% of builder-turns; gold unspent on 75% of turns above the reserve.
+
 ## Run 6: turns 1 to 331, with the settle-statement and city-strike fixes (issues 127, 134 to 136)
 
 - **Game:** standard save `STD_T1_01`, two sessions on 2026-11-12 (`20261112T052854Z` for turns 1 to 102, `20261112T134816Z` for turns 102 to 331). No model calls, $0.00.

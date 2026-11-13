@@ -1121,3 +1121,26 @@ def test_a_failed_focus_call_is_retried_and_never_stops_production():
     run(policy.assign(game))
     assert len(game.focus_calls) == 2
     assert game.set_calls  # The idle city still got something to build.
+
+
+def test_each_builder_order_uses_up_an_unclaimed_job():
+    ctx = replace(MID, builders=1, spare_jobs=1)
+    assert score_of("UNIT_BUILDER", city(), ctx) > 0
+    ctx = ctx.after_choosing("UNIT_BUILDER")
+    assert ctx.spare_jobs == 0 and score_of("UNIT_BUILDER", city(), ctx) == 0.0
+    # Builders that already exist were counted in the job figure, so they take none.
+    empire = run(read_empire(fx.FakeGame()))
+    built = build_context(empire, [], (), (), None, 0, 1)
+    assert built.spare_jobs == 1
+    ordering = build_context(empire, [], ["UNIT_BUILDER"], (), None, 0, 1)
+    assert ordering.spare_jobs == 0
+
+
+def test_a_city_that_starves_again_after_the_reset_keeps_its_food_focus():
+    busy = dict(currently_building="BUILDING_LIBRARY")
+    game = FocusGame(cities=[fx.city_info(food_surplus=-0.1, **busy)])
+    policy = CityProductionPolicy()
+    for surplus in (-0.1, 2.5, -0.1, 2.5, 2.5):
+        game.data["cities"] = [fx.city_info(food_surplus=surplus, **busy)]
+        run(policy.assign(game))
+    assert game.focus_calls == [(65536, "food"), (65536, "default"), (65536, "food")]

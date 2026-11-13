@@ -109,10 +109,18 @@ class ProductionContext:
     idle_builders: int = 0  # Builders that found no job on offer the last time they ran (1.45).
     spare_jobs: int | None = None  # Jobs no builder holds; None when not known this turn.
 
-    def after_choosing(self, item: str, unknown_combat: bool = False) -> "ProductionContext":
-        """Count a pick, so two cities don't both build the one builder the empire needs."""
+    def after_choosing(
+        self, item: str, unknown_combat: bool = False, orders: bool = True
+    ) -> "ProductionContext":
+        """Count a pick, so two cities don't both build the one builder the empire needs.
+
+        A builder ordered (`orders`) also uses up one unclaimed job. Builders that already exist
+        don't: the job count was taken after they chose.
+        """
         kinds = _counted_as(item) or (("army",) if unknown_combat else ())
         counted = replace(self, **{kind: getattr(self, kind) + 1 for kind in kinds})
+        if orders and "builders" in kinds and counted.spare_jobs is not None:
+            counted = replace(counted, spare_jobs=max(0, counted.spare_jobs - 1))
         if item.startswith("DISTRICT_"):  # A district being built counts, so two cities don't.
             counted = replace(counted, districts=counted.districts | {_short(item)})
         return counted
@@ -145,6 +153,8 @@ def build_context(
     in_progress: Iterable[str] = (),
     cities: Iterable[City] = (),
     defence: Any = None,
+    idle_builders: int = 0,
+    spare_jobs: int | None = None,
 ) -> ProductionContext:
     """Count what exists plus what cities are already building, so picks don't double up.
 
@@ -157,10 +167,14 @@ def build_context(
         threatened=defence.threatened_ids if defence is not None else frozenset(),
         short=defence.short_ids if defence is not None else frozenset(),
         districts=frozenset(_short(d.district_type) for c in cities for d in c.districts),
+        idle_builders=idle_builders,
+        spare_jobs=spare_jobs,
     )
     for unit in units:
         ctx = ctx.after_choosing(
-            unit.unit_type, unknown_combat=unit.is_combat and unit.unit_type not in COMBAT_UNITS
+            unit.unit_type,
+            unknown_combat=unit.is_combat and unit.unit_type not in COMBAT_UNITS,
+            orders=False,
         )
     for item in in_progress:
         ctx = ctx.after_choosing(item)
@@ -773,6 +787,8 @@ class CityProductionPolicy:
     ) -> None:
         self.builder_demand = builder_demand  # `builder.BuilderDemand`, or None.
         self._food_focus: set[int] = set()  # Cities this policy set to a food focus.
+        self._reset: set[int] = set()  # Cities returned to default, which may starve again.
+        self._kept: set[int] = set()  # Cities that starved again after a reset: focus stays.
         self._emit = bus.publish if bus is not None else None
         self.defence = defence  # The threat state (`defence.DefenceState`), or None.
         self.weights = weights or ProductionWeights()  # The strategist replaces this later.
@@ -786,14 +802,17 @@ class CityProductionPolicy:
             log.warning("No production chosen for %s", ", ".join(unfinished))
 
     def _context(self, empire, units, in_progress, cities) -> ProductionContext:
-        context = build_context(empire, units, in_progress, cities, self.defence)
         demand = self.builder_demand
-        return replace(
-            context,
-            sites_ok=self.expansion.sites_ok(empire.turn),
+        context = build_context(
+            empire,
+            units,
+            in_progress,
+            cities,
+            self.defence,
             idle_builders=demand.idle if demand is not None else 0,
             spare_jobs=demand.spare_jobs if demand is not None else None,
         )
+        return replace(context, sites_ok=self.expansion.sites_ok(empire.turn))
 
     async def assign(self, game: ProductionGame) -> list[str]:
         """Choose for each idle city, and return the names of any left without a choice.
@@ -848,12 +867,17 @@ class CityProductionPolicy:
 
         One `set_city_focus` call per change, never per turn: only a city that starts starving, or
         one this policy focused that now gains `STARVING_FOCUS_RECOVERED` food a turn, costs a call.
-        A failed call is tried again next turn.
+        A city that starves again after its reset keeps the focus for good, since the focus's own
+        food was what lifted it. A failed call is tried again next turn.
         """
         for city in cities:
             if is_starving(city) and city.city_id not in self._food_focus:
                 focus, add = "food", True
-            elif city.city_id in self._food_focus and city.food_surplus >= STARVING_FOCUS_RECOVERED:
+            elif (
+                city.city_id in self._food_focus
+                and city.city_id not in self._kept
+                and city.food_surplus >= STARVING_FOCUS_RECOVERED
+            ):
                 focus, add = "default", False
             else:
                 continue
@@ -866,7 +890,13 @@ class CityProductionPolicy:
                 log.info("%s: set_city_focus %s refused: %s", city.name, focus, str(result)[:120])
                 continue
             log.info("%s: focus %s (food %+.1f)", city.name, focus, city.food_surplus)
-            (self._food_focus.add if add else self._food_focus.discard)(city.city_id)
+            if add:
+                self._food_focus.add(city.city_id)
+                if city.city_id in self._reset:  # The deficit came back: the focus was the cure.
+                    self._kept.add(city.city_id)
+            else:
+                self._food_focus.discard(city.city_id)
+                self._reset.add(city.city_id)
 
     def _note(self, city: City, text: str) -> None:
         if self.defence is not None:

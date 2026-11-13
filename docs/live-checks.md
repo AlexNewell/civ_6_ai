@@ -42,7 +42,7 @@ Written offline against civ6-mcp's source, so none of this has run in a game yet
 
 ## Run 7: turns 1 to 309, after offline batch 2 (issues 148 and 127)
 
-STD_T1_01 from turn 1 on main at 6731933, 2026-11-12 evening, one session with no restart and no hands-on help. It stopped on turn 309 on the game-over screen: `PlayerStatus(alive=True, winning_team=1, team=0, cities=2)`, so a rival won and we were still alive with 2 cities. The screenshot shows only the end-screen backdrop, so the victory type is unknown. 6,797 s of bot time, $0.00 in model spend. Decision time mean 11.5 s (p90 15.7 s), end-turn wait mean 10.5 s.
+STD_T1_01 from turn 1 on main at 6731933, 2026-11-12 evening, one session with no restart and no hands-on help. It stopped on turn 309 on the game-over screen: `PlayerStatus(alive=True, winning_team=1, team=0, cities=2)`, so a rival won and we were still alive with 2 cities: a Germany science victory (the owner read the end screen; the screenshot shows only the backdrop). Germany also won Runs 3 and 6 on this save. Cities: 7 founded (the 4th on turn 72), 2 lost early, then the capital fell on turn 280, three turns after Sumeria declared war on turn 277, and four more fell by turn 302, after peace on turn 288. 6,797 s of bot time, $0.00 in model spend. Decision time mean 11.5 s (p90 15.7 s), end-turn wait mean 10.5 s.
 
 | Check (PR) | Result |
 |---|---|

@@ -55,6 +55,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
 
 from civ6_ai.blockers import Blocker, BlockerType, action_succeeded, move_succeeded
+from civ6_ai.policies.game_data import COMBAT_UNITS
 from civ6_ai.policies.settling import SCOUT, hex_line, units_reserved_for_settling
 from civ6_ai.state import City, GameReads, Threat, Tile, Unit, read_area
 from civ6_ai.state import read_cities as _read_cities
@@ -103,6 +104,13 @@ _ATTACK_TAGS = ("RANGE_ATTACK", "MELEE_ATTACK", "AIR_ATTACK")
 _DAMAGE_DEALT = re.compile(r"damage dealt:~?(\d+)")
 _HP_AFTER = re.compile(r"your HP:\s*-?\d+\s*->\s*(-?\d+)")
 _NOW_AT = re.compile(r"now_at:(-?\d+),(-?\d+)")
+_ALREADY_ON = re.compile(r"STACKING_CONFLICT.*already on \((-?\d+),\s*(-?\d+)\)")
+# Units that hold a tile like a military unit does: the game refuses a second one of the class
+# (Run 7: "Friendly UNIT_MILITARY_ENGINEER already on (64,28). Cannot stack same formation class").
+_TILE_HOLDERS = ("MILITARY_ENGINEER",)
+WANTED_DEFENDERS = 2  # In a threatened city or on a tile beside it.
+SWAP_REACH = 2  # How near a stronger unit must be to be swapped in for a weaker holder.
+SWAP_MARGIN = 1.3  # The newcomer must be this much stronger than the unit it replaces.
 
 
 def is_land_military(unit: Unit) -> bool:
@@ -112,6 +120,19 @@ def is_land_military(unit: Unit) -> bool:
         and unit.unit_type != SCOUT
         and not any(word in unit.unit_type for word in _NOT_LAND)
     )
+
+
+def holds_tile(unit: Unit) -> bool:
+    """True for a unit the game will not stack with a military unit (`STACKING_CONFLICT`)."""
+    return is_land_military(unit) or any(word in unit.unit_type for word in _TILE_HOLDERS)
+
+
+def _hold_strength(unit: Unit) -> float:
+    """How well a unit holds a city. A unit that is no defender (an engineer) counts as nothing."""
+    stats = COMBAT_UNITS.get(unit.unit_type)
+    if stats is not None:
+        return max(float(stats[0]), 0.9 * stats[1])
+    return float(max(unit.combat_strength, 0.9 * unit.ranged_strength))
 
 
 @dataclass(frozen=True)
@@ -344,6 +365,9 @@ class _Turn:
     target_hp: dict[tuple[int, int], float] = field(default_factory=dict)
     at_city: dict[tuple[int, int], int] = field(default_factory=dict)
     camp_scanned: bool = False
+    placed: dict[int, tuple[int, int]] = field(default_factory=dict)  # Where a unit moved to.
+    blocked: set[tuple[int, int]] = field(default_factory=set)  # Tiles the game said are full.
+    en_route: dict[int, int] = field(default_factory=dict)  # City id to cover units still walking.
     spare_orders: int = 0
     fired: set[int] = field(default_factory=set)  # Cities that have used their strike.
     struck: set[tuple[int, int]] = field(default_factory=set)  # Targets a city has hit.
@@ -371,6 +395,8 @@ class MilitaryPolicy:
         default_factory=dict, init=False, repr=False
     )
     _camp_aside: dict[tuple[int, int], int] = field(default_factory=dict, init=False, repr=False)
+    # The threat state (see `defence.DefenceState`), or None to play without it.
+    defence: Any = field(default=None, repr=False)
 
     def blocker_policies(self) -> Mapping[str, Any]:
         """Policies to pass to `BlockerResolver`, which takes over the promotion blocker."""
@@ -407,6 +433,7 @@ class MilitaryPolicy:
         await self._clear_camp(game, t)
         await self._spare_units(game, t)
         await self._idle(game, t)
+        self._publish_defence(t)
 
     # ----- bookkeeping -----
 
@@ -492,9 +519,34 @@ class MilitaryPolicy:
     def _spare(self, t: _Turn, unit: Unit) -> bool:
         """True if the unit can leave where it stands without leaving a city short."""
         city = self._city_at(t, unit)
-        return city is None or t.at_city.get((unit.x, unit.y), 0) > garrison_required(
-            city, self.settings
-        )
+        if city is None:
+            return self._covering(t, unit) is None
+        return t.at_city.get((unit.x, unit.y), 0) > garrison_required(city, self.settings)
+
+    def _state_threatened(self, city: City) -> bool:
+        return self.defence is not None and self.defence.is_threatened(city.city_id)
+
+    def _pos(self, t: _Turn, unit: Unit) -> tuple[int, int]:
+        return t.placed.get(unit.unit_id, (unit.x, unit.y))
+
+    def _beside(self, t: _Turn, city: City) -> int:
+        """Land military units on the tiles around the city."""
+        w = self.settings.map_width
+        return sum(1 for u in t.mine if hex_distance(city.x, city.y, *self._pos(t, u), w) == 1)
+
+    def _covering(self, t: _Turn, unit: Unit) -> City | None:
+        """The threatened city this unit helps hold from the tile beside it, if it is needed."""
+        if self.defence is None:
+            return None
+        w = self.settings.map_width
+        for city in t.cities:
+            if (
+                self._state_threatened(city)
+                and hex_distance(city.x, city.y, *self._pos(t, unit), w) == 1
+                and t.at_city.get((city.x, city.y), 0) + self._beside(t, city) <= WANTED_DEFENDERS
+            ):
+                return city
+        return None
 
     def _held(self, t: _Turn, where: tuple[int, int], unit: Unit) -> bool:
         """True if another land military unit already stands on the tile.
@@ -502,15 +554,25 @@ class MilitaryPolicy:
         The game refuses a second one (`STACKING_CONFLICT`: same formation class), so the move
         is not sent. Units that left the tile this turn are no longer counted.
         """
-        if t.at_city.get(where, 0) > 0:
+        if t.at_city.get(where, 0) > 0 or where in t.blocked:
             return True
         return any(
-            u.unit_id != unit.unit_id
-            and u.unit_id in t.reserved
-            and (u.x, u.y) == where
-            and is_land_military(u)
+            u.unit_id != unit.unit_id and self._pos(t, u) == where and holds_tile(u)
             for u in t.units
         )
+
+    @staticmethod
+    def _reached(result: str, goal: tuple[int, int]) -> tuple[int, int]:
+        """Where a move ended, from `now_at`, or the goal if the reply does not say."""
+        found = _NOW_AT.search(result)
+        return (int(found.group(1)), int(found.group(2))) if found else goal
+
+    @staticmethod
+    def _learn_full_tile(t: _Turn, result: str | None) -> None:
+        """A `STACKING_CONFLICT` names the tile that is full, so no one else tries it this turn."""
+        found = _ALREADY_ON.search(result or "")
+        if found:
+            t.blocked.add((int(found.group(1)), int(found.group(2))))
 
     def _leave(self, t: _Turn, unit: Unit) -> None:
         if (unit.x, unit.y) in t.at_city:
@@ -860,9 +922,14 @@ class MilitaryPolicy:
             t.acted.add(unit.unit_id)
             self._leave(t, unit)
             self._arrive(t, city, result)
+            reached = _NOW_AT.search(result)
+            t.placed[unit.unit_id] = (
+                (int(reached.group(1)), int(reached.group(2))) if reached else where
+            )
             self._log(t, unit, action, reason, where, result=result)
             return True
         self._refuse(t, unit, kind)
+        self._learn_full_tile(t, result)
         self._log(t, unit, action, "move refused", where, result=result or "")
         await self._fallback(game, t, unit, city, action)
         return False
@@ -871,8 +938,8 @@ class MilitaryPolicy:
         """Tiles beside the city, nearest the unit first, with no unit on them."""
         s = self.settings
         width = s.map_width
-        taken = {(u.x, u.y) for u in t.units if u.unit_id != unit.unit_id}
-        taken |= {(th.x, th.y) for th in t.threats}
+        taken = {self._pos(t, u) for u in t.units if u.unit_id != unit.unit_id}
+        taken |= {(th.x, th.y) for th in t.threats} | t.blocked
         found = set()
         for dx in (-1, 0, 1):
             for dy in (-1, 0, 1):
@@ -906,6 +973,7 @@ class MilitaryPolicy:
                 if result is not None and move_succeeded(result):
                     t.acted.add(unit.unit_id)
                     self._leave(t, unit)
+                    t.placed[unit.unit_id] = self._reached(result, goal)
                     self._log(
                         t,
                         unit,
@@ -915,6 +983,7 @@ class MilitaryPolicy:
                         result=result,
                     )
                     return
+                self._learn_full_tile(t, result)
                 self._log(t, unit, action, "fallback move refused", goal, result=result or "")
         if t.actions >= s.max_actions:
             return
@@ -937,8 +1006,11 @@ class MilitaryPolicy:
     async def _garrison(self, game: MilitaryGame, t: _Turn) -> None:
         s = self.settings
         for city in sorted(t.cities, key=lambda c: (-len(c.threats), c.city_id)):
-            if not city.is_threatened:
+            state_threat = self._state_threatened(city)
+            if not city.is_threatened and not state_threat:
                 continue
+            if state_threat:
+                await self._swap(game, t, city)
             while t.at_city.get((city.x, city.y), 0) < garrison_required(city, s):
                 if t.at_city.get((city.x, city.y), 0) > 0:
                     break  # One land unit per tile: the game refuses a second to stack.
@@ -948,7 +1020,7 @@ class MilitaryPolicy:
                     if self._available(t, u, "move")
                     and (u.x, u.y) != (city.x, city.y)
                     and u.hp >= s.weights.heal_below * u.max_hp
-                    and self._spare(t, u)
+                    and (self._spare(t, u) or self._covering(t, u) is city)
                 ]
                 candidates = [c for c in candidates if c[0] <= s.garrison_reach]
                 if not candidates:
@@ -959,9 +1031,135 @@ class MilitaryPolicy:
                     game, t, unit, city, "garrison", "city has hostile units near it and a gap"
                 ):
                     continue  # Refused, so it is set aside and the next unit is tried.
+                self._note(city, f"garrison: moved {unit.unit_type} into the city")
                 if t.at_city.get((city.x, city.y), 0) == before:
                     # En route: it counts for this turn, so the same gap does not call another.
                     t.at_city[city.x, city.y] = before + 1
+            if state_threat:
+                await self._cover(game, t, city)
+
+    def _note(self, city: City, text: str) -> None:
+        if self.defence is not None:
+            self.defence.note(city.city_id, text)
+
+    def _ring(self, t: _Turn, city: City, unit: Unit) -> list[tuple[int, int]]:
+        """Free tiles around the city, nearest the unit first. None holds a unit or a threat."""
+        w = self.settings.map_width
+        taken = {self._pos(t, u) for u in t.units if u.unit_id != unit.unit_id and holds_tile(u)}
+        taken |= {(th.x, th.y) for th in t.threats} | t.blocked
+        found = set()
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                x, y = city.x + dx, city.y + dy
+                if w:
+                    x %= w
+                if (x, y) != (city.x, city.y) and hex_distance(city.x, city.y, x, y, w) == 1:
+                    found.add((x, y))
+        found -= taken
+        found.discard(self._pos(t, unit))
+        return sorted(found, key=lambda p: (hex_distance(unit.x, unit.y, *p, w), p))
+
+    async def _step_out(
+        self, game: MilitaryGame, t: _Turn, unit: Unit, city: City, action: str, reason: str
+    ) -> bool:
+        """Move a unit to a free tile beside the city. Tries `fallback_tiles` tiles."""
+        s = self.settings
+        for goal in self._ring(t, city, unit)[: s.fallback_tiles]:
+            if not self._available(t, unit, action):
+                return False
+            result = await self._order(t, unit, action, game.move_unit(unit.unit_index, *goal))
+            if result is not None and move_succeeded(result):
+                t.acted.add(unit.unit_id)
+                if any(u.unit_id == unit.unit_id for u in t.mine):
+                    self._leave(t, unit)  # An engineer was never counted as a defender.
+                at = self._reached(result, goal)
+                t.placed[unit.unit_id] = at
+                if at != goal:  # Still walking: not a defender yet, but no other unit is sent.
+                    t.en_route[city.city_id] = t.en_route.get(city.city_id, 0) + 1
+                self._log(t, unit, action, reason, goal, result=result)
+                self._note(city, f"{action}: {unit.unit_type} to {goal[0]},{goal[1]}")
+                return True
+            self._learn_full_tile(t, result)
+            self._log(t, unit, action, "move refused", goal, result=result or "")
+        self._refuse(t, unit, action)
+        return False
+
+    async def _cover(self, game: MilitaryGame, t: _Turn, city: City) -> None:
+        """Get a second defender onto a tile beside the city, so two hold it (roadmap 1.36)."""
+        s = self.settings
+        while t.actions < s.max_actions:
+            inside = t.at_city.get((city.x, city.y), 0)
+            if inside + self._beside(t, city) + t.en_route.get(city.city_id, 0) >= WANTED_DEFENDERS:
+                return
+            candidates = [
+                (hex_distance(*self._pos(t, u), city.x, city.y, s.map_width), u.unit_id, u)
+                for u in t.mine
+                if self._available(t, u, "cover")
+                and hex_distance(*self._pos(t, u), city.x, city.y, s.map_width) > 1
+                and u.hp >= s.weights.heal_below * u.max_hp
+                and self._spare(t, u)
+            ]
+            candidates = [c for c in candidates if c[0] <= s.garrison_reach]
+            if not candidates:
+                return
+            unit = min(candidates, key=lambda c: c[:2])[2]
+            await self._step_out(
+                game, t, unit, city, "cover", "threatened city has fewer than two defenders"
+            )
+
+    async def _swap(self, game: MilitaryGame, t: _Turn, city: City) -> None:
+        """Put a clearly stronger unit on the city tile and its weaker holder beside it.
+
+        The holder may be a unit that is no defender at all, such as a Military Engineer, which
+        the game also refuses to stack with a military unit.
+        """
+        s = self.settings
+        where = (city.x, city.y)
+        holder = next(
+            (
+                u
+                for u in sorted(t.units, key=lambda u: u.unit_id)
+                if self._pos(t, u) == where and holds_tile(u) and self._available(t, u, "swap")
+            ),
+            None,
+        )
+        if holder is None:
+            return
+        weak = _hold_strength(holder)
+        candidates = [
+            (hex_distance(u.x, u.y, city.x, city.y, s.map_width), u.unit_id, u)
+            for u in t.mine
+            if u.unit_id != holder.unit_id
+            and self._available(t, u, "move")
+            and u.hp >= s.weights.heal_below * u.max_hp
+            and _hold_strength(u) >= max(weak * SWAP_MARGIN, weak + 1)
+            and (self._spare(t, u) or self._covering(t, u) is city)
+        ]
+        candidates = [c for c in candidates if 0 < c[0] <= SWAP_REACH]
+        if not candidates:
+            return
+        # The strongest, then the nearest.
+        newcomer = min(candidates, key=lambda c: (-_hold_strength(c[2]), c[0], c[1]))[2]
+        if not await self._step_out(
+            game, t, holder, city, "swap", "city tile held by a weaker unit, so it steps aside"
+        ):
+            return
+        if await self._walk_home(
+            game, t, newcomer, city, "swap", "stronger unit takes the city tile"
+        ):
+            self._note(city, f"swap: {newcomer.unit_type} in for {holder.unit_type}")
+            if t.at_city.get(where, 0) == 0:
+                t.at_city[where] = 1  # En route, counted for this turn.
+
+    def _publish_defence(self, t: _Turn) -> None:
+        """Hand the defender counts, as they stand after this turn's orders, to the threat state."""
+        if self.defence is None:
+            return
+        for city in t.cities:
+            if self._state_threatened(city):
+                self.defence.set_defenders(
+                    city.city_id, t.at_city.get((city.x, city.y), 0), self._beside(t, city)
+                )
 
     # ----- barbarian camps -----
 
@@ -1061,7 +1259,9 @@ class MilitaryPolicy:
                 continue
             city = self._city_at(t, unit)
             if city is not None:
-                if city.is_threatened and self._fortified.get(unit.unit_id) != (unit.x, unit.y):
+                if (city.is_threatened or self._state_threatened(city)) and (
+                    self._fortified.get(unit.unit_id) != (unit.x, unit.y)
+                ):
                     result = await self._order(t, unit, "idle", game.fortify_unit(unit.unit_index))
                     if result is not None and action_succeeded(result):
                         t.acted.add(unit.unit_id)
@@ -1069,6 +1269,17 @@ class MilitaryPolicy:
                         self._log(
                             t, unit, "fortify", "city has hostile units near it", result=result
                         )
+                    else:
+                        self._refuse(t, unit, "idle")
+                continue
+            beside = self._covering(t, unit)
+            if beside is not None:  # Holding a threatened city from beside it: stay and dig in.
+                if self._fortified.get(unit.unit_id) != self._pos(t, unit):
+                    result = await self._order(t, unit, "idle", game.fortify_unit(unit.unit_index))
+                    if result is not None and action_succeeded(result):
+                        t.acted.add(unit.unit_id)
+                        self._fortified[unit.unit_id] = self._pos(t, unit)
+                        self._log(t, unit, "fortify", "covering a threatened city", result=result)
                     else:
                         self._refuse(t, unit, "idle")
                 continue

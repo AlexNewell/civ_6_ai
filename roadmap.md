@@ -139,6 +139,8 @@ flowchart TD
     P18 --> P141["1.41 Six cities by T150"]
     P15 & P17 --> P143["1.43 Science rank"]
     P134 --> P144["1.44 Wonder log"]
+    P120 & P129 --> P145["1.45 Placement precheck"]
+    P115 & P143 --> P146["1.46 Rival victory threat"]
     P128["1.28 Live checks"] ~~~ P142["1.42 Early-game gap"] ~~~ P130["1.30 Run docs"] ~~~ P131["1.31 civ6-mcp review"] ~~~ P133["1.33 Strength review"]
 
     classDef done fill:#c7f0d2,stroke:#1a7f37,color:#0b2e13
@@ -196,6 +198,8 @@ flowchart TD
 | [`1.42`](https://github.com/AlexNewell/civ_6_ai/issues/181) | Close the early-game score gap (research) | ⬜ Backlog | From 1.33. |
 | [`1.43`](https://github.com/AlexNewell/civ_6_ai/issues/182) | Keep science rank at or above the median | ⬜ Backlog | From 1.33. |
 | [`1.44`](https://github.com/AlexNewell/civ_6_ai/issues/183) | Log wonder completions | ⬜ Backlog | From 1.33. |
+| [`1.45`](https://github.com/AlexNewell/civ_6_ai/issues/187) | Check district placement before choosing it | ⬜ Backlog | From Run 7: 59% of production choices refused, most for no valid tile. |
+| [`1.46`](https://github.com/AlexNewell/civ_6_ai/issues/188) | Notice and respond to a rival nearing victory | ⬜ Backlog | From Run 7: Germany won by science with nothing reacting. |
 
 ## Workstream "E": <ins>Evaluator</ins> and Data
 

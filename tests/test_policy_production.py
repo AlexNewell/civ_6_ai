@@ -949,3 +949,175 @@ def test_boosted_settler_beats_a_builder_but_not_defence_under_threat():
     assert best(city(population=4), menu, behind) == "UNIT_SETTLER"
     pressed = city(population=4, threats=[threat()])
     assert score(option("UNIT", "UNIT_SETTLER"), pressed, behind, ProductionWeights()) == 0
+
+
+# 1.45: placement precheck, builder cap and starving cities.
+
+
+class CountingGame(ScriptedGame):
+    advisor_calls = 0
+
+    async def get_district_advisor(self, city_id, district_type):
+        self.advisor_calls += 1
+        return await super().get_district_advisor(city_id, district_type)
+
+
+def harbor_game(cities=None):
+    options = [
+        lq.ProductionOption("DISTRICT", "DISTRICT_HARBOR", 60, 5, -1),
+        lq.ProductionOption("UNIT", "UNIT_WARRIOR", 40, 4, -1),
+    ]
+    game = CountingGame(cities=cities or idle_cities(), production=options)
+    game.districts = []
+    return game
+
+
+def test_a_district_with_no_tile_is_not_asked_for_after_the_city_builds_something_else():
+    game = harbor_game()
+    policy = CityProductionPolicy()
+    run(policy.assign(game))
+    assert game.advisor_calls == 1
+    # The city gains a building and a district, as it does every few turns. Still no tile.
+    grown = fx.city_info(
+        currently_building="nothing",
+        buildings=["PALACE", "MONUMENT", "BUILDING_LIBRARY"],
+        districts=["DISTRICT_CITY_CENTER@10,10", "DISTRICT_CAMPUS@11,10", "DISTRICT_THEATER@9,9"],
+    )
+    game.data["cities"] = [grown]
+    run(policy.assign(game))
+    assert game.advisor_calls == 1
+
+
+def test_a_district_with_no_tile_is_asked_again_once_the_wait_is_over():
+    from civ6_ai.policies.production import NO_PLACEMENT_BACKOFF_TURNS, RefusalMemory
+
+    mem, c = RefusalMemory(), city()
+    mem.refused(c, "DISTRICT_HARBOR", 10, NO_PLACEMENT)
+    assert mem.blocked(c, "DISTRICT_HARBOR", 10 + NO_PLACEMENT_BACKOFF_TURNS - 1)
+    assert not mem.blocked(c, "DISTRICT_HARBOR", 10 + NO_PLACEMENT_BACKOFF_TURNS)
+    # A repeat waits longer, up to a cap.
+    assert mem.refused(c, "DISTRICT_HARBOR", 30, NO_PLACEMENT) == 2 * NO_PLACEMENT_BACKOFF_TURNS
+
+
+def test_no_placement_survives_new_buildings_but_cannot_start_ends_on_a_new_district():
+    from civ6_ai.policies.production import RefusalMemory
+
+    mem, c = RefusalMemory(), city()
+    mem.refused(c, "DISTRICT_HARBOR", 10, NO_PLACEMENT)
+    mem.refused(c, "BUILDING_TAJ_MAHAL", 10, CANNOT_START)
+    more_buildings = replace(c, buildings=(*c.buildings, "BUILDING_LIBRARY"))
+    assert mem.blocked(more_buildings, "DISTRICT_HARBOR", 11)
+    assert mem.blocked(more_buildings, "BUILDING_TAJ_MAHAL", 11)  # A wonder needs a district.
+    new_district = replace(
+        c, districts=(*c.districts, replace(c.districts[0], district_type="DISTRICT_THEATER"))
+    )
+    assert mem.blocked(new_district, "DISTRICT_HARBOR", 11)
+    assert not mem.blocked(new_district, "BUILDING_TAJ_MAHAL", 11)
+
+
+def test_a_refused_wonder_is_not_asked_for_again_as_buildings_come_and_go():
+    options = [
+        lq.ProductionOption("BUILDING", "BUILDING_TAJ_MAHAL", 200, 9, -1),
+        lq.ProductionOption("UNIT", "UNIT_WARRIOR", 40, 4, -1),
+    ]
+    game = ScriptedGame(
+        refuse={"BUILDING_TAJ_MAHAL": CANNOT_START}, cities=idle_cities(), production=options
+    )
+    policy = CityProductionPolicy()
+    for n in range(4):
+        game.data["cities"] = [
+            fx.city_info(
+                currently_building="nothing",
+                buildings=["PALACE", "MONUMENT", *[f"BUILDING_X{i}" for i in range(n)]],
+            )
+        ]
+        run(policy.assign(game))
+    assert attempts(game, "BUILDING_TAJ_MAHAL") == 1
+
+
+def test_builders_are_not_trained_while_one_is_idle():
+    ctx = replace(MID, builders=2, idle_builders=1)
+    assert score_of("UNIT_BUILDER", city(), ctx) == 0.0
+    assert score_of("UNIT_BUILDER", city(), replace(MID, builders=2)) > 0.0
+
+
+def test_builders_are_capped_by_the_jobs_nobody_holds():
+    short = replace(MID, builders=2, spare_jobs=0)
+    assert score_of("UNIT_BUILDER", city(), short) == 0.0
+    assert score_of("UNIT_BUILDER", city(), replace(short, spare_jobs=2)) > 0.0
+    # With no builders at all, a stale count never stops the first one.
+    assert score_of("UNIT_BUILDER", city(), replace(short, builders=0)) > 0.0
+
+
+def test_the_policy_reads_the_builder_demand():
+    from civ6_ai.policies.builder import BuilderDemand
+
+    demand = BuilderDemand(idle=1, spare_jobs=0)
+    policy = CityProductionPolicy(builder_demand=demand)
+    empire = run(read_empire(fx.FakeGame()))
+    ctx = policy._context(empire, [], [], [])
+    assert (ctx.idle_builders, ctx.spare_jobs) == (1, 0)
+    ctx = CityProductionPolicy()._context(empire, [], [], [])
+    assert (ctx.idle_builders, ctx.spare_jobs) == (0, None)
+
+
+def starving(**changes):
+    return city(food_surplus=-0.1, population=4, **changes)
+
+
+def test_a_starving_city_prefers_a_food_building():
+    c, ctx = starving(), MID
+    granary, sewer = option("BUILDING", "BUILDING_GRANARY"), option("BUILDING", "BUILDING_SEWER")
+    weights = ProductionWeights()
+    assert score(granary, c, ctx, weights) > 3 * score(granary, city(), ctx, weights)
+    options = [granary, option("BUILDING", "BUILDING_LIBRARY")]
+    assert best(c, options, ctx) == "BUILDING_GRANARY"
+    assert best(city(), options, ctx) == "BUILDING_LIBRARY"
+    # Housing does not feed anyone.
+    assert score(sewer, c, ctx, weights) == score(sewer, city(), ctx, weights)
+
+
+def test_a_starving_city_trains_no_settler():
+    ctx = replace(MID, num_cities=2, army=9, turn=40)
+    assert score_of("UNIT_SETTLER", city(), ctx) > 0
+    assert score_of("UNIT_SETTLER", starving(), ctx) == 0
+
+
+class FocusGame(ScriptedGame):
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.focus_calls: list[tuple] = []
+
+    async def set_city_focus(self, city_id, focus):
+        self.focus_calls.append((city_id, focus))
+        return f"FOCUS|{focus}"
+
+
+def test_a_starving_city_gets_a_food_focus_once_and_default_after_it_recovers():
+    busy = dict(currently_building="BUILDING_LIBRARY")
+    game = FocusGame(cities=[fx.city_info(food_surplus=-0.1, **busy)])
+    policy = CityProductionPolicy()
+    for _ in range(3):
+        run(policy.assign(game))
+    assert game.focus_calls == [(65536, "food")]  # One call, not one per turn.
+    game.data["cities"] = [fx.city_info(food_surplus=1.0, **busy)]
+    run(policy.assign(game))
+    assert game.focus_calls == [(65536, "food")]  # Not yet recovered.
+    game.data["cities"] = [fx.city_info(food_surplus=2.5, **busy)]
+    run(policy.assign(game))
+    run(policy.assign(game))
+    assert game.focus_calls == [(65536, "food"), (65536, "default")]
+
+
+def test_a_failed_focus_call_is_retried_and_never_stops_production():
+    class Broken(FocusGame):
+        async def set_city_focus(self, city_id, focus):
+            self.focus_calls.append((city_id, focus))
+            raise RuntimeError("no connection")
+
+    game = Broken(cities=[fx.city_info(food_surplus=-1.0, currently_building="nothing")])
+    policy = CityProductionPolicy()
+    run(policy.assign(game))
+    run(policy.assign(game))
+    assert len(game.focus_calls) == 2
+    assert game.set_calls  # The idle city still got something to build.

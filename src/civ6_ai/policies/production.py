@@ -40,6 +40,18 @@ _NO_COORDS_WONDER = ("ERR:MISSING_COORDS", "Error: MISSING_COORDS")
 _REFUSAL_CODES = ("NO_PLACEMENT", "CANNOT_START", "SILENT_FAILURE", "CANNOT_PRODUCE")
 REFUSAL_BACKOFF_TURNS = 5  # Turns to skip an item after its first refusal for a city.
 REFUSAL_BACKOFF_MAX_TURNS = 40  # Each repeat refusal doubles the wait, up to this.
+# A city with no tile for a district only gains one when its borders grow, which takes many turns
+# and is not visible in the reads. Run 8 asked 16 to 20 times for the same Harbor, because the
+# short wait above also ended whenever the city built anything. So it waits much longer, and only
+# the clock ends it.
+NO_PLACEMENT_BACKOFF_TURNS = 15
+NO_PLACEMENT_BACKOFF_MAX_TURNS = 120
+# `CANNOT_START` means a prerequisite is missing: a district, or a building. The wait ends early
+# when the city gains a new kind of district (or, for a plain building, a new building), not for
+# every building as before.
+CANNOT_START_BACKOFF_TURNS = 10
+CANNOT_START_BACKOFF_MAX_TURNS = 80
+STARVING_FOCUS_RECOVERED = 2.0  # Food per turn at which a food-focused city goes back to default.
 _TURN_SCALE = 20.0  # A build this many turns away scores half as much as an instant one.
 _URGENT_SCALE = 10.0
 _FINISHING_TURNS = 2  # A build this close to done is let finish.
@@ -94,6 +106,8 @@ class ProductionContext:
     threatened: frozenset[int] = frozenset()  # Ids of cities the threat state marks (1.35).
     short: frozenset[int] = frozenset()  # Of those, the ones with fewer than two defenders.
     sites_ok: bool = True  # False when settling found no safe site to send a settler to.
+    idle_builders: int = 0  # Builders that found no job on offer the last time they ran (1.45).
+    spare_jobs: int | None = None  # Jobs no builder holds; None when not known this turn.
 
     def after_choosing(self, item: str, unknown_combat: bool = False) -> "ProductionContext":
         """Count a pick, so two cities don't both build the one builder the empire needs."""
@@ -378,6 +392,16 @@ def is_pressed(city: City, ctx: ProductionContext) -> bool:
     return ctx.army < wanted
 
 
+def is_starving(city: City) -> bool:
+    """The city is losing food each turn and has people to lose."""
+    return city.food_surplus < 0 and city.pop > 1
+
+
+# What a starving city builds to feed itself. Housing buildings (Aqueduct, Sewer) do not help.
+_FOOD_BUILDINGS = frozenset({"GRANARY", "LIGHTHOUSE", "HARBOR", "WATER_MILL"})
+_STARVING_FOOD_BOOST = 4.0  # Extra weight on the food yield of a food building in a starving city.
+
+
 def _unit_score(
     option: ProductionChoice, city: City, ctx: ProductionContext, w: ProductionWeights
 ) -> float:
@@ -397,6 +421,7 @@ def _unit_score(
         in_flight_cap = 2 if boosted and ctx.num_cities + 2 <= w.target_cities else 1
         if (
             threatened
+            or is_starving(city)
             or city.pop < _SETTLER_MIN_POP
             or ctx.num_cities + ctx.settlers >= w.target_cities
             or ctx.settlers >= in_flight_cap
@@ -405,6 +430,13 @@ def _unit_score(
         return (_BEHIND_SETTLER_SCORE if boosted else 14.0) * w.expansion
     if kind == "UNIT_BUILDER":
         wanted = max(1, ctx.num_cities) - ctx.builders
+        if ctx.builders > 0:
+            # Run 8: builders sat idle on 74% of builder-turns, 98% late. Train another only while
+            # a job is going unclaimed, and never while one already has nothing to do.
+            if ctx.idle_builders > 0:
+                return 0.0
+            if ctx.spare_jobs is not None:
+                wanted = min(wanted, ctx.spare_jobs)
         if wanted <= 0 or threatened:
             return 0.0
         return (6.0 + 2.0 * min(wanted, 3) + len(city.unimproved_resources)) * w.builders
@@ -458,6 +490,8 @@ def _building_score(
     value = _yield_value(profile, w)
     if name == "GRANARY" and city.food_surplus > 3:
         value *= 0.5
+    if name in _FOOD_BUILDINGS and is_starving(city):
+        value += _STARVING_FOOD_BOOST * profile[0] * w.food
     return value
 
 
@@ -469,6 +503,8 @@ def _district_score(option: ProductionChoice, city: City, w: ProductionWeights) 
     if profile is None:
         return _UNKNOWN_BUILDING * 2.0
     value = _yield_value(profile, w)
+    if name in _FOOD_BUILDINGS and is_starving(city):
+        value += _STARVING_FOOD_BOOST * profile[0] * w.food
     if _short(option.item) == "AQUEDUCT":
         # Worth building when growth is capped by housing, not before.
         value = value * 2.0 if city.housing - city.pop <= 1 else value * 0.3
@@ -521,6 +557,7 @@ class ProductionGame(BlockerGame, Protocol):
     async def get_game_overview(self) -> Any: ...
     async def get_district_advisor(self, city_id: int, district_type: str) -> Any: ...
     async def get_wonder_advisor(self, city_id: int, wonder_name: str) -> Any: ...
+    async def set_city_focus(self, city_id: int, focus: str) -> str: ...
 
 
 def is_refusal(result: str) -> bool:
@@ -533,32 +570,59 @@ def _circumstances(city: City) -> tuple[int, int]:
     return len(city.districts), len(city.buildings)
 
 
+def _refusal_kind(reply: str) -> str:
+    if "NO_PLACEMENT" in reply:
+        return "placement"
+    if "CANNOT_START" in reply:
+        return "start"
+    return "other"
+
+
+def _signature(city: City, item: str, kind: str) -> Any:
+    """What must change in the city before the refused item could be accepted."""
+    if kind == "placement":
+        return None  # Only time (borders growing) changes it.
+    if kind == "start":
+        districts = frozenset(d.district_type for d in city.districts)
+        if item in WONDERS:
+            return districts
+        return districts, frozenset(city.buildings)
+    return len(city.districts), len(city.buildings)
+
+
 class RefusalMemory:
     """Items the game refused for a city, skipped until a back-off passes.
 
-    The wait is `REFUSAL_BACKOFF_TURNS`, doubled for each repeat refusal of the same city and item,
-    up to `REFUSAL_BACKOFF_MAX_TURNS`. It ends early when the city gains a district or building.
-    Kept in memory only: a restart forgets it, which costs one retry per item (a few calls).
+    The wait doubles for each repeat refusal of the same city and item. Its base and cap depend on
+    the reply: `REFUSAL_BACKOFF_TURNS` up to `REFUSAL_BACKOFF_MAX_TURNS` for most, a much longer
+    one for `NO_PLACEMENT` (only borders growing helps, so only time ends it), and a middle one for
+    `CANNOT_START`, which also ends early when the city gains what the item needs (see
+    `_signature`). Kept in memory only: a restart forgets it, which costs one retry per item.
     """
 
     def __init__(self) -> None:
-        # (city_id, item) -> (skip until this turn, refusals so far, city circumstances)
-        self._entries: dict[tuple[int, str], tuple[int, int, tuple[int, int]]] = {}
+        # (city_id, item) -> (skip until this turn, refusals so far, kind, city signature)
+        self._entries: dict[tuple[int, str], tuple[int, int, str, Any]] = {}
 
     def blocked(self, city: City, item: str, turn: int) -> bool:
         entry = self._entries.get((city.city_id, item))
         if entry is None:
             return False
-        until, _, seen = entry
+        until, _, kind, seen = entry
         # Once expired or changed it is free again, but the count stays so a repeat waits longer.
-        return turn < until and _circumstances(city) == seen
+        return turn < until and _signature(city, item, kind) == seen
 
-    def refused(self, city: City, item: str, turn: int) -> int:
+    def refused(self, city: City, item: str, turn: int, reply: str = "") -> int:
         """Record a refusal and return how many turns the item is now skipped for."""
         key = (city.city_id, item)
         count = self._entries[key][1] + 1 if key in self._entries else 1
-        wait = min(REFUSAL_BACKOFF_TURNS * 2 ** (count - 1), REFUSAL_BACKOFF_MAX_TURNS)
-        self._entries[key] = (turn + wait, count, _circumstances(city))
+        kind = _refusal_kind(reply)
+        base, cap = {
+            "placement": (NO_PLACEMENT_BACKOFF_TURNS, NO_PLACEMENT_BACKOFF_MAX_TURNS),
+            "start": (CANNOT_START_BACKOFF_TURNS, CANNOT_START_BACKOFF_MAX_TURNS),
+        }.get(kind, (REFUSAL_BACKOFF_TURNS, REFUSAL_BACKOFF_MAX_TURNS))
+        wait = min(base * 2 ** (count - 1), cap)
+        self._entries[key] = (turn + wait, count, kind, _signature(city, item, kind))
         return wait
 
     def accepted(self, city: City, item: str) -> None:
@@ -669,7 +733,7 @@ async def choose_for_city(
         refusal = is_refusal(result)
         wait = 0
         if memory is not None and refusal:
-            wait = memory.refused(city, option.item, context.turn)
+            wait = memory.refused(city, option.item, context.turn, result)
         if emit is not None:
             emit(
                 ProductionRefused(
@@ -705,7 +769,10 @@ class CityProductionPolicy:
         bus: EventBus | None = None,
         expansion: ExpansionState | None = None,
         defence: Any = None,
+        builder_demand: Any = None,
     ) -> None:
+        self.builder_demand = builder_demand  # `builder.BuilderDemand`, or None.
+        self._food_focus: set[int] = set()  # Cities this policy set to a food focus.
         self._emit = bus.publish if bus is not None else None
         self.defence = defence  # The threat state (`defence.DefenceState`), or None.
         self.weights = weights or ProductionWeights()  # The strategist replaces this later.
@@ -720,7 +787,13 @@ class CityProductionPolicy:
 
     def _context(self, empire, units, in_progress, cities) -> ProductionContext:
         context = build_context(empire, units, in_progress, cities, self.defence)
-        return replace(context, sites_ok=self.expansion.sites_ok(empire.turn))
+        demand = self.builder_demand
+        return replace(
+            context,
+            sites_ok=self.expansion.sites_ok(empire.turn),
+            idle_builders=demand.idle if demand is not None else 0,
+            spare_jobs=demand.spare_jobs if demand is not None else None,
+        )
 
     async def assign(self, game: ProductionGame) -> list[str]:
         """Choose for each idle city, and return the names of any left without a choice.
@@ -730,6 +803,7 @@ class CityProductionPolicy:
         already building a defender or walls is left alone, so a switch never repeats.
         """
         cities = await _read_cities(game)
+        await self._feed_starving(game, cities)
         marked = self.defence.threatened_ids if self.defence is not None else frozenset()
         switching = [c for c in cities if _should_switch(c, marked)]
         idle = [c for c in cities if c.is_idle]
@@ -768,6 +842,31 @@ class CityProductionPolicy:
                 context = context.after_choosing(picked.item)
                 self._note(city, f"production: chose {picked.item}")
         return unfinished
+
+    async def _feed_starving(self, game: ProductionGame, cities: list[City]) -> None:
+        """Set a food focus on a starving city, and clear it once the city has recovered.
+
+        One `set_city_focus` call per change, never per turn: only a city that starts starving, or
+        one this policy focused that now gains `STARVING_FOCUS_RECOVERED` food a turn, costs a call.
+        A failed call is tried again next turn.
+        """
+        for city in cities:
+            if is_starving(city) and city.city_id not in self._food_focus:
+                focus, add = "food", True
+            elif city.city_id in self._food_focus and city.food_surplus >= STARVING_FOCUS_RECOVERED:
+                focus, add = "default", False
+            else:
+                continue
+            try:
+                result = await game.set_city_focus(city.city_id, focus)
+            except Exception as err:  # A focus is a nicety. It must never stop production.
+                log.warning("%s: set_city_focus %s failed: %s", city.name, focus, err)
+                continue
+            if _failed(str(result)):
+                log.info("%s: set_city_focus %s refused: %s", city.name, focus, str(result)[:120])
+                continue
+            log.info("%s: focus %s (food %+.1f)", city.name, focus, city.food_surplus)
+            (self._food_focus.add if add else self._food_focus.discard)(city.city_id)
 
     def _note(self, city: City, text: str) -> None:
         if self.defence is not None:

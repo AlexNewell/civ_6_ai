@@ -48,6 +48,36 @@ class Screenshotter:
         """How many screenshots this game already has, from earlier sessions too."""
         return len(list(self._dir.glob(f"{self._game_id}_T*.jpg")))
 
+    def probe_count(self) -> int:
+        """How many of this game's screenshots are probe shots."""
+        return len(list(self._dir.glob(f"{self._game_id}_T*_probe-*.jpg")))
+
+    def probe_sidecars(self) -> list[Path]:
+        """The sidecar files of this game's probe shots, from earlier sessions too."""
+        return sorted(self._dir.glob(f"{self._game_id}_T*_probe-*.json"))
+
+    def probe_room(self, probe_cap: int) -> int:
+        """Probe shots still allowed: under the probe cap and never into the stop reserve."""
+        return min(probe_cap - self.probe_count(), self._cap - self.count() - RESERVED_FOR_STOPS)
+
+    def take_probe(self, turn: int, reason: str, probe_cap: int) -> Path | None:
+        """Save a probe screenshot. Unlike `take` it ignores and leaves the once-a-turn mark, so
+        a stop on the same turn still gets its own shot."""
+        try:
+            if self.probe_room(probe_cap) <= 0:
+                return None
+            data = self._capture()
+            if not data:
+                return None
+            self._dir.mkdir(parents=True, exist_ok=True)
+            path = self._dir / f"{self._game_id}_T{turn:03d}_{_safe(reason)}.jpg"
+            path.write_bytes(data)
+            log.info("Probe screenshot saved: %s", path.name)
+            return path
+        except Exception:
+            log.exception("Probe screenshot failed")
+            return None
+
     def take(self, turn: int, reason: str, stop: bool = False) -> Path | None:
         """Save one screenshot. None if over the cap, already shot this turn, or it failed.
 

@@ -59,7 +59,7 @@ from civ6_ai.defeat import is_defeated
 from civ6_ai.monitors import EventBus, EventLog, Monitors
 from civ6_ai.orchestrator import Handler, Orchestrator, TurnLog
 from civ6_ai.policies import research
-from civ6_ai.policies.builder import BuilderPolicy
+from civ6_ai.policies.builder import BuilderDemand, BuilderPolicy
 from civ6_ai.policies.defence import DefencePolicy, DefenceReport, DefenceState
 from civ6_ai.policies.diplomacy import DiplomacyPolicy
 from civ6_ai.policies.expansion import ExpansionLog, ExpansionState
@@ -271,7 +271,10 @@ def build_orchestrator(
     """
     defence = DefenceState()  # Which cities are threatened this turn, shared by three policies.
     expansion = ExpansionState()  # Settling fills it. Production and the log line read it.
-    production = CityProductionPolicy(bus=bus, expansion=expansion, defence=defence)
+    builder_demand = BuilderDemand()  # What the builders left undone, which production reads.
+    production = CityProductionPolicy(
+        bus=bus, expansion=expansion, defence=defence, builder_demand=builder_demand
+    )
     government = GovernmentPolicy()  # One instance, so handler and blockers share its bounds.
     secondary = SecondaryPolicy()
     military = MilitaryPolicy(defence=defence)
@@ -329,7 +332,7 @@ def build_orchestrator(
         government,
         production,
         gold,
-        BuilderPolicy(),
+        BuilderPolicy(demand=builder_demand),
         secondary,
         FaithPolicy(),
         DefenceReport(defence),

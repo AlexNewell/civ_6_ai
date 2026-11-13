@@ -24,6 +24,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Protocol
 
 from civ6_ai.blockers import action_succeeded, move_succeeded
+from civ6_ai.policies.expansion import ExpansionState
 from civ6_ai.state import (
     Exploration,
     GameReads,
@@ -96,10 +97,50 @@ class SettlingSettings:
     # Bounds on waiting and retrying, so nothing stalls for good.
     max_hold_turns: int = 4  # A settler held this many turns in a row goes without its escort.
     max_move_failures: int = 3  # Refused moves to one site before it is set aside.
+    # Loyalty. A city leans towards the owner of the bigger, nearer cities within `loyalty_radius`.
+    loyalty_radius: int = 9
+    loyalty_city_base: int = 2  # Added to a city's population, so a small city still pulls.
+    loyalty_reject_margin: float = 12.0  # Reject a site whose margin is below minus this.
+    loyalty_penalty_weight: float = 1.0  # Score lost per point of margin below zero.
     retry_turns: int = 10  # How long a site or frontier that could not be reached is set aside.
     scout_wait_turns: int = 2  # A scout waits this long for a hostile unit on its route, then goes.
     automate_retry_turns: int = 3  # Before an idle scout is handed to the game's explorer again.
     map_width: int | None = STANDARD_MAP_WIDTH
+
+
+def loyalty_pressure(
+    x: int,
+    y: int,
+    cities: Iterable[tuple[int, int, int]],
+    settings: SettlingSettings,
+) -> float:
+    """How hard a set of cities, as (x, y, population), pulls on a city at (x, y).
+
+    Each city pulls with its population plus a base, in proportion to how far inside the radius the
+    site lies. A city outside the radius pulls nothing.
+    """
+    total = 0.0
+    for cx, cy, pop in cities:
+        d = hex_distance(x, y, cx, cy, settings.map_width)
+        if d <= settings.loyalty_radius:
+            total += (pop + settings.loyalty_city_base) * (settings.loyalty_radius + 1 - d)
+    return total
+
+
+def loyalty_margin(
+    x: int,
+    y: int,
+    own: Iterable[tuple[int, int, int]],
+    rivals: Iterable[tuple[int, int, int]],
+    settings: SettlingSettings,
+) -> float:
+    """Our pull on a site minus the rivals'. Below zero the new city leans towards a rival.
+
+    Live: cities 9 to 12 tiles from the capital and next to a rival flipped 6 to 9 turns after a
+    loyalty warning (Runs 3 to 5), and Run 7 lost Calakmul 4 turns after founding. Only cities we
+    can see are counted, so an unseen rival makes the margin look better than it is.
+    """
+    return loyalty_pressure(x, y, own, settings) - loyalty_pressure(x, y, rivals, settings)
 
 
 def score_site(site: SettleSite, settings: SettlingSettings) -> float:
@@ -128,6 +169,8 @@ class CandidateLog:
     net_score: float
     rejected: str | None  # None means the site can be chosen.
     path_threat: bool
+    loyalty_margin: float = 0.0  # Our pull minus rivals', at the site. Below zero is a flip risk.
+    loyalty_penalty: float = 0.0  # Taken off the site score.
 
 
 @dataclass(frozen=True)
@@ -231,6 +274,11 @@ def units_reserved_for_settling(
     return frozenset(reserved)
 
 
+def unit_at(x: int, y: int) -> Unit:
+    """A stand-in settler at a tile, for asking where sites and escorts are from there."""
+    return Unit(0, 0, SETTLER, "", x, y, 2.0, 2.0, 100, 100)
+
+
 def neighbours(x: int, y: int, map_width: int | None = STANDARD_MAP_WIDTH) -> list[tuple[int, int]]:
     offsets = _ODD_ROW_NEIGHBOURS if y & 1 else _EVEN_ROW_NEIGHBOURS
     found = [(x + dx, y + dy) for dx, dy in offsets]
@@ -330,6 +378,10 @@ class SettlingPolicy:
     _automated: dict[int, int] = field(default_factory=dict, init=False, repr=False)
     _scout_targets: dict[int, tuple[int, int]] = field(default_factory=dict, init=False, repr=False)
     _scout_waits: dict[int, int] = field(default_factory=dict, init=False, repr=False)
+    # Shared with production and the expansion log. `run` fills it when it surveys the map.
+    expansion: ExpansionState = field(default_factory=ExpansionState)
+    _own_cities: list[tuple[int, int, int]] = field(default_factory=list, init=False, repr=False)
+    _rival_cities: list[tuple[int, int, int]] = field(default_factory=list, init=False, repr=False)
 
     async def run(self, game: SettlingGame) -> None:
         units = await read_units(game)
@@ -343,14 +395,16 @@ class SettlingPolicy:
         exploration = await read_exploration(game)
         danger = _Danger(threats, self.settings.map_width)
         city_tiles = [(c.x, c.y) for c in cities]
+        self._own_cities = [(c.x, c.y, c.pop) for c in cities]
+        self._rival_cities = []
         claimed: set[int] = set()
         self._forget_gone_units(units, turn)
         if settlers:
-            rival_tiles = [
-                (city.x, city.y)
-                for rival in await read_rivals(game)
-                for city in rival.visible_cities
+            rival_cities = [
+                city for rival in await read_rivals(game) for city in rival.visible_cities
             ]
+            rival_tiles = [(city.x, city.y) for city in rival_cities]
+            self._rival_cities = [(city.x, city.y, city.pop) for city in rival_cities]
             if self._first_turn is None and not cities:
                 self._first_turn = turn
             for settler in settlers:
@@ -365,6 +419,7 @@ class SettlingPolicy:
                     turn,
                     claimed,
                 )
+        self._survey(settlers, units, exploration, city_tiles, danger, turn)
         for scout in scouts:
             await self._explore(game, scout, exploration, danger, turn)
 
@@ -380,6 +435,36 @@ class SettlingPolicy:
         self._bad_frontiers = {k: v for k, v in self._bad_frontiers.items() if v >= turn}
 
     # ----- settlers -----
+
+    def _survey(
+        self,
+        settlers: list[Unit],
+        units: Iterable[Unit],
+        exploration: Exploration,
+        city_tiles: list[tuple[int, int]],
+        danger: _Danger,
+        turn: int,
+    ) -> None:
+        """Record how many safe sites there are and the best one, for production and the log."""
+        if not city_tiles:
+            return
+        rival_tiles = [(x, y) for x, y, _ in self._rival_cities]
+        origin = settlers[0] if settlers else None
+        if origin is None:
+            origin = unit_at(*city_tiles[0])
+        sites = [
+            c
+            for c in self._candidates(
+                origin, exploration, city_tiles, rival_tiles, danger, False, turn, []
+            )
+            if c.rejected is None
+        ]
+        self.expansion = ExpansionState(
+            survey_turn=turn,
+            safe_sites=len(sites),
+            best_site_score=max((c.site_score for c in sites), default=None),
+            settlers_on_map=sum(1 for u in units if u.unit_type == SETTLER),
+        )
 
     def _candidates(
         self,
@@ -399,6 +484,12 @@ class SettlingPolicy:
             site_score = score_site(site, s)
             distance = hex_distance(settler.x, settler.y, site.x, site.y, s.map_width)
             turns = math.ceil(distance / max(1.0, settler.max_moves))
+            # The first city can't be picky: a rival's pull is only counted once we have a city.
+            margin = 0.0
+            if not first_city:
+                margin = loyalty_margin(site.x, site.y, self._own_cities, self._rival_cities, s)
+            penalty = max(0.0, -margin) * s.loyalty_penalty_weight
+            site_score -= penalty
             nearest_own = min(
                 (hex_distance(site.x, site.y, cx, cy, s.map_width) for cx, cy in city_tiles),
                 default=None,
@@ -420,6 +511,8 @@ class SettlingPolicy:
                 rejected = "reserved by another settler"
             elif not escorted and danger.near(site.x, site.y, s.threat_radius):
                 rejected = "hostile unit near the site"
+            elif margin < -s.loyalty_reject_margin:
+                rejected = "likely to flip to a rival (loyalty)"
             elif not first_city and site_score < s.min_site_score:
                 rejected = "below minimum site score"
             elif nearest_own is not None and nearest_own > s.max_city_distance:
@@ -437,6 +530,8 @@ class SettlingPolicy:
                     site_score - s.travel_turn_cost * turns,
                     rejected,
                     path_threat,
+                    margin,
+                    penalty,
                 )
             )
         found.sort(key=lambda c: (-c.net_score, c.distance, c.x, c.y))
@@ -572,9 +667,27 @@ class SettlingPolicy:
             return
         holds = self._holds.get(settler.unit_id, 0)
         unescorted = holds >= s.max_hold_turns
-        escort = (
-            None if unescorted else self._find_escort(settler, units, city_tiles, claimed, danger)
+        # Live (Run 7): the escort chosen was another unit, and its move onto the settler's tile
+        # was refused (STACKING_CONFLICT) because a combat unit already stood there, so the
+        # settler held for turns. A unit already on the tile is the escort.
+        companion = next(
+            (
+                u
+                for u in units
+                if u.is_combat
+                and u.unit_type != SCOUT
+                and (u.x, u.y) == (settler.x, settler.y)
+                and (u.x, u.y) not in city_tiles  # A city's garrison stays.
+                and u.unit_id not in claimed
+            ),
+            None,
         )
+        if unescorted:
+            escort = None
+        elif companion is not None:
+            escort = companion if companion.can_move else None  # Never gather a second unit.
+        else:
+            escort = self._find_escort(settler, units, city_tiles, claimed, danger)
         target = next((c for c in better if not c.path_threat or escort is not None), None)
         if target is None and unescorted:
             target = better[0]

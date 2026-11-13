@@ -268,3 +268,19 @@ def test_an_old_notification_does_not_vouch_for_a_later_stuck_turn(tmp_path):
     reason, turn_log = play(StuckAfterNotifiedGame(stale_reads=99), [DoNothing()], 5, tmp_path)
     assert reason is StopReason.BLOCKED
     assert len(turn_log.records) == 2
+
+
+def test_advance_reported_reads_the_turn_summary_line():
+    assert orchestrator.advance_reported("Turn 291 -> 292\nScore: 5", 291)
+    assert orchestrator.advance_reported("Events\nTurn 291 -> 292", 291)
+    assert not orchestrator.advance_reported("Turn 290 -> 291", 291)
+    assert not orchestrator.advance_reported("Turn did not advance", 291)
+
+
+def test_a_report_of_the_advance_gets_longer_looks_before_a_block(tmp_path):
+    # Run 8, turn 291: the report said "291 -> 292", the UI read 291 for the short retries, and
+    # the run stopped with the game on 292. It catches up here after more looks than the default.
+    stale = orchestrator.TURN_READ_RETRIES + 3
+    reason, turn_log = play(SlowUiGame(stale_reads=stale), [DoNothing()], 2, tmp_path)
+    assert reason is StopReason.TURN_LIMIT
+    assert [record.stop_reason for record in turn_log.records] == [None, None]

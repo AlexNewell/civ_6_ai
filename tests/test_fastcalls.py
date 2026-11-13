@@ -73,3 +73,15 @@ def test_pinned_civ6_mcp_still_has_the_code_the_patches_rely_on():
     # These raise RuntimeError if a civ6-mcp upgrade changed the code.
     fastcalls.narrow_popup_scan()
     fastcalls.shorten_call_waits()
+
+
+def test_units_query_skips_the_line_of_sight_call_when_it_does_not_exist(monkeypatch):
+    from civ_mcp import lua as lq
+
+    monkeypatch.setattr(lq, "build_units_query", lq.build_units_query)
+    fastcalls.fix_units_query()
+    lua = lq.build_units_query()
+    assert "UnitManager.CanStartOperation ~= nil and UnitManager.CanStartOperation(" in lua
+    assert "losOK = UnitManager.CanStartOperation(" not in lua
+    fastcalls.fix_units_query()  # a second call changes nothing
+    assert lq.build_units_query() == lua

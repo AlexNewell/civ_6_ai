@@ -89,3 +89,32 @@ def narrow_popup_scan(check: bool = True) -> None:
 
     dismiss_popup._narrowed = True  # type: ignore[attr-defined]
     game_lifecycle.dismiss_popup = dismiss_popup
+
+
+# The line-of-sight call in civ6-mcp's units query. GameCore has no `CanStartOperation`.
+_LOS_CALL = "losOK = UnitManager.CanStartOperation("
+_LOS_SAFE = "losOK = UnitManager.CanStartOperation ~= nil and UnitManager.CanStartOperation("
+
+
+def fix_units_query(check: bool = True) -> None:
+    """Make the units query run in GameCore, where the end-of-turn snapshot reads it.
+
+    civ6-mcp's `build_units_query` calls `UnitManager.CanStartOperation` for ranged units with an
+    enemy in range. That function exists only in InGame, so the snapshot read (GameCore) died with
+    `function expected instead of nil` at line 65 whenever it applied, and the turn report lost its
+    events (runs 5 to 8). Here the call is skipped when the function is missing, so the snapshot
+    reads, and InGame behaves as before. Raises RuntimeError if civ6-mcp's Lua changed.
+    """
+    from civ_mcp import lua as lq
+
+    original = lq.build_units_query
+    if getattr(original, "_los_safe", False):
+        return
+    if check and _LOS_CALL not in original():
+        raise RuntimeError("civ6-mcp's units query no longer calls UnitManager.CanStartOperation")
+
+    def build_units_query() -> str:
+        return original().replace(_LOS_CALL, _LOS_SAFE)
+
+    build_units_query._los_safe = True  # type: ignore[attr-defined]
+    lq.build_units_query = build_units_query  # type: ignore[attr-defined]

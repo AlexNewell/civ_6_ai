@@ -95,6 +95,7 @@ class SettlingSettings:
     escort_search_radius: int = 5
     scout_threat_radius: int = 2
     # Bounds on waiting and retrying, so nothing stalls for good.
+    no_site_disband_turns: int = 20  # A settler with no site this many turns in a row is disbanded.
     max_hold_turns: int = 4  # A settler held this many turns in a row goes without its escort.
     max_move_failures: int = 3  # Refused moves to one site before it is set aside.
     # Loyalty. A city leans towards the owner of the bigger, nearer cities within `loyalty_radius`.
@@ -381,12 +382,20 @@ class SettlingPolicy:
     # Shared with production and the expansion log. `run` fills it when it surveys the map.
     expansion: ExpansionState = field(default_factory=ExpansionState)
     _own_cities: list[tuple[int, int, int]] = field(default_factory=list, init=False, repr=False)
+    # Settlers that founded a city this turn (so they are no longer on the map), and how many turns
+    # in a row each has found no site.
+    _founded: set[int] = field(default_factory=set, init=False, repr=False)
+    _no_site_turns: dict[int, int] = field(default_factory=dict, init=False, repr=False)
     _rival_cities: list[tuple[int, int, int]] = field(default_factory=list, init=False, repr=False)
 
     async def run(self, game: SettlingGame) -> None:
         units = await read_units(game)
         settlers = [u for u in units if u.unit_type == SETTLER and u.can_move]
         scouts = [u for u in units if u.unit_type == SCOUT and u.can_move]
+        self._founded = set()
+        # Run 8: the count stayed at 1 from the turn a settler founded its city to the end of the
+        # game, because it was only taken on turns with a settler to move. It is free here.
+        self.expansion.settlers_on_map = sum(1 for u in units if u.unit_type == SETTLER)
         if not settlers and not scouts:
             return
         turn = (await game.get_game_overview()).turn
@@ -428,6 +437,7 @@ class SettlingPolicy:
         alive = {u.unit_id for u in units}  # Including units with no moves left this turn.
         self._site_claims = {k: v for k, v in self._site_claims.items() if k in alive}
         self._holds = {k: v for k, v in self._holds.items() if k in alive}
+        self._no_site_turns = {k: v for k, v in self._no_site_turns.items() if k in alive}
         self._scout_targets = {k: v for k, v in self._scout_targets.items() if k in alive}
         self._scout_waits = {k: v for k, v in self._scout_waits.items() if k in alive}
         self._automated = {k: v for k, v in self._automated.items() if k in alive}
@@ -464,7 +474,9 @@ class SettlingPolicy:
         state.survey_turn = turn
         state.safe_sites = len(sites)
         state.best_site_score = max((c.site_score for c in sites), default=None)
-        state.settlers_on_map = sum(1 for u in units if u.unit_type == SETTLER)
+        state.settlers_on_map = sum(
+            1 for u in units if u.unit_type == SETTLER and u.unit_id not in self._founded
+        )
 
     def _candidates(
         self,
@@ -655,6 +667,8 @@ class SettlingPolicy:
                 record("found", reason, (settler.x, settler.y), result)
                 self._site_claims.pop(settler.unit_id, None)
                 self._holds.pop(settler.unit_id, None)
+                self._no_site_turns.pop(settler.unit_id, None)
+                self._founded.add(settler.unit_id)
                 city_tiles.append((settler.x, settler.y))  # Later settlers this turn see it.
                 return
             self._failed_sites.add((settler.x, settler.y))
@@ -663,8 +677,13 @@ class SettlingPolicy:
 
         if not better:
             self._site_claims.pop(settler.unit_id, None)
+            idle = self._no_site_turns.get(settler.unit_id, 0) + 1
+            self._no_site_turns[settler.unit_id] = idle
+            if idle >= s.no_site_disband_turns and await self._disband(game, settler, record, idle):
+                return
             record("no_site", "no acceptable site on the revealed map")
             return
+        self._no_site_turns.pop(settler.unit_id, None)  # A site exists, so the streak ends.
         holds = self._holds.get(settler.unit_id, 0)
         unescorted = holds >= s.max_hold_turns
         # Live (Run 7): the escort chosen was another unit, and its move onto the settler's tile
@@ -741,6 +760,22 @@ class SettlingPolicy:
     def _find_escort(self, settler, units, city_tiles, claimed, danger) -> Unit | None:
         s = self.settings
         return find_escort(settler, units, city_tiles, claimed, s.escort_search_radius, s.map_width)
+
+    async def _disband(self, game, settler, record, idle: int) -> bool:
+        """Disband a settler that has had no site for many turns. True if it is gone.
+
+        Civ6-mcp has no join-city command, and an idle settler only costs upkeep and a pop.
+        """
+        delete = getattr(game, "delete_unit", None)
+        if delete is None:
+            return False
+        result = await delete(settler.unit_index)
+        record("disband", f"no acceptable site for {idle} turns", None, result)
+        if not action_succeeded(result):
+            return False
+        self._no_site_turns.pop(settler.unit_id, None)
+        self._founded.add(settler.unit_id)  # Gone, so not on the map.
+        return True
 
     async def _flee(self, game, settler, city_tiles, record) -> bool:
         s = self.settings

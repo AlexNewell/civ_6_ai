@@ -725,3 +725,56 @@ def test_survey_updates_the_shared_state_in_place():
     game = make_game([settler()], cities=[alpha()], sites=[site(14, 10, food=40)])
     run(SettlingPolicy(expansion=shared), game)
     assert shared.survey_turn == 1 and shared.safe_sites == 1
+
+
+def test_settlers_on_map_does_not_count_a_settler_that_just_founded():
+    # Run 8: the count stayed at 1 for 160 turns after the last settler founded its city.
+    state = ExpansionState()
+    game = make_game([settler()], sites=[site(10, 10)])  # The first city, founded on the spot.
+    run(SettlingPolicy(expansion=state), game)
+    assert ("found", 7) in game.actions
+    assert state.settlers_on_map == 0
+
+
+def test_settlers_on_map_is_refreshed_on_turns_with_no_settler_to_move():
+    state = ExpansionState(settlers_on_map=1)
+    game = make_game(
+        [unit_info(unit_id=9, unit_index=9, unit_type="UNIT_WARRIOR")], cities=[alpha()]
+    )
+    run(SettlingPolicy(expansion=state), game)
+    assert state.settlers_on_map == 0
+
+
+def test_a_settler_with_no_site_for_many_turns_is_disbanded():
+    class DeletingGame(ActionGame):
+        async def delete_unit(self, unit_index):
+            self.actions.append(("delete", unit_index))
+            return "OK"
+
+    policy = SettlingPolicy(settings=SettlingSettings(no_site_disband_turns=3))
+    for turn in range(1, 4):
+        game = DeletingGame(
+            units=[settler()],
+            cities=[alpha()],
+            settle=[],
+            overview=overview(turn=turn, num_cities=1),
+            strategic=lq.StrategicMapData([], []),
+        )
+        run(policy, game)
+        expected = [("delete", 7)] if turn == 3 else []
+        assert game.actions == expected
+    assert policy.decisions[-1].action == "disband"
+
+
+def test_a_held_settler_with_a_site_resets_the_no_site_streak():
+    game = make_game(
+        [settler(y=14)],
+        cities=[alpha()],
+        threats=[barbarian(13, 10)],
+        sites=[site(14, 6, food=40)],
+    )
+    policy = SettlingPolicy(SettlingSettings(threat_radius=2))
+    policy._no_site_turns[7] = 19
+    run(policy, game)
+    assert policy.decisions[0].action == "hold"
+    assert policy._no_site_turns.get(7, 0) == 0

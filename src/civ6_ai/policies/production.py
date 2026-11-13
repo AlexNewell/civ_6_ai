@@ -869,7 +869,7 @@ async def choose_for_city(
                     is_refusal=refusal,
                     placements_offered=trace.placements,
                     backoff_turns=wait,
-                    reason=reason,
+                    reason_class=reason,
                 )
             )
     return None
@@ -905,7 +905,9 @@ class CityProductionPolicy:
         self.defence = defence  # The threat state (`defence.DefenceState`), or None.
         self.weights = weights or ProductionWeights()  # The strategist replaces this later.
         self.refusals = RefusalMemory()
-        self.planner = Planner()  # Chained tile buys. Its `book` is the gold policy's saving list.
+        self.planner = Planner(
+            emit=self._emit
+        )  # Chained tile buys. Its `book` is the gold policy's saving list.
         self.expansion = expansion if expansion is not None else ExpansionState()
 
     async def run(self, game: ProductionGame) -> None:

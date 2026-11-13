@@ -778,7 +778,7 @@ def test_a_refusal_event_carries_its_reason():
         )
     )
     refused = [e for e in events if e.kind == "production_refused"]
-    assert refused and refused[0].reason == PLACEMENT and refused[0].backoff_turns > 0
+    assert refused and refused[0].reason_class == PLACEMENT and refused[0].backoff_turns > 0
 
 
 def test_a_cannot_start_is_diagnosed_once_and_remembered_with_its_unlock():
@@ -811,7 +811,7 @@ def test_a_cannot_start_is_diagnosed_once_and_remembered_with_its_unlock():
     )
     refused = [e for e in events if e.kind == "production_refused"]
     if refused:  # BUILDING_X may rank below the monument; when tried it is diagnosed.
-        assert refused[0].reason == UNLOCK
+        assert refused[0].reason_class == UNLOCK
         assert memory.watched() == ("TECH_MASONRY",)
         assert conn.calls.count("diag") == 1
 
@@ -966,3 +966,20 @@ def test_gold_does_not_buy_planned_tiles_while_saving_for_an_upgrade():
     )
     gold_run(game, book)
     assert game.bought == []
+
+
+def test_plan_steps_are_published_as_events():
+    events = []
+    game, reads = setup(["PTILE|7|7|100|5|0"])
+    p, c = Planner(emit=events.append), city()
+    p.begin_turn(100, 60, 10.0)
+    consider(p, game, reads, c)
+    assert [(e.kind, e.action, e.tile_x, e.tile_y, e.cost) for e in events] == [
+        ("placement_plan", "save", 7, 7, 100)
+    ]
+    game, reads = setup(["PTILE|7|7|60|5|0"])
+    p.begin_turn(101, 500, 10.0)
+    consider(p, game, reads, c, item="DISTRICT_HARBOR")
+    run(p.placed(reads, c, "DISTRICT_HARBOR", []))
+    assert [e.action for e in events][-2:] == ["buy_then_place", "buy_failed_place"]
+    assert events[-1].item == "DISTRICT_HARBOR" and events[-1].category == "DISTRICT"

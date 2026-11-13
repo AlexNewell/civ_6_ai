@@ -25,6 +25,7 @@ Each chain logs `placement_plan city=... item=... tile=(x,y) action=... cost=...
 """
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -651,7 +652,14 @@ class Planner:
     only for the item production chose this turn, never for one that is merely wanted.
     """
 
-    def __init__(self, book: PlanBook | None = None, last_turn: int = DEFAULT_LAST_TURN) -> None:
+    def __init__(
+        self,
+        book: PlanBook | None = None,
+        last_turn: int = DEFAULT_LAST_TURN,
+        emit: Callable[[Any], None] | None = None,
+    ) -> None:
+        self.emit = emit  # Receives a `construction.PlacementPlan` for each plan line.
+        self._category = "DISTRICT"
         self.book = book if book is not None else PlanBook()
         self.last_turn = last_turn
         self.budget = 0
@@ -708,6 +716,7 @@ class Planner:
         asks the advisor again after a purchase.
         """
         key = (city.city_id, item)
+        self._category = category
         if self._buys.get(key, 0) >= MAX_PLAN_BUYS:
             return False
         if self._bought_turn.get(city.city_id) == self.turn:
@@ -735,6 +744,7 @@ class Planner:
                 read.unpredicted[:5],
                 read.missed[:5],
             )
+            self._announce(city, item, "rules_mismatch", None, None, 0)
             return False
         owned = [replace(t, displacement=read.displacement.get((t.x, t.y), 0)) for t in available]
         taken = {*self._claimed, *self.book.claimed_by_others(city.city_id)}
@@ -788,7 +798,31 @@ class Planner:
             y,
             cost,
         )
+        self._announce(city, item, "buy_failed_place", x, y, cost)
         return False
+
+    def _announce(
+        self, city: Any, item: str, action: str, x: int | None, y: int | None, cost: int
+    ) -> None:
+        if self.emit is None:
+            return
+        from civ6_ai.construction import PlacementPlan
+
+        self.emit(
+            PlacementPlan(
+                self.turn,
+                city.city_id,
+                city.name,
+                city.x,
+                city.y,
+                item=item,
+                category=self._category,
+                action=action,
+                tile_x=x,
+                tile_y=y,
+                cost=cost,
+            )
+        )
 
     def _log(self, city: Any, item: str, plan: Plan) -> None:
         """Log a plan, once while it stays the same."""
@@ -797,6 +831,7 @@ class Planner:
         if self._logged.get(key) == shape and plan.action != "buy_then_place":
             return
         self._logged[key] = shape
+        self._announce(city, item, plan.action, plan.x, plan.y, plan.cost)
         log.info(
             "placement_plan city=%s item=%s tile=(%d,%d) action=%s cost=%d",
             city.name,

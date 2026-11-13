@@ -570,6 +570,29 @@ issues:
       - A wonder_completed event is written with turn and city, with unit tests, and no new game calls.
     depends: ["1.34"]
     budget: none
+  - id: "1.45"
+    title: Check district placement before choosing it
+    type: feature
+    parallel: true
+    goal: Stop asking for districts a city has no tile for.
+    scope: "In Run 7, 59% of production choices were refused, most with ERR:NO_PLACEMENT (Harbor 80, Entertainment Complex 37, Preserve 21, Observatory 18, Dam 18); one city asked for a Harbor 26 times. Check for a valid tile before choosing a district, and stop repeating a wonder the game answers CANNOT_START."
+    acceptance:
+      - "Unit tests: a district with no valid tile is never chosen, and a wonder refused with CANNOT_START is not asked for again before its condition changes."
+      - "Live: under 30% of production choices refused, and no city and item pair refused more than 10 times."
+    depends: ["1.20", "1.29"]
+    budget: none
+  - id: "1.46"
+    title: Notice and respond to a rival nearing victory
+    type: feature
+    parallel: true
+    goal: Notice when a rival is close to winning and respond.
+    scope: "Germany won by science in Run 7 with nothing reacting. Read each rival's victory progress from reads already made, log a victory_threat line each turn, vote against the leader in the World Congress and raise our own output. Strategic answers such as war belong to the Phase 2 strategist (2.3)."
+    acceptance:
+      - A victory_threat line each turn names the leader, the victory type and the margin, with unit tests and no new game calls.
+      - World Congress votes target the threatening rival when a resolution allows a target.
+      - "Live: the threat is flagged at least 30 turns before a rival wins."
+    depends: ["1.15", "1.43"]
+    budget: none
 
   # Workstream "E"
   - id: E.1

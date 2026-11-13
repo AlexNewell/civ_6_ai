@@ -683,6 +683,7 @@ class SettlingPolicy:
                 return
             record("no_site", "no acceptable site on the revealed map")
             return
+        self._no_site_turns.pop(settler.unit_id, None)  # A site exists, so the streak ends.
         holds = self._holds.get(settler.unit_id, 0)
         unescorted = holds >= s.max_hold_turns
         # Live (Run 7): the escort chosen was another unit, and its move onto the settler's tile
@@ -717,7 +718,6 @@ class SettlingPolicy:
             reason = f"held {holds} turns, so going without an escort"
         else:
             reason = "heading for the best site"
-        self._no_site_turns.pop(settler.unit_id, None)
         self._site_claims[settler.unit_id] = (target.x, target.y)
         moved = await self._advance(game, settler, target, escort, claimed, record, turn, reason)
         self._holds[settler.unit_id] = 0 if moved else holds + 1

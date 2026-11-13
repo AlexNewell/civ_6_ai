@@ -764,3 +764,17 @@ def test_a_settler_with_no_site_for_many_turns_is_disbanded():
         expected = [("delete", 7)] if turn == 3 else []
         assert game.actions == expected
     assert policy.decisions[-1].action == "disband"
+
+
+def test_a_held_settler_with_a_site_resets_the_no_site_streak():
+    game = make_game(
+        [settler(y=14)],
+        cities=[alpha()],
+        threats=[barbarian(13, 10)],
+        sites=[site(14, 6, food=40)],
+    )
+    policy = SettlingPolicy(SettlingSettings(threat_radius=2))
+    policy._no_site_turns[7] = 19
+    run(policy, game)
+    assert policy.decisions[0].action == "hold"
+    assert policy._no_site_turns.get(7, 0) == 0

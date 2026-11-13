@@ -64,7 +64,10 @@ class ProductionRefused(ConstructionEvent):
     reply: str
     is_refusal: bool  # The game said no, as opposed to a read or call that failed.
     placements_offered: int | None = None
-    backoff_turns: int = 0  # How long the item is now skipped for this city.
+    backoff_turns: int = 0  # Turns until it is asked again. -1: only a change ends it.
+    reason_class: str = (
+        ""  # Why, for a refusal: placement, unlock, elsewhere, district, unknown, other.
+    )
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -99,6 +102,20 @@ class CityGained(ConstructionEvent):
     regained: bool = False  # We held this city before.
 
 
+@dataclass(frozen=True, kw_only=True)
+class PlacementPlan(ConstructionEvent):
+    """A chained placement step (`placement.Planner`), the same fact as its log line."""
+
+    kind = "placement_plan"
+
+    item: str
+    category: str
+    action: str  # buy_then_place, save, wait_for_border, buy_failed_place or rules_mismatch.
+    tile_x: int | None = None
+    tile_y: int | None = None
+    cost: int = 0
+
+
 CONSTRUCTION_EVENTS: tuple[type[ConstructionEvent], ...] = (
     ProductionSet,
     ProductionRefused,
@@ -106,6 +123,7 @@ CONSTRUCTION_EVENTS: tuple[type[ConstructionEvent], ...] = (
     DistrictLost,
     BuildingCompleted,
     CityGained,
+    PlacementPlan,
 )
 for _event_type in CONSTRUCTION_EVENTS:
     register_event(_event_type)

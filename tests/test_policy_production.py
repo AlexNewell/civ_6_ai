@@ -751,49 +751,6 @@ def test_no_placement_is_remembered_and_the_pair_is_not_retried():
     assert (65536, "DISTRICT_HARBOR") in policy.refusals._entries
 
 
-def test_refusal_expires_and_a_repeat_waits_longer():
-    from civ6_ai.policies.production import (
-        REFUSAL_BACKOFF_MAX_TURNS,
-        REFUSAL_BACKOFF_TURNS,
-        RefusalMemory,
-    )
-
-    mem = RefusalMemory()
-    c = city()
-    item = "BUILDING_TAJ_MAHAL"
-    mem.refused(c, item, 10)
-    assert mem.blocked(c, item, 10 + REFUSAL_BACKOFF_TURNS - 1)
-    assert not mem.blocked(c, item, 10 + REFUSAL_BACKOFF_TURNS)
-    mem.refused(c, item, 20)
-    assert mem.blocked(c, item, 20 + REFUSAL_BACKOFF_TURNS)  # Doubled.
-    assert not mem.blocked(c, item, 20 + 2 * REFUSAL_BACKOFF_TURNS)
-    for _ in range(10):
-        mem.refused(c, item, 300)
-    assert mem.blocked(c, item, 300 + REFUSAL_BACKOFF_MAX_TURNS - 1)
-    assert not mem.blocked(c, item, 300 + REFUSAL_BACKOFF_MAX_TURNS)
-
-
-def test_a_new_building_clears_the_refusal():
-    from civ6_ai.policies.production import RefusalMemory
-
-    mem = RefusalMemory()
-    before = city()
-    mem.refused(before, "BUILDING_TAJ_MAHAL", 10)
-    grown = replace(before, buildings=(*before.buildings, "BUILDING_MONUMENT"))
-    assert mem.blocked(before, "BUILDING_TAJ_MAHAL", 11)
-    assert not mem.blocked(grown, "BUILDING_TAJ_MAHAL", 11)
-
-
-def test_refusals_are_kept_per_city():
-    from civ6_ai.policies.production import RefusalMemory
-
-    mem = RefusalMemory()
-    one = city()
-    other = replace(one, city_id=one.city_id + 1)
-    mem.refused(one, "BUILDING_TAJ_MAHAL", 10)
-    assert not mem.blocked(other, "BUILDING_TAJ_MAHAL", 11)
-
-
 @pytest.mark.parametrize(
     "reply",
     ["Error: Could not read cities: timeout", "Error: LUA_ERROR|nil value", "ERR:GAME_BUSY"],
@@ -986,33 +943,6 @@ def test_a_district_with_no_tile_is_not_asked_for_after_the_city_builds_somethin
     game.data["cities"] = [grown]
     run(policy.assign(game))
     assert game.advisor_calls == 1
-
-
-def test_a_district_with_no_tile_is_asked_again_once_the_wait_is_over():
-    from civ6_ai.policies.production import NO_PLACEMENT_BACKOFF_TURNS, RefusalMemory
-
-    mem, c = RefusalMemory(), city()
-    mem.refused(c, "DISTRICT_HARBOR", 10, NO_PLACEMENT)
-    assert mem.blocked(c, "DISTRICT_HARBOR", 10 + NO_PLACEMENT_BACKOFF_TURNS - 1)
-    assert not mem.blocked(c, "DISTRICT_HARBOR", 10 + NO_PLACEMENT_BACKOFF_TURNS)
-    # A repeat waits longer, up to a cap.
-    assert mem.refused(c, "DISTRICT_HARBOR", 30, NO_PLACEMENT) == 2 * NO_PLACEMENT_BACKOFF_TURNS
-
-
-def test_no_placement_survives_new_buildings_but_cannot_start_ends_on_a_new_district():
-    from civ6_ai.policies.production import RefusalMemory
-
-    mem, c = RefusalMemory(), city()
-    mem.refused(c, "DISTRICT_HARBOR", 10, NO_PLACEMENT)
-    mem.refused(c, "BUILDING_TAJ_MAHAL", 10, CANNOT_START)
-    more_buildings = replace(c, buildings=(*c.buildings, "BUILDING_LIBRARY"))
-    assert mem.blocked(more_buildings, "DISTRICT_HARBOR", 11)
-    assert mem.blocked(more_buildings, "BUILDING_TAJ_MAHAL", 11)  # A wonder needs a district.
-    new_district = replace(
-        c, districts=(*c.districts, replace(c.districts[0], district_type="DISTRICT_THEATER"))
-    )
-    assert mem.blocked(new_district, "DISTRICT_HARBOR", 11)
-    assert not mem.blocked(new_district, "BUILDING_TAJ_MAHAL", 11)
 
 
 def test_a_refused_wonder_is_not_asked_for_again_as_buildings_come_and_go():

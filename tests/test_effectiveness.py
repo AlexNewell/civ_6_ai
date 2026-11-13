@@ -670,3 +670,13 @@ def test_loaded_legacy_session_falls_back_to_its_bot_log_text(tmp_path: Path):
     )
     run = load_run([log])
     assert by_name(run)[("production", "most repeats of one refused build")].created == 30
+
+
+def test_a_bought_tile_the_game_would_not_place_on_is_counted():
+    from civ6_ai.effectiveness import MAX_FAILED_TILE_BUYS, production_checks
+
+    msg = "placement_plan city=Coba item=DISTRICT_HARBOR tile=(7,7) action=buy_failed_place cost=60"
+    lines = [("placement", "INFO", msg)] * (MAX_FAILED_TILE_BUYS + 1)
+    run = RunLogs(records=[turn(1)], bot=lines, has_bot_log=True)
+    check = next(c for c in production_checks(run) if "would not place" in c.name)
+    assert check.status == FAIL

@@ -10,6 +10,7 @@ from civ6_ai.construction import (
     ConstructionWatcher,
     DistrictCompleted,
     DistrictLost,
+    PlacementPlan,
     ProductionRefused,
     ProductionSet,
 )
@@ -165,6 +166,19 @@ def test_events_round_trip_through_the_events_file(tmp_path):
         DistrictLost(4, 1, "A", 1, 2, district="DISTRICT_CAMPUS", district_x=5, district_y=6),
         BuildingCompleted(4, 1, "A", 1, 2, building="LIBRARY"),
         CityGained(4, 1, "A", 1, 2, regained=True),
+        PlacementPlan(
+            4,
+            1,
+            "A",
+            1,
+            2,
+            item="X",
+            category="DISTRICT",
+            action="save",
+            tile_x=7,
+            tile_y=7,
+            cost=90,
+        ),
     ]
     assert len(sent) == len(CONSTRUCTION_EVENTS)
     for event in sent:

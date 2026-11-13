@@ -66,6 +66,7 @@ LOYALTY_LOOKBACK_TURNS = 30  # A loyalty warning this close before a loss makes 
 MAX_STARVING_NOTICES = 25
 MAX_WASTED_GREAT_PEOPLE = 3
 MAX_IDLE_ENVOY_TURNS = 5
+MAX_FAILED_TILE_BUYS = 2  # Each is gold spent for nothing: the placement rules need a look.
 PLANNED_STOPS = ("game_over", "turn_limit")
 
 # The checks that gate G1 (a run is clean only if none fails); the rest only warn. See
@@ -687,6 +688,14 @@ def production_checks(run: RunLogs) -> list[Check]:
             MAX_REPEAT_REFUSALS,
             f"one city/item refused at most {MAX_REPEAT_REFUSALS} times",
             f"{worst[0][0]} {worst[0][1]}" if worst[1] else "",
+        ),
+        _count_check(
+            "production",
+            "tile buys the game would not place on",
+            sum("action=buy_failed_place" in m for m in run.messages("placement")),
+            MAX_FAILED_TILE_BUYS,
+            f"at most {MAX_FAILED_TILE_BUYS} bought tiles a run that the game then refused",
+            "placement_plan ... action=buy_failed_place",
         ),
     ]
 

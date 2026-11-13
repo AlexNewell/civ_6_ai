@@ -907,3 +907,45 @@ def test_context_collects_the_districts_every_city_built():
 def test_a_district_being_chosen_counts_toward_the_one_spaceport():
     ctx = ProductionContext(turn=250, num_cities=4).after_choosing("DISTRICT_SPACEPORT")
     assert not _districts_kept("SPACEPORT", ctx=ctx, victory="science")
+
+
+# ----- expansion target (1.41) -----
+
+
+def _settler_score(ctx, **city_changes):
+    grown = city(population=4, **city_changes)
+    return score(option("UNIT", "UNIT_SETTLER"), grown, ctx, ProductionWeights())
+
+
+def test_settler_priority_rises_when_behind_the_schedule():
+    behind = ProductionContext(turn=100, num_cities=2, builders=2, recon=1, army=2)
+    on_pace = replace(behind, num_cities=4, army=4, builders=4)
+    assert _settler_score(behind) > _settler_score(on_pace) > 0
+    assert _settler_score(behind) > 14.0
+
+
+def test_no_boost_without_safe_sites_a_garrison_or_a_defender_per_city():
+    behind = ProductionContext(turn=100, num_cities=2, builders=2, recon=1, army=2)
+    boosted = _settler_score(behind)
+    for plain in (
+        _settler_score(replace(behind, sites_ok=False)),
+        _settler_score(behind, garrison_unit=""),
+        _settler_score(replace(behind, army=1)),  # A city would be left bare.
+    ):
+        assert 0 < plain < boosted
+
+
+def test_a_second_settler_is_queued_only_when_behind():
+    behind = ProductionContext(turn=100, num_cities=2, settlers=1, builders=2, recon=1, army=2)
+    assert _settler_score(behind) > 0
+    on_pace = replace(behind, num_cities=4, army=4, builders=4)
+    assert _settler_score(on_pace) == 0
+    assert _settler_score(replace(behind, settlers=2)) == 0
+
+
+def test_boosted_settler_beats_a_builder_but_not_defence_under_threat():
+    behind = ProductionContext(turn=100, num_cities=2, builders=0, recon=1, army=2)
+    menu = [option("UNIT", "UNIT_SETTLER"), option("UNIT", "UNIT_BUILDER")]
+    assert best(city(population=4), menu, behind) == "UNIT_SETTLER"
+    pressed = city(population=4, threats=[threat()])
+    assert score(option("UNIT", "UNIT_SETTLER"), pressed, behind, ProductionWeights()) == 0

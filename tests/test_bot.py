@@ -109,10 +109,12 @@ def test_one_turn_runs_handlers_in_order_and_acts(tmp_path):
     assert list(record.handler_seconds) == [
         "monitors",
         "construction_watch",
+        "expansion_log",
         "diplomacy",
         "wars",
         "trade_offers",
         "settling",
+        "loyalty_response",
         "defence",
         "military",
         "research",

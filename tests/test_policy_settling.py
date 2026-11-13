@@ -5,11 +5,13 @@ import logging
 from civ_mcp import lua as lq
 
 from civ6_ai.orchestrator import Handler
+from civ6_ai.policies.expansion import ExpansionState
 from civ6_ai.policies.settling import (
     SettlingPolicy,
     SettlingSettings,
     frontier_points,
     hex_line,
+    loyalty_margin,
     neighbours,
     score_site,
 )
@@ -602,3 +604,124 @@ def test_an_escorted_settler_founds_though_a_hostile_unit_shadows_it():
     together = make_game([settler(x=14), escort], cities=[alpha()], threats=barbs, sites=sites)
     run(SettlingPolicy(), together)
     assert ("found", 7) in together.actions
+
+
+# ----- loyalty (1.37) -----
+
+
+def test_loyalty_margin_counts_both_sides_and_ignores_far_cities():
+    settings = SettlingSettings()
+    own, rival = [(10, 10, 5)], [(20, 10, 6)]
+    assert loyalty_margin(14, 10, own, rival, settings) == 42 - 32
+    assert loyalty_margin(16, 10, own, rival, settings) == 28 - 48
+    assert loyalty_margin(10, 30, own, rival, settings) == 0  # Both out of range.
+    # A bigger rival pulls harder, and a second city of ours adds to our pull.
+    bigger = [(20, 10, 12)]
+    assert loyalty_margin(16, 10, own, bigger, settings) < loyalty_margin(
+        16, 10, own, rival, settings
+    )
+    more = own + [(13, 10, 3)]
+    assert loyalty_margin(16, 10, more, rival, settings) > loyalty_margin(
+        16, 10, own, rival, settings
+    )
+
+
+def test_site_likely_to_flip_is_rejected():
+    # Rome has a visible city at 20,10 (pop 6). A site 4 tiles from it and 6 from ours leans to it.
+    game = make_game([settler()], cities=[alpha()], sites=[site(16, 10, food=40)])
+    policy = SettlingPolicy()
+    run(policy, game)
+    candidate = policy.decisions[0].candidates[0]
+    assert candidate.rejected == "likely to flip to a rival (loyalty)"
+    assert candidate.loyalty_margin < -12
+    assert policy.decisions[0].action == "no_site"
+
+
+def test_marginal_site_loses_score_but_a_safe_one_does_not():
+    game = make_game(
+        [settler()], cities=[alpha()], sites=[site(15, 10, food=40), site(13, 10, food=40)]
+    )
+    policy = SettlingPolicy()
+    run(policy, game)
+    by_site = {(c.x, c.y): c for c in policy.decisions[0].candidates}
+    assert by_site[15, 10].loyalty_penalty == 5 and by_site[15, 10].rejected is None
+    assert by_site[13, 10].loyalty_penalty == 0
+    assert by_site[15, 10].site_score == by_site[13, 10].site_score - 5
+
+
+def test_first_city_ignores_loyalty():
+    game = make_game([settler()], sites=[site(16, 10, food=40)])
+    policy = SettlingPolicy()
+    run(policy, game)
+    assert policy.decisions[0].candidates[0].loyalty_penalty == 0
+
+
+# ----- an escort already on the tile and the expansion survey -----
+
+
+def test_a_unit_already_on_the_settler_tile_is_the_escort_and_nothing_is_gathered():
+    companion = unit_info(unit_id=9, unit_index=9, x=10, y=14)
+    far = unit_info(unit_id=11, unit_index=11, x=10, y=13)
+    game = make_game(
+        [settler(y=14), companion, far],
+        cities=[alpha()],
+        threats=[barbarian(13, 10)],
+        sites=[site(14, 6, food=40)],
+    )
+    run(SettlingPolicy(SettlingSettings(threat_radius=2)), game)
+    assert all(a[1] != 11 for a in game.actions)  # The unit one tile away never moves.
+    assert {a[1] for a in game.actions} == {9, 7}
+
+
+def test_a_companion_with_no_moves_makes_the_settler_wait_not_stack_another():
+    companion = unit_info(unit_id=9, unit_index=9, x=10, y=14, moves_remaining=0.0)
+    far = unit_info(unit_id=11, unit_index=11, x=10, y=13)
+    game = make_game(
+        [settler(y=14), companion, far],
+        cities=[alpha()],
+        threats=[barbarian(13, 10)],
+        sites=[site(14, 6, food=40)],
+    )
+    policy = SettlingPolicy(SettlingSettings(threat_radius=2))
+    run(policy, game)
+    assert not [a for a in game.actions if a[0] == "move"]
+    assert policy.decisions[0].action == "hold"
+
+
+def test_a_garrison_in_the_city_is_not_taken_as_the_companion():
+    garrison = unit_info(unit_id=9, unit_index=9, x=10, y=10)
+    game = make_game(
+        [settler(y=10), garrison],
+        cities=[alpha()],
+        threats=[barbarian(13, 10)],
+        sites=[site(14, 6, food=40)],
+    )
+    run(SettlingPolicy(SettlingSettings(threat_radius=2)), game)
+    assert all(a[1] != 9 for a in game.actions)
+
+
+def test_survey_records_safe_sites_and_the_best_score():
+    game = make_game(
+        [settler()], cities=[alpha()], sites=[site(14, 10, food=40), site(10, 16, food=30)]
+    )
+    policy = SettlingPolicy()
+    run(policy, game)
+    state = policy.expansion
+    assert state.survey_turn == 1 and state.safe_sites == 2
+    assert state.best_site_score == max(c.site_score for c in policy.decisions[0].candidates)
+    assert state.settlers_on_map == 1
+
+
+def test_survey_with_a_scout_only_still_counts_sites():
+    scout = unit_info(unit_id=3, unit_index=3, x=10, y=10, **SCOUT)
+    game = make_game([scout], cities=[alpha()], sites=[site(14, 10, food=40)])
+    policy = SettlingPolicy()
+    run(policy, game)
+    assert policy.expansion.safe_sites == 1 and policy.expansion.settlers_on_map == 0
+
+
+def test_survey_updates_the_shared_state_in_place():
+    shared = ExpansionState()
+    game = make_game([settler()], cities=[alpha()], sites=[site(14, 10, food=40)])
+    run(SettlingPolicy(expansion=shared), game)
+    assert shared.survey_turn == 1 and shared.safe_sites == 1

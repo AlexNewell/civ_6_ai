@@ -123,6 +123,19 @@ class CityLoyaltyWarning(Event):
 
 
 @dataclass(frozen=True)
+class CityLoyaltyResponse(Event):
+    """What the bot did about a city that is losing loyalty (roadmap item 1.37)."""
+
+    kind = "city_loyalty_response"
+
+    city_id: int
+    city_name: str
+    loyalty: float
+    loyalty_per_turn: float
+    actions: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class RivalVictoryWarning(Event):
     """A rival has passed a share of what a win needs.
 

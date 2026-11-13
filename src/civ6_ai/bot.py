@@ -11,7 +11,9 @@ Order within a turn:
    `WarPolicy` follows it: it logs every war and offers peace. It closes its own sessions.
    `TradeOfferPolicy` runs right after it and offers surplus resources to other civs. It closes
    every session it opens.
-3. `SettlingPolicy` moves settlers and scouts, which changes cities and units.
+   `ExpansionLog` writes the one-line expansion status here, before anything changes the game.
+3. `SettlingPolicy` moves settlers and scouts, which changes cities and units. `LoyaltyResponse`
+   follows it, and acts only for a city that has a loyalty warning: governor, garrison, card.
    `DefencePolicy` then marks the threatened cities (a war with a major civ, or hostile or
    denouncing units within 3 tiles; see `policies.defence`) for the military, production and gold
    policies to read. It uses reads they make anyway. `DefenceReport` logs one line per marked city
@@ -60,9 +62,11 @@ from civ6_ai.policies import research
 from civ6_ai.policies.builder import BuilderPolicy
 from civ6_ai.policies.defence import DefencePolicy, DefenceReport, DefenceState
 from civ6_ai.policies.diplomacy import DiplomacyPolicy
+from civ6_ai.policies.expansion import ExpansionLog, ExpansionState
 from civ6_ai.policies.faith import FaithPolicy
 from civ6_ai.policies.gold import GoldPolicy
 from civ6_ai.policies.government import GovernmentPolicy
+from civ6_ai.policies.loyalty import LoyaltyResponse
 from civ6_ai.policies.military import MilitaryPolicy
 from civ6_ai.policies.production import CityProductionPolicy
 from civ6_ai.policies.secondary import SecondaryPolicy
@@ -266,7 +270,8 @@ def build_orchestrator(
     turn, since it buffers its writes.
     """
     defence = DefenceState()  # Which cities are threatened this turn, shared by three policies.
-    production = CityProductionPolicy(bus=bus, defence=defence)
+    expansion = ExpansionState()  # Settling fills it. Production and the log line read it.
+    production = CityProductionPolicy(bus=bus, expansion=expansion, defence=defence)
     government = GovernmentPolicy()  # One instance, so handler and blockers share its bounds.
     secondary = SecondaryPolicy()
     military = MilitaryPolicy(defence=defence)
@@ -312,10 +317,12 @@ def build_orchestrator(
             else []
         ),
         watcher,
+        ExpansionLog(expansion),
         diplomacy,
         WarPolicy(state_path=wars_state),
         *([TradeOfferPolicy(diplomacy.weights)] if trade_offers else []),
-        SettlingPolicy(),
+        SettlingPolicy(expansion=expansion),
+        LoyaltyResponse(bus),
         DefencePolicy(defence),
         military,
         research_policy,

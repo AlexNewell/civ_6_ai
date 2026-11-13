@@ -13,11 +13,17 @@ this order, until the turn's bounds or the gold run out:
 3. Buy tiles, resource tiles first. A tile with no resource is bought only when it costs at most
    half of what is left to spend.
 
-Reserve: `RESERVE_FLOOR` plus `RESERVE_PER_CITY` for each city, plus ten turns of any deficit,
-capped at `RESERVE_CAP`. The floor is about one emergency Warrior or Builder. Each city adds
-enough to buy a defender if it is attacked. The deficit term keeps a negative income from
-emptying the treasury. The cap exists because Run 3 banked 1,363 gold by turn 135 and Run 2
-held 625 at turn 100, so a reserve that grows without limit is what we are avoiding.
+Reserve: `RESERVE_FLOOR` plus `RESERVE_PER_CITY` for each city, lowered by `INCOME_RELIEF` per
+gold of income (never below `RESERVE_MIN`), plus ten turns of any deficit, capped at
+`RESERVE_CAP`. Run 8 idled with gold above a reserve of 215 on 73% of turns, so the old
+60 plus 20 per city was too high. The floor is about one emergency Warrior. A high income
+refills a spent reserve quickly. The deficit term keeps a negative income from emptying the
+treasury.
+
+Saving: when the best upgrade (or the top-ranked item of an unthreatened city) is out of reach
+but income closes the gap within `SAVE_TURNS` turns, it becomes the saving target. While there
+is one, tiles and other purchases wait (a threatened city's defence does not), so small buys do
+not keep the gold below one price. A target further away is not saved for.
 
 Threatened cities (roadmap 1.35, see `defence.DefenceState`): while any city is threatened the
 reserve drops to `THREAT_DEFICIT_TURNS` turns of any deficit (zero with income), so war chests
@@ -55,10 +61,15 @@ from civ6_ai.state.reader import hex_distance
 
 log = logging.getLogger(__name__)
 
-RESERVE_FLOOR = 60
-RESERVE_PER_CITY = 20
-RESERVE_CAP = 300
+RESERVE_FLOOR = 40
+RESERVE_PER_CITY = 10
+RESERVE_MIN = 30  # Never lower than about one emergency Warrior, however high the income.
+RESERVE_CAP = 150
+INCOME_RELIEF = 3  # Reserve gold saved per gold of income: a high income refills a spent reserve.
 DEFICIT_TURNS = 10
+SAVE_TURNS = (
+    8  # Most turns to save for the best purchase or upgrade before spending on lesser ones.
+)
 MAX_UPGRADES = 3
 MAX_PURCHASES = 3
 MAX_TILES = 2
@@ -73,7 +84,11 @@ _RESOURCE_RANK = {"luxury": 0, "strategic": 1, "bonus": 2}
 def reserve_for(num_cities: int, gold_per_turn: float = 0.0) -> int:
     """Gold never spent. See the module docstring for why each part is there."""
     deficit = DEFICIT_TURNS * max(0.0, -gold_per_turn)
-    return int(min(RESERVE_CAP, RESERVE_FLOOR + RESERVE_PER_CITY * max(0, num_cities) + deficit))
+    base = RESERVE_FLOOR + RESERVE_PER_CITY * max(0, num_cities)
+    relief = INCOME_RELIEF * max(0.0, gold_per_turn)
+    # Income lowers the reserve, but never below the minimum (or the base, when that is lower).
+    held = max(min(base, RESERVE_MIN), base - relief)
+    return int(min(RESERVE_CAP, held + deficit))
 
 
 class GoldGame(Protocol):
@@ -135,6 +150,24 @@ class _Turn:
     upgrades: int = 0
     purchases: int = 0
     tiles: int = 0
+    income: float = 0.0
+    target: str | None = None  # What gold is being saved for: it holds back lesser spending.
+    target_defence: bool = False  # The target is defence, so a threatened city may still buy.
+
+    def save_for(self, name: str, cost: int) -> bool:
+        """Make `name` the saving target when income closes the gap within `SAVE_TURNS` turns."""
+        gap = cost - self.budget
+        if (
+            self.target is not None
+            or self.income <= 0
+            or gap <= 0
+            or gap / self.income > SAVE_TURNS
+        ):
+            return False
+        self.target = (
+            f"{name} (cost {cost}, {gap / self.income:.0f} turns at {self.income:.0f} a turn)"
+        )
+        return True
 
     @property
     def refused_out(self) -> bool:
@@ -165,7 +198,7 @@ class GoldPolicy:
         empire = await _read_empire(game)
         reserve = self._reserve(empire.num_cities, empire.gold_per_turn)
         budget = int(empire.gold) - reserve
-        turn = _Turn(budget)
+        turn = _Turn(budget, income=empire.gold_per_turn)
         notes: list[str] = []
         log.info("Gold %d, reserve %d, %d to spend", empire.gold, reserve, budget)
         if threatened:
@@ -182,6 +215,8 @@ class GoldPolicy:
         await self._tiles(game, turn, cities, notes)
         spent = budget - turn.budget
         log.info("gold_spent turn total: %d of %d to spend", spent, budget)
+        if turn.target is not None:
+            log.info("Gold %d, reserve %d: saving toward %s", empire.gold, reserve, turn.target)
         if spent == 0:
             log.info(
                 "Gold %d is above the reserve %d, nothing bought: %s",
@@ -238,6 +273,7 @@ class GoldPolicy:
                 break
             if unit.upgrade_cost > turn.budget:
                 notes.append(f"{unit.unit_type} upgrade costs {unit.upgrade_cost}")
+                turn.save_for(f"{unit.unit_type} upgrade", unit.upgrade_cost)
                 continue
             result = await self._call(game.upgrade_unit(unit.unit_id))
             if _ok(result, "UPGRADED"):
@@ -287,6 +323,9 @@ class GoldPolicy:
             except Exception:
                 log.exception("Production read failed for %s", city.name)
                 continue
+            if turn.target is not None and not self._may_buy_while_saving(city):
+                notes.append(f"{city.name}: saving toward {turn.target}")
+                continue
             others = [item for cid, item in building.items() if cid != city.city_id]
             context = build_context(empire, units, [*others, *bought], cities, self.defence)
             ranked = rank_production(city, options, context, self.weights)
@@ -294,6 +333,10 @@ class GoldPolicy:
                 # Defenders and walls only. A threatened city does not buy a library.
                 ranked = [o for o in ranked if is_defence(o)]
             await self._buy_in(game, turn, city, ranked, context, bought, notes)
+
+    def _may_buy_while_saving(self, city: City) -> bool:
+        """Only a threatened city's defence is bought while gold is saved for something else."""
+        return self.defence is not None and self.defence.is_threatened(city.city_id)
 
     async def _buy_in(
         self,
@@ -317,6 +360,9 @@ class GoldPolicy:
                 continue
             if option.gold_cost > turn.budget:
                 notes.append(f"{city.name} {option.item} costs {option.gold_cost}")
+                if tried == 0 and not is_defence(option) and not self._marked(city):
+                    # The best item is out of reach: save for it if income gets there soon.
+                    turn.save_for(f"{city.name} {option.item}", option.gold_cost)
                 continue
             if tried >= 2 or turn.refused_out:
                 break
@@ -345,6 +391,9 @@ class GoldPolicy:
         for city in cities:
             if turn.tiles >= MAX_TILES or turn.refused_out or turn.budget <= 0:
                 return
+            if turn.target is not None:
+                notes.append(f"tiles wait while saving toward {turn.target}")
+                return
             try:
                 tiles = await game.get_purchasable_tiles(city.city_id)
             except ConnectionError:
@@ -361,7 +410,7 @@ class GoldPolicy:
             for tile in ranked:
                 if tile.cost <= 0 or tile.cost > turn.budget:
                     continue
-                if not tile.resource_class and tile.cost * 2 > turn.budget:
+                if not tile.resource_class and tile.cost > turn.budget:
                     continue
                 result = await self._call(game.purchase_tile(city.city_id, tile.x, tile.y))
                 if _ok(result, "TILE_PURCHASED"):

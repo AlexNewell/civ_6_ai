@@ -491,3 +491,146 @@ def test_a_real_person_is_still_bought_beside_an_unreachable_one():
     )
     asyncio.run(FaithPolicy(FaithSettings(reserve=60.0)).run(game))
     assert ("patronize", 2, "YIELD_FAITH") in game.actions
+
+
+# ----- spending: saving, units, call savings (issues 90, 146) -----
+
+
+def calls(game, name):
+    return [c for c in game.calls if c == name]
+
+
+def count(game, name):
+    """Record each call to the named read on `game.calls`."""
+    original = getattr(game, name)
+
+    async def counted(*args, **kwargs):
+        game.calls.append(name)
+        return await original(*args, **kwargs)
+
+    setattr(game, name, counted)
+
+
+def test_faith_is_saved_toward_a_reachable_great_person(caplog):
+    policy = FaithPolicy()
+    game = Game(overview=overview(turn=100, faith=100.0), people=[person(faith=200)])
+    run(policy, game)  # No income estimate yet, so nothing to save by.
+    set_overview(game, turn=101, faith=110.0)
+    with caplog.at_level(logging.INFO):
+        run(policy, game)  # About 10 a turn, 50 above the reserve, 150 to go: 15 turns.
+    assert "saving toward Hypatia" in caplog.text
+
+
+def test_saving_holds_back_buildings_and_buys_the_person_when_reached():
+    policy = FaithPolicy()
+    game = Game(overview=overview(turn=100, faith=100.0), people=[person(faith=200)])
+    run(policy, game)
+    game.actions.clear()
+    set_overview(game, turn=101, faith=110.0)
+    run(policy, game)
+    assert game.actions == []  # Saving: no Shrine is bought in between.
+    set_overview(game, turn=102, faith=270.0)
+    run(policy, game)
+    assert acted(game, "patronize") == [("patronize", 1, "YIELD_FAITH")]
+
+
+def test_a_great_person_too_far_to_save_for_does_not_hold_faith_back(caplog):
+    policy = FaithPolicy()
+    game = Game(overview=overview(turn=100, faith=100.0), people=[person(faith=1470)])
+    run(policy, game)
+    set_overview(game, turn=101, faith=200.0)
+    with caplog.at_level(logging.INFO):
+        run(policy, game)
+    assert "saving toward" not in caplog.text
+    assert acted(game, "buy")  # The Shrine fits in what is above the reserve.
+
+
+def test_a_slow_income_is_not_saved_for():
+    policy = FaithPolicy()
+    game = Game(overview=overview(turn=100, faith=100.0), people=[person(faith=290)])
+    run(policy, game)
+    set_overview(game, turn=101, faith=101.0)  # One a turn: 190 turns away.
+    run(policy, game)
+    assert acted(game, "buy") == []  # Too little above the reserve for the Shrine estimate.
+    assert not policy._saving
+
+
+def faith_units(item="UNIT_BUILDER", gold=60):
+    return [
+        lq.ProductionOption("UNIT", item, 50, 5, gold),
+        lq.ProductionOption("BUILDING", "BUILDING_SHRINE", 60, 6, 120),
+    ]
+
+
+def test_a_builder_is_bought_with_faith_before_a_shrine(caplog):
+    game = Game(production=faith_units(), overview=overview(turn=100, faith=300.0))
+    with caplog.at_level(logging.INFO):
+        run(FaithPolicy(), game)
+    assert acted(game, "buy")[0] == ("buy", 65536, "UNIT_BUILDER", "YIELD_FAITH")
+    assert "spent on UNIT_BUILDER" in caplog.text
+
+
+def test_a_unit_the_rules_refuse_is_not_asked_again_for_a_while():
+    policy = FaithPolicy()
+    game = Game(production=faith_units())
+    game.replies["buy"] = ["Error: CANNOT_PURCHASE|cannot purchase with this yield"]
+    run(policy, game)
+    first = [a[2] for a in acted(game, "buy")]
+    assert first[0] == "UNIT_BUILDER"
+    game.actions.clear()
+    set_overview(game, turn=107, faith=300.0)  # Past the per-city wait, inside the rule wait.
+    run(policy, game)
+    assert "UNIT_BUILDER" not in [a[2] for a in acted(game, "buy")]
+    game.actions.clear()
+    set_overview(game, turn=100 + 16, faith=300.0)
+    run(policy, game)
+    assert acted(game, "buy")[0][2] == "UNIT_BUILDER"
+
+
+def test_a_threatened_city_buys_its_best_defender_with_faith():
+    from civ6_ai.policies.defence import CityThreat, DefenceState
+
+    defence = DefenceState()
+    defence.cities = {65536: CityThreat.__new__(CityThreat)}
+    production = [
+        lq.ProductionOption("UNIT", "UNIT_WARRIOR", 40, 4, 60),
+        lq.ProductionOption("UNIT", "UNIT_CROSSBOWMAN", 80, 8, 120),
+        lq.ProductionOption("UNIT", "UNIT_BUILDER", 50, 5, 60),
+    ]
+    game = Game(production=production, overview=overview(turn=100, faith=400.0))
+    run(FaithPolicy(defence=defence), game)
+    assert acted(game, "buy")[0] == ("buy", 65536, "UNIT_CROSSBOWMAN", "YIELD_FAITH")
+
+
+def test_the_great_people_list_is_not_read_every_turn_while_out_of_reach():
+    policy = FaithPolicy()
+    game = Game(people=[person(faith=1470)], overview=overview(turn=100, faith=300.0))
+    for name in ("get_great_people", "get_religion_founding_status", "get_pantheon_status"):
+        count(game, name)
+    for turn in range(100, 103):
+        set_overview(game, turn=turn, faith=300.0)
+        run(policy, game)
+    assert len(calls(game, "get_great_people")) == 1
+    assert len(calls(game, "get_religion_founding_status")) == 1
+    assert len(calls(game, "get_pantheon_status")) <= 1
+
+
+def test_cities_are_not_rescanned_every_turn_when_nothing_is_offered():
+    policy = FaithPolicy()
+    game = Game(production=[], people=[])
+    for turn in range(100, 103):
+        set_overview(game, turn=turn, faith=300.0)
+        run(policy, game)
+    assert len(calls(game, "list_city_production")) == 1
+
+
+def test_every_turn_logs_faith_reserve_and_the_outcome(caplog):
+    game = Game(overview=overview(turn=100, faith=30.0))
+    with caplog.at_level(logging.INFO):
+        run(FaithPolicy(), game)
+    assert "Faith 30, reserve 60: at or below the reserve" in caplog.text
+    caplog.clear()
+    game = Game()
+    with caplog.at_level(logging.INFO):
+        run(FaithPolicy(), game)
+    assert "Faith 300, reserve 60: spent on BUILDING_SHRINE in Alpha for 70" in caplog.text

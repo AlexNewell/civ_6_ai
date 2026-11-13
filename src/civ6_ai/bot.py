@@ -253,6 +253,7 @@ def build_orchestrator(
     task_db: Path | TaskDB | None = None,
     ledger: BuildLedger | None = None,
     event_log: EventLog | None = None,
+    probes: Any = None,
 ) -> Orchestrator:
     """Wire the handlers to a game. `game` is civ6-mcp's `GameState`, or a fake with its reads.
 
@@ -268,6 +269,7 @@ def build_orchestrator(
     `ledger` is the build ledger, restored from earlier sessions' events (see `build_ledger`). It
     is fed from `bus`, and a gap line is logged each turn. `event_log` is flushed at the end of each
     turn, since it buffers its writes.
+    `probes` is a `ProbeShots` (see `probes`), subscribed to `bus` and run before the events flush.
     """
     defence = DefenceState()  # Which cities are threatened this turn, shared by three policies.
     expansion = ExpansionState()  # Settling fills it. Production and the log line read it.
@@ -298,6 +300,8 @@ def build_orchestrator(
     resolver = BlockerResolver(merged, emit=bus.publish, turn=lambda: watcher.turn)
     ledger = ledger if ledger is not None else BuildLedger()
     ledger.subscribe(bus)
+    if probes is not None:
+        probes.subscribe(bus)
     handlers: list[Handler] = [
         Monitors(bus),
         *(
@@ -338,6 +342,7 @@ def build_orchestrator(
         DefenceReport(defence),
         BuildTracker(ledger, victory=lambda: production.weights.victory, watcher=watcher),
         resolver,
+        *([probes] if probes is not None and probes.enabled else []),
         *([EventFlush(event_log)] if event_log is not None else []),
     ]
     timer = CallTimer(game)  # Under SharedReads, so it times real calls and not remembered ones.

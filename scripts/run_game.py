@@ -37,6 +37,7 @@ from civ6_ai.preflight import (
     check_tuner,
     report,
 )
+from civ6_ai.probes import PROBE_KINDS, ProbeShots, parse_kinds
 from civ6_ai.saves import disable_mcp_saves, use_real_save_dirs
 from civ6_ai.screenshots import Screenshotter
 from civ6_ai.victory_check import fix_victory_check
@@ -81,8 +82,13 @@ async def play_game(
     turns: int,
     expect_save: str | None = None,
     on_turn: Callable[[TurnRecord], None] | None = None,
+    probe_kinds: list[str] | None = None,
+    probe_overlay: bool = False,
 ) -> GameRun | None:
-    """Play `turns` turns in the open game. None if it is not a standard save (or `expect_save`)."""
+    """Play `turns` turns in the open game. None if it is not a standard save (or `expect_save`).
+
+    `probe_kinds` turns on outcome-triggered probe screenshots (see `civ6_ai.probes`); off if empty.
+    """
     # Preflight: the screenshot warning must show now, not at a stop. Patches fail fast.
     early = [
         check_screenshot_imports(),
@@ -140,6 +146,12 @@ async def play_game(
         first_turn = (await game.get_game_overview()).turn
         game_id = game_id_for_new_session(ROOT / "runs", name, first_turn, f"{name}_{stamp}")
         shots = Screenshotter(ROOT / "runs" / "screenshots", game_id)
+        probes = ProbeShots(
+            shots,
+            connection.execute_write,
+            kinds=probe_kinds or [],
+            overlay=probe_overlay,
+        )
         ledger = BuildLedger()
         restored = ledger.restore(
             earlier_event_files(
@@ -160,6 +172,7 @@ async def play_game(
             wars_state=ROOT / "runs" / f"{name}_wars.json",  # Same for every restart of this game.
             ledger=ledger,
             event_log=event_log,
+            probes=probes,
         )
         reason = await orchestrator.play(turns)
     finally:
@@ -173,8 +186,8 @@ async def play_game(
     return GameRun(name, reason, turn_log, decisions)
 
 
-async def run(turns: int) -> int:
-    played = await play_game(turns)
+async def run(turns: int, probe_kinds: list[str] | None = None, overlay: bool = False) -> int:
+    played = await play_game(turns, probe_kinds=probe_kinds, probe_overlay=overlay)
     if played is None:
         return 1
     name, reason, turn_log, decisions = (
@@ -208,7 +221,23 @@ async def run(turns: int) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--turns", type=int, default=20, help="turns to play")
-    return asyncio.run(run(parser.parse_args().turns))
+    parser.add_argument(
+        "--probe",
+        default="",
+        metavar="KIND[,KIND]",
+        help=f"take probe screenshots when these outcomes happen; one of {sorted(PROBE_KINDS)}",
+    )
+    parser.add_argument(
+        "--probe-overlay",
+        action="store_true",
+        help="also open the game's placement view for a placement probe (unverified live)",
+    )
+    args = parser.parse_args()
+    try:
+        kinds = parse_kinds(args.probe)
+    except ValueError as error:
+        parser.error(str(error))
+    return asyncio.run(run(args.turns, kinds, args.probe_overlay))
 
 
 if __name__ == "__main__":

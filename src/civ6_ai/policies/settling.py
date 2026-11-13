@@ -459,12 +459,12 @@ class SettlingPolicy:
             )
             if c.rejected is None
         ]
-        self.expansion = ExpansionState(
-            survey_turn=turn,
-            safe_sites=len(sites),
-            best_site_score=max((c.site_score for c in sites), default=None),
-            settlers_on_map=sum(1 for u in units if u.unit_type == SETTLER),
-        )
+        # Updated in place: production and the log line hold this same object.
+        state = self.expansion
+        state.survey_turn = turn
+        state.safe_sites = len(sites)
+        state.best_site_score = max((c.site_score for c in sites), default=None)
+        state.settlers_on_map = sum(1 for u in units if u.unit_type == SETTLER)
 
     def _candidates(
         self,

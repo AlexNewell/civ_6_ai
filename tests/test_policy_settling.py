@@ -5,6 +5,7 @@ import logging
 from civ_mcp import lua as lq
 
 from civ6_ai.orchestrator import Handler
+from civ6_ai.policies.expansion import ExpansionState
 from civ6_ai.policies.settling import (
     SettlingPolicy,
     SettlingSettings,
@@ -717,3 +718,10 @@ def test_survey_with_a_scout_only_still_counts_sites():
     policy = SettlingPolicy()
     run(policy, game)
     assert policy.expansion.safe_sites == 1 and policy.expansion.settlers_on_map == 0
+
+
+def test_survey_updates_the_shared_state_in_place():
+    shared = ExpansionState()
+    game = make_game([settler()], cities=[alpha()], sites=[site(14, 10, food=40)])
+    run(SettlingPolicy(expansion=shared), game)
+    assert shared.survey_turn == 1 and shared.safe_sites == 1

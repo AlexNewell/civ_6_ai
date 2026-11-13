@@ -234,3 +234,13 @@ def test_report_lists_probe_shots(tmp_path):
     table = probe_report.markdown(probe_report.load(tmp_path, "g"))
     assert "DISTRICT_CAMPUS" in table and "Ur" in table and "placement" in table
     assert probe_report.markdown([]) == "No probe screenshots found."
+
+
+def test_dedup_survives_a_restart(tmp_path):
+    probes, bus, *_ = make(tmp_path)
+    bus.publish(refused(turn=10))
+    run(probes)
+    again, bus2, *_ = make(tmp_path)  # A new session of the same game.
+    bus2.publish(refused(turn=20))
+    run(again)
+    assert len(jpgs(tmp_path)) == 1

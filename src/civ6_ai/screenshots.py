@@ -52,6 +52,10 @@ class Screenshotter:
         """How many of this game's screenshots are probe shots."""
         return len(list(self._dir.glob(f"{self._game_id}_T*_probe-*.jpg")))
 
+    def probe_sidecars(self) -> list[Path]:
+        """The sidecar files of this game's probe shots, from earlier sessions too."""
+        return sorted(self._dir.glob(f"{self._game_id}_T*_probe-*.json"))
+
     def probe_room(self, probe_cap: int) -> int:
         """Probe shots still allowed: under the probe cap and never into the stop reserve."""
         return min(probe_cap - self.probe_count(), self._cap - self.count() - RESERVED_FOR_STOPS)

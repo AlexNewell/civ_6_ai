@@ -259,6 +259,17 @@ class ProbeShots:
         self._blocked_turns: set[int] = set()
         self._shot_turns: set[int] = set()
         self.seconds: list[float] = []
+        self._restore_seen()
+
+    def _restore_seen(self) -> None:
+        """Keys already shot by earlier sessions of this game, so a restart doesn't repeat them."""
+        for path in self.shots.probe_sidecars():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                key = (data.get("city") or str(data["city_id"]), data["item"], data["reason_class"])
+            except (OSError, ValueError, KeyError):
+                continue
+            self._seen.add(key)
 
     @property
     def enabled(self) -> bool:

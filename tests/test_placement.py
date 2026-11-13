@@ -880,3 +880,89 @@ def test_the_chain_logs_buy_failed_place_when_the_game_still_has_no_tile(caplog)
     )
     assert picked is None or picked.item != "DISTRICT_HARBOR"
     assert "action=buy_failed_place" in caplog.text
+
+
+def test_a_saving_target_is_dropped_when_an_owned_tile_becomes_available():
+    game, reads = setup(["PTILE|7|7|150|5|0"])
+    p, c = planner_at(budget=100, income=50), city()
+    assert not consider(p, game, reads, c, item="DISTRICT_HARBOR")
+    assert (c.city_id, "DISTRICT_HARBOR") in p.book.targets
+    # Border growth supplies an owned tile as good as the bought one would be.
+    game, reads = setup(["PTILE|7|7|150|5|0", "POWN|5|5|0|1"])
+    assert not consider(p, game, reads, c, item="DISTRICT_HARBOR", offered=[OwnedTile(5, 5, 5)])
+    assert p.book.targets == {}
+
+
+def test_starting_the_item_drops_its_saving_target():
+    conn = Conn(sig={0: "1"})
+    game = PickGame([lq_option("DISTRICT", "DISTRICT_HARBOR", turns=1)], conn=conn)
+    game.districts = [lq.DistrictPlacement(5, 5, {}, 1, "Plains")]
+    planner = planner_at()
+    planner.book.add(SavingTarget(65536, "Alpha", "DISTRICT_HARBOR", 7, 7, 100, 100))
+    run(
+        choose_for_city(
+            game,
+            city(),
+            run(_read_options(game)),
+            ProductionContext(turn=100, num_cities=4, builders=4, recon=1, army=8),
+            ProductionWeights(),
+            memory=RefusalMemory(),
+            reads=PlacementReads(game),
+            planner=planner,
+        )
+    )
+    assert planner.book.targets == {}
+
+
+def test_the_item_is_placed_on_the_tile_that_was_bought_not_the_best_raw_adjacency():
+    # The owned +5 tile has displacement 3 (net 2); the bought +4 tile is clean (net 4).
+    conn = Conn(sig={0: "1"}, plan=["PTILE|7|7|50|4|0", "POWN|5|5|3|1"])
+
+    class Chain(PickGame):
+        async def purchase_tile(self, city_id, x, y):
+            self.districts = [
+                lq.DistrictPlacement(5, 5, {}, 5, "Plains"),
+                lq.DistrictPlacement(x, y, {}, 4, "Plains"),
+            ]
+            return f"OK:TILE_PURCHASED|({x},{y})|cost:50"
+
+        async def set_city_production(self, city_id, item_type, item_name, x=None, y=None):
+            self.set_calls.append((item_name, x, y))
+            return f"PRODUCING|{item_name}|5"
+
+    game = Chain(
+        [lq_option("DISTRICT", "DISTRICT_HARBOR", turns=1)],
+        districts=[lq.DistrictPlacement(5, 5, {}, 5, "Plains")],
+        conn=conn,
+    )
+    run(
+        choose_for_city(
+            game,
+            city(),
+            run(_read_options(game)),
+            ProductionContext(turn=100, num_cities=4, builders=4, recon=1, army=8),
+            ProductionWeights(),
+            memory=RefusalMemory(),
+            reads=PlacementReads(game),
+            planner=planner_at(),
+        )
+    )
+    assert game.set_calls == [("DISTRICT_HARBOR", 7, 7)]
+
+
+def test_gold_does_not_buy_planned_tiles_while_saving_for_an_upgrade():
+    book = PlanBook()
+    book.add(target(cost=50))
+    unit = fx.unit_info(
+        unit_id=1,
+        unit_index=1,
+        can_upgrade=True,
+        upgrade_target="UNIT_SWORDSMAN",
+        upgrade_cost=200,
+    )
+    game = TileGame(
+        units=[unit],
+        overview=fx.overview(turn=100, gold=150, gold_per_turn=20, num_cities=2),
+    )
+    gold_run(game, book)
+    assert game.bought == []

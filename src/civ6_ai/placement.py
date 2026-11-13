@@ -720,6 +720,7 @@ class Planner:
             del self._failed[key]
         available = self._available(city.city_id, item, offered)
         if available and item not in ADJACENCY_DISTRICTS:
+            self.book.drop(city.city_id, item)
             return False  # It has a tile, and a better one only counts for adjacency.
         read = await reads.plan_read(
             city.city_id, category, item, tuple((t.x, t.y) for t in offered)
@@ -739,6 +740,8 @@ class Planner:
         taken = {*self._claimed, *self.book.claimed_by_others(city.city_id)}
         tiles = [t for t in read.tiles if (t.x, t.y) not in taken]
         plan = decide(tiles, owned, self.budget, self.income)
+        if plan is None or plan.action != "save":
+            self.book.drop(city.city_id, item)  # An older saving target no longer applies.
         if plan is None:
             return False
         self._log(city, item, plan)

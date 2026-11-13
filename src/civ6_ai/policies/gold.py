@@ -403,6 +403,8 @@ class GoldPolicy:
         """Buy the tile a district or wonder is waiting for, or make it the saving target."""
         if self.defence is not None and self.defence.any:
             return  # A threatened city's defence comes before any tile.
+        if turn.target is not None:
+            return  # An earlier saving target (an upgrade) comes first.
         bought_for: set[int] = set()
         for target in self.plans.current(now):
             if turn.refused_out:

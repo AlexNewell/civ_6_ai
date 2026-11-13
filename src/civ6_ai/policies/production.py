@@ -696,6 +696,7 @@ async def _start(
     could buy) goes through the planner, which may buy a tile; the advisor is then asked again.
     """
     trace = trace if trace is not None else StartTrace()
+    bought: tuple[int, int] | None = None
     if option.is_repair:
         trace.tile = (option.repair_x, option.repair_y)
         return await game.set_city_production(
@@ -712,10 +713,13 @@ async def _start(
                 if not isinstance(placements, list):
                     return _advisor_failed(option.item, placements)
                 await plan.verify(city, option, [OwnedTile(p.x, p.y, 0) for p in placements])
+                bought = plan.bought_tile
         trace.placements = len(placements)
         if not placements:
             return f"ERR:NO_PLACEMENT|{option.item}: no valid tile"
         best = min(placements, key=lambda p: (-p.total_adjacency, p.x, p.y))
+        if bought is not None:  # The tile was bought for its net value, so it is the one used.
+            best = next((p for p in placements if (p.x, p.y) == bought), best)
         trace.tile = (best.x, best.y)
         return await game.set_city_production(
             city.city_id, option.category, option.item, best.x, best.y
@@ -733,10 +737,13 @@ async def _start(
                 if not isinstance(placements, list):
                     return _advisor_failed(option.item, placements)
                 await plan.verify(city, option, [OwnedTile(p.x, p.y, 0) for p in placements])
+                bought = plan.bought_tile
         trace.placements = len(placements)
         if not placements:
             return f"ERR:NO_PLACEMENT|{option.item}: no valid tile"
         best = min(placements, key=lambda p: (p.displacement_score, p.x, p.y))
+        if bought is not None:
+            best = next((p for p in placements if (p.x, p.y) == bought), best)
         trace.tile = (best.x, best.y)
         return await game.set_city_production(
             city.city_id, option.category, option.item, best.x, best.y
@@ -757,6 +764,11 @@ class PlanContext:
         return await self.planner.consider(
             game, self.reads, city, option.category, option.item, offered
         )
+
+    @property
+    def bought_tile(self) -> tuple[int, int]:
+        x, y, _ = self.planner._bought_at
+        return x, y
 
     async def verify(self, city: City, option: ProductionChoice, offered: list[OwnedTile]) -> None:
         """After a purchase: log `buy_failed_place` if the game did not offer the bought tile."""
@@ -835,6 +847,8 @@ async def choose_for_city(
             placed = option.category == "DISTRICT" or trace.placements is not None
             if planner is not None and trace.tile is not None and placed and not option.is_repair:
                 planner.reserve(city.city_id, option.item, *trace.tile)
+            if planner is not None:
+                planner.book.drop(city.city_id, option.item)  # Started: no tile to save for.
             return option
         log.info("%s can't build %s: %s", city.name, option.item, result[:120])
         refusal = is_refusal(result)

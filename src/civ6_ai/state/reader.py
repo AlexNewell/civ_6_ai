@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Sized
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
 from civ6_ai.state.fog import BARBARIAN_ID, is_hidden_stealth_unit
@@ -666,6 +667,89 @@ async def _rival_city_visibility(
                     t.visibility == "visible" and (t.x, t.y) == (city.x, city.y) for t in tiles
                 )
     return visible
+
+
+# Every city of another player on a tile we have revealed, fogged or not, and every revealed tile
+# in another player's borders. A human sees these on the map; `get_diplomacy` covers met majors
+# only and `read_rivals` then keeps only cities on a tile visible this turn, so city-states and
+# cities in the fog were missing from the loyalty estimate (Run 12: Tikal founded with no rival
+# city known, game pressure -13 a turn). One call.
+_KNOWN_CITIES_LUA = """
+local me = Game.GetLocalPlayer()
+local vis = PlayersVisibility[me]
+for i = 0, 62 do
+    local p = Players[i]
+    if i ~= me and p and p:IsAlive() and not p:IsBarbarian() then
+        for _, c in p:GetCities():Members() do
+            local x, y = c:GetX(), c:GetY()
+            if vis:IsRevealed(x, y) then
+                local okc, cap = pcall(function() return c:IsCapital() end)
+                print("KCITY|" .. i .. "|" .. x .. "|" .. y .. "|" .. c:GetPopulation() .. "|"
+                    .. ((okc and cap) and 1 or 0) .. "|" .. (vis:IsVisible(x, y) and 1 or 0))
+            end
+        end
+    end
+end
+local owned = {}
+for idx = 0, Map.GetPlotCount() - 1 do
+    local plot = Map.GetPlotByIndex(idx)
+    local o = plot:GetOwner()
+    if o ~= -1 and o ~= me and vis:IsRevealed(plot:GetX(), plot:GetY()) then
+        owned[o] = owned[o] or {}
+        table.insert(owned[o], plot:GetX() .. "," .. plot:GetY())
+    end
+end
+for o, tiles in pairs(owned) do
+    print("BORDER|" .. o .. "|" .. table.concat(tiles, ";"))
+end
+print("---END---")
+"""
+
+
+@dataclass(frozen=True)
+class KnownCity:
+    owner: int
+    x: int
+    y: int
+    pop: int
+    capital: bool
+    visible: bool
+
+
+@dataclass(frozen=True)
+class KnownMap:
+    cities: tuple[KnownCity, ...]
+    border_tiles: tuple[tuple[int, int, int], ...]  # (owner, x, y)
+
+
+def parse_known_cities(output: str) -> KnownMap:
+    cities, borders = [], []
+    for line in output.splitlines():
+        parts = line.strip().split("|")
+        try:
+            if parts[0] == "KCITY" and len(parts) >= 7:
+                cities.append(
+                    KnownCity(
+                        int(parts[1]),
+                        int(parts[2]),
+                        int(parts[3]),
+                        int(parts[4]),
+                        parts[5] == "1",
+                        parts[6] == "1",
+                    )
+                )
+            elif parts[0] == "BORDER" and len(parts) >= 3:
+                for tile in parts[2].split(";"):
+                    x, y = tile.split(",")
+                    borders.append((int(parts[1]), int(x), int(y)))
+        except ValueError:
+            continue
+    return KnownMap(tuple(cities), tuple(borders))
+
+
+async def read_known_cities(game) -> KnownMap:
+    """Rival cities and borders on revealed tiles. `game` needs `execute_lua`."""
+    return parse_known_cities(await game.execute_lua(_KNOWN_CITIES_LUA, "ingame"))
 
 
 async def read_threats(game: GameReads) -> tuple[Threat, ...]:

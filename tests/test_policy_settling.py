@@ -105,7 +105,7 @@ def barbarian(x, y):
 
 
 def alpha():
-    return city_info(x=10, y=10)
+    return city_info(x=10, y=10, buildings=[])
 
 
 def test_policy_is_a_turn_handler():
@@ -1006,3 +1006,102 @@ def test_default_safe_floor_refuses_the_run_11_chichen_itza_site():
     # Founded on a safe rate of 1.9 (estimate +16.5), it read -27 a turn and flipped.
     assert SettlingSettings().loyalty_reject_safe > 1.9
     assert SettlingSettings().loyalty_reject_safe <= 9.0  # Every city that held was at 9 or more.
+
+
+# Run 12 (STD_T1_01): Tikal at (61,20), the game's breakdown on turn 84. Pressure -13.28, from
+# these sources (owner, x, y, pop, capital).
+TIKAL = (61, 20)
+TIKAL_OWN = [(64, 22, 3), (63, 27, 2), (66, 25, 3, True)]
+TIKAL_RIVALS = [
+    (56, 19, 7, True),
+    (59, 14, 2),
+    (55, 15, 4),
+    (53, 18, 2),
+    (63, 11, 13, True),
+]
+
+
+def test_tikal_pressure_matches_the_game_breakdown():
+    s = SettlingSettings(map_width=84)
+    # The game said -13.28 on turn 84 (the new city counted as pop 1 on our side).
+    assert loyalty_rate(*TIKAL, TIKAL_OWN, TIKAL_RIVALS, s) == pytest.approx(-13.28, abs=0.2)
+
+
+def test_the_capital_weight_matters():
+    s = SettlingSettings(map_width=84)
+    plain = [(c[0], c[1], c[2]) for c in TIKAL_RIVALS]
+    assert loyalty_rate(*TIKAL, TIKAL_OWN, plain, s) > loyalty_rate(
+        *TIKAL, TIKAL_OWN, TIKAL_RIVALS, s
+    )
+
+
+def test_tikal_is_refused_when_the_rivals_are_known_and_passed_when_they_are_not():
+    s = SettlingSettings(map_width=84)
+    own = [(66, 25, 3, True), (64, 22, 3), (63, 27, 1)]
+    assert safe_loyalty_rate(*TIKAL, own, [], s) >= 9  # What the bot saw: +17.
+    assert safe_loyalty_rate(*TIKAL, own, TIKAL_RIVALS, s) < s.loyalty_reject_safe
+
+
+KNOWN_LUA_OUTPUT = """KCITY|5|56|19|7|1|0
+KCITY|5|59|14|2|0|1
+KCITY|2|63|11|13|0|0
+BORDER|5|57,19;58,19;59,15
+BORDER|9|70,5;71,5
+---END---"""
+
+
+def test_known_city_output_is_parsed():
+    from civ6_ai.state.reader import parse_known_cities
+
+    known = parse_known_cities(KNOWN_LUA_OUTPUT)
+    assert [(c.owner, c.x, c.y, c.pop, c.capital, c.visible) for c in known.cities] == [
+        (5, 56, 19, 7, True, False),
+        (5, 59, 14, 2, False, True),
+        (2, 63, 11, 13, False, False),
+    ]
+    assert (9, 71, 5) in known.border_tiles and len(known.border_tiles) == 5
+
+
+class LuaGame(ActionGame):
+    def __init__(self, output, **overrides):
+        super().__init__(**overrides)
+        self.output = output
+        self.lua_calls = 0
+
+    async def execute_lua(self, code, context="gamecore"):
+        self.lua_calls += 1
+        return self.output
+
+
+def test_fogged_cities_capitals_and_unseen_borders_feed_the_estimate():
+    game = LuaGame(
+        KNOWN_LUA_OUTPUT,
+        units=[settler()],
+        cities=[alpha()],
+        settle=[site(16, 10, food=40)],
+        overview=overview(turn=1, num_cities=1),
+        strategic=lq.StrategicMapData([], []),
+    )
+    policy = SettlingPolicy()
+    run(policy, game)
+    cities = policy._rival_cities
+    assert game.lua_calls == 1
+    assert (56, 19, 5, True) in cities  # Fogged, never seen: default population, a capital.
+    assert (59, 14, 2) in cities  # Visible: its real population.
+    assert (63, 11, 5) in cities  # Fogged.
+    assert (70, 5, 3) in cities  # Phantom for the unexplained border; the Sumerian ones explained.
+    assert len(cities) == 4
+
+
+def test_no_lua_read_when_nothing_needs_the_rivals():
+    game = LuaGame(
+        KNOWN_LUA_OUTPUT,
+        units=[],
+        cities=[alpha()],
+        overview=overview(turn=1, num_cities=1),
+        strategic=lq.StrategicMapData([], []),
+    )
+    policy = SettlingPolicy()
+    policy.expansion.target_cities = 1
+    run(policy, game)
+    assert game.lua_calls == 0

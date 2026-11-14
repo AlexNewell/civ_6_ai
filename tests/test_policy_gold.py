@@ -605,6 +605,20 @@ def test_the_occupant_goes_to_the_owned_tile_farthest_from_the_enemy():
     assert game.moves and game.moves[0][1:] == (9, 10)  # West, away from the unit at (12,10).
 
 
+def test_the_occupant_never_steps_onto_our_scout():
+    scout = fx.unit_info(
+        unit_id=9, unit_index=9, unit_type="UNIT_SCOUT", x=9, y=10,
+        moves_remaining=0, combat_strength=10,
+    )  # fmt: skip
+    game = WarGame(
+        units=[_holder(5), scout],
+        production=[option("UNIT_FIELD_CANNON", 880, category="UNIT")],
+        threats=[fx.threat_info(x=12, y=10)],
+    )
+    _run_war(game)
+    assert game.moves and game.moves[0][1:] != (9, 10)  # The farthest tile, but the scout holds it.
+
+
 def test_no_room_is_made_outside_a_threatened_city():
     game = WarGame(
         units=[_holder(5)], production=[option("UNIT_FIELD_CANNON", 880, category="UNIT")]

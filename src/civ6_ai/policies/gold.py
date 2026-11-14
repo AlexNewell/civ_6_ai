@@ -60,6 +60,7 @@ from civ6_ai.policies.production import (
     rank_production,
     score,
 )
+from civ6_ai.policies.settling import SCOUT
 from civ6_ai.stacking import StackBlocks
 from civ6_ai.state import City, Unit
 from civ6_ai.state import read_area as _read_area
@@ -568,7 +569,8 @@ class GoldPolicy:
     ) -> list[tuple[Unit, tuple[int, int]]] | None:
         """A tile for each occupant, or None when there are not enough safe ones."""
         owner = next((t.owner_id for t in area if (t.x, t.y) == (city.x, city.y)), None)
-        taken = {(u.x, u.y) for u in units if holds_tile(u)}
+        # A scout is not ordered by military, but the game still won't stack a land unit on it.
+        taken = {(u.x, u.y) for u in units if holds_tile(u) or u.unit_type == SCOUT}
         ground = []
         for tile in area:
             if hex_distance(city.x, city.y, tile.x, tile.y) != 1 or (tile.x, tile.y) in taken:

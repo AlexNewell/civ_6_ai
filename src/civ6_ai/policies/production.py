@@ -438,6 +438,9 @@ def _unit_score(
             or city.pop < _SETTLER_MIN_POP
             or ctx.num_cities + ctx.settlers >= w.target_cities
             or ctx.settlers >= in_flight_cap
+            # Run 11: a settler with no site was built five times and disbanded four. Only the
+            # boost used to read this; now no fresh survey site means no settler at all.
+            or not ctx.sites_ok
         ):
             return 0.0
         return (_BEHIND_SETTLER_SCORE if boosted else 14.0) * w.expansion
@@ -951,6 +954,7 @@ class CityProductionPolicy:
             idle_builders=demand.idle if demand is not None else 0,
             spare_jobs=demand.spare_jobs if demand is not None else None,
         )
+        self.expansion.target_cities = self.weights.target_cities
         return replace(context, sites_ok=self.expansion.sites_ok(empire.turn))
 
     async def assign(self, game: ProductionGame) -> list[str]:

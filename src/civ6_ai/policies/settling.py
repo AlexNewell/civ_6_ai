@@ -81,6 +81,14 @@ class SettlingSettings:
     min_site_score: float = 50.0
     min_city_distance: int = 4  # The game refuses a city within 3 tiles of another.
     max_city_distance: int = 8  # From the nearest own city, so the empire stays compact.
+    # Run 11: the near land was taken and every site left within reach was under a rival's pull,
+    # while sites 9 to 14 tiles out (loyalty rate +20, safe +17, score 174) were refused as "too
+    # far" and four settlers were disbanded. A site beyond `max_city_distance` and within
+    # `far_city_distance` competes, minus `far_penalty` a tile past the normal limit, but only
+    # where the safe loyalty rate is at least `far_min_safe_rate` (no rival near).
+    far_city_distance: int = 14
+    far_penalty: float = 6.0
+    far_min_safe_rate: float = 8.0
     travel_turn_cost: float = 6.0  # Score given up for each turn spent walking to a site.
     # Site score. The weights follow the ones civ6-mcp ranks its list with, minus its hidden terms.
     food_weight: float = 2.0
@@ -129,7 +137,10 @@ class SettlingSettings:
     #    `loyalty_fog_distance` tiles. Rival-owned tiles are not in the settle scan, so this is the
     #    only stand-in for them.
     loyalty_fog_distance: int = 8
-    loyalty_reject_safe: float = 0.0  # Reject a site whose safe rate is below this.
+    # Run 11: every city founded on a safe rate of 9 or more held; Chichen Itza, founded on 1.9
+    # (estimate +16.5), read -27 a turn and was lost twice. So the floor sits below the lowest safe
+    # success and above the failure.
+    loyalty_reject_safe: float = 4.0  # Reject a site whose safe rate is below this.
     loyalty_comfort_rate: float = 8.0  # A safe rate under this costs score.
     loyalty_safe_penalty_weight: float = 2.0  # Score lost per point of safe rate under comfort.
     rival_city_default_pop: int = 5  # A rival city seen but never with its population read.
@@ -491,11 +502,22 @@ class SettlingPolicy:
         # still remembered when one can.
         cities = await read_cities(game)
         rival_cities = await self._remember_rivals(game, cities)
-        if not settlers and not scouts:
+        # With no settler and no scout the survey used to go stale, and production read a stale
+        # survey as "sites unknown, ok" and built settlers for a map with no site (Run 11: four
+        # settlers built, none used). Survey every turn while below the city target; it is
+        # re-checked as the map changes, not on a timer.
+        below_target = bool(cities) and len(cities) < self.expansion.target_cities
+        if not settlers and not scouts and not below_target:
             return
         turn = (await game.get_game_overview()).turn
-        threats = await read_threats(game)
-        exploration = await read_exploration(game)
+        try:
+            threats = await read_threats(game)
+            exploration = await read_exploration(game)
+        except Exception:
+            if settlers or scouts:
+                raise
+            log.warning("Survey read failed; production keeps its last survey", exc_info=True)
+            return
         danger = _Danger(threats, self.settings.map_width)
         city_tiles = [(c.x, c.y) for c in cities]
         self._own_cities = [(c.x, c.y, c.pop) for c in cities]
@@ -643,7 +665,16 @@ class SettlingPolicy:
             elif not first_city and site_score < s.min_site_score:
                 rejected = "below minimum site score"
             elif nearest_own is not None and nearest_own > s.max_city_distance:
-                rejected = "too far from our cities"
+                if (
+                    nearest_own <= s.far_city_distance
+                    and safe >= s.far_min_safe_rate
+                    and not first_city
+                ):
+                    site_score -= s.far_penalty * (nearest_own - s.max_city_distance)
+                    if site_score < s.min_site_score:
+                        rejected = "below minimum site score"
+                else:
+                    rejected = "too far from our cities"
             path_threat = rejected is None and danger.on_path(
                 (settler.x, settler.y), (site.x, site.y), s.threat_radius
             )

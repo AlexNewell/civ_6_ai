@@ -49,3 +49,7 @@ def test_handler_logs_one_line_with_city_and_settler_counts(caplog):
     assert len(lines) == 1
     assert "cities=2" in lines[0] and "settlers_building=1" in lines[0]
     assert "best_site=unknown" in lines[0]
+
+
+def test_state_carries_the_city_target_for_the_survey_gate():
+    assert ExpansionState().target_cities == 6

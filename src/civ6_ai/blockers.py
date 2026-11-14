@@ -36,6 +36,11 @@ MAX_END_TURN_RETRIES = 8  # Enough for all five opponents to interrupt one turn,
 WATCH_FIRST_SECONDS = 10.0
 WATCH_EVERY_SECONDS = 10.0
 _CAN_END_TURN_LUA = f'print("CAN_END_TURN|" .. tostring(UI.CanEndTurn())); print("{SENTINEL}")'
+_OPEN_TURN_LUA = (
+    'print("OPEN_TURN|" .. tostring(Game.GetCurrentGameTurn()) .. "|" '
+    ".. tostring(UI.CanEndTurn())); "
+    f'print("{SENTINEL}")'
+)
 MAX_DIPLOMACY_ROUNDS = 4  # A first meeting takes 2-3 rounds.
 
 _NOTHING_CHOSEN = "None"  # civ6-mcp's value when no tech or civic is in progress.
@@ -736,6 +741,12 @@ class ResolvingGame:
         self._last_hold: tuple | None = None
         self._stray_seen: int | None = None
         self._submitted_on: int | None = None  # The turn a held session was last submitted on.
+        # Run 9, turn 30: a first-meeting greeting was answered during the wait and the game then
+        # sat on our own turn with the end-turn request gone. After an answer, a turn still open
+        # on two ticks in a row is asked again, once.
+        self._answered_on: int | None = None
+        self._open_ticks = 0
+        self._reasked_on: int | None = None
         task = asyncio.ensure_future(self._game.end_turn())
         delay = WATCH_FIRST_SECONDS
         try:
@@ -785,6 +796,7 @@ class ResolvingGame:
                 self._stray_seen = None
             if not blockers:
                 self._last_hold = None
+                await self._reask_after_answer(turn_before)
                 return
             # Act only on a hold seen twice with the same turn. As a turn changes, the turn can
             # still read as the old one while the new turn's blockers show. Clearing those ended
@@ -797,6 +809,8 @@ class ResolvingGame:
                     # It is not followed by a new end-turn request: the AI carries on by itself.
                     await self._resolver.resolve(self._game, readers=readers)
                     log.info("Turn %s: answered %s at once", turn_before, sorted(hold[1]))
+                    self._answered_on = turn_before
+                    self._open_ticks = 0
                 return
             await self._resolver.resolve(self._game, readers=readers)
             # A World Congress session can run as the next turn starts, while the turn still reads
@@ -819,6 +833,24 @@ class ResolvingGame:
             raise
         except Exception:
             log.warning("Clearing a held turn failed", exc_info=True)
+
+    async def _reask_after_answer(self, turn_before: int) -> None:
+        """Ask again to end a turn left open after a diplomacy answer, once per turn.
+
+        Only after an answer on this turn, and only when the game's own turn number and
+        `UI.CanEndTurn` both say our turn is still open on two ticks in a row, so a turn that is
+        just changing (the old number can show briefly) is never ended unplayed.
+        """
+        if self._answered_on != turn_before or self._reasked_on == turn_before:
+            return
+        output = await self._game.execute_lua(_OPEN_TURN_LUA, "ingame")
+        still_open = f"OPEN_TURN|{turn_before}|true" in output
+        self._open_ticks = self._open_ticks + 1 if still_open else 0
+        if self._open_ticks < 2:
+            return
+        self._reasked_on = turn_before
+        await self._game.execute_lua(build_end_turn(), "ingame")
+        log.info("Turn %s: still open after a diplomacy answer, asked again to end it", turn_before)
 
     async def _game_over(self) -> bool:
         """Ask the defeat check, if there is one. A check that fails counts as not over."""

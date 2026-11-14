@@ -40,6 +40,35 @@ Written offline against civ6-mcp's source, so none of this has run in a game yet
 | Ranged units are not hit back by melee defenders, and ranged defenders do hit back (`assess_attack` assumes both) | Not reached |
 | `Unit.targets` lists only targets in range with line of sight, and ranged units fire at adjacent targets | Not reached |
 
+## Run 9: turns 1 to 330, with Batch B and the placement redesign (PRs 193 to 198)
+
+STD_T1_01 from turn 1 on main, 2026-11-14, in two sessions. Turns 1 to 30 ran in `20261114T061230Z`, which hung on turn 30 after a diplomacy answer (fixed by PR 198). Turns 30 to 330 ran in `20261114T063748Z`, with `--probe placement`, no hands-on help and no stop other than game over. Result: defeat at the turn limit. `PlayerStatus(alive=True, winning_team=1, cities=6)`: Germany again, on score. The final score was 902 on turn 329 (Run 8: 922). $0.00 in model spend. Decision time mean 11.7 s (p90 16.6 s), end-turn wait mean 12.1 s.
+
+| Check | Result |
+|---|---|
+| Ask again after a diplomacy answer (198) | Pass: fired on turns 233 and 246, and the next turns followed in order. No skipped turn all game. |
+| Preflight shows 9 patches; no snapshot Lua error (195) | Pass. |
+| No false `blocked` stop (195) | Pass. |
+| Production refused under 30% (187) | Fail: 507 of 818 (62%; Run 8: 64%). Causes found and fixed in PR 201 (below). |
+| Harbors built (187) | 1 Harbor. 79 Harbor refusals, from the district population cap, not the water filter. |
+| `placement_plan` buy-then-place (196) | Fail: all 226 plans were `rules_mismatch`, so no tile was ever bought (PR 201). |
+| Probe screenshots (197) | Pass: 12 placement probes, the cap, with sidecars; `scripts/probe_report.py` lists them. |
+| Faith idle at most 250 (194) | Fail: up to 4,519; 18 purchases in 247 turns above the reserve (PR 200). |
+| Gold used | Fail: nothing bought on 78% of turns above the reserve (PR 200). |
+| Builders idle under 50% | Fail: 76% (PR 200 stops buying Builders while any is idle). |
+| Great people | Gate fail: 6 waiting at once, 4 wasted. |
+| No city lost (174 to 176) | Fail: 3 lost to loyalty. Adab and Chichen Itza on turn 127, Copan on turn 232 (PR 199). |
+| 6 cities by turn 150 (180) | Pass: 6 on turn 150, 7 at most, 6 at the end. |
+| Score against Run 8 | Level: 153, 277, 452, 623 and 790 on turns 100, 150, 200, 250 and 290 (Run 8: 139, 272, 432, 612 and 796). |
+
+What the finished game showed (read-only Lua on the turn-330 save):
+
+- **Wonder refusals (207):** civ6-mcp's wonder advisor merges the game's `MOUNTAIN_PLOTS` with its valid `PLOTS`, and ranks a bare mountain first. El Mirador's Chichen Itza was offered at (62,19), a mountain, and refused every time.
+- **District "no valid tile" (290):** the game's reason was "Requires Population of N". Cities sat at their district cap (El Mirador: 7 of 7 at population 18), and the bot kept choosing new districts.
+- **The planner never trusted its rules:** civ6-mcp's district advisor prints at most 10 tiles, so cities with more valid tiles always "missed" some. The rules also allowed luxury and strategic resource tiles.
+- **Faith:** Builder purchases refused about 70 times by `STACKING_CONFLICT` (a unit on the city tile), and great people judged "not worth saving for" at 107 faith a turn against a 1,160 cost.
+- **Loyalty:** the Chichen Itza site was founded on a margin of 14, which read 82, 16, 92, 96 and 14 on successive turns as a rival city went in and out of the fog. The game then said -24 a turn.
+
 ## Run 8: turns 1 to 330, with Batch A (issues 174 to 176 and 180)
 
 STD_T1_01 from turn 1 on main at the merge of PRs 190 and 191, 2026-11-13. It ran turns 1 to 291 in one session, then stopped as `blocked` on turn 291, although the game had already advanced to turn 292 (the screenshot shows turn 292). The run was resumed with no reload and played to the turn limit (330). Game over: `PlayerStatus(alive=True, winning_team=5, cities=7)`, so a rival won at the turn limit. Final score read on turn 291: 796. $0.00 in model spend. Decision time mean 10.1 s (8.3 s after the resume).

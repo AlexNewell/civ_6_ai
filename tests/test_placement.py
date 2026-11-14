@@ -44,8 +44,10 @@ def city(city_id=65536, **changes):
 class Conn:
     """A connection that answers each kind of placement Lua with canned lines."""
 
-    def __init__(self, sig="1:5", unlocks=None, diag=None, plan=()):
+    def __init__(self, sig="1:5", unlocks=None, diag=None, plan=(), caps=None, nopop=()):
         self.sig = sig
+        self.caps = caps or {}
+        self.nopop = list(nopop)
         self.unlocks = unlocks or {}
         self.diag = diag
         self.plan = list(plan)
@@ -56,6 +58,8 @@ class Conn:
             self.calls.append("sig")
             lines = [f"PSIG|{c}|{h}|9" for c, h in self._sigs().items()]
             lines += [f"PUNLOCK|{n}|{int(v)}" for n, v in self.unlocks.items()]
+            lines += [f"PCAP|{c}|{v}" for c, v in self.caps.items()]
+            lines += [f"PNOPOP|{n}" for n in self.nopop]
             return lines
         if "PDIAG" in lua:
             self.calls.append("diag")
@@ -1052,3 +1056,118 @@ def test_the_plan_query_reads_the_border_with_pcall():
     assert "GetTurnsUntilExpansion" in lua and "GetNextPlot" in lua and "PBORDER" in lua
     assert placement.parse_plan(["PBORDER|3|7|8"]).border == (3, 7, 8)
     assert placement.parse_plan(["PBORDER|?"]).border is None
+
+
+# ---- Run 9: the wonder advisor's mountains, the district cap, the full tile list ----
+
+
+@pytest.fixture
+def restore_wonder_query(monkeypatch):
+    monkeypatch.setattr(
+        lq, "build_wonder_advisor_query", lq.build_wonder_advisor_query, raising=True
+    )
+
+
+def test_the_wonder_advisor_reads_only_the_games_valid_tiles(restore_wonder_query):
+    # Run 9: the game's targets for Chichen Itza held MOUNTAIN_PLOTS (62,19) beside PLOTS (63,21)
+    # and (65,21); the advisor merged them, ranked the bare mountain first, and the game refused.
+    assert "pairs(targets)" in lq.build_wonder_advisor_query(1, "BUILDING_PYRAMIDS")
+    district_advisor.fix_wonder_advisor()
+    lua = lq.build_wonder_advisor_query(1, "BUILDING_PYRAMIDS")
+    assert "targets[CityOperationResults.PLOTS]" in lua
+    assert "pairs(targets)" not in lua and "MOUNTAIN" not in lua
+    once = lq.build_wonder_advisor_query
+    district_advisor.fix_wonder_advisor()
+    assert lq.build_wonder_advisor_query is once
+
+
+def test_the_district_advisor_reads_only_the_games_valid_tiles_and_keeps_water(restore_query):
+    district_advisor.fix_district_advisor()
+    lua = lq.build_district_advisor_query(1, "DISTRICT_HARBOR")
+    assert "targets[CityOperationResults.PLOTS]" in lua and "pairs(targets)" not in lua
+    assert "waterOk" in lua
+
+
+def test_plots_only_raises_when_the_loop_is_missing():
+    with pytest.raises(RuntimeError):
+        district_advisor.plots_only("local targets = {}")
+
+
+def test_the_district_cap_is_read_from_the_signature_query():
+    # El Mirador on turn 330: 7 zoned of 7 allowed. The game said "Requires Population of 19"
+    # for a Holy Site, while the Theater (already placed) and a Neighborhood (exempt) could go.
+    read = placement.parse_signature_read(
+        [
+            "PSIG|131073|5|9",
+            "PCAP|131073|7|7|DISTRICT_CITY_CENTER,DISTRICT_THEATER",
+            "PCAP|65536|4|5|DISTRICT_CITY_CENTER",
+            "PNOPOP|DISTRICT_NEIGHBORHOOD",
+            "a stray line",
+        ]
+    )
+    cap = read.caps[131073]
+    assert (cap.zoned, cap.allowed) == (7, 7)
+    assert cap.blocks("DISTRICT_HOLY_SITE", read.exempt)
+    assert not cap.blocks("DISTRICT_THEATER", read.exempt)  # Placed already: resuming it is fine.
+    assert not cap.blocks("DISTRICT_NEIGHBORHOOD", read.exempt)  # Does not count.
+    assert not read.caps[65536].blocks("DISTRICT_HOLY_SITE", read.exempt)
+    assert "PCAP|" in placement.build_signatures_query() and "PNOPOP|" in (
+        placement.build_signatures_query()
+    )
+
+
+def test_a_capped_district_is_skipped_without_an_attempt_and_the_next_option_starts():
+    memory = RefusalMemory()
+    conn = Conn(sig={0: "1"}, caps={0: "3|3|DISTRICT_CITY_CENTER"})
+    game = PickGame(
+        [
+            lq_option("DISTRICT", "DISTRICT_HARBOR", turns=1),
+            lq_option("BUILDING", "BUILDING_LIBRARY", turns=9),
+        ],
+        districts=[lq.DistrictPlacement(5, 5, {}, 1, "Coast")],
+        conn=conn,
+    )
+    picked = choose(game, memory, PlacementReads(game))
+    assert picked is not None and picked.item == "BUILDING_LIBRARY"
+    assert game.advisor_calls == 0 and game.set_calls == ["BUILDING_LIBRARY"]
+    assert not memory.has(city(), "DISTRICT_HARBOR")  # Not a refusal: nothing to remember.
+
+
+def test_a_district_competes_again_once_the_city_may_hold_one_more():
+    conn = Conn(sig={0: "1"}, caps={0: "3|4|DISTRICT_CITY_CENTER"})
+    game = PickGame(
+        [lq_option("DISTRICT", "DISTRICT_HARBOR", turns=1)],
+        districts=[lq.DistrictPlacement(5, 5, {}, 1, "Coast")],
+        conn=conn,
+    )
+    picked = choose(game, RefusalMemory(), PlacementReads(game))
+    assert picked is not None and picked.item == "DISTRICT_HARBOR"
+
+
+def test_an_unread_cap_never_blocks_a_district():
+    conn = Conn(sig={0: "1"})  # No PCAP line.
+    game = PickGame(
+        [lq_option("DISTRICT", "DISTRICT_HARBOR", turns=1)],
+        districts=[lq.DistrictPlacement(5, 5, {}, 1, "Coast")],
+        conn=conn,
+    )
+    assert choose(game, RefusalMemory(), PlacementReads(game)).item == "DISTRICT_HARBOR"
+
+
+def test_the_plan_query_checks_the_games_full_list_resources_and_owning_city():
+    lua = placement.build_plan_query(1, "DISTRICT", "DISTRICT_CAMPUS", ((3, 4),))
+    # The full list, not the advisor's ten, and the game's own buyable tiles.
+    assert "CityOperationResults.PLOTS" in lua and "PURCHASABLE_PLOTS" in lua
+    assert "PGAMEBUY|" in lua
+    # Run 9: Wine, Iron and Tobacco tiles were predicted valid; only a bonus resource is cleared.
+    assert '~= "RESOURCECLASS_BONUS" then return false' in lua
+    assert "IsResourceVisible(res)" in lua  # An unrevealed resource does not block.
+    # A tile another of our cities owns is that city's, whatever the distance.
+    assert "GetPlotPurchaseCity" in lua
+
+
+def test_the_games_buyable_list_makes_the_candidates_trusted():
+    read = placement.parse_plan(["PGAMEBUY|3", "PMISS|1|1", "PTILE|2|2|50|2|0"])
+    assert not read.agrees and read.trusted and read.game_buy == 3
+    read = placement.parse_plan(["PGAMEBUY|0", "PMISS|1|1"])
+    assert not read.trusted

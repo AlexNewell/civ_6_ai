@@ -170,3 +170,31 @@ def test_a_hopeless_city_gets_no_garrison_and_the_log_says_what_it_needed(caplog
     assert any(a.startswith("accept the loss") for a in seen[0].actions)
     message = next(r.getMessage() for r in caplog.records if "loyalty_response" in r.getMessage())
     assert "needs=+24.0/turn" in message and "with_governor=5.1" in message
+
+
+class BreakdownGame(LoyaltyGame):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.lua: list[str] = []
+
+    async def execute_lua(self, code, context="gamecore"):
+        self.lua.append(code)
+        return (
+            "LB|Pressure from nearby [ICON_Citizen] Citizens|-20\n"
+            "LB|Not following your founded [ICON_Religion] Religion|-3\n"
+            "LP|5|60|20|9|2|-14.5|0\n---END---"
+        )
+
+
+def test_the_game_breakdown_is_logged_once_per_warned_city(caplog):
+    bus, handler, _, _ = make()
+    game = BreakdownGame()
+    warned(bus)
+    with caplog.at_level(logging.INFO, logger="civ6_ai.policies.loyalty"):
+        run(handler, game)
+        handler._last_response.clear()  # Answer again next turn; the breakdown is not re-read.
+        run(handler, game)
+    assert len(game.lua) == 1 and str(CITY_ID) in game.lua[0]
+    lines = [r.getMessage() for r in caplog.records if "loyalty_breakdown" in r.getMessage()]
+    assert len(lines) == 1
+    assert "Religion|-3" in lines[0] and "5|60|20|9|2|-14.5|0" in lines[0]

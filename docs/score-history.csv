@@ -1,0 +1,9 @@
+run,scenario,source,date,outcome,winner,victory_type,final_turn,last_score_turn,last_score,score_per_turn,mean_share,score_50,score_100,score_150,score_200,score_250,score_300,share_50,share_100,share_150,share_200,share_250,share_300,rank_50,rank_100,rank_150,rank_200,rank_250,rank_300,notes
+Run 2,STD_T1_01,manual,,unfinished,,,100,,,,,,,,,,,,,,,,,,,,,,,Stopped at turn 100 by design; no score recorded
+Run 3,STD_T1_01,manual,,unknown,,,318,,,,,,,,,,,,,,,,,,,,,,,Game ended turn 318; the recorded Germany science win is set aside by the owner
+Run 4,STD_T1_01,manual,,lost,Sumeria,culture,325,,,,,,,,,,,,,,,,,,,,,,,Needed hands-on help
+Run 5,STD_T1_01,manual,2026-11-11,lost,Mapuche,,315,,,,,,,,,,,,,,,,,,,,,,,Victory type not in the logs
+Run 6,STD_T1_01,manual,2026-11-12,lost,Germany,,331,,,,,,,,,,,,,,,,,,,,,,,Won at the turn limit on score per the doc; type not logged
+Run 7,STD_T1_01,manual,2026-11-12,lost,Germany,science,309,,,,,,,,,,,,,,,,,,,,,,,
+Run 8,STD_T1_01,manual,2026-11-13,lost,,,330,291,796,,,,139,272,432,612,,,,,,,,,,,,,,"Winner is team 5, not named; checkpoints from docs/live-checks.md"
+Run 9,STD_T1_01,manual,2026-11-14,lost,Germany,score,330,329,902,,,,153,277,452,623,,,,,,,,,,,,,,Checkpoints from docs/live-checks.md

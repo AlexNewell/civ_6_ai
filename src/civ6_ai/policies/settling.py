@@ -26,6 +26,7 @@ from typing import Protocol
 from civ6_ai.blockers import action_succeeded, move_succeeded
 from civ6_ai.policies.expansion import ExpansionState
 from civ6_ai.state import (
+    City,
     Exploration,
     GameReads,
     Threat,
@@ -36,7 +37,7 @@ from civ6_ai.state import (
     read_threats,
     read_units,
 )
-from civ6_ai.state.models import SettleSite
+from civ6_ai.state.models import RivalCity, SettleSite
 from civ6_ai.state.reader import STANDARD_MAP_WIDTH, hex_distance
 
 log = logging.getLogger(__name__)
@@ -429,7 +430,9 @@ class SettlingPolicy:
     # Every rival city seen on a visible tile, by tile, with its last seen population. The game
     # only lists a city while its tile is visible, so the estimate used to swing with the fog:
     # Run 9's Chichen Itza site read 82, 16, 92, 96 and 14 on successive turns.
-    _rival_memory: dict[tuple[int, int], int] = field(default_factory=dict, init=False, repr=False)
+    _rival_memory: dict[tuple[int, int], tuple[int, int]] = field(
+        default_factory=dict, init=False, repr=False
+    )
 
     async def run(self, game: SettlingGame) -> None:
         units = await read_units(game)
@@ -439,26 +442,22 @@ class SettlingPolicy:
         # Run 8: the count stayed at 1 from the turn a settler founded its city to the end of the
         # game, because it was only taken on turns with a settler to move. It is free here.
         self.expansion.settlers_on_map = sum(1 for u in units if u.unit_type == SETTLER)
+        # Sightings are recorded every turn, so a rival city seen while no settler could move is
+        # still remembered when one can.
+        cities = await read_cities(game)
+        rival_cities = await self._remember_rivals(game, cities)
         if not settlers and not scouts:
             return
         turn = (await game.get_game_overview()).turn
         threats = await read_threats(game)
-        cities = await read_cities(game)
         exploration = await read_exploration(game)
         danger = _Danger(threats, self.settings.map_width)
         city_tiles = [(c.x, c.y) for c in cities]
         self._own_cities = [(c.x, c.y, c.pop) for c in cities]
-        self._rival_cities = []
         claimed: set[int] = set()
         self._forget_gone_units(units, turn)
         if settlers:
-            rival_cities = [
-                city for rival in await read_rivals(game) for city in rival.visible_cities
-            ]
             rival_tiles = [(city.x, city.y) for city in rival_cities]
-            for city in rival_cities:
-                self._rival_memory[city.x, city.y] = city.pop
-            self._rival_cities = [(x, y, pop) for (x, y), pop in self._rival_memory.items()]
             if self._first_turn is None and not cities:
                 self._first_turn = turn
             for settler in settlers:
@@ -476,6 +475,22 @@ class SettlingPolicy:
         self._survey(settlers, units, exploration, city_tiles, danger, turn)
         for scout in scouts:
             await self._explore(game, scout, exploration, danger, turn)
+
+    async def _remember_rivals(self, game: SettlingGame, cities: Iterable[City]) -> list[RivalCity]:
+        """Update the rival city memory from what is visible now, and return those sightings.
+
+        A tile now holding a city of ours is dropped (it flipped to us), and a sighting under a
+        different owner replaces the old entry (it changed hands).
+        """
+        seen = []
+        for rival in await read_rivals(game):
+            for city in rival.visible_cities:
+                self._rival_memory[city.x, city.y] = (rival.player_id, city.pop)
+                seen.append(city)
+        for city in cities:
+            self._rival_memory.pop((city.x, city.y), None)
+        self._rival_cities = [(x, y, pop) for (x, y), (_, pop) in self._rival_memory.items()]
+        return seen
 
     def _forget_gone_units(self, units: Iterable[Unit], turn: int) -> None:
         """Drop what is kept per unit once the unit is gone, and any expired set-asides."""

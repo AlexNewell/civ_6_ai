@@ -698,6 +698,36 @@ def test_a_rival_city_that_leaves_view_still_counts():
     assert after.rejected == "likely to flip to a rival (loyalty)"
 
 
+def test_sightings_are_remembered_on_a_turn_no_settler_can_move():
+    game = make_game([settler(moves_remaining=0.0)], cities=[alpha()], sites=[site(16, 10)])
+    policy = SettlingPolicy()
+    run(policy, game)
+    assert policy._rival_memory == {(20, 10): (policy._rival_memory[20, 10][0], 6)}
+    assert policy._rival_cities == [(20, 10, 6)]
+
+
+def test_a_remembered_city_that_flipped_to_us_stops_counting_as_a_rival():
+    game = make_game([settler()], cities=[alpha()], sites=[site(16, 10)])
+    policy = SettlingPolicy()
+    run(policy, game)
+    assert policy._rival_cities == [(20, 10, 6)]
+    game.data["cities"].append(city_info(city_id=9, name="Roma", x=20, y=10))
+    game.data["overview"] = overview(num_cities=2)
+    game.data["civs"][0].visible_cities = []  # Now ours, so no longer listed under Rome.
+    run(policy, game)
+    assert policy._rival_cities == []
+
+
+def test_a_remembered_city_that_changed_owner_takes_the_new_owner():
+    game = make_game([settler()], cities=[alpha()], sites=[site(16, 10)])
+    policy = SettlingPolicy()
+    run(policy, game)
+    old_owner = policy._rival_memory[20, 10][0]
+    game.data["civs"][0].player_id = old_owner + 5
+    run(policy, game)
+    assert policy._rival_memory[20, 10][0] == old_owner + 5
+
+
 def test_a_falling_estimated_rate_costs_score():
     game = make_game([settler()], cities=[alpha()], sites=[site(16, 10, food=40)])
     policy = SettlingPolicy()

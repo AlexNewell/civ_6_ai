@@ -151,7 +151,9 @@ def test_committed_history_backfill():
     assert rows["Run 8"]["score_200"] == "432" and rows["Run 8"]["score_300"] == ""
     assert rows["Run 4"]["winner"] == "Sumeria" and rows["Run 4"]["victory_type"] == "culture"
     assert rows["Run 7"]["final_turn"] == "309"
-    assert all(r["source"] == "manual" for r in rows.values())
+    # The backfilled rows predate per-turn scores; later rows are built from the logs.
+    backfilled = [f"Run {n}" for n in range(2, 11)]
+    assert all(rows[name]["source"] == "manual" for name in backfilled if name in rows)
     # Older runs have outcomes only: no invented scores.
     for name in ("Run 3", "Run 4", "Run 5", "Run 6", "Run 7"):
         assert all(rows[name][f"score_{c}"] == "" for c in CHECKPOINTS)

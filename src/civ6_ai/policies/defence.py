@@ -31,7 +31,8 @@ from civ6_ai.state.reader import STANDARD_MAP_WIDTH, hex_distance
 log = logging.getLogger(__name__)
 
 THREAT_RADIUS = 3  # Tiles. A land unit moves about 2 a turn, so this is one turn of warning.
-WANTED_DEFENDERS = 2  # In the city or on a tile beside it.
+WANTED_DEFENDERS = 2  # In the city or on a tile beside it, with no hostile unit about.
+MAX_WANTED_DEFENDERS = 5  # However many hostile units are near: no city is stacked past this.
 # How a rival that means us harm shows up in civ6-mcp's `diplomatic_state`.
 HOSTILE_STATES = ("DENOUNCED", "UNFRIENDLY", "WAR")
 
@@ -54,8 +55,19 @@ class CityThreat:
         return self.defenders_in + self.defenders_beside
 
     @property
+    def wanted(self) -> int:
+        """Defenders to hold the city: one more than the units near it, between 2 and 5.
+
+        Run 10: five Mapuche units stood beside a city held by two and it fell a turn after the
+        declaration, while production built an Amphitheater and gold bought nothing, because the
+        old count asked for two defenders however many enemies came. A rival's unit near the
+        city counts like a hostile one: it is the same size of force.
+        """
+        return max(WANTED_DEFENDERS, min(self.hostile_units + 1, MAX_WANTED_DEFENDERS))
+
+    @property
     def short(self) -> bool:
-        return self.defenders < WANTED_DEFENDERS
+        return self.defenders < self.wanted
 
 
 @dataclass

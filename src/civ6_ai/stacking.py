@@ -53,3 +53,8 @@ class StackBlocks:
 
     def is_blocked(self, city_id: int, item: str) -> bool:
         return (city_id, item) in self._blocked
+
+    def release(self, city_id: int) -> None:
+        """Forget the blocks of one city, after its tile was cleared."""
+        for key in [k for k in self._blocked if k[0] == city_id]:
+            del self._blocked[key]

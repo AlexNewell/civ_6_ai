@@ -1074,3 +1074,28 @@ def test_a_city_that_starves_again_after_the_reset_keeps_its_food_focus():
         game.data["cities"] = [fx.city_info(food_surplus=surplus, **busy)]
         run(policy.assign(game))
     assert game.focus_calls == [(65536, "food"), (65536, "default"), (65536, "food")]
+
+
+# ----- military readiness (Run 10) -----
+
+
+def test_a_city_short_of_defenders_for_the_enemy_beside_it_builds_a_unit_not_a_building():
+    """The empire's army was large, so no unit scored in a city with five enemies beside it."""
+    ctx = replace(MID, army=15, threatened=frozenset({65536}), short=frozenset({65536}))
+    menu = [
+        option("BUILDING", "BUILDING_AMPHITHEATER", 6),
+        option("UNIT", "UNIT_CROSSBOWMAN", 4),
+    ]
+    ranked = rank_production(city(threats=[threat()]), menu, ctx)
+    assert ranked[0].item == "UNIT_CROSSBOWMAN"
+    held = replace(ctx, short=frozenset())
+    assert rank_production(city(), menu, held)[0].item == "BUILDING_AMPHITHEATER"
+
+
+def test_a_pressed_city_prefers_the_much_stronger_defender_over_the_slightly_faster():
+    ctx = replace(MID, threatened=frozenset({65536}), short=frozenset({65536}))
+    menu = [
+        option("UNIT", "UNIT_CROSSBOWMAN", 4),
+        option("UNIT", "UNIT_PIKE_AND_SHOT", 6),
+    ]
+    assert rank_production(city(threats=[threat()]), menu, ctx)[0].item == "UNIT_PIKE_AND_SHOT"

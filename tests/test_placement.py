@@ -44,10 +44,11 @@ def city(city_id=65536, **changes):
 class Conn:
     """A connection that answers each kind of placement Lua with canned lines."""
 
-    def __init__(self, sig="1:5", unlocks=None, diag=None, plan=(), caps=None, nopop=()):
+    def __init__(self, sig="1:5", unlocks=None, diag=None, plan=(), caps=None, nopop=(), denied=()):
         self.sig = sig
         self.caps = caps or {}
         self.nopop = list(nopop)
+        self.denied = list(denied)
         self.unlocks = unlocks or {}
         self.diag = diag
         self.plan = list(plan)
@@ -60,6 +61,7 @@ class Conn:
             lines += [f"PUNLOCK|{n}|{int(v)}" for n, v in self.unlocks.items()]
             lines += [f"PCAP|{c}|{v}" for c, v in self.caps.items()]
             lines += [f"PNOPOP|{n}" for n in self.nopop]
+            lines += list(self.denied)
             return lines
         if "PDIAG" in lua:
             self.calls.append("diag")
@@ -1171,3 +1173,68 @@ def test_the_games_buyable_list_makes_the_candidates_trusted():
     assert not read.agrees and read.trusted and read.game_buy == 3
     read = placement.parse_plan(["PGAMEBUY|0", "PMISS|1|1"])
     assert not read.trusted
+
+
+NO_ROOM = "No suitable location to zone this district."
+
+
+def test_the_games_verdict_is_read_with_the_signatures():
+    read = placement.parse_signature_read(
+        [
+            f"PDNO|131073|DISTRICT_AQUEDUCT|{NO_ROOM}",
+            "PDNO|131073|DISTRICT_CAMPUS|Requires a population of 5",
+            "PDNO|131073|DISTRICT_HARBOR|Something else entirely",
+            "PDNO|65536|DISTRICT_THEATER|",
+        ]
+    )
+    assert read.denied == {
+        131073: {
+            "DISTRICT_AQUEDUCT": placement.NO_LOCATION,
+            "DISTRICT_CAMPUS": placement.POPULATION,
+        }
+    }  # An unknown or empty reason is not acted on.
+    lua = placement.build_signatures_query()
+    assert "CityManager.CanStartOperation" in lua and "PDNO|" in lua
+    assert "bq:CanProduce(row.Hash, true)" in lua and "HasDistrict(row.Index)" in lua
+
+
+def test_a_district_the_game_says_has_no_location_is_skipped_without_a_refusal():
+    memory = RefusalMemory()
+    conn = Conn(sig={0: "1"}, denied=[f"PDNO|0|DISTRICT_AQUEDUCT|{NO_ROOM}"])
+    game = PickGame(
+        [
+            lq_option("DISTRICT", "DISTRICT_AQUEDUCT", turns=1),
+            lq_option("BUILDING", "BUILDING_LIBRARY", turns=9),
+        ],
+        districts=[],
+        conn=conn,
+    )
+    picked = choose(game, memory, PlacementReads(game))
+    assert picked is not None and picked.item == "BUILDING_LIBRARY"
+    assert game.advisor_calls == 0 and not memory.has(city(), "DISTRICT_AQUEDUCT")
+
+
+def test_a_district_the_game_does_not_deny_is_still_tried():
+    conn = Conn(sig={0: "1"}, denied=["PDNO|0|DISTRICT_HARBOR|Unknown reason"])
+    game = PickGame(
+        [lq_option("DISTRICT", "DISTRICT_HARBOR", turns=1)],
+        districts=[lq.DistrictPlacement(5, 5, {}, 1, "Coast")],
+        conn=conn,
+    )
+    assert choose(game, RefusalMemory(), PlacementReads(game)).item == "DISTRICT_HARBOR"
+
+
+def test_the_signature_covers_only_the_citys_own_tiles_and_its_ring():
+    lua = placement.build_signatures_query()
+    assert "Cities.GetPlotPurchaseCity(plot)" in lua
+    assert "pc:GetID() == city:GetID()" in lua and "mine = dist <= 1" in lua
+
+
+def test_a_missed_tile_is_explained_in_the_log_line():
+    read = placement.parse_plan(
+        ["PGAMEBUY|0", "PMISS|68|27", "PMISSWHY|68|27|TERRAIN_DESERT|FEATURE_OASIS|-|-|-|0|No"]
+    )
+    assert read.missed == [(68, 27)] and read.missed_why == [
+        "68|27|TERRAIN_DESERT|FEATURE_OASIS|-|-|-|0|No"
+    ]
+    assert "PMISSWHY|" in placement.build_plan_query(1, "DISTRICT", "DISTRICT_CAMPUS")

@@ -103,14 +103,18 @@ def _water_names() -> tuple[str, ...]:
 def build_signatures_query(watch: tuple[str, ...] = ()) -> str:
     """InGame Lua: a placement signature for each of the player's cities, and unlock flags.
 
-    The hash covers every plot within `PLAN_RADIUS` of the city that the player owns, with its
-    feature, improvement and district, so it changes when the borders grow or a tile is bought,
-    cleared, improved or built on. `watch` names techs and civics whose ownership is answered too.
+    The hash covers the plots within `PLAN_RADIUS` of the city that the player owns and that are
+    the city's own (the game's purchase city is this city) or adjacent to it, with feature,
+    improvement and district, so it changes when the borders grow or one of those tiles is bought,
+    cleared, improved or built on. A change on a neighbouring city's tiles does not move it.
+    `watch` names techs and civics whose ownership is answered too.
 
     It also gives each city's district cap: `PCAP|city|zoned|allowed|types`, the districts that
     count against the population limit, how many its population allows, and the district types
     the city already has (placed or built); and `PNOPOP|type` for each district that does not
-    count against the limit (`Districts.RequiresPopulation` false).
+    count against the limit (`Districts.RequiresPopulation` false). For each district the city
+    lacks and could produce, `CanStartOperation` is asked; `PDNO|city|type|reasons` is printed
+    when the game says no, with its failure reasons (about 10 calls a city).
     """
     watched = ", ".join(f'"{name}"' for name in watch if name.replace("_", "").isalnum())
     return f"""
@@ -121,7 +125,16 @@ for _, city in Players[me]:GetCities():Members() do
     local h, n = 17, 0
     for dy = -R, R do for dx = -R, R do
         local plot = Map.GetPlot(cx + dx, cy + dy)
-        if plot and plot:GetOwner() == me and Map.GetPlotDistance(cx, cy, cx + dx, cy + dy) <= R then
+        local dist = plot and Map.GetPlotDistance(cx, cy, cx + dx, cy + dy) or 99
+        local mine = false
+        if plot and dist <= R and plot:GetOwner() == me then
+            mine = dist <= 1
+            if not mine then
+                local pc = Cities.GetPlotPurchaseCity(plot)
+                mine = (pc == nil) or (pc:GetOwner() == me and pc:GetID() == city:GetID())
+            end
+        end
+        if mine then
             n = n + 1
             local v = ((plot:GetIndex() * 7 + plot:GetFeatureType() + 2) * 13 + plot:GetImprovementType() + 2) * 11 + plot:GetDistrictType() + 2
             h = (h * 31 + v) % 2147483629
@@ -136,6 +149,20 @@ for _, city in Players[me]:GetCities():Members() do
         end
         print("PCAP|" .. city:GetID() .. "|" .. ds:GetNumZonedDistrictsRequiringPopulation() .. "|"
             .. ds:GetNumAllowedDistrictsRequiringPopulation() .. "|" .. table.concat(have, ","))
+        -- The game's own verdict for each district the city could otherwise start.
+        local bq = city:GetBuildQueue()
+        for row in GameInfo.Districts() do
+            if not ds:HasDistrict(row.Index) and bq:CanProduce(row.Hash, true) then
+                local t = {{}}
+                t[CityOperationTypes.PARAM_DISTRICT_TYPE] = row.Hash
+                local ok, res = CityManager.CanStartOperation(city, CityOperationTypes.BUILD, t, true)
+                if not ok then
+                    local why = ""
+                    pcall(function() why = table.concat(res[CityOperationResults.FAILURE_REASONS], ";") end)
+                    print("PDNO|" .. city:GetID() .. "|" .. row.DistrictType .. "|" .. (tostring(why):gsub("|", " ")))
+                end
+            end
+        end
     end)
 end
 for row in GameInfo.Districts() do
@@ -174,6 +201,24 @@ class DistrictCap:
         return self.zoned >= self.allowed
 
 
+NO_LOCATION = "no_location"  # The game: no tile in the city can hold this district.
+POPULATION = "population"  # The game: the city's population allows no further district.
+
+
+def classify_denial(reasons: str) -> str | None:
+    """What the game's failure reasons for a district say, if it is something a refusal repeats.
+
+    Only a location or population verdict is acted on; anything else (including no text) is None,
+    so the district is still tried.
+    """
+    text = reasons.lower()
+    if "location" in text or "zone" in text:
+        return NO_LOCATION
+    if "population" in text or "citizen" in text:
+        return POPULATION
+    return None
+
+
 @dataclass
 class Signatures:
     """One read of `build_signatures_query`."""
@@ -182,6 +227,7 @@ class Signatures:
     unlocks: dict[str, bool] = field(default_factory=dict)
     caps: dict[int, DistrictCap] = field(default_factory=dict)
     exempt: frozenset[str] = frozenset()
+    denied: dict[int, dict[str, str]] = field(default_factory=dict)  # City -> district -> class.
 
 
 def parse_signature_read(lines: list[str]) -> Signatures:
@@ -197,6 +243,10 @@ def parse_signature_read(lines: list[str]) -> Signatures:
             elif parts[0] == "PCAP" and len(parts) >= 4:
                 has = frozenset(t for t in (parts[4] if len(parts) > 4 else "").split(",") if t)
                 read.caps[int(parts[1])] = DistrictCap(int(parts[2]), int(parts[3]), has)
+            elif parts[0] == "PDNO" and len(parts) >= 3:
+                kind = classify_denial(parts[3] if len(parts) > 3 else "")
+                if kind is not None:
+                    read.denied.setdefault(int(parts[1]), {})[parts[2]] = kind
             elif parts[0] == "PNOPOP" and len(parts) >= 2:
                 exempt.add(parts[1])
         except ValueError:
@@ -510,6 +560,27 @@ for dy = -{PLAN_RADIUS}, {PLAN_RADIUS} do for dx = -{PLAN_RADIUS}, {PLAN_RADIUS}
                 print("POWN|" .. x .. "|" .. y .. "|" .. displacementOf(plot) .. "|" .. (ok and 1 or 0))
             elseif ok and not nearestOther(x, y) then
                 print("PMISS|" .. x .. "|" .. y)
+                -- Why the game left it out, for the log: what is on the tile, who has it, and the
+                -- game's own reasons for this tile.
+                pcall(function()
+                    local terr = GameInfo.Terrains[plot:GetTerrainType()]
+                    local feat = plot:GetFeatureType() >= 0 and GameInfo.Features[plot:GetFeatureType()]
+                    local res = plot:GetResourceType() >= 0 and GameInfo.Resources[plot:GetResourceType()]
+                    local imp = plot:GetImprovementType() >= 0 and GameInfo.Improvements[plot:GetImprovementType()]
+                    local pc = Cities.GetPlotPurchaseCity(plot)
+                    local why = ""
+                    local p = {{}}
+                    if isDistrict then p[CityOperationTypes.PARAM_DISTRICT_TYPE] = row.Hash
+                    else p[CityOperationTypes.PARAM_BUILDING_TYPE] = row.Hash end
+                    p[CityOperationTypes.PARAM_X] = x
+                    p[CityOperationTypes.PARAM_Y] = y
+                    local ok2, r2 = CityManager.CanStartOperation(pCity, CityOperationTypes.BUILD, p, true)
+                    pcall(function() why = table.concat(r2[CityOperationResults.FAILURE_REASONS], ";") end)
+                    print("PMISSWHY|" .. x .. "|" .. y .. "|" .. (terr and terr.TerrainType or "?") .. "|"
+                        .. (feat and feat.FeatureType or "-") .. "|" .. (res and res.ResourceType or "-") .. "|"
+                        .. (imp and imp.ImprovementType or "-") .. "|" .. (pc and pc:GetID() or "-") .. "|"
+                        .. (ok2 and 1 or 0) .. "|" .. (tostring(why):gsub("|", " ")))
+                end)
             end
         end
     end
@@ -559,6 +630,7 @@ class PlanRead:
     displacement: dict[tuple[int, int], int] = field(default_factory=dict)  # Owned, offered.
     unpredicted: list[tuple[int, int]] = field(default_factory=list)  # Offered, rules said no.
     missed: list[tuple[int, int]] = field(default_factory=list)  # Rules said yes, not offered.
+    missed_why: list[str] = field(default_factory=list)  # What is on each missed tile, and why.
     game_buy: int = 0  # Tiles the game itself listed as buyable for the item (its placement view).
     border: tuple[int, int, int] | None = None  # Turns until expansion, and the next plot's x, y.
     border_seen: bool = False  # The game answered `PBORDER` (with or without a value).
@@ -598,6 +670,8 @@ def parse_plan(lines: list[str]) -> PlanRead:
                 read.border_seen = True
                 if len(parts) >= 4:
                     read.border = (int(parts[1]), int(parts[2]), int(parts[3]))
+            elif parts[0] == "PMISSWHY" and len(parts) >= 4:
+                read.missed_why.append("|".join(parts[1:]))
             elif parts[0] == "PMISS" and len(parts) >= 3:
                 read.missed.append((int(parts[1]), int(parts[2])))
             elif parts[0] == "PGAMEBUY" and len(parts) >= 2:
@@ -629,6 +703,7 @@ class PlacementReads:
         self._unlocks: dict[str, bool] = {}
         self._caps: dict[int, DistrictCap] = {}
         self._exempt: frozenset[str] = frozenset()
+        self._denied: dict[int, dict[str, str]] = {}
 
     def refresh(self) -> None:
         """Forget the signatures, after something (a tile bought) changed them."""
@@ -651,6 +726,7 @@ class PlacementReads:
         read = parse_signature_read(list(lines))
         self._signatures, self._unlocks = read.signatures, read.unlocks
         self._caps, self._exempt = read.caps, read.exempt
+        self._denied = read.denied
 
     async def signature(self, city_id: int) -> str | None:
         await self._load()
@@ -666,6 +742,13 @@ class PlacementReads:
         if cap is None or not cap.blocks(district, self._exempt):
             return None
         return cap
+
+    async def district_denied(self, city_id: int, district: str) -> str | None:
+        """Why the game itself says the city cannot start `district` now (`NO_LOCATION` or
+        `POPULATION`), else None. None too when nothing could be read."""
+        await self._load()
+        denied = self._denied.get(city_id % 65536) or self._denied.get(city_id) or {}
+        return denied.get(district)
 
     async def unlocked(self, name: str) -> bool:
         await self._load()
@@ -912,12 +995,13 @@ class Planner:
         if not read.trusted:
             log.info(
                 "placement_plan city=%s item=%s action=rules_mismatch game_buy=%s unpredicted=%s"
-                " missed=%s",
+                " missed=%s why=%s",
                 city.name,
                 item,
                 read.game_buy,
                 read.unpredicted[:5],
                 read.missed[:5],
+                read.missed_why[:3],
             )
             self._announce(city, item, "rules_mismatch", None, None, 0)
             return False

@@ -363,7 +363,8 @@ class FaithPolicy:
             attempts += tried
             self._spent_since += spent
             if self._saving_for is not None and step == self._production_sinks:
-                self._delay = (self._saving_for, self._delay[1] + spent)
+                before = self._delay[1] if self._delay[0] == self._saving_for else 0.0
+                self._delay = (self._saving_for, before + spent)
             if bought >= self.settings.max_purchases or attempts >= MAX_ATTEMPTS:
                 break
             if self._saving is not None:
@@ -583,7 +584,7 @@ class FaithPolicy:
                     notes.append(f"{item} in {city.name} blocked by a unit on the city tile")
                     continue
                 price = self._costs.get(item, estimate)
-                if self._sink_cap is not None and price > self._sink_cap:
+                if self._sink_cap is not None and price > self._sink_cap - spent:
                     continue  # Saving for a great person: only a cheap buy may go first.
                 if price > budget - spent:
                     cheapest_short = min(cheapest_short, price)

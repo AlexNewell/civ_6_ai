@@ -785,3 +785,32 @@ def test_an_empty_great_people_list_says_why(caplog):
     with caplog.at_level(logging.INFO):
         run(FaithPolicy(), game)
     assert "2 listed: 1 claimed, 1 priced 0, 0 not buyable" in caplog.text
+
+
+def test_slack_is_shared_by_purchases_in_one_call():
+    # Slack is 2 x 50 = 100 and each Shrine costs 70: only one fits, not one per city.
+    policy = FaithPolicy(FaithSettings(reserve=60.0, max_purchases=5))
+    cities = [city_info(), city_info(city_id=65537, name="Beta", x=20, y=20)]
+    game = Game(overview=overview(turn=101, faith=350.0), people=[person(faith=600)], cities=cities)
+    policy._costs["BUILDING_SHRINE"] = 70
+    policy._last = (100, 300.0)  # Income 50 a turn.
+    run(policy, game)
+    assert len(acted(game, "buy")) == 1
+
+
+def test_a_new_saving_target_starts_with_no_spent_slack():
+    policy = FaithPolicy()
+    policy._delay = (1, 500.0)
+    policy._saving_for = 2
+    policy._income = 100.0
+    before = policy._delay[1] if policy._delay[0] == policy._saving_for else 0.0
+    assert before == 0.0
+    game = Game(overview=overview(turn=100, faith=100.0), people=[person(1, faith=1000)])
+    run(policy, game)
+    game.actions.clear()
+    policy._delay = (1, 500.0)  # Spent against another person earlier.
+    game.data["people"] = [person(2, faith=1000)]
+    policy._gp = None
+    set_overview(game, turn=101, faith=200.0)
+    run(policy, game)
+    assert policy._delay[0] == 2 and policy._delay[1] <= 200.0

@@ -39,7 +39,7 @@ cost, so the reserve holds even if a later read is stale.
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from civ6_ai.placement import PlanBook
@@ -52,6 +52,7 @@ from civ6_ai.policies.production import (
     rank_production,
     score,
 )
+from civ6_ai.stacking import StackBlocks
 from civ6_ai.state import City, Unit
 from civ6_ai.state import read_cities as _read_cities
 from civ6_ai.state import read_empire as _read_empire
@@ -71,6 +72,7 @@ DEFICIT_TURNS = 10
 SAVE_TURNS = (
     8  # Most turns to save for the best purchase or upgrade before spending on lesser ones.
 )
+SLACK_TURNS = 2  # While saving, lesser buys may delay the target by this many turns of income.
 MAX_UPGRADES = 3
 MAX_PURCHASES = 3
 MAX_TILES = 2
@@ -154,6 +156,16 @@ class _Turn:
     income: float = 0.0
     target: str | None = None  # What gold is being saved for: it holds back lesser spending.
     target_defence: bool = False  # The target is defence, so a threatened city may still buy.
+    slack: float = 0.0  # Gold lesser buys may still take while saving (see `SLACK_TURNS`).
+    key: str | None = None  # Identifies the target across turns, for `delay`.
+    delay: dict[str, float] = field(default_factory=dict)  # Gold lesser buys took per target.
+
+    def spend(self, cost: int) -> None:
+        """Take a spend off the budget, and off the slack when it is made while saving."""
+        self.budget -= cost
+        if self.target is not None and self.key is not None:
+            self.slack -= cost
+            self.delay[self.key] = self.delay.get(self.key, 0.0) + cost
 
     def save_for(self, name: str, cost: int) -> bool:
         """Make `name` the saving target when income closes the gap within `SAVE_TURNS` turns."""
@@ -168,6 +180,10 @@ class _Turn:
         self.target = (
             f"{name} (cost {cost}, {gap / self.income:.0f} turns at {self.income:.0f} a turn)"
         )
+        self.key = f"{name}:{cost}"
+        # The allowance is for the whole wait, not for each turn of it: gold already spent on
+        # lesser things while saving for this target counts against it.
+        self.slack = max(0.0, SLACK_TURNS * self.income - self.delay.get(self.key, 0.0))
         return True
 
     @property
@@ -185,7 +201,11 @@ class GoldPolicy:
         weights: ProductionWeights | None = None,
         defence: Any = None,
         plans: PlanBook | None = None,
+        builder_demand: Any = None,
     ) -> None:
+        self.builder_demand = builder_demand  # `builder.BuilderDemand`, or None.
+        self._stack = StackBlocks()  # Purchases a unit on the city tile blocks.
+        self._delay: dict[str, float] = {}  # Lesser spending while saving, per target.
         # Tiles production wants for a district or wonder (see `placement`): bought when they fit
         # the budget, else the saving target.
         self.plans = plans if plans is not None else PlanBook()
@@ -207,7 +227,7 @@ class GoldPolicy:
         empire = await _read_empire(game)
         reserve = self._reserve(empire.num_cities, empire.gold_per_turn)
         budget = int(empire.gold) - reserve
-        turn = _Turn(budget, income=empire.gold_per_turn)
+        turn = _Turn(budget, income=empire.gold_per_turn, delay=self._delay)
         notes: list[str] = []
         log.info("Gold %d, reserve %d, %d to spend", empire.gold, reserve, budget)
         if threatened:
@@ -223,6 +243,8 @@ class GoldPolicy:
         await self._plan_tiles(game, turn, empire.turn, notes)
         await self._buy(game, turn, empire, cities, units, notes)
         await self._tiles(game, turn, cities, notes)
+        # Forget the allowance of a target no longer being saved for.
+        self._delay = {k: v for k, v in self._delay.items() if k == turn.key}
         spent = budget - turn.budget
         log.info("gold_spent turn total: %d of %d to spend", spent, budget)
         if turn.target is not None:
@@ -287,7 +309,7 @@ class GoldPolicy:
                 continue
             result = await self._call(game.upgrade_unit(unit.unit_id))
             if _ok(result, "UPGRADED"):
-                turn.budget -= unit.upgrade_cost
+                turn.spend(unit.upgrade_cost)
                 turn.upgrades += 1
                 reason = "next to a hostile unit" if self._near(unit, hostile) else "outdated"
                 log.info(
@@ -317,6 +339,8 @@ class GoldPolicy:
 
     async def _buy(self, game, turn, empire, cities: list[City], units, notes: list[str]):
         building = {c.city_id: c.building for c in cities if c.building}
+        self._stack.refresh(cities, units)
+        demand = self.builder_demand
         bought: list[str] = []
         limit = MAX_PURCHASES
         if self.defence is not None:
@@ -333,11 +357,19 @@ class GoldPolicy:
             except Exception:
                 log.exception("Production read failed for %s", city.name)
                 continue
-            if turn.target is not None and not self._may_buy_while_saving(city):
+            if turn.target is not None and not self._may_buy_while_saving(city) and turn.slack <= 0:
                 notes.append(f"{city.name}: saving toward {turn.target}")
                 continue
             others = [item for cid, item in building.items() if cid != city.city_id]
-            context = build_context(empire, units, [*others, *bought], cities, self.defence)
+            context = build_context(
+                empire,
+                units,
+                [*others, *bought],
+                cities,
+                self.defence,
+                idle_builders=demand.idle if demand is not None else 0,
+                spare_jobs=demand.spare_jobs if demand is not None else None,
+            )
             ranked = rank_production(city, options, context, self.weights)
             if self.defence is not None and self.defence.is_threatened(city.city_id):
                 # Defenders and walls only. A threatened city does not buy a library.
@@ -368,6 +400,9 @@ class GoldPolicy:
                 continue
             if not _NAME.fullmatch(option.item):
                 continue
+            if self._stack.is_blocked(city.city_id, option.item):
+                notes.append(f"{city.name} {option.item} blocked by a unit on the city tile")
+                continue
             if option.gold_cost > turn.budget:
                 notes.append(f"{city.name} {option.item} costs {option.gold_cost}")
                 if tried == 0 and not is_defence(option) and not self._marked(city):
@@ -376,14 +411,14 @@ class GoldPolicy:
                 continue
             if tried >= 2 or turn.refused_out:
                 break
-            if turn.target is not None and not is_defence(option):
-                break  # Saving toward a better item: no lesser one is bought meanwhile.
+            if turn.target is not None and not is_defence(option) and option.gold_cost > turn.slack:
+                continue  # Saving toward a better item: only a buy within the slack goes first.
             tried += 1
             result = await self._call(
                 game.purchase_item(city.city_id, option.category, option.item)
             )
             if _ok(result, "PURCHASED"):
-                turn.budget -= option.gold_cost
+                turn.spend(option.gold_cost)
                 turn.purchases += 1
                 bought.append(option.item)
                 why = "threatened" if self._marked(city) else "top-ranked affordable item"
@@ -396,6 +431,8 @@ class GoldPolicy:
                 )
                 return True
             turn.refusals += 1
+            if self._stack.record(city.city_id, option.item, result):
+                notes.append(f"{city.name} {option.item} blocked by a unit on the city tile")
             log.info("Purchase of %s in %s refused: %s", option.item, city.name, str(result)[:120])
         return False
 
@@ -416,7 +453,7 @@ class GoldPolicy:
                 self.plans.drop(target.city_id, target.item)  # Bought or refused, it is spent.
                 if _ok(result, "TILE_PURCHASED"):
                     bought_for.add(target.city_id)
-                    turn.budget -= target.cost
+                    turn.spend(target.cost)
                     turn.tiles += 1
                     log.info(
                         "placement_plan city=%s item=%s tile=(%d,%d) action=bought cost=%d",
@@ -445,7 +482,7 @@ class GoldPolicy:
         for city in cities:
             if turn.tiles >= MAX_TILES or turn.refused_out or turn.budget <= 0:
                 return
-            if turn.target is not None:
+            if turn.target is not None and turn.slack <= 0:
                 notes.append(f"tiles wait while saving toward {turn.target}")
                 return
             try:
@@ -464,11 +501,13 @@ class GoldPolicy:
             for tile in ranked:
                 if tile.cost <= 0 or tile.cost > turn.budget:
                     continue
+                if turn.target is not None and tile.cost > turn.slack:
+                    continue
                 if not tile.resource_class and tile.cost > turn.budget:
                     continue
                 result = await self._call(game.purchase_tile(city.city_id, tile.x, tile.y))
                 if _ok(result, "TILE_PURCHASED"):
-                    turn.budget -= tile.cost
+                    turn.spend(tile.cost)
                     turn.tiles += 1
                     log.info(
                         "Bought tile (%d,%d) for %s for %d (%s)",

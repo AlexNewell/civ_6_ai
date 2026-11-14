@@ -342,7 +342,7 @@ def test_gold_below_one_price_is_saved_for_the_upgrade_not_spent_on_tiles(caplog
         gold_per_turn=20.0,
         units=[upgradable(1, 100)],
         production=[],
-        tiles={65536: [ptile(1, 30, "luxury")]},
+        tiles={65536: [ptile(1, 50, "luxury")]},
     )
     run(game)
     assert game.actions == []
@@ -355,7 +355,7 @@ def test_saving_for_a_building_holds_back_tiles_but_the_building_is_bought_when_
         gold_per_turn=20.0,
         units=[],
         production=[option("BUILDING_LIBRARY", 100)],
-        tiles={65536: [ptile(1, 10, "luxury")]},
+        tiles={65536: [ptile(1, 50, "luxury")]},
     )
     saving = GoldGame(gold_amount=reserve + 60, **kwargs)
     run(saving)
@@ -414,7 +414,99 @@ def test_a_saving_target_stops_lesser_purchases_in_the_same_city():
         gold_amount=reserve + 60,
         gold_per_turn=20.0,
         units=[],
-        production=[option("BUILDING_UNIVERSITY", 100), option("BUILDING_MONUMENT", 30)],
+        production=[option("BUILDING_UNIVERSITY", 100), option("BUILDING_MONUMENT", 55)],
     )
     run(game)
     assert [a for a in game.actions if a[0] == "buy"] == []
+
+
+# ----- saving leaves room for cheap buys (Run 9: nothing bought on 78% of turns above reserve) -
+
+
+def test_a_cheap_buy_within_the_slack_goes_ahead_of_the_saving_target():
+    reserve = reserve_for(2, 20.0)
+    game = GoldGame(
+        gold_amount=reserve + 60,
+        gold_per_turn=20.0,
+        units=[],
+        production=[option("BUILDING_UNIVERSITY", 100), option("BUILDING_LIBRARY", 30)],
+    )
+    run(game)
+    assert ("buy", 65536, "BUILDING", "BUILDING_LIBRARY") in game.actions
+
+
+def test_the_slack_is_for_the_whole_wait_so_saving_still_ends():
+    reserve = reserve_for(2, 20.0)
+    policy = GoldPolicy()
+    spent = 0
+    for _ in range(3):  # Same target each turn, 40 gold of slack in all.
+        game = GoldGame(
+            gold_amount=reserve + 60,
+            gold_per_turn=20.0,
+            units=[],
+            production=[option("BUILDING_UNIVERSITY", 100), option("BUILDING_LIBRARY", 30)],
+        )
+        asyncio.run(policy.run(game))
+        spent += 30 * len([a for a in game.actions if a[3] == "BUILDING_LIBRARY"])
+    assert spent == 30  # The second and third turns have 10 of slack left, which is too little.
+
+
+def test_a_tile_within_the_slack_is_bought_while_saving():
+    reserve = reserve_for(2, 20.0)
+    game = GoldGame(
+        gold_amount=reserve + 60,
+        gold_per_turn=20.0,
+        units=[upgradable(1, 100)],
+        production=[],
+        tiles={65536: [ptile(1, 30, "luxury")]},
+    )
+    run(game)
+    assert kinds(game) == ["tile"]
+
+
+# ----- builders and stacking (Run 9) -----
+
+
+def test_no_builder_is_bought_while_a_builder_has_nothing_to_do():
+    from civ6_ai.policies.builder import BuilderDemand
+
+    builder = fx.unit_info(unit_id=9, unit_index=9, unit_type="UNIT_BUILDER", combat_strength=0)
+    kwargs = dict(units=[builder], production=[option("UNIT_BUILDER", 40, category="UNIT")])
+    idle = GoldGame(**kwargs)
+    asyncio.run(GoldPolicy(builder_demand=BuilderDemand(idle=1, spare_jobs=3)).run(idle))
+    assert [a for a in idle.actions if a[0] == "buy"] == []
+    busy = GoldGame(**kwargs)
+    asyncio.run(GoldPolicy(builder_demand=BuilderDemand(idle=0, spare_jobs=3)).run(busy))
+    assert any(a[3] == "UNIT_BUILDER" for a in busy.actions)
+
+
+STACKED = (
+    "Error: STACKING_CONFLICT|Cannot purchase UNIT_MILITARY_ENGINEER - "
+    "UNIT_MILITARY_ENGINEER (unit_id=77) is on the city tile. Move it first."
+)
+
+
+def test_a_stacking_refusal_is_not_retried_while_the_same_unit_stands_there():
+    engineer = fx.unit_info(
+        unit_id=77, unit_index=77, unit_type="UNIT_MILITARY_ENGINEER", x=10, y=10
+    )
+    policy = GoldPolicy()
+    game = GoldGame(
+        units=[engineer],
+        production=[option("UNIT_MILITARY_ENGINEER", 50, category="UNIT")],
+        replies={"buy": STACKED},
+    )
+    asyncio.run(policy.run(game))
+    first = len([a for a in game.actions if a[0] == "buy"])
+    assert first >= 1
+    game.actions.clear()
+    asyncio.run(policy.run(game))
+    assert [a for a in game.actions if a[1] == 65536] == []  # Not retried where it is blocked.
+    assert [a for a in game.actions if a[1] == 65537]  # A city whose tile is free is tried.
+    # The unit leaves the tile: the item is eligible again (it is not forced).
+    game.data["units"] = [
+        fx.unit_info(unit_id=77, unit_index=77, unit_type="UNIT_MILITARY_ENGINEER", x=14, y=14)
+    ]
+    game.actions.clear()
+    asyncio.run(policy.run(game))
+    assert any(a[1] == 65536 for a in game.actions)

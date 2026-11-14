@@ -284,6 +284,10 @@ class SettleDecision:
     result: str = ""
     candidates: tuple[CandidateLog, ...] = ()
     threats: tuple[ThreatLog, ...] = ()
+    # The cities the loyalty estimate used, as (x, y, population): ours, and every rival city
+    # remembered. Logged so a city that flips can be checked against what the estimate knew.
+    own_cities: tuple[tuple[int, int, int], ...] = ()
+    rival_cities: tuple[tuple[int, int, int], ...] = ()
 
 
 class SettlingGame(GameReads, Protocol):
@@ -736,6 +740,8 @@ class SettlingPolicy:
                         for t in danger.threats
                         if t.hostile
                     ),
+                    own_cities=tuple(self._own_cities),
+                    rival_cities=tuple(self._rival_cities),
                 )
             )
 

@@ -72,6 +72,42 @@ def _show(turns: float | None) -> str:
     return "stable" if turns is None else f"{turns:.1f}"
 
 
+_BREAKDOWN_LUA = """
+local c = nil
+for _, city in Players[Game.GetLocalPlayer()]:GetCities():Members() do
+    if city:GetID() == {city_id} then c = city end
+end
+if c == nil then print("---END---") return end
+local id = c:GetCulturalIdentity()
+local ok, d = pcall(function() return id:GetIdentitySourcesDetailedBreakdown() end)
+if ok and d then
+    for k, v in pairs(d) do
+        if type(v) == "table" then
+            for name, val in pairs(v) do print("LB|" .. tostring(name) .. "|" .. tostring(val)) end
+        else
+            print("LB|" .. tostring(k) .. "|" .. tostring(v))
+        end
+    end
+end
+local ok2, p = pcall(function() return id:GetCityIdentityPressures() end)
+if ok2 and p then
+    for _, e in pairs(p) do
+        local src = nil
+        local owner = Players[e.CityOwner]
+        if owner and owner:GetCities() then src = owner:GetCities():FindID(e.CityID) end
+        if src then
+            print("LP|" .. e.CityOwner .. "|" .. src:GetX() .. "|" .. src:GetY()
+                .. "|" .. src:GetPopulation()
+                .. "|" .. Map.GetPlotDistance(c:GetX(), c:GetY(), src:GetX(), src:GetY())
+                .. "|" .. tostring(e.IdentityPressureTotal)
+                .. "|" .. tostring(e.IdentityPressureFromAges))
+        end
+    end
+end
+print("---END---")
+"""
+
+
 class LoyaltyResponse:
     """Turn handler. Build it with the bus so it hears the warnings."""
 
@@ -82,6 +118,7 @@ class LoyaltyResponse:
         self.warned: dict[int, int] = {}  # City id to the turn of its warning.
         self._last_response: dict[int, int] = {}
         self._sends: Counter[tuple[str, int]] = Counter()
+        self._explained: set[int] = set()  # Cities whose breakdown has been logged.
         if bus is not None:
             bus.subscribe(self._on_warning, CityLoyaltyWarning)
 
@@ -104,6 +141,9 @@ class LoyaltyResponse:
                 continue
             self._last_response[city_id] = turn
             city = cities[city_id]
+            if city_id not in self._explained:
+                self._explained.add(city_id)
+                await self._explain(game, city, turn)
             actions: list[str] = []
             hopeless = is_hopeless(city)
             steps = (
@@ -145,6 +185,34 @@ class LoyaltyResponse:
                         tuple(actions),
                     )
                 )
+
+    async def _explain(self, game: Any, city: City, turn: int) -> None:
+        """Log the game's own loyalty breakdown and the cities pressing on the city, once.
+
+        Diagnostic only: Runs 9 to 11 lost new cities at -24 to -27 a turn where the settle
+        estimate said +2 to +16, and this records what the game counted instead.
+        """
+        code = _BREAKDOWN_LUA.replace("{city_id}", str(int(city.city_id)))
+        try:
+            reply = await game.execute_lua(code, "ingame")
+        except ConnectionError:
+            raise
+        except Exception:
+            log.exception("Loyalty breakdown read failed for %s", city.name)
+            return
+        text = reply if isinstance(reply, str) else "\n".join(reply)
+        terms = [line[3:] for line in text.splitlines() if line.startswith("LB|")]
+        sources = [line[3:] for line in text.splitlines() if line.startswith("LP|")]
+        log.info(
+            "loyalty_breakdown turn=%d city=%s at=%d,%d terms=%s "
+            "sources(owner|x|y|pop|dist|pressure|ages)=%s",
+            turn,
+            city.name,
+            city.x,
+            city.y,
+            terms,
+            sources,
+        )
 
     async def _governor(self, game: Any, city: City) -> list[str]:
         government = await read_government(game)

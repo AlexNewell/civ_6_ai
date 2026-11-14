@@ -89,6 +89,8 @@ class HeldGame:
         return "OK:SKIPPED|1 units"
 
     async def execute_lua(self, code, context="gamecore"):
+        if "OPEN_TURN" in code:
+            return f"OPEN_TURN|{self.turn}|{str(self.can_end).lower()}"
         if "UI.CanEndTurn" in code:
             return f"CAN_END_TURN|{str(self.can_end).lower()}"
         if "WORLD_CONGRESS_SUBMIT_TURN" in code:
@@ -277,3 +279,41 @@ def test_a_failing_game_over_check_does_not_stop_the_watch():
 
     report = asyncio.run(ResolvingGame(game, BlockerResolver(), defeat_check=broken).end_turn())
     assert report == ADVANCED
+
+
+class LostRequest(HeldGame):
+    """Run 9, turn 30: answering a greeting leaves our turn open and the end-turn request gone."""
+
+    async def diplomacy_respond(self, other_player_id, response):
+        self.calls.append("talk")
+        self.talk = False
+        return "OK:SESSION_CLOSED"  # The AI does not carry on by itself.
+
+
+def test_a_turn_left_open_after_a_diplomacy_answer_is_asked_again_once():
+    game = LostRequest(talk=True)
+    resolver = BlockerResolver({BlockerType.DIPLOMACY_SESSION: _answer})
+    assert asyncio.run(ResolvingGame(game, resolver).end_turn()) == ADVANCED
+    assert game.calls == ["end_turn", "talk", "ask again"]
+
+
+def test_no_new_request_after_an_answer_while_the_turn_cannot_be_ended():
+    # The AI is playing: CanEndTurn is false, so a new request could skip a turn.
+    game = LostRequest(talk=True, can_end=False)
+    resolver = BlockerResolver({BlockerType.DIPLOMACY_SESSION: _answer})
+    assert asyncio.run(ResolvingGame(game, resolver).end_turn()) == TIMED_OUT
+    assert "ask again" not in game.calls
+
+
+def test_no_new_request_after_an_answer_when_the_game_turn_has_moved():
+    # The overview can still read the old turn while the game's own number has moved on.
+    class Moved(LostRequest):
+        async def execute_lua(self, code, context="gamecore"):
+            if "OPEN_TURN" in code:
+                return f"OPEN_TURN|{self.turn + 1}|true"
+            return await super().execute_lua(code, context)
+
+    game = Moved(talk=True)
+    resolver = BlockerResolver({BlockerType.DIPLOMACY_SESSION: _answer})
+    assert asyncio.run(ResolvingGame(game, resolver).end_turn()) == TIMED_OUT
+    assert "ask again" not in game.calls

@@ -26,6 +26,7 @@ from typing import Protocol
 from civ6_ai.blockers import action_succeeded, move_succeeded
 from civ6_ai.policies.expansion import ExpansionState
 from civ6_ai.state import (
+    City,
     Exploration,
     GameReads,
     Threat,
@@ -36,7 +37,7 @@ from civ6_ai.state import (
     read_threats,
     read_units,
 )
-from civ6_ai.state.models import SettleSite
+from civ6_ai.state.models import RivalCity, SettleSite
 from civ6_ai.state.reader import STANDARD_MAP_WIDTH, hex_distance
 
 log = logging.getLogger(__name__)
@@ -103,6 +104,15 @@ class SettlingSettings:
     loyalty_city_base: int = 2  # Added to a city's population, so a small city still pulls.
     loyalty_reject_margin: float = 12.0  # Reject a site whose margin is below minus this.
     loyalty_penalty_weight: float = 1.0  # Score lost per point of margin below zero.
+    # The game's own rule, as its settle scan models it: each city within `loyalty_range` pulls
+    # with population * (range + 1 - distance) / range, and the rate is ten times the gap over the
+    # smaller side, capped at plus or minus `loyalty_rate_cap`. Run 9 flipped three cities that
+    # the linear margin above had passed, so the rate gates sites too.
+    loyalty_range: int = 9
+    loyalty_rate_cap: float = 20.0
+    loyalty_reject_rate: float = -6.0  # Reject a site whose estimated rate is below this.
+    loyalty_rate_penalty_weight: float = 4.0  # Score lost per point of rate below zero.
+    rival_city_default_pop: int = 5  # A rival city seen but never with its population read.
     retry_turns: int = 10  # How long a site or frontier that could not be reached is set aside.
     scout_wait_turns: int = 2  # A scout waits this long for a hostile unit on its route, then goes.
     automate_retry_turns: int = 3  # Before an idle scout is handed to the game's explorer again.
@@ -144,6 +154,35 @@ def loyalty_margin(
     return loyalty_pressure(x, y, own, settings) - loyalty_pressure(x, y, rivals, settings)
 
 
+def loyalty_rate(
+    x: int,
+    y: int,
+    own: Iterable[tuple[int, int, int]],
+    rivals: Iterable[tuple[int, int, int]],
+    settings: SettlingSettings,
+) -> float:
+    """Estimated loyalty per turn of a city at (x, y), from the cities pulling on it.
+
+    The shape matters more than the weights. A site is safe only while our side outweighs the
+    rivals', and the rate saturates: Run 9's Chichen Itza showed minus 24 a turn, which no linear
+    margin could say. The 1.0 on our side is the site's own pull, as in the game's scan.
+    """
+    reach = settings.loyalty_range
+
+    def pull(cities: Iterable[tuple[int, int, int]]) -> float:
+        total = 0.0
+        for cx, cy, pop in cities:
+            d = hex_distance(x, y, cx, cy, settings.map_width)
+            if 0 < d <= reach:
+                total += pop * (reach + 1 - d) / (reach + 1)
+        return total
+
+    friendly, enemy = 1.0 + pull(own), pull(rivals)
+    rate = 10.0 * (friendly - enemy) / (min(friendly, enemy) + 0.5)
+    cap = settings.loyalty_rate_cap
+    return max(-cap, min(cap, rate))
+
+
 def score_site(site: SettleSite, settings: SettlingSettings) -> float:
     """Value a site from the visible fields only. The upstream score is never read."""
     score = (
@@ -172,6 +211,7 @@ class CandidateLog:
     path_threat: bool
     loyalty_margin: float = 0.0  # Our pull minus rivals', at the site. Below zero is a flip risk.
     loyalty_penalty: float = 0.0  # Taken off the site score.
+    loyalty_rate: float = 0.0  # Estimated loyalty per turn at the site. Below zero it falls.
 
 
 @dataclass(frozen=True)
@@ -387,6 +427,12 @@ class SettlingPolicy:
     _founded: set[int] = field(default_factory=set, init=False, repr=False)
     _no_site_turns: dict[int, int] = field(default_factory=dict, init=False, repr=False)
     _rival_cities: list[tuple[int, int, int]] = field(default_factory=list, init=False, repr=False)
+    # Every rival city seen on a visible tile, by tile, with its last seen population. The game
+    # only lists a city while its tile is visible, so the estimate used to swing with the fog:
+    # Run 9's Chichen Itza site read 82, 16, 92, 96 and 14 on successive turns.
+    _rival_memory: dict[tuple[int, int], tuple[int, int]] = field(
+        default_factory=dict, init=False, repr=False
+    )
 
     async def run(self, game: SettlingGame) -> None:
         units = await read_units(game)
@@ -396,24 +442,22 @@ class SettlingPolicy:
         # Run 8: the count stayed at 1 from the turn a settler founded its city to the end of the
         # game, because it was only taken on turns with a settler to move. It is free here.
         self.expansion.settlers_on_map = sum(1 for u in units if u.unit_type == SETTLER)
+        # Sightings are recorded every turn, so a rival city seen while no settler could move is
+        # still remembered when one can.
+        cities = await read_cities(game)
+        rival_cities = await self._remember_rivals(game, cities)
         if not settlers and not scouts:
             return
         turn = (await game.get_game_overview()).turn
         threats = await read_threats(game)
-        cities = await read_cities(game)
         exploration = await read_exploration(game)
         danger = _Danger(threats, self.settings.map_width)
         city_tiles = [(c.x, c.y) for c in cities]
         self._own_cities = [(c.x, c.y, c.pop) for c in cities]
-        self._rival_cities = []
         claimed: set[int] = set()
         self._forget_gone_units(units, turn)
         if settlers:
-            rival_cities = [
-                city for rival in await read_rivals(game) for city in rival.visible_cities
-            ]
             rival_tiles = [(city.x, city.y) for city in rival_cities]
-            self._rival_cities = [(city.x, city.y, city.pop) for city in rival_cities]
             if self._first_turn is None and not cities:
                 self._first_turn = turn
             for settler in settlers:
@@ -431,6 +475,22 @@ class SettlingPolicy:
         self._survey(settlers, units, exploration, city_tiles, danger, turn)
         for scout in scouts:
             await self._explore(game, scout, exploration, danger, turn)
+
+    async def _remember_rivals(self, game: SettlingGame, cities: Iterable[City]) -> list[RivalCity]:
+        """Update the rival city memory from what is visible now, and return those sightings.
+
+        A tile now holding a city of ours is dropped (it flipped to us), and a sighting under a
+        different owner replaces the old entry (it changed hands).
+        """
+        seen = []
+        for rival in await read_rivals(game):
+            for city in rival.visible_cities:
+                self._rival_memory[city.x, city.y] = (rival.player_id, city.pop)
+                seen.append(city)
+        for city in cities:
+            self._rival_memory.pop((city.x, city.y), None)
+        self._rival_cities = [(x, y, pop) for (x, y), (_, pop) in self._rival_memory.items()]
+        return seen
 
     def _forget_gone_units(self, units: Iterable[Unit], turn: int) -> None:
         """Drop what is kept per unit once the unit is gone, and any expired set-asides."""
@@ -497,10 +557,12 @@ class SettlingPolicy:
             distance = hex_distance(settler.x, settler.y, site.x, site.y, s.map_width)
             turns = math.ceil(distance / max(1.0, settler.max_moves))
             # The first city can't be picky: a rival's pull is only counted once we have a city.
-            margin = 0.0
+            margin, rate = 0.0, 0.0
             if not first_city:
                 margin = loyalty_margin(site.x, site.y, self._own_cities, self._rival_cities, s)
+                rate = loyalty_rate(site.x, site.y, self._own_cities, self._rival_cities, s)
             penalty = max(0.0, -margin) * s.loyalty_penalty_weight
+            penalty += max(0.0, -rate) * s.loyalty_rate_penalty_weight
             site_score -= penalty
             nearest_own = min(
                 (hex_distance(site.x, site.y, cx, cy, s.map_width) for cx, cy in city_tiles),
@@ -523,7 +585,7 @@ class SettlingPolicy:
                 rejected = "reserved by another settler"
             elif not escorted and danger.near(site.x, site.y, s.threat_radius):
                 rejected = "hostile unit near the site"
-            elif margin < -s.loyalty_reject_margin:
+            elif margin < -s.loyalty_reject_margin or rate < s.loyalty_reject_rate:
                 rejected = "likely to flip to a rival (loyalty)"
             elif not first_city and site_score < s.min_site_score:
                 rejected = "below minimum site score"
@@ -544,6 +606,7 @@ class SettlingPolicy:
                     path_threat,
                     margin,
                     penalty,
+                    rate,
                 )
             )
         found.sort(key=lambda c: (-c.net_score, c.distance, c.x, c.y))

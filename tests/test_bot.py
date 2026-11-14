@@ -43,6 +43,9 @@ class WiredGame(BlockerFake):
     async def get_diplomacy(self):
         return [fx.civ_info(), fx.unmet_civ()]
 
+    async def get_map_area(self, center_x, center_y, radius=2):
+        return [fx.tile()] if (center_x, center_y) == (20, 10) else []
+
     async def get_victory_progress(self):
         return fx.victory()
 

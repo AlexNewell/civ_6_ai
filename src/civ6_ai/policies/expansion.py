@@ -40,6 +40,7 @@ class ExpansionState:
     safe_sites: int = 0  # Sites a settler could be sent to now.
     best_site_score: float | None = None  # Best adjusted score among them.
     settlers_on_map: int = 0
+    target_cities: int = TARGET_CITIES  # Set by production from its weights.
 
     def sites_ok(self, turn: int) -> bool:
         """False only when a recent survey found no safe site. Unknown counts as ok."""

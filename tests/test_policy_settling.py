@@ -784,10 +784,10 @@ def test_a_site_below_the_safe_floor_is_refused_and_one_under_comfort_is_marked_
         cities=[alpha()],
         sites=[site(15, 10, food=40), site(14, 10, food=40), site(4, 10, food=40)],
     )
-    policy = SettlingPolicy(SettlingSettings(loyalty_new_city_drag=DRAG))
+    policy = SettlingPolicy(SettlingSettings(loyalty_new_city_drag=DRAG, loyalty_reject_safe=0.0))
     run(policy, game)
     by_site = {(c.x, c.y): c for c in policy.decisions[0].candidates}
-    s = SettlingSettings(loyalty_new_city_drag=DRAG)
+    s = SettlingSettings(loyalty_new_city_drag=DRAG, loyalty_reject_safe=0.0)
     refused = by_site[15, 10]
     assert refused.loyalty_rate > 0 > refused.safe_rate
     assert refused.rejected == "likely to flip to a rival (loyalty)"
@@ -808,7 +808,7 @@ def test_a_few_site_points_do_not_beat_a_materially_safer_site(real_safe_rate):
         cities=[alpha()],
         sites=[site(14, 10, food=40), site(4, 10, food=36)],
     )
-    policy = SettlingPolicy(SettlingSettings(loyalty_new_city_drag=DRAG))
+    policy = SettlingPolicy(SettlingSettings(loyalty_new_city_drag=DRAG, loyalty_reject_safe=0.0))
     run(policy, game)
     by_site = {(c.x, c.y): c for c in policy.decisions[0].candidates}
     near, far = by_site[14, 10], by_site[4, 10]
@@ -959,3 +959,50 @@ def test_a_held_settler_with_a_site_resets_the_no_site_streak():
     run(policy, game)
     assert policy.decisions[0].action == "hold"
     assert policy._no_site_turns.get(7, 0) == 0
+
+
+def test_far_site_is_taken_when_safe_and_marked_down():
+    # Run 11: sites 9 to 14 tiles out with no rival near were refused as too far.
+    far = site(10, 19, food=40)  # 9 tiles south of Alpha at (10, 10)
+    game = make_game([settler()], cities=[alpha()], sites=[far])
+    policy = SettlingPolicy()
+    run(policy, game)
+    cand = policy.decisions[0].candidates[0]
+    assert cand.rejected is None
+    s = policy.settings
+    base = 40 * s.food_weight + 10 * s.production_weight + s.fresh_water_bonus
+    assert cand.site_score == base - s.far_penalty * (9 - s.max_city_distance)
+
+
+def test_far_site_beyond_the_far_limit_stays_rejected():
+    game = make_game([settler()], cities=[alpha()], sites=[site(10, 26, food=40)])
+    policy = SettlingPolicy()
+    run(policy, game)
+    assert policy.decisions[0].candidates[0].rejected == "too far from our cities"
+
+
+def test_far_site_needs_a_safe_loyalty_rate(monkeypatch):
+    monkeypatch.setattr("civ6_ai.policies.settling.safe_loyalty_rate", lambda *a, **k: 5.0)
+    game = make_game([settler()], cities=[alpha()], sites=[site(10, 19, food=40)])
+    policy = SettlingPolicy()
+    run(policy, game)
+    assert policy.decisions[0].candidates[0].rejected == "too far from our cities"
+
+
+def test_survey_runs_without_settlers_while_below_the_city_target():
+    state = ExpansionState(target_cities=6)
+    game = make_game([], cities=[alpha()], sites=[site(14, 10, food=25)])
+    policy = SettlingPolicy(expansion=state)
+    run(policy, game)
+    assert state.survey_turn is not None
+    assert state.safe_sites == 1
+    full = ExpansionState(target_cities=1)
+    policy = SettlingPolicy(expansion=full)
+    run(policy, make_game([], cities=[alpha()], sites=[site(14, 10, food=25)]))
+    assert full.survey_turn is None
+
+
+def test_default_safe_floor_refuses_the_run_11_chichen_itza_site():
+    # Founded on a safe rate of 1.9 (estimate +16.5), it read -27 a turn and flipped.
+    assert SettlingSettings().loyalty_reject_safe > 1.9
+    assert SettlingSettings().loyalty_reject_safe <= 9.0  # Every city that held was at 9 or more.

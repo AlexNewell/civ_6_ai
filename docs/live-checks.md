@@ -40,6 +40,24 @@ Written offline against civ6-mcp's source, so none of this has run in a game yet
 | Ranged units are not hit back by melee defenders, and ranged defenders do hit back (`assess_attack` assumes both) | Not reached |
 | `Unit.targets` lists only targets in range with line of sight, and ranged units fire at adjacent targets | Not reached |
 
+## Run 11: turns 1 to 301, with the Run 10 fixes (PRs 204 to 206)
+
+STD_T1_01 from turn 1 on main at 69f758d, 2026-11-14, in one session (`20261114T152535Z`) with `--probe placement`, no hands-on help and no stop other than game over. Result: defeat on turn 301, `winning_team=1` (Germany), before the turn limit. The end screen names no victory; Germany, Brazil, Mapuche and Sumeria each had 4 spaceports and 65 to 68 techs against our 48, so it was almost certainly a science victory. The bot never raised a science warning (issue 182). Final scores: Brazil 1,117, Sumeria 1,092, Germany 1,034, Mapuche 964, Maya 760 (5th), Khmer 348. First run with per-turn scores (PR 202): 49, 132, 267, 480, 632 and 759 on turns 50 to 300. $0.00 in model spend. 301 turns in 6,429 s; decision time mean 11.1 s (p90 14.5 s), end-turn wait mean 10.3 s.
+
+| Check | Result |
+|---|---|
+| Production refused under 30% (204) | Pass: 14 of 191 (7%; Run 10: 31%). 9 Bolshoi Theatre, 5 Cristo Redentor. |
+| Wonders | 10 (Run 10: 17). |
+| No new-city loyalty loss (205) | Fail: Chichen Itza (61,20), founded on turn 71 at an estimate of +16.5 (safe +1.9), read -27 the next turn and flipped on turn 76. Retaken on turn 116, lost again on turn 127 at -12 to -16 with Amani in the city. Run 9 lost the same site. PR 207 now logs the game's breakdown on a warning. |
+| No city lost to war (206) | Pass: the Khmer declared war on turn 192; no city fell. 9 upgrades by turn 178. |
+| Faith idle at most 250 | Fail, better: up to 890 (Run 10: 1,613); 11 purchases. |
+| Gold used | Fail: nothing bought on 69% of turns above the reserve. |
+| Builders idle under 50% | Fail: 63%. |
+| Settlers | 10 built, 6 founded a city; 141 of 200 settle decisions found no site. |
+| Score | Level with Runs 8 and 9 through turn 250 (632; Run 9: 623), 759 on turn 300. Our share of the leader's score peaked at 0.72 on turn 200 and fell to 0.69. |
+
+The main finding is science. We had 48 techs to the leaders' 65 to 68 at the end (Run 10: 55 to 75), and the game ended 29 turns before the turn limit on a victory the bot did not see coming.
+
 ## Run 10: turns 1 to 330, with the Run 9 fixes (PRs 199 to 201)
 
 STD_T1_01 from turn 1 on main at 5a5e504, 2026-11-14, in one session (`20261114T125429Z`) with `--probe placement`, no hands-on help and no stop other than game over. Result: defeat at the turn limit, `winning_team=1` (Germany, on score). Final scores read from the game afterwards: Germany 1,471, Sumeria 1,372, Mapuche 1,117, Maya 921 (4th), Brazil 718, Khmer 622. Tech count 55 against Germany's 75. $0.00 in model spend. 329 turns in 7,229 s; decision time mean 12.1 s (p90 16.7 s), end-turn wait mean 9.9 s, so the per-turn rival reads of PR 199 cost no visible time.

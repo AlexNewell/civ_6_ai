@@ -474,30 +474,11 @@ def test_a_city_founded_this_turn_blocks_nearby_sites_for_the_next_settler():
     assert game.actions == [("found", 7), ("move", 8, 10, 15)]
 
 
-def test_a_held_settler_gives_up_waiting_after_a_bounded_number_of_turns():
-    settings = SettlingSettings(threat_radius=2, max_hold_turns=3)
-    policy = SettlingPolicy(settings)
-    sites = [site(14, 6, food=40)]
-    for turn in (1, 2, 3):
-        game = make_game(
-            [settler(y=14)], cities=[alpha()], threats=[barbarian(13, 10)], sites=sites, turn=turn
-        )
-        run(policy, game)
-        assert game.actions == []
-    final = make_game(
-        [settler(y=14)], cities=[alpha()], threats=[barbarian(13, 10)], sites=sites, turn=4
-    )
-    run(policy, final)
-    assert final.actions == [("move", 7, 14, 6)]
-    assert "without an escort" in policy.decisions[-1].reason
-
-
-def test_an_escort_that_cannot_move_does_not_stall_the_pair_for_good():
-    settings = SettlingSettings(threat_radius=2, max_hold_turns=2)
-    policy = SettlingPolicy(settings)
+def test_an_escort_that_cannot_move_keeps_the_settler_waiting_not_walking_alone():
+    policy = SettlingPolicy(SettlingSettings(threat_radius=2))
     sites = [site(14, 6, food=40)]
     escort = unit_info(unit_id=9, unit_index=9, x=10, y=14)
-    for turn in (1, 2):
+    for turn in range(1, 6):
         game = make_game(
             [settler(y=14), escort],
             cities=[alpha()],
@@ -508,11 +489,7 @@ def test_an_escort_that_cannot_move_does_not_stall_the_pair_for_good():
         game.failing = {"move"}
         run(policy, game)
         assert policy.decisions[-1].action == "hold"
-    last = make_game(
-        [settler(y=14), escort], cities=[alpha()], threats=[barbarian(13, 10)], sites=sites, turn=3
-    )
-    run(policy, last)
-    assert last.actions == [("move", 7, 14, 6)]
+        assert not [a for a in game.actions if a[1] == 7]
 
 
 def test_a_blocked_move_counts_as_a_failure():
@@ -1006,3 +983,108 @@ def test_default_safe_floor_refuses_the_run_11_chichen_itza_site():
     # Founded on a safe rate of 1.9 (estimate +16.5), it read -27 a turn and flipped.
     assert SettlingSettings().loyalty_reject_safe > 1.9
     assert SettlingSettings().loyalty_reject_safe <= 9.0  # Every city that held was at 9 or more.
+
+
+def _capital_pair(*others, settler_at=(10, 10)):
+    return [settler(x=settler_at[0], y=settler_at[1]), *others]
+
+
+def test_the_garrison_already_stacked_with_the_settler_is_its_escort():
+    # Run 12: two combat units and the settler in the capital; an escort sent onto the tile was
+    # refused every turn (STACKING_CONFLICT). One of the two on the tile leads, none is sent.
+    slinger = unit_info(unit_id=8, unit_index=8, x=10, y=10)
+    warrior = unit_info(unit_id=9, unit_index=9, x=10, y=10)
+    game = make_game(
+        _capital_pair(slinger, warrior),
+        cities=[alpha()],
+        threats=[barbarian(13, 10)],
+        sites=[site(14, 6, food=40)],
+    )
+    policy = SettlingPolicy(SettlingSettings(threat_radius=2))
+    run(policy, game)
+    assert policy.decisions[-1].action == "escort_move"
+    assert [a[1] for a in game.actions] == [8, 7]  # The slinger leads, the settler joins it.
+    assert game.actions[0][2:] == game.actions[1][2:]
+
+
+def test_a_lone_garrison_stays_and_another_escort_meets_the_settler_on_the_route():
+    garrison = unit_info(unit_id=9, unit_index=9, x=10, y=10)
+    escort = unit_info(unit_id=8, unit_index=8, x=10, y=9)
+    sites = [site(14, 6, food=40)]
+    settings = SettlingSettings(threat_radius=2)
+    policy = SettlingPolicy(settings)
+    first = make_game(
+        _capital_pair(garrison, escort),
+        cities=[alpha()],
+        threats=[barbarian(13, 10)],
+        sites=sites,
+    )
+    run(policy, first)
+    assert first.actions and first.actions[0][1] == 8
+    meet = first.actions[0][2:]
+    assert meet != (10, 10)  # Not onto the garrison's tile, which would be refused.
+    assert policy.decisions[-1].action == "escort_gather"
+    waiting = unit_info(unit_id=8, unit_index=8, x=meet[0], y=meet[1])
+    second = make_game(
+        _capital_pair(garrison, waiting),
+        cities=[alpha()],
+        threats=[barbarian(13, 10)],
+        sites=sites,
+    )
+    run(policy, second)
+    assert second.actions == [("move", 7, *meet)]  # The settler joins the escort.
+
+
+def test_a_refused_join_is_not_repeated_while_nothing_changes():
+    class Refusing(ActionGame):
+        async def move_unit(self, unit_index, x, y):
+            self.actions.append(("move", unit_index, x, y))
+            return "Error: STACKING_CONFLICT|Friendly UNIT_SLINGER already on (10,9)"
+
+    garrison = unit_info(unit_id=9, unit_index=9, x=10, y=10)
+    escort = unit_info(unit_id=8, unit_index=8, x=10, y=9)
+
+    def play(policy):
+        game = Refusing(
+            units=_capital_pair(garrison, escort),
+            cities=[alpha()],
+            threats=[barbarian(13, 10)],
+            settle=[site(14, 6, food=40)],
+            overview=overview(turn=1, num_cities=1),
+            strategic=lq.StrategicMapData([], []),
+        )
+        run(policy, game)
+        return game.actions
+
+    policy = SettlingPolicy(SettlingSettings(threat_radius=2))
+    assert len(play(policy)) == 1
+    assert play(policy) == []  # Same order, same blockers: not sent again.
+
+
+def test_a_settler_never_goes_alone_down_a_route_the_threat_read_calls_threatened():
+    # Run 12: "held 4 turns, so going without an escort" sent the settler into barbarians.
+    policy = SettlingPolicy(SettlingSettings(threat_radius=2))
+    for turn in range(1, 9):
+        game = make_game(
+            [settler(y=14)],
+            cities=[alpha()],
+            threats=[barbarian(13, 10)],
+            sites=[site(14, 6, food=40)],
+            turn=turn,
+        )
+        run(policy, game)
+        assert not [a for a in game.actions if a[0] == "move"]
+        assert policy.decisions[-1].action == "hold"
+
+
+def test_an_escorted_settler_does_not_flee_back_to_the_city():
+    escort = unit_info(unit_id=9, unit_index=9, x=13, y=10)
+    game = make_game(
+        [settler(x=13, y=10), escort],
+        cities=[alpha()],
+        threats=[barbarian(15, 10)],
+        sites=[site(16, 10, food=40)],
+    )
+    policy = SettlingPolicy()
+    run(policy, game)
+    assert policy.decisions[0].action != "flee"

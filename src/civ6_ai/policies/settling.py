@@ -105,7 +105,6 @@ class SettlingSettings:
     scout_threat_radius: int = 2
     # Bounds on waiting and retrying, so nothing stalls for good.
     no_site_disband_turns: int = 20  # A settler with no site this many turns in a row is disbanded.
-    max_hold_turns: int = 4  # A settler held this many turns in a row goes without its escort.
     max_move_failures: int = 3  # Refused moves to one site before it is set aside.
     # Loyalty. A city leans towards the owner of the bigger, nearer cities within `loyalty_radius`.
     loyalty_radius: int = 9
@@ -472,6 +471,9 @@ class SettlingPolicy:
     _bad_frontiers: dict[tuple[int, int], int] = field(default_factory=dict, init=False, repr=False)
     _site_claims: dict[int, tuple[int, int]] = field(default_factory=dict, init=False, repr=False)
     _holds: dict[int, int] = field(default_factory=dict, init=False, repr=False)
+    # Escort orders the game refused, as (escort, from, to, military units on `to`): not sent again
+    # until one of those changes.
+    _refused: set = field(default_factory=set, init=False, repr=False)
     _automated: dict[int, int] = field(default_factory=dict, init=False, repr=False)
     _scout_targets: dict[int, tuple[int, int]] = field(default_factory=dict, init=False, repr=False)
     _scout_waits: dict[int, int] = field(default_factory=dict, init=False, repr=False)
@@ -777,7 +779,14 @@ class SettlingPolicy:
             )
 
         threatened = danger.near(settler.x, settler.y, s.flee_radius)
-        if threatened and city_tiles and await self._flee(game, settler, city_tiles, record):
+        # Live (Run 12): an escorted settler stepped out, then fled back to the city next turn
+        # and the pair repeated it. A settler with its escort on the tile goes on instead.
+        if (
+            threatened
+            and city_tiles
+            and not escorted
+            and await self._flee(game, settler, city_tiles, record)
+        ):
             return
 
         options = usable
@@ -835,44 +844,54 @@ class SettlingPolicy:
             return
         self._no_site_turns.pop(settler.unit_id, None)  # A site exists, so the streak ends.
         holds = self._holds.get(settler.unit_id, 0)
-        unescorted = holds >= s.max_hold_turns
         # Live (Run 7): the escort chosen was another unit, and its move onto the settler's tile
         # was refused (STACKING_CONFLICT) because a combat unit already stood there, so the
-        # settler held for turns. A unit already on the tile is the escort.
-        companion = next(
-            (
-                u
-                for u in units
-                if u.is_combat
-                and u.unit_type != SCOUT
-                and (u.x, u.y) == (settler.x, settler.y)
-                and (u.x, u.y) not in city_tiles  # A city's garrison stays.
-                and u.unit_id not in claimed
-            ),
-            None,
-        )
-        if unescorted:
-            escort = None
+        # settler held for turns. A unit already on the tile is the escort. Live (Run 12): the
+        # same in the capital, where the garrison was excluded; a city's garrison may escort
+        # when another combat unit stays behind, so the city is never left empty.
+        on_tile = [
+            u
+            for u in units
+            if u.is_combat
+            and u.unit_type != SCOUT
+            and (u.x, u.y) == (settler.x, settler.y)
+            and u.unit_id not in claimed
+        ]
+        spare = len(on_tile) >= (2 if (settler.x, settler.y) in city_tiles else 1)
+        movable = [u for u in on_tile if u.can_move]
+        companion = min(movable, key=lambda u: u.unit_id) if spare and movable else None
+        if on_tile and spare and companion is None:
+            escort = None  # The unit with the settler has no moves left: wait, gather no second.
         elif companion is not None:
-            escort = companion if companion.can_move else None  # Never gather a second unit.
+            escort = companion  # Never gather a second unit.
         else:
             escort = self._find_escort(settler, units, city_tiles, claimed, danger)
+        crowded = any(u.is_combat and (u.x, u.y) == (settler.x, settler.y) for u in units)
+        if escort is not None and companion is None:
+            # Skip an escort whose order the game already refused with nothing changed.
+            excluded = set(claimed)
+            while escort is not None and self._refused_order(
+                settler, better[0], escort, units, crowded
+            ):
+                excluded.add(escort.unit_id)
+                escort = self._find_escort(settler, units, city_tiles, excluded, danger)
         target = next((c for c in better if not c.path_threat or escort is not None), None)
-        if target is None and unescorted:
-            target = better[0]
         if target is None:
+            # Going alone is for a route the threat read finds clear (those candidates have no
+            # path_threat); otherwise wait for an escort rather than walk into the threat.
             self._holds[settler.unit_id] = holds + 1
             record("hold", "every route passes a hostile unit and no escort is free")
             return
-        if unescorted and target.path_threat:
-            reason = f"held {holds} turns, so going without an escort"
-        else:
-            reason = "heading for the best site"
+        reason = "heading for the best site"
         self._site_claims[settler.unit_id] = (target.x, target.y)
-        moved = await self._advance(game, settler, target, escort, claimed, record, turn, reason)
+        moved = await self._advance(
+            game, settler, target, escort, claimed, record, turn, reason, units, crowded
+        )
         self._holds[settler.unit_id] = 0 if moved else holds + 1
 
-    async def _advance(self, game, settler, target, escort, claimed, record, turn, reason) -> bool:
+    async def _advance(
+        self, game, settler, target, escort, claimed, record, turn, reason, units=(), crowded=False
+    ) -> bool:
         """Take one step towards the site. Returns False if the settler did not get closer."""
         s = self.settings
         goal = (target.x, target.y)
@@ -881,7 +900,18 @@ class SettlingPolicy:
             step = line[min(max(1, int(settler.moves)), len(line)) - 1]
             claimed.add(escort.unit_id)
             if (escort.x, escort.y) != (settler.x, settler.y):
-                result = await game.move_unit(escort.unit_index, settler.x, settler.y)
+                if not crowded:
+                    meet = (settler.x, settler.y)
+                elif (escort.x, escort.y) == step:
+                    # The escort waits on the free tile; a civilian may join it there.
+                    result = await game.move_unit(settler.unit_index, *step)
+                    record("escort_move", "the settler joins the escort on the route", goal, result)
+                    return move_succeeded(result)
+                else:
+                    meet = step  # Two combat units can't share a tile, so meet on the route.
+                result = await game.move_unit(escort.unit_index, *meet)
+                if not move_succeeded(result):
+                    self._refused.add(self._order_key(escort, meet, units))
                 action = "escort_gather" if move_succeeded(result) else "hold"
                 record(action, "route is threatened, so the escort joins first", goal, result)
                 return False
@@ -906,6 +936,23 @@ class SettlingPolicy:
                 self._site_claims.pop(settler.unit_id, None)
         record("move", reason if moved else "move refused, trying again later", goal, result)
         return moved
+
+    def _order_key(self, escort, dest, units) -> tuple:
+        crowd = sum(1 for u in units if u.is_combat and (u.x, u.y) == tuple(dest))
+        return (escort.unit_id, (escort.x, escort.y), tuple(dest), crowd)
+
+    def _refused_order(self, settler, target, escort, units, crowded) -> bool:
+        """True when the join this escort would be sent on was refused and nothing has changed."""
+        if target is None or not target.path_threat:
+            return False
+        if not crowded:
+            meet = (settler.x, settler.y)
+        else:
+            line = hex_line((settler.x, settler.y), (target.x, target.y), self.settings.map_width)
+            if not line:
+                return False
+            meet = line[min(max(1, int(settler.moves)), len(line)) - 1]
+        return self._order_key(escort, meet, units) in self._refused
 
     def _find_escort(self, settler, units, city_tiles, claimed, danger) -> Unit | None:
         s = self.settings

@@ -87,8 +87,13 @@ def points(records: list[dict]) -> list[Point]:
     ]
 
 
-def at_checkpoint(series: list[Point], checkpoint: int) -> Point | None:
-    """The newest point on the checkpoint turn, or up to CHECKPOINT_WINDOW turns before it."""
+def at_checkpoint(series: list[Point], checkpoint: int, final_turn: int) -> Point | None:
+    """The newest point on the checkpoint turn, or up to CHECKPOINT_WINDOW turns before it.
+
+    The window only covers a turn with no record. A run that ended before the checkpoint never
+    reached it, so it gets none."""
+    if final_turn < checkpoint:
+        return None
     near = [p for p in series if checkpoint - CHECKPOINT_WINDOW <= p.turn <= checkpoint]
     return max(near, key=lambda p: p.turn) if near else None
 
@@ -141,7 +146,7 @@ def row_from_records(run: str, records: list[dict], scenario: str, date: str = "
         row["score_per_turn"] = _round(_mean_over_turns(series, lambda p: p.score), 1)
         row["mean_share"] = _round(_mean_over_turns(series, lambda p: p.share), 3)
     for checkpoint in CHECKPOINTS:
-        if point := at_checkpoint(series, checkpoint):
+        if point := at_checkpoint(series, checkpoint, records[-1]["turn"]):
             row[f"score_{checkpoint}"] = point.score
             row[f"share_{checkpoint}"] = _round(point.share, 3)
             row[f"rank_{checkpoint}"] = point.rank

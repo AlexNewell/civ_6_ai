@@ -60,8 +60,13 @@ def test_no_rival_scores_leaves_share_and_rank_blank():
 
 def test_checkpoint_uses_a_record_just_before_a_missing_turn():
     series = [Point(48, 1), Point(49, 2), Point(53, 3)]
-    assert at_checkpoint(series, 50).turn == 49
-    assert at_checkpoint([Point(40, 1)], 50) is None
+    assert at_checkpoint(series, 50, 53).turn == 49
+    assert at_checkpoint([Point(40, 1)], 50, 60) is None
+
+
+def test_run_that_ended_before_a_checkpoint_has_none():
+    row = row_from_records("Run X", [record(t, t) for t in range(1, 49)], "S")
+    assert "score_50" not in row and row["last_score"] == 48
 
 
 def test_logs_without_scores_still_give_an_outcome_row():

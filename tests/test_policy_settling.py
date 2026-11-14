@@ -1042,11 +1042,11 @@ def test_tikal_is_refused_when_the_rivals_are_known_and_passed_when_they_are_not
     assert safe_loyalty_rate(*TIKAL, own, TIKAL_RIVALS, s) < s.loyalty_reject_safe
 
 
-KNOWN_LUA_OUTPUT = """KCITY|5|56|19|7|1|0
+KNOWN_LUA_OUTPUT = """KCITY|5|56|19|7|1|1
 KCITY|5|59|14|2|0|1
-KCITY|2|63|11|13|0|0
 BORDER|5|57,19;58,19;59,15
 BORDER|9|70,5;71,5
+VISIBLE|
 ---END---"""
 
 
@@ -1054,12 +1054,20 @@ def test_known_city_output_is_parsed():
     from civ6_ai.state.reader import parse_known_cities
 
     known = parse_known_cities(KNOWN_LUA_OUTPUT)
-    assert [(c.owner, c.x, c.y, c.pop, c.capital, c.visible) for c in known.cities] == [
-        (5, 56, 19, 7, True, False),
-        (5, 59, 14, 2, False, True),
-        (2, 63, 11, 13, False, False),
+    assert [(c.owner, c.x, c.y, c.pop, c.capital) for c in known.cities] == [
+        (5, 56, 19, 7, True),
+        (5, 59, 14, 2, False),
     ]
     assert (9, 71, 5) in known.border_tiles and len(known.border_tiles) == 5
+
+
+def test_a_partial_known_city_read_is_an_error():
+    from civ6_ai.state.reader import parse_known_cities
+
+    with pytest.raises(ValueError):
+        parse_known_cities("KCITY|5|56|19|7|1|1\n")
+    with pytest.raises(ValueError):
+        parse_known_cities("")
 
 
 class LuaGame(ActionGame):
@@ -1067,30 +1075,75 @@ class LuaGame(ActionGame):
         super().__init__(**overrides)
         self.output = output
         self.lua_calls = 0
+        self.lua_code: list[str] = []
 
     async def execute_lua(self, code, context="gamecore"):
         self.lua_calls += 1
+        self.lua_code.append(code)
         return self.output
 
 
-def test_fogged_cities_capitals_and_unseen_borders_feed_the_estimate():
-    game = LuaGame(
-        KNOWN_LUA_OUTPUT,
-        units=[settler()],
+def lua_game(output, **overrides):
+    return LuaGame(
+        output,
+        units=overrides.pop("units", [settler()]),
         cities=[alpha()],
         settle=[site(16, 10, food=40)],
         overview=overview(turn=1, num_cities=1),
         strategic=lq.StrategicMapData([], []),
+        **overrides,
     )
+
+
+def test_visible_cities_capitals_and_borders_feed_the_estimate():
+    game = lua_game(KNOWN_LUA_OUTPUT)
     policy = SettlingPolicy()
     run(policy, game)
-    cities = policy._rival_cities
     assert game.lua_calls == 1
-    assert (56, 19, 5, True) in cities  # Fogged, never seen: default population, a capital.
-    assert (59, 14, 2) in cities  # Visible: its real population.
-    assert (63, 11, 5) in cities  # Fogged.
-    assert (70, 5, 3) in cities  # Phantom for the unexplained border; the Sumerian ones explained.
-    assert len(cities) == 4
+    assert sorted(c for c in policy._rival_cities if c[0] > 50) == [(56, 19, 7, True), (59, 14, 2)]
+    # The unexplained Sumerian-free border (owner 9) is a phantom; owner 5's are explained.
+    assert policy._phantoms == [(70, 5, 3)]
+
+
+def test_phantoms_are_not_cities_for_spacing_or_the_log():
+    game = lua_game(KNOWN_LUA_OUTPUT)
+    policy = SettlingPolicy()
+    run(policy, game)
+    assert (70, 5) not in [(c[0], c[1]) for c in policy._rival_cities]
+    assert (70, 5, 3) in policy._pressure_sources()
+    decision = policy.decisions[0]
+    assert (70, 5, 3) not in decision.rival_cities
+    assert decision.phantom_cities == ((70, 5, 3),)
+
+
+def test_a_failed_or_partial_read_keeps_the_memory():
+    policy = SettlingPolicy()
+    run(policy, lua_game(KNOWN_LUA_OUTPUT))
+    before = list(policy._rival_cities), list(policy._phantoms)
+    run(policy, lua_game("KCITY|5|56|19|7|1|1\n"))  # No end marker.
+    assert (list(policy._rival_cities), list(policy._phantoms)) == before
+    run(policy, lua_game("---END---"))  # Complete but sees nothing: nothing is seen to be gone.
+    assert sorted(policy._rival_cities) == sorted(before[0])
+
+
+def test_a_remembered_city_is_dropped_only_when_its_plot_is_seen_empty():
+    policy = SettlingPolicy()
+    run(policy, lua_game(KNOWN_LUA_OUTPUT))
+    # Out of sight: the memory (and the live game state) is not consulted for it.
+    run(policy, lua_game("VISIBLE|59,14\n---END---"))  # (59,14) visible and city-free
+    assert [c for c in policy._rival_cities if c[0] > 50] == [(56, 19, 7, True)]
+    # Only visible tiles are watched: Lua is told what we remember.
+    game = lua_game("---END---")
+    run(policy, game)
+    assert "56,19" in game.lua_code[0] and "59,14" not in game.lua_code[0]
+
+
+def test_a_remembered_city_updates_only_when_visible_again():
+    policy = SettlingPolicy()
+    run(policy, lua_game(KNOWN_LUA_OUTPUT))
+    run(policy, lua_game("KCITY|7|56|19|9|0|1\n---END---"))
+    assert policy._rival_memory[56, 19] == (7, 9)
+    assert (56, 19, 9) in policy._rival_cities  # No longer a capital, new owner.
 
 
 def test_no_lua_read_when_nothing_needs_the_rivals():

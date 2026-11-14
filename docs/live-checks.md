@@ -40,6 +40,31 @@ Written offline against civ6-mcp's source, so none of this has run in a game yet
 | Ranged units are not hit back by melee defenders, and ranged defenders do hit back (`assess_attack` assumes both) | Not reached |
 | `Unit.targets` lists only targets in range with line of sight, and ranged units fire at adjacent targets | Not reached |
 
+## Run 10: turns 1 to 330, with the Run 9 fixes (PRs 199 to 201)
+
+STD_T1_01 from turn 1 on main at 5a5e504, 2026-11-14, in one session (`20261114T125429Z`) with `--probe placement`, no hands-on help and no stop other than game over. Result: defeat at the turn limit, `winning_team=1` (Germany, on score). Final scores read from the game afterwards: Germany 1,471, Sumeria 1,372, Mapuche 1,117, Maya 921 (4th), Brazil 718, Khmer 622. Tech count 55 against Germany's 75. $0.00 in model spend. 329 turns in 7,229 s; decision time mean 12.1 s (p90 16.7 s), end-turn wait mean 9.9 s, so the per-turn rival reads of PR 199 cost no visible time.
+
+| Check | Result |
+|---|---|
+| Preflight shows 10 patches (201) | Pass. |
+| Production refused under 30% (201) | Near: 111 of 362 (31%; Run 9: 62%). 31 were an Aqueduct for a city with no water source, and 54 were one boxed-in coastal city (Yokib) with no free land tile. |
+| Wonders built (201) | Pass: 17 (Run 9: 8). |
+| `placement_plan` buy-then-place (201) | Fail: all 6 plans were `rules_mismatch` with `game_buy=0`, so no tile was bought for a district. |
+| Faith idle at most 250 (200) | Fail, better: up to 1,613 (Run 9: 4,519); 16 purchases. |
+| Gold used (200) | Fail: nothing bought on 70% of turns above the reserve (Run 9: 78%). |
+| Builders idle under 50% (200) | Fail: 64% (Run 9: 76%); 16% of builder actions refused. |
+| No early loyalty loss (199) | Fail: Palenque, founded on turn 101 on an estimate of +2.3 a turn, read -27 the next turn and flipped on turn 105. No other loyalty loss. |
+| No city lost | Fail: the capital fell on turn 233 (retaken on turn 243) and Uxmal on turn 276, both to the Mapuche. |
+| Score | 921 on turn 330, 4th of 6 (Run 9: 902). |
+
+What the finished game showed (read-only Lua on the turn-330 save):
+
+- **The army was never modernised.** At the end it held 9 Crossbowmen, 4 Cuirassiers and one Field Cannon, with Ballistics, Rifling and Replaceable Parts researched. Production chose Crossbowmen until turn 275. The gold policy logged "no unit can upgrade" 217 times and upgraded only Knights and Coursers. civ6-mcp tests upgrades with `CanStartCommand(unit, UPGRADE, nil, true)`, which was false for every unit, while `CanStartCommand(unit, UPGRADE, true, true)` was true for every Crossbowman (205 gold to a Field Cannon).
+- **Gold sat idle under attack.** On turn 275 the bot had 1,226 gold, 6 threatened cities and a reserve of 0, and bought nothing: every unit offered was obsolete (Crossbowman, Courser, Knight, Pike and Shot) and blocked by a unit on the city tile. Uxmal fell the next turn.
+- **The capital fell in one turn.** The Mapuche declared war on turn 232 with 5 units next to it, and it fell on turn 233.
+- **Palenque's loyalty.** The game's breakdown lists pressure from citizens (capped at 20 a turn) plus religion (-3 for not following our religion), happiness and governors. The estimate counts only pressure, and the site was surrounded by Mapuche cities. On turn 99 a site one tile away scored +5.7 a turn with a margin of 20, 17 site points lower.
+- **Repeat district refusals.** The game's own reason was "No suitable location to zone this district." The re-ask-on-change signature covers every tile we own within 3 tiles, so any improvement nearby made the district eligible again.
+
 ## Run 9: turns 1 to 330, with Batch B and the placement redesign (PRs 193 to 198)
 
 STD_T1_01 from turn 1 on main, 2026-11-14, in two sessions. Turns 1 to 30 ran in `20261114T061230Z`, which hung on turn 30 after a diplomacy answer (fixed by PR 198). Turns 30 to 330 ran in `20261114T063748Z`, with `--probe placement`, no hands-on help and no stop other than game over. Result: defeat at the turn limit. `PlayerStatus(alive=True, winning_team=1, cities=6)`: Germany again, on score. The final score was 902 on turn 329 (Run 8: 922). $0.00 in model spend. Decision time mean 11.7 s (p90 16.6 s), end-turn wait mean 12.1 s.

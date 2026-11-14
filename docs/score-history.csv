@@ -7,3 +7,4 @@ Run 6,STD_T1_01,manual,2026-11-12,lost,Germany,,331,,,,,,,,,,,,,,,,,,,,,,,Won at
 Run 7,STD_T1_01,manual,2026-11-12,lost,Germany,science,309,,,,,,,,,,,,,,,,,,,,,,,
 Run 8,STD_T1_01,manual,2026-11-13,lost,,,330,291,796,,,,139,272,432,612,,,,,,,,,,,,,,"Winner is team 5, not named; checkpoints from docs/live-checks.md"
 Run 9,STD_T1_01,manual,2026-11-14,lost,Germany,score,330,329,902,,,,153,277,452,623,,,,,,,,,,,,,,Checkpoints from docs/live-checks.md
+Run 10,STD_T1_01,manual,2026-11-14,lost,Germany,score,330,330,921,,,,,,,,,,,,,,,,,,,,,"Final scores read from the game after it ended: Germany 1471, Sumeria 1372, Mapuche 1117, Maya 921 (4th), Brazil 718, Khmer 622; no per-turn scores (run predates PR 202)"

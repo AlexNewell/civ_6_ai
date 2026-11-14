@@ -14,6 +14,14 @@ Production's own amenity scoring is not touched here. Every response is logged a
 `city_loyalty_response` event. Each city is answered at most once every `COOLDOWN_TURNS`, and a
 governor is sent to one city at most `MAX_SENDS` times, because moving restarts its establishing.
 With no warned city the handler makes no game call.
+
+What can and cannot be saved (Run 9, three cities lost after a warning). A governor arriving took
+a city from -14.4 to -5.6 a turn at once (Copan, about +9), and that is the biggest lever the bot
+has; a garrison, a card with an open slot and the like add little or nothing to loyalty. Chichen
+Itza fell at -24 a turn from 76 loyalty, so even the governor would only have stretched 3 turns
+to 5. When the best case still flips the city within `HOPELESS_TURNS`, the response says so, does
+not send a unit into a city that is about to change hands, and logs the rate it would have needed.
+A cause fixed at the site (the settler's estimate) matters more than any answer here.
 """
 
 import logging
@@ -38,6 +46,30 @@ MAX_SENDS = 2
 GARRISON_RADIUS = 8
 PREFERRED_GOVERNORS = ("GOVERNOR_THE_DEFENDER", "GOVERNOR_THE_AMBASSADOR")  # Victor, Amani.
 LOYALTY_CARD_WORDS = ("LOYAL", "AMENIT")
+GOVERNOR_RELIEF = (
+    9.0  # Loyalty per turn a governor in the city added (Copan, Run 9: -14.4 to -5.6).
+)
+HOPELESS_TURNS = 6  # A city that still flips within this many turns even with a governor is lost.
+
+
+def turns_left(city: City, relief: float = 0.0) -> float | None:
+    """Turns until the city flips at its rate plus `relief`, or None when it no longer falls."""
+    rate = city.loyalty_per_turn + relief
+    return None if rate >= 0 else city.loyalty / -rate
+
+
+def is_hopeless(city: City) -> bool:
+    left = turns_left(city, GOVERNOR_RELIEF)
+    return left is not None and left <= HOPELESS_TURNS
+
+
+def needed_rate(city: City) -> float:
+    """The extra loyalty per turn that would stop the fall."""
+    return max(0.0, -city.loyalty_per_turn)
+
+
+def _show(turns: float | None) -> str:
+    return "stable" if turns is None else f"{turns:.1f}"
 
 
 class LoyaltyResponse:
@@ -73,7 +105,19 @@ class LoyaltyResponse:
             self._last_response[city_id] = turn
             city = cities[city_id]
             actions: list[str] = []
-            for step in (self._governor, self._garrison, self._card):
+            hopeless = is_hopeless(city)
+            steps = (
+                (self._governor, self._card)
+                if hopeless
+                else (
+                    self._governor,
+                    self._garrison,
+                    self._card,
+                )
+            )
+            if hopeless:
+                actions.append("accept the loss: no garrison sent")
+            for step in steps:
                 try:
                     actions.extend(await step(game, city))
                 except ConnectionError:
@@ -84,7 +128,10 @@ class LoyaltyResponse:
                     )
             line = (
                 f"loyalty_response turn={turn} city={city.name} loyalty={city.loyalty:.0f} "
-                f"per_turn={city.loyalty_per_turn:.1f} actions={actions or ['none available']}"
+                f"per_turn={city.loyalty_per_turn:.1f} needs=+{needed_rate(city):.1f}/turn "
+                f"turns_left={_show(turns_left(city))} with_governor="
+                f"{_show(turns_left(city, GOVERNOR_RELIEF))} "
+                f"actions={actions or ['none available']}"
             )
             log.info("%s", line)
             if self._emit is not None:

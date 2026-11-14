@@ -4,7 +4,8 @@ import logging
 from civ_mcp import lua as lq
 
 from civ6_ai.monitors import CityLoyaltyResponse, CityLoyaltyWarning, EventBus
-from civ6_ai.policies.loyalty import LoyaltyResponse
+from civ6_ai.policies.loyalty import LoyaltyResponse, is_hopeless, needed_rate, turns_left
+from civ6_ai.state import read_cities
 from fixtures import civ_state as fx
 from test_policy_government import ScriptedGame, appointed, slot
 
@@ -134,3 +135,38 @@ def test_cooldown_and_recovery():
     game.data["cities"][1] = fx.city_info(city_id=CITY_ID, loyalty_per_turn=2.0, x=20, y=20)
     run(handler, game)
     assert handler.warned == {}
+
+
+def _city(loyalty, per_turn):
+    game = LoyaltyGame()
+    game.data["cities"][1] = fx.city_info(
+        city_id=CITY_ID, name="Far", x=20, y=20, loyalty=loyalty, loyalty_per_turn=per_turn
+    )
+    return [c for c in asyncio.run(read_cities(game)) if c.city_id == CITY_ID][0]
+
+
+def test_run9_numbers_chichen_itza_and_copan_were_past_saving_but_adab_was_not():
+    chichen = _city(76.0, -24.0)  # Lost 4 turns later.
+    assert turns_left(chichen) == 76 / 24 and needed_rate(chichen) == 24.0
+    assert is_hopeless(chichen)  # With a governor's +9 it still flips in about 5 turns.
+    adab = _city(69.0, -15.6)
+    assert not is_hopeless(adab)
+    copan = _city(30.0, -14.4)  # A governor took it to -5.6 and it still fell.
+    assert is_hopeless(copan)  # Still 5.6 turns even so; the governor is sent regardless.
+    assert _city(40.0, 1.0).loyalty_per_turn == 1.0 and turns_left(_city(40.0, 1.0)) is None
+
+
+def test_a_hopeless_city_gets_no_garrison_and_the_log_says_what_it_needed(caplog):
+    bus, handler, game, seen = make(
+        points=0, units=[fx.unit_info(unit_id=2, unit_index=2, x=19, y=20)]
+    )
+    game.data["cities"][1] = fx.city_info(
+        city_id=CITY_ID, name="Far", x=20, y=20, loyalty=76.0, loyalty_per_turn=-24.0
+    )
+    warned(bus)
+    with caplog.at_level(logging.INFO, logger="civ6_ai.policies.loyalty"):
+        run(handler, game)
+    assert game.moves == []
+    assert any(a.startswith("accept the loss") for a in seen[0].actions)
+    message = next(r.getMessage() for r in caplog.records if "loyalty_response" in r.getMessage())
+    assert "needs=+24.0/turn" in message and "with_governor=5.1" in message

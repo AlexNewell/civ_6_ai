@@ -12,12 +12,21 @@ from civ6_ai.policies.settling import (
     frontier_points,
     hex_line,
     loyalty_margin,
+    loyalty_rate,
     neighbours,
     score_site,
 )
 from civ6_ai.state.models import SettleSite
 from civ6_ai.state.reader import build_exploration
-from fixtures.civ_state import BARBARIANS, FakeGame, city_info, overview, threat_info, unit_info
+from fixtures.civ_state import (
+    BARBARIANS,
+    FakeGame,
+    city_info,
+    overview,
+    threat_info,
+    tile,
+    unit_info,
+)
 
 SETTLER = dict(unit_type="UNIT_SETTLER", name="Settler", combat_strength=0)
 SCOUT = dict(unit_type="UNIT_SCOUT", name="Scout", combat_strength=0, max_moves=3.0)
@@ -647,6 +656,54 @@ def test_marginal_site_loses_score_but_a_safe_one_does_not():
     assert by_site[15, 10].loyalty_penalty == 5 and by_site[15, 10].rejected is None
     assert by_site[13, 10].loyalty_penalty == 0
     assert by_site[15, 10].site_score == by_site[13, 10].site_score - 5
+
+
+# Run 9 (STD_T1_01): our cities when Chichen Itza (57,26) was founded, with assumed populations.
+RUN9_OWN = [(66, 25, 9), (64, 22, 6), (67, 21, 5), (63, 27, 5), (60, 25, 4), (60, 20, 4)]
+
+
+def test_rate_saturates_and_follows_the_ratio_not_the_difference():
+    settings = SettlingSettings()
+    # A rival twice as strong as us reads far worse than the same gap between two big sides.
+    small = loyalty_rate(14, 10, [(10, 10, 2)], [(18, 10, 4)], settings)
+    big = loyalty_rate(14, 10, [(10, 10, 20)], [(18, 10, 22)], settings)
+    assert small < big < 0
+    # No rivals is the cap, and a crowd of rivals is the cap the other way.
+    assert loyalty_rate(14, 10, [(10, 10, 5)], [], settings) == settings.loyalty_rate_cap
+    crowd = [(18, 10, 30), (17, 12, 30)]
+    assert loyalty_rate(14, 10, [(10, 10, 1)], crowd, settings) == -settings.loyalty_rate_cap
+
+
+def test_run9_chichen_itza_site_is_refused_once_the_rival_city_is_counted():
+    # The linear margin passed the site (14.0) and the game then said -24 a turn. Rival cities
+    # to the west (positions and sizes assumed: the log kept no rival cities) pulls the rate past
+    # the limit.
+    settings = SettlingSettings()
+    rivals = [(52, 26, 12), (53, 23, 10), (54, 29, 8)]
+    assert loyalty_rate(57, 26, RUN9_OWN, rivals, settings) < settings.loyalty_reject_rate
+    # With no rival counted (the fog), the same site looks safe, which is how it was founded.
+    assert loyalty_rate(57, 26, RUN9_OWN, [], settings) > 0
+
+
+def test_a_rival_city_that_leaves_view_still_counts():
+    # Run 9: the margin at one site read 82, 16, 92, 96 as the rival's tile came and went.
+    game = make_game([settler()], cities=[alpha()], sites=[site(16, 10, food=40)])
+    policy = SettlingPolicy()
+    run(policy, game)
+    seen = policy.decisions[0].candidates[0]
+    game.data["tiles"][20, 10] = [tile(visibility="revealed")]  # Roma now in the fog.
+    run(policy, game)
+    after = policy.decisions[-1].candidates[0]
+    assert after.loyalty_margin == seen.loyalty_margin < 0
+    assert after.rejected == "likely to flip to a rival (loyalty)"
+
+
+def test_a_falling_estimated_rate_costs_score():
+    game = make_game([settler()], cities=[alpha()], sites=[site(16, 10, food=40)])
+    policy = SettlingPolicy()
+    run(policy, game)
+    candidate = policy.decisions[0].candidates[0]
+    assert candidate.loyalty_rate < 0 and candidate.loyalty_penalty > -candidate.loyalty_margin
 
 
 def test_first_city_ignores_loyalty():

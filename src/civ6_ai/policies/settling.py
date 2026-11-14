@@ -112,6 +112,26 @@ class SettlingSettings:
     loyalty_rate_cap: float = 20.0
     loyalty_reject_rate: float = -6.0  # Reject a site whose estimated rate is below this.
     loyalty_rate_penalty_weight: float = 4.0  # Score lost per point of rate below zero.
+    # The estimate is a snapshot of a city that does not exist yet. Run 10 founded Palenque at an
+    # estimated +2.3 a turn and the game said -27 a turn the next turn. The "safe" rate is the
+    # estimate after the three things it leaves out; a site must stay above `loyalty_reject_safe`
+    # on it and is marked down for every point under `loyalty_comfort_rate`.
+    # 1. Non-pressure losses of a new city: not following the neighbour's religion (-3 in the
+    #    game's breakdown), no governor and no happiness bonus yet.
+    #    Assumed -3 a turn: the religion term, happiness and governor taken as zero.
+    loyalty_new_city_drag: float = 3.0
+    # 2. Growth: a new city starts at population 1 while rival cities keep growing. Over the first
+    #    ~20 turns assume rival cities gain `rival_growth` pop and our existing ones `own_growth`.
+    loyalty_rival_growth: int = 2
+    loyalty_own_growth: int = 1
+    # 3. Fog: a site within range of a seen rival city is in that rival's heartland, where cities
+    #    we have not seen are likely. Count one extra rival city, default population less 2, at
+    #    `loyalty_fog_distance` tiles. Rival-owned tiles are not in the settle scan, so this is the
+    #    only stand-in for them.
+    loyalty_fog_distance: int = 8
+    loyalty_reject_safe: float = 0.0  # Reject a site whose safe rate is below this.
+    loyalty_comfort_rate: float = 8.0  # A safe rate under this costs score.
+    loyalty_safe_penalty_weight: float = 2.0  # Score lost per point of safe rate under comfort.
     rival_city_default_pop: int = 5  # A rival city seen but never with its population read.
     retry_turns: int = 10  # How long a site or frontier that could not be reached is set aside.
     scout_wait_turns: int = 2  # A scout waits this long for a hostile unit on its route, then goes.
@@ -183,6 +203,26 @@ def loyalty_rate(
     return max(-cap, min(cap, rate))
 
 
+def safe_loyalty_rate(
+    x: int,
+    y: int,
+    own: Iterable[tuple[int, int, int]],
+    rivals: Iterable[tuple[int, int, int]],
+    settings: SettlingSettings,
+) -> float:
+    """The loyalty estimate after growth, fog and the non-pressure drag. See the settings."""
+    s = settings
+    rivals = list(rivals)
+    grown_own = [(cx, cy, pop + s.loyalty_own_growth) for cx, cy, pop in own]
+    grown_rivals = [(cx, cy, pop + s.loyalty_rival_growth) for cx, cy, pop in rivals]
+    if any(0 < hex_distance(x, y, cx, cy, s.map_width) <= s.loyalty_range for cx, cy, _ in rivals):
+        # A phantom city straight east on the same row, at the assumed distance. Only the
+        # distance matters to the pull, and wrapping is handled by hex_distance's width.
+        px = (x + s.loyalty_fog_distance) % (s.map_width or 10_000)
+        grown_rivals.append((px, y, s.rival_city_default_pop - 2))
+    return loyalty_rate(x, y, grown_own, grown_rivals, s) - s.loyalty_new_city_drag
+
+
 def score_site(site: SettleSite, settings: SettlingSettings) -> float:
     """Value a site from the visible fields only. The upstream score is never read."""
     score = (
@@ -212,6 +252,7 @@ class CandidateLog:
     loyalty_margin: float = 0.0  # Our pull minus rivals', at the site. Below zero is a flip risk.
     loyalty_penalty: float = 0.0  # Taken off the site score.
     loyalty_rate: float = 0.0  # Estimated loyalty per turn at the site. Below zero it falls.
+    safe_rate: float = 0.0  # The same after growth, fog and new-city drag.
 
 
 @dataclass(frozen=True)
@@ -557,12 +598,16 @@ class SettlingPolicy:
             distance = hex_distance(settler.x, settler.y, site.x, site.y, s.map_width)
             turns = math.ceil(distance / max(1.0, settler.max_moves))
             # The first city can't be picky: a rival's pull is only counted once we have a city.
-            margin, rate = 0.0, 0.0
+            margin, rate, safe = 0.0, 0.0, 0.0
             if not first_city:
                 margin = loyalty_margin(site.x, site.y, self._own_cities, self._rival_cities, s)
                 rate = loyalty_rate(site.x, site.y, self._own_cities, self._rival_cities, s)
+                safe = safe_loyalty_rate(site.x, site.y, self._own_cities, self._rival_cities, s)
             penalty = max(0.0, -margin) * s.loyalty_penalty_weight
             penalty += max(0.0, -rate) * s.loyalty_rate_penalty_weight
+            if not first_city:
+                # Run 10: 17 site points of difference beat a site 3.4 rate points safer.
+                penalty += max(0.0, s.loyalty_comfort_rate - safe) * s.loyalty_safe_penalty_weight
             site_score -= penalty
             nearest_own = min(
                 (hex_distance(site.x, site.y, cx, cy, s.map_width) for cx, cy in city_tiles),
@@ -585,7 +630,11 @@ class SettlingPolicy:
                 rejected = "reserved by another settler"
             elif not escorted and danger.near(site.x, site.y, s.threat_radius):
                 rejected = "hostile unit near the site"
-            elif margin < -s.loyalty_reject_margin or rate < s.loyalty_reject_rate:
+            elif (
+                margin < -s.loyalty_reject_margin
+                or rate < s.loyalty_reject_rate
+                or (not first_city and safe < s.loyalty_reject_safe)
+            ):
                 rejected = "likely to flip to a rival (loyalty)"
             elif not first_city and site_score < s.min_site_score:
                 rejected = "below minimum site score"
@@ -607,6 +656,7 @@ class SettlingPolicy:
                     margin,
                     penalty,
                     rate,
+                    safe,
                 )
             )
         found.sort(key=lambda c: (-c.net_score, c.distance, c.x, c.y))

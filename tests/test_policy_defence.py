@@ -472,3 +472,16 @@ def test_a_cover_unit_that_stops_short_is_not_counted_beside_but_no_other_is_sen
     assert len(moves(game)) == 1
     assert state.cities[ALPHA].defenders_beside == 0
     assert state.cities[ALPHA].short
+
+
+def test_the_wanted_defenders_grow_with_the_hostile_units_near_the_city():
+    """Run 10: five Mapuche units beside a city held by two, which counted as held."""
+
+    def threat(hostile, inside, beside):
+        return CityThreat(ALPHA, "Alpha", 10, 10, (), hostile, inside, beside)
+
+    assert threat(0, 1, 1).wanted == 2 and not threat(0, 1, 1).short
+    assert threat(5, 1, 1).wanted == 5 and threat(5, 1, 1).short
+    assert not threat(5, 2, 3).short
+    assert threat(40, 0, 0).wanted == 5  # Capped: no city is stacked without end.
+    assert threat(2, 1, 1).short and not threat(2, 2, 1).short

@@ -510,3 +510,187 @@ def test_a_stacking_refusal_is_not_retried_while_the_same_unit_stands_there():
     game.actions.clear()
     asyncio.run(policy.run(game))
     assert any(a[1] == 65536 for a in game.actions)
+
+
+# ----- military readiness (Run 10) -----
+
+
+def _tile(x, y, **changes):
+    base = dict(units=None, own_units=None, resource=None)
+    return fx.tile(x=x, y=y, **{**base, **changes})
+
+
+class WarGame(GoldGame):
+    """A threatened city 65536 at (10,10), with the area around it and recorded moves."""
+
+    def __init__(self, units, production, move_reply=None, tiles=None, **data):
+        area = tiles if tiles is not None else [
+            _tile(10, 10), _tile(11, 10), _tile(9, 10), _tile(10, 11), _tile(10, 9),
+        ]  # fmt: skip
+        super().__init__(
+            gold_amount=data.pop("gold_amount", 1200),
+            units=units,
+            production=production,
+            **data,
+        )
+        self.data["tiles"] = {(10, 10): area}
+        self.move_reply = move_reply
+        self.moves: list[tuple] = []
+
+    async def purchase_item(self, city_id, item_type, item_name, yield_type="YIELD_GOLD"):
+        for unit in self.data["units"]:
+            if city_id == 65536 and (unit.x, unit.y) == (10, 10) and unit.combat_strength:
+                self.actions.append(("refused", city_id, item_name))
+                return (
+                    f"Error: STACKING_CONFLICT|Cannot purchase {item_name} - "
+                    f"{unit.unit_type} (unit_id={unit.unit_id}) is on the city tile."
+                )
+        return await super().purchase_item(city_id, item_type, item_name, yield_type)
+
+    async def move_unit(self, unit_index, x, y):
+        self.moves.append((unit_index, x, y))
+        if self.move_reply is not None:
+            return self.move_reply
+        self.data["units"] = [
+            u if u.unit_index != unit_index else _moved(u, x, y) for u in self.data["units"]
+        ]
+        return f"MOVING_TO|{x},{y}|from:10,10|now_at:{x},{y}|(moved)"
+
+
+def _moved(unit, x, y):
+    from dataclasses import replace
+
+    return replace(unit, x=x, y=y)
+
+
+def _defence(city_id=65536, hostile=3):
+    from civ6_ai.policies.defence import CityThreat, DefenceState
+
+    state = DefenceState()
+    state.cities = {city_id: CityThreat(city_id, "Alpha", 10, 10, ("war:X",), hostile, 1, 0)}
+    return state
+
+
+def _holder(unit_id, unit_type="UNIT_CROSSBOWMAN", moves=2.0, x=10, y=10):
+    return fx.unit_info(
+        unit_id=unit_id, unit_index=unit_id, unit_type=unit_type, x=x, y=y,
+        moves_remaining=moves, combat_strength=30, ranged_strength=40,
+    )  # fmt: skip
+
+
+def _run_war(game):
+    policy = GoldPolicy(defence=_defence())
+    asyncio.run(policy.run(game))
+    return policy
+
+
+def test_a_blocked_defender_purchase_moves_the_occupant_aside_and_buys():
+    game = WarGame(
+        units=[_holder(5)], production=[option("UNIT_FIELD_CANNON", 880, category="UNIT")]
+    )
+    _run_war(game)
+    assert len(game.moves) == 1 and game.moves[0][0] == 5
+    assert game.moves[0][1:] != (10, 10)
+    assert ("buy", 65536, "UNIT", "UNIT_FIELD_CANNON") in game.actions
+    assert game.actions.index(("buy", 65536, "UNIT", "UNIT_FIELD_CANNON")) >= 0
+
+
+def test_the_occupant_goes_to_the_owned_tile_farthest_from_the_enemy():
+    game = WarGame(
+        units=[_holder(5)],
+        production=[option("UNIT_FIELD_CANNON", 880, category="UNIT")],
+        threats=[fx.threat_info(x=12, y=10)],  # A barbarian, hostile.
+    )
+    _run_war(game)
+    assert game.moves and game.moves[0][1:] == (9, 10)  # West, away from the unit at (12,10).
+
+
+def test_no_room_is_made_outside_a_threatened_city():
+    game = WarGame(
+        units=[_holder(5)], production=[option("UNIT_FIELD_CANNON", 880, category="UNIT")]
+    )
+    asyncio.run(GoldPolicy().run(game))  # No defence state: nothing marks the city.
+    assert game.moves == []
+
+
+def test_a_unit_with_no_moves_is_left_and_the_purchase_goes_elsewhere():
+    game = WarGame(
+        units=[_holder(5, moves=0.0)],
+        production=[option("UNIT_FIELD_CANNON", 880, category="UNIT")],
+    )
+    _run_war(game)
+    assert game.moves == []
+    assert not any(a[0] == "buy" and a[1] == 65536 for a in game.actions)
+
+
+def test_a_refused_move_does_not_buy_and_is_not_repeated_this_turn():
+    game = WarGame(
+        units=[_holder(5)],
+        production=[
+            option("UNIT_FIELD_CANNON", 880, category="UNIT"),
+            option("UNIT_CAVALRY", 880, category="UNIT"),
+        ],
+        move_reply="Error: PATH_BLOCKED|no path",
+    )
+    _run_war(game)
+    assert len(game.moves) == 1
+
+
+def test_tiles_that_are_foreign_water_or_taken_are_not_chosen():
+    game = WarGame(
+        units=[_holder(5), _holder(6, x=11, y=10)],
+        production=[option("UNIT_FIELD_CANNON", 880, category="UNIT")],
+        tiles=[
+            _tile(10, 10),
+            _tile(11, 10),  # Another land unit stands here.
+            _tile(9, 10, terrain="TERRAIN_COAST"),
+            _tile(10, 11, owner_id=99),
+            _tile(10, 9, units=["Rome WARRIOR"]),
+        ],
+    )
+    _run_war(game)
+    assert game.moves == []  # No safe tile, so nothing moves and nothing is forced.
+
+
+def test_a_second_occupant_is_also_moved_and_more_than_two_are_not():
+    one_each = WarGame(
+        units=[_holder(5), _holder(6)],
+        production=[option("UNIT_FIELD_CANNON", 880, category="UNIT")],
+    )
+    _run_war(one_each)
+    assert {m[0] for m in one_each.moves} == {5, 6}
+    three = WarGame(
+        units=[_holder(5), _holder(6), _holder(7)],
+        production=[option("UNIT_FIELD_CANNON", 880, category="UNIT")],
+    )
+    _run_war(three)
+    assert three.moves == []
+
+
+def test_a_threatened_city_buys_the_strongest_unit_not_the_fastest():
+    from civ6_ai.policies.gold import strongest_first
+    from civ6_ai.state.reader import build_production
+
+    options = build_production(
+        [
+            option("UNIT_CROSSBOWMAN", 300, category="UNIT", turns=3),
+            option("BUILDING_WALLS", 200),
+            option("UNIT_PIKE_AND_SHOT", 400, category="UNIT", turns=6),
+            option("UNIT_AT_CREW", 5000, category="UNIT", turns=9),
+        ]
+    )
+    order = [o.item for o in strongest_first(options, budget=1000)]
+    assert order == ["UNIT_PIKE_AND_SHOT", "BUILDING_WALLS", "UNIT_CROSSBOWMAN", "UNIT_AT_CREW"]
+    # The strongest the budget covers wins; the unaffordable one goes last of the units.
+    assert [o.item for o in strongest_first(options, budget=10_000)][0] == "UNIT_AT_CREW"
+
+
+def test_the_upgrade_note_says_how_many_units_had_no_moves(caplog):
+    caplog.set_level(logging.INFO, logger="civ6_ai.policies.gold")
+    game = GoldGame(
+        units=[_holder(5, moves=0.0, x=30, y=30)],
+        production=[],
+    )
+    asyncio.run(GoldPolicy().run(game))
+    text = " ".join(r.getMessage() for r in caplog.records)
+    assert "no unit can upgrade (1 units with an upgrade path, 1 with no moves left" in text

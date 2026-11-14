@@ -473,7 +473,7 @@ def _unit_score(
     if threatened:
         # In a marked city a ranged unit, which shoots from behind the front one, gets a lift.
         ranged = 3.0 if stats[4] == "RANGED" and city.city_id in ctx.threatened else 0.0
-        return 14.0 + strength / 4.0 + 2.0 * len(city.threats) + ranged
+        return 14.0 + strength / 2.0 + 2.0 * len(city.threats) + ranged
     if city.garrison_unit is None:
         return (16.0 if ctx.turn <= _EARLY_TURNS else 12.0) + strength / 10.0
     wanted = w.army_per_city * ctx.num_cities - ctx.army

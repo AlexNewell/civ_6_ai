@@ -31,6 +31,12 @@ are spent, not banked. Units in or beside a threatened city upgrade first, a thr
 buys only defenders and walls, and the bounds below widen to `THREAT_MAX_UPGRADES` and one
 purchase per threatened city.
 
+Under threat a purchase is ordered by strength, since gold buys the unit now and build time does
+not matter: the strongest defender the game offers and the budget covers comes first. A land unit
+cannot be bought while another stands on the city tile (Run 10 left 1226 gold unspent in a
+threatened city that way). The policy then moves the occupants to a safe adjacent tile and buys:
+see `_make_room`.
+
 Bounds per turn: 3 upgrades, 3 purchases (one per city, since the game allows one per city per
 turn), 2 tiles, and 8 calls that the game refuses. A refusal is logged and the next candidate is
 tried. Costs come from the game's reads, and each spend is taken off the budget at its listed
@@ -39,21 +45,24 @@ cost, so the reserve holds even if a later read is stale.
 
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
 from civ6_ai.placement import PlanBook
-from civ6_ai.policies.game_data import COMBAT_UNITS
+from civ6_ai.policies.game_data import COMBAT_UNITS, UPGRADES
+from civ6_ai.policies.military import holds_tile
 from civ6_ai.policies.production import (
     ProductionContext,
     ProductionWeights,
     build_context,
+    defence_strength,
     is_defence,
     rank_production,
     score,
 )
 from civ6_ai.stacking import StackBlocks
 from civ6_ai.state import City, Unit
+from civ6_ai.state import read_area as _read_area
 from civ6_ai.state import read_cities as _read_cities
 from civ6_ai.state import read_empire as _read_empire
 from civ6_ai.state import read_production as _read_production
@@ -79,6 +88,8 @@ MAX_TILES = 2
 MAX_REFUSALS = 8
 THREAT_DEFICIT_TURNS = 2  # The reserve under threat: enough that a deficit cannot disband units.
 THREAT_MAX_UPGRADES = 5
+MAX_CLEARED_PER_CITY = 2  # Units moved off one city tile to make room for a purchase.
+MAX_CLEARED_PER_TURN = 4
 _PURCHASABLE = ("UNIT", "BUILDING")
 _NAME = re.compile(r"[A-Z0-9_]+")
 _RESOURCE_RANK = {"luxury": 0, "strategic": 1, "bonus": 2}
@@ -103,6 +114,7 @@ class GoldGame(Protocol):
     ) -> str: ...
     async def get_purchasable_tiles(self, city_id: int) -> Any: ...
     async def purchase_tile(self, city_id: int, x: int, y: int) -> str: ...
+    async def move_unit(self, unit_index: int, target_x: int, target_y: int) -> str: ...
 
 
 def _ok(result: str, marker: str) -> bool:
@@ -122,6 +134,29 @@ def _strength(unit_type: str) -> int:
 def threat_reserve(gold_per_turn: float = 0.0) -> int:
     """The reserve while a city is threatened: nothing banked beyond a deficit's next turns."""
     return int(THREAT_DEFICIT_TURNS * max(0.0, -gold_per_turn))
+
+
+def strongest_first(ranked: list, budget: int) -> list:
+    """Reorder a threatened city's defence so the strongest unit the budget covers comes first.
+
+    Production's ranking divides by build time, which a purchase does not wait for. Units trade
+    places among themselves (affordable, then strongest, then cheapest) and buildings (walls) keep
+    their slots, so the ranking still decides walls against a unit.
+    """
+    slots = [i for i, o in enumerate(ranked) if o.category == "UNIT"]
+    units = sorted(
+        (ranked[i] for i in slots),
+        key=lambda o: (
+            (o.gold_cost or 0) > budget,
+            -defence_strength(o.item),
+            o.gold_cost or 0,
+            o.item,
+        ),
+    )
+    result = list(ranked)
+    for slot, unit in zip(slots, units, strict=True):
+        result[slot] = unit
+    return result
 
 
 def upgrade_order(
@@ -150,6 +185,8 @@ class _Turn:
 
     budget: int
     refusals: int = 0
+    cleared: int = 0  # Units moved off a city tile to make room for a purchase.
+    roomed: set[int] = field(default_factory=set)  # Cities whose tile was tried this turn.
     upgrades: int = 0
     purchases: int = 0
     tiles: int = 0
@@ -206,6 +243,7 @@ class GoldPolicy:
         self.builder_demand = builder_demand  # `builder.BuilderDemand`, or None.
         self._stack = StackBlocks()  # Purchases a unit on the city tile blocks.
         self._delay: dict[str, float] = {}  # Lesser spending while saving, per target.
+        self._hostile: list[tuple[int, int]] = []  # Hostile unit tiles, read for the upgrades.
         # Tiles production wants for a district or wonder (see `placement`): bought when they fit
         # the budget, else the saving target.
         self.plans = plans if plans is not None else PlanBook()
@@ -295,10 +333,11 @@ class GoldPolicy:
         except Exception:
             log.exception("Threat read failed, upgrading without threat order")
             hostile = []
+        self._hostile = hostile
         guarded = [(c.x, c.y) for c in cities or [] if self._marked(c)]
         candidates = upgrade_order(units, hostile, guarded if self.defence is not None else None)
         if not candidates:
-            notes.append("no unit can upgrade")
+            notes.append(f"no unit can upgrade{self._upgrade_gap(units)}")
             return
         for unit in candidates:
             if turn.upgrades >= self._max_upgrades() or turn.refused_out:
@@ -323,6 +362,22 @@ class GoldPolicy:
             else:
                 turn.refusals += 1
                 log.info("Upgrade of %s refused: %s", unit.unit_type, str(result)[:120])
+
+    @staticmethod
+    def _upgrade_gap(units: list[Unit]) -> str:
+        """Why nothing upgrades, from what the unit list shows.
+
+        The game's own check (`CanStartCommand` for UPGRADE, in its strict form) covers tech,
+        strategic resources, the unit's moves and its tile, not gold. A unit that moved or fought
+        earlier in the turn has no moves, and one whose upgrade needs a tech the empire lacks is
+        refused. Run 10 logged only "no unit can upgrade" 217 times, which hid which of the two.
+        """
+        combat = [u for u in units if u.is_combat and u.unit_type in UPGRADES]
+        if not combat:
+            return ""
+        spent = sum(1 for u in combat if u.moves <= 0)
+        types = sorted({u.unit_type.removeprefix("UNIT_") for u in combat})
+        return f" ({len(combat)} units with an upgrade path, {spent} with no moves left: {types})"
 
     def _note_upgrade(self, unit: Unit, cities: list[City], text: str) -> None:
         if self.defence is None:
@@ -373,8 +428,8 @@ class GoldPolicy:
             ranked = rank_production(city, options, context, self.weights)
             if self.defence is not None and self.defence.is_threatened(city.city_id):
                 # Defenders and walls only. A threatened city does not buy a library.
-                ranked = [o for o in ranked if is_defence(o)]
-            await self._buy_in(game, turn, city, ranked, context, bought, notes)
+                ranked = strongest_first([o for o in ranked if is_defence(o)], turn.budget)
+            await self._buy_in(game, turn, city, ranked, context, bought, notes, units)
 
     def _may_buy_while_saving(self, city: City) -> bool:
         """Only a threatened city's defence is bought while gold is saved for something else."""
@@ -389,6 +444,7 @@ class GoldPolicy:
         context: ProductionContext,
         bought: list[str],
         notes: list[str],
+        units: list[Unit] | None = None,
     ) -> bool:
         tried = 0
         for option in ranked:
@@ -400,6 +456,10 @@ class GoldPolicy:
                 continue
             if not _NAME.fullmatch(option.item):
                 continue
+            if option.gold_cost <= turn.budget and units is not None and self._marked(city):
+                # Under threat, a unit on the city tile is moved aside rather than left to
+                # block the one purchase that would help.
+                await self._make_room(game, turn, city, option, units, notes)
             if self._stack.is_blocked(city.city_id, option.item):
                 notes.append(f"{city.name} {option.item} blocked by a unit on the city tile")
                 continue
@@ -435,6 +495,98 @@ class GoldPolicy:
                 notes.append(f"{city.name} {option.item} blocked by a unit on the city tile")
             log.info("Purchase of %s in %s refused: %s", option.item, city.name, str(result)[:120])
         return False
+
+    async def _make_room(
+        self,
+        game: GoldGame,
+        turn: _Turn,
+        city: City,
+        option: Any,
+        units: list[Unit],
+        notes: list[str],
+    ) -> None:
+        """Move the land units off a threatened city's tile so a land unit can be bought there.
+
+        The game refuses a land unit while another stands on the tile (`CanStartCommand` says
+        "Too many units of the same class in this location"), whatever its count. Only a unit
+        purchase can be blocked, and only by units that hold a tile. Each occupant goes to the
+        adjacent tile the city owns that is land, empty of our land units and of any foreign
+        unit, farthest from hostile units and then on defensive ground. The block lifts by the
+        usual rule (the units read no longer shows the unit on the tile), so nothing is forced:
+        if no occupant can move (no moves left, no tile) the item stays blocked.
+        """
+        if option.category != "UNIT" or option.item not in COMBAT_UNITS:
+            return
+        if city.city_id in turn.roomed:
+            return  # Tried already this turn, moved or not.
+        turn.roomed.add(city.city_id)
+        here = (city.x, city.y)
+        occupants = [u for u in units if u.is_combat and holds_tile(u) and (u.x, u.y) == here]
+        if not occupants:
+            return  # Nothing blocks a soldier: a builder or a great person does not.
+        if (
+            len(occupants) > MAX_CLEARED_PER_CITY
+            or turn.cleared + len(occupants) > MAX_CLEARED_PER_TURN
+            or any(u.moves <= 0 for u in occupants)
+        ):
+            notes.append(
+                f"{city.name}: {len(occupants)} units on the city tile, "
+                "too many or none able to move aside"
+            )
+            return
+        try:
+            area = await _read_area(game, city.x, city.y, 1)
+        except ConnectionError:
+            raise
+        except Exception:
+            log.exception("Area read failed for %s", city.name)
+            return
+        plans = self._room_plan(city, occupants, units, area)
+        if plans is None:
+            notes.append(f"{city.name}: no safe tile beside the city for its defenders")
+            return
+        for unit, (x, y) in plans:
+            result = await self._call(game.move_unit(unit.unit_index, x, y))
+            turn.cleared += 1
+            left = str(result).startswith(("MOVING_TO", "OK")) and (
+                f"now_at:{city.x},{city.y}" not in str(result)
+            )
+            if not left:
+                turn.refusals += 1
+                log.info(
+                    "Moving %s off %s refused: %s", unit.unit_type, city.name, str(result)[:120]
+                )
+                return
+            units[units.index(unit)] = replace(unit, x=x, y=y, moves=0.0)
+            log.info("Moved %s off the city tile of %s to (%d,%d)", unit.unit_type, city.name, x, y)
+            if self.defence is not None:
+                self.defence.note(city.city_id, f"gold: moved {unit.unit_type} aside to buy")
+        self._stack.release(city.city_id)
+
+    def _room_plan(
+        self, city: City, occupants: list[Unit], units: list[Unit], area: tuple
+    ) -> list[tuple[Unit, tuple[int, int]]] | None:
+        """A tile for each occupant, or None when there are not enough safe ones."""
+        owner = next((t.owner_id for t in area if (t.x, t.y) == (city.x, city.y)), None)
+        taken = {(u.x, u.y) for u in units if holds_tile(u)}
+        ground = []
+        for tile in area:
+            if hex_distance(city.x, city.y, tile.x, tile.y) != 1 or (tile.x, tile.y) in taken:
+                continue
+            if tile.foreign_units or owner is None or tile.owner_id != owner:
+                continue
+            terrain = tile.terrain or ""
+            if any(word in terrain for word in ("COAST", "OCEAN", "LAKE", "MOUNTAIN")):
+                continue
+            nearest = min(
+                (hex_distance(tile.x, tile.y, x, y) for x, y in self._hostile), default=99
+            )
+            ground.append((-min(nearest, 3), not tile.hills, tile.x, tile.y))
+        ground.sort()
+        if len(ground) < len(occupants):
+            return None
+        weakest_first = sorted(occupants, key=lambda u: (defence_strength(u.unit_type), u.unit_id))
+        return [(u, (g[2], g[3])) for u, g in zip(weakest_first, ground, strict=False)]
 
     async def _plan_tiles(self, game: GoldGame, turn: _Turn, now: int, notes: list[str]) -> None:
         """Buy the tile a district or wonder is waiting for, or make it the saving target."""

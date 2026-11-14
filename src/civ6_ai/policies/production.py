@@ -33,7 +33,13 @@ from civ6_ai.placement import (
 )
 from civ6_ai.policies.districts import BASE_VALUE, PLANNED_VALUE, is_planned, wants_district
 from civ6_ai.policies.expansion import ExpansionState, expected_cities
-from civ6_ai.policies.game_data import COMBAT_UNITS, REPLACES, UPGRADES, WONDERS
+from civ6_ai.policies.game_data import (
+    COMBAT_UNITS,
+    REPLACES,
+    UNIQUE_DISTRICTS,
+    UPGRADES,
+    WONDERS,
+)
 from civ6_ai.state import City, Empire, ProductionChoice, Unit
 from civ6_ai.state import read_cities as _read_cities
 from civ6_ai.state import read_empire as _read_empire
@@ -68,7 +74,7 @@ class ProductionWeights:
     food: float = 1.0
     production: float = 1.0
     gold: float = 1.0
-    science: float = 1.0
+    science: float = 1.25  # Above 1: science compounds, and a science race is lost late.
     culture: float = 1.0
     faith: float = 0.5
     military: float = 1.0  # Land units beyond the garrison a city needs.
@@ -102,6 +108,7 @@ class ProductionContext:
     traders: int = 0  # Traders that exist, on a route or not, plus those being built.
     trade_capacity: int = 0  # Routes the empire can run at once.
     districts: frozenset[str] = frozenset()  # Short names of districts any city has built.
+    science_districts: int = 0  # Campuses (or the unique district in their place) built or begun.
     threatened: frozenset[int] = frozenset()  # Ids of cities the threat state marks (1.35).
     short: frozenset[int] = frozenset()  # Of those, the ones with fewer than two defenders.
     sites_ok: bool = True  # False when settling found no safe site to send a settler to.
@@ -122,6 +129,8 @@ class ProductionContext:
             counted = replace(counted, spare_jobs=max(0, counted.spare_jobs - 1))
         if item.startswith("DISTRICT_"):  # A district being built counts, so two cities don't.
             counted = replace(counted, districts=counted.districts | {_short(item)})
+            if _base_district(item) == "CAMPUS":
+                counted = replace(counted, science_districts=counted.science_districts + 1)
         return counted
 
 
@@ -166,6 +175,9 @@ def build_context(
         threatened=defence.threatened_ids if defence is not None else frozenset(),
         short=defence.short_ids if defence is not None else frozenset(),
         districts=frozenset(_short(d.district_type) for c in cities for d in c.districts),
+        science_districts=sum(
+            _base_district(d.district_type) == "CAMPUS" for c in cities for d in c.districts
+        ),
         idle_builders=idle_builders,
         spare_jobs=spare_jobs,
     )
@@ -282,6 +294,19 @@ def _short(item: str) -> str:
         if item.startswith(prefix):
             return item.removeprefix(prefix)
     return item
+
+
+def _base_district(item: str) -> str:
+    """The district without its prefix, a unique district as the base district it replaces."""
+    short = _short(item)
+    return UNIQUE_DISTRICTS.get(short, short)
+
+
+# A city without a science district is worth more the further the empire is from having one in
+# every city, up to this much on top of the district's own value. It only raises the score, so
+# a threatened city, a defender or a nearly finished build still wins, and wonders and the other
+# districts still get their turn once most cities have one.
+_SCIENCE_CATCHUP = 2.5
 
 
 def _yield_value(profile: tuple[float, ...], weights: ProductionWeights) -> float:
@@ -511,17 +536,22 @@ def _building_score(
     return value
 
 
-def _district_score(option: ProductionChoice, city: City, w: ProductionWeights) -> float:
-    name = _short(option.item)
+def _district_score(
+    option: ProductionChoice, city: City, w: ProductionWeights, ctx: ProductionContext
+) -> float:
+    name = _base_district(option.item)
     if name in BASE_VALUE:  # It passed `wants_district`, so it is worth building.
         return PLANNED_VALUE if is_planned(name, w.victory) else BASE_VALUE[name]
     profile = _DISTRICT_YIELDS.get(name)
     if profile is None:
         return _UNKNOWN_BUILDING * 2.0
     value = _yield_value(profile, w)
+    if name == "CAMPUS" and ctx.num_cities > 0:
+        behind = max(0.0, 1.0 - ctx.science_districts / ctx.num_cities)
+        value += _SCIENCE_CATCHUP * behind * w.science
     if name in _FOOD_BUILDINGS and is_starving(city):
         value += _STARVING_FOOD_BOOST * profile[0] * w.food
-    if _short(option.item) == "AQUEDUCT":
+    if name == "AQUEDUCT":
         # Worth building when growth is capped by housing, not before.
         value = value * 2.0 if city.housing - city.pop <= 1 else value * 0.3
     return value
@@ -536,7 +566,7 @@ def score(
     elif option.category == "UNIT":
         value = _unit_score(option, city, ctx, weights)
     elif option.category == "DISTRICT":
-        value = _district_score(option, city, weights)
+        value = _district_score(option, city, weights, ctx)
     else:
         value = _building_score(option, city, ctx, weights)
     if value <= 0:

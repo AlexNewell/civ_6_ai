@@ -1238,3 +1238,12 @@ def test_a_missed_tile_is_explained_in_the_log_line():
         "68|27|TERRAIN_DESERT|FEATURE_OASIS|-|-|-|0|No"
     ]
     assert "PMISSWHY|" in placement.build_plan_query(1, "DISTRICT", "DISTRICT_CAMPUS")
+
+
+def test_observatory_adjacency_is_scored_by_the_plan_query():
+    from civ6_ai.placement import ADJACENCY_DISTRICTS, build_plan_query
+
+    assert "DISTRICT_OBSERVATORY" in ADJACENCY_DISTRICTS
+    lua = build_plan_query(1, "DISTRICT", "DISTRICT_OBSERVATORY")
+    assert 'dType == "DISTRICT_OBSERVATORY"' in lua
+    assert "IMPROVEMENT_PLANTATION" in lua and "IMPROVEMENT_FARM" in lua

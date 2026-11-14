@@ -37,8 +37,11 @@ _NO_TURNS = 999  # Stands in for an option with no known time to finish.
 DEFAULT_PRIORITIES: tuple[tuple[str, float], ...] = (
     ("BRONZE_WORKING", 1.0),
     ("CODE_OF_LAWS", 2.0),
+    ("ASTRONOMY", 1.0),  # Run 11: researched on turn 182, so science buildings came late.
+    ("CHEMISTRY", 1.5),  # The Research Lab. Run 11 never reached it: 0 labs in 5 cities.
     ("CRAFTSMANSHIP", 1.0),
     ("CURRENCY", 1.0),
+    ("EDUCATION", 2.5),  # The University. Cheap techs (speed) otherwise run ahead of it.
     ("EARLY_EMPIRE", 1.5),
     ("FOREIGN_TRADE", 1.0),
     ("MASONRY", 0.5),

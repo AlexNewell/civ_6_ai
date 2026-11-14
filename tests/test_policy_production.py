@@ -952,8 +952,8 @@ def test_settler_priority_rises_when_behind_the_schedule():
 def test_no_boost_without_safe_sites_a_garrison_or_a_defender_per_city():
     behind = ProductionContext(turn=100, num_cities=2, builders=2, recon=1, army=2)
     boosted = _settler_score(behind)
+    assert _settler_score(replace(behind, sites_ok=False)) == 0  # No site, no settler at all.
     for plain in (
-        _settler_score(replace(behind, sites_ok=False)),
         _settler_score(behind, garrison_unit=""),
         _settler_score(replace(behind, army=1)),  # A city would be left bare.
     ):
@@ -1167,3 +1167,13 @@ def test_a_pressed_city_prefers_the_much_stronger_defender_over_the_slightly_fas
         option("UNIT", "UNIT_PIKE_AND_SHOT", 6),
     ]
     assert rank_production(city(threats=[threat()]), menu, ctx)[0].item == "UNIT_PIKE_AND_SHOT"
+
+
+def test_no_settler_when_the_survey_found_no_safe_site():
+    # Run 11: a settler was built five times with no site on the map; four were disbanded.
+    grown = city(population=4)
+    ctx = ProductionContext(turn=60, num_cities=3, builders=3, recon=1, army=4)
+    assert best(grown, MENU, ctx) == "UNIT_SETTLER"
+    assert best(grown, MENU, replace(ctx, sites_ok=False)) != "UNIT_SETTLER"
+    behind = replace(ctx, turn=140, sites_ok=False)
+    assert best(grown, MENU, behind) != "UNIT_SETTLER"

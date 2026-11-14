@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 
+import pytest
 from civ_mcp import lua as lq
 
 from civ6_ai.orchestrator import Handler
@@ -14,6 +15,7 @@ from civ6_ai.policies.settling import (
     loyalty_margin,
     loyalty_rate,
     neighbours,
+    safe_loyalty_rate,
     score_site,
 )
 from civ6_ai.state.models import SettleSite
@@ -31,6 +33,21 @@ from fixtures.civ_state import (
 SETTLER = dict(unit_type="UNIT_SETTLER", name="Settler", combat_strength=0)
 SCOUT = dict(unit_type="UNIT_SCOUT", name="Scout", combat_strength=0, max_moves=3.0)
 GOOD = dict(food=20, prod=10, water="fresh")  # Scores 65.
+
+
+@pytest.fixture(autouse=True)
+def _no_safe_rate(monkeypatch):
+    """Older tests place sites near the fixture's rival; they test other rules, so the safe rate
+    reads as clear for them. Tests of the safe rate itself ask for `real_safe_rate`."""
+    monkeypatch.setattr(
+        "civ6_ai.policies.settling.safe_loyalty_rate",
+        lambda *a, **k: SettlingSettings().loyalty_rate_cap,
+    )
+
+
+@pytest.fixture
+def real_safe_rate(monkeypatch):
+    monkeypatch.setattr("civ6_ai.policies.settling.safe_loyalty_rate", safe_loyalty_rate)
 
 
 class ActionGame(FakeGame):
@@ -734,6 +751,83 @@ def test_a_falling_estimated_rate_costs_score():
     run(policy, game)
     candidate = policy.decisions[0].candidates[0]
     assert candidate.loyalty_rate < 0 and candidate.loyalty_penalty > -candidate.loyalty_margin
+
+
+# Run 10 (STD_T1_01): Palenque at (59,29) was estimated +2.3 a turn and the game said -27.
+# Positions and populations are assumed (the log kept the rates, not the cities).
+RUN10_OWN = [(66, 25, 9), (64, 22, 6), (67, 21, 5), (63, 27, 5)]
+RUN10_RIVALS = [(54, 27, 6), (55, 31, 5)]
+
+
+def test_safe_rate_is_below_the_snapshot_rate_by_drag_growth_and_fog():
+    settings = SettlingSettings()
+    raw = loyalty_rate(59, 29, RUN10_OWN, RUN10_RIVALS, settings)
+    safe = safe_loyalty_rate(59, 29, RUN10_OWN, RUN10_RIVALS, settings)
+    assert safe < raw - settings.loyalty_new_city_drag
+    # No rival in range: only the drag applies, and the site stays comfortable.
+    quiet = safe_loyalty_rate(66, 28, RUN10_OWN, [], settings)
+    assert quiet == settings.loyalty_rate_cap - settings.loyalty_new_city_drag
+    assert quiet > settings.loyalty_comfort_rate
+
+
+DRAG = 1.0  # Lighter than the default so a site 4 tiles out still clears the floor.
+
+
+def test_a_site_below_the_safe_floor_is_refused_and_one_under_comfort_is_marked_down(
+    real_safe_rate,
+):
+    # Own city (10,10) pop 5, Roma (20,10) pop 6. The raw estimate at (15,10) is +1.4, positive,
+    # but after growth, fog and drag it is under zero: refused. (13,10) clears the floor but not
+    # the comfort rate and loses score; (4,10) is out of Roma's range and loses none.
+    game = make_game(
+        [settler()],
+        cities=[alpha()],
+        sites=[site(15, 10, food=40), site(14, 10, food=40), site(4, 10, food=40)],
+    )
+    policy = SettlingPolicy(SettlingSettings(loyalty_new_city_drag=DRAG))
+    run(policy, game)
+    by_site = {(c.x, c.y): c for c in policy.decisions[0].candidates}
+    s = SettlingSettings(loyalty_new_city_drag=DRAG)
+    refused = by_site[15, 10]
+    assert refused.loyalty_rate > 0 > refused.safe_rate
+    assert refused.rejected == "likely to flip to a rival (loyalty)"
+    mid = by_site[14, 10]
+    assert mid.rejected is None and 0 <= mid.safe_rate < s.loyalty_comfort_rate
+    assert mid.loyalty_penalty == (s.loyalty_comfort_rate - mid.safe_rate) * (
+        s.loyalty_safe_penalty_weight
+    )
+    safe = by_site[4, 10]
+    assert safe.loyalty_penalty == 0 and safe.safe_rate == s.loyalty_rate_cap - DRAG
+
+
+def test_a_few_site_points_do_not_beat_a_materially_safer_site(real_safe_rate):
+    # Run 10, turn 99: 17 site points took Palenque over a site 3.4 rate points safer. Here the
+    # nearer site is a few points better on paper, and the comfort penalty reverses the order.
+    game = make_game(
+        [settler()],
+        cities=[alpha()],
+        sites=[site(14, 10, food=40), site(4, 10, food=36)],
+    )
+    policy = SettlingPolicy(SettlingSettings(loyalty_new_city_drag=DRAG))
+    run(policy, game)
+    by_site = {(c.x, c.y): c for c in policy.decisions[0].candidates}
+    near, far = by_site[14, 10], by_site[4, 10]
+    assert near.rejected is None and far.rejected is None
+    assert near.site_score + near.loyalty_penalty > far.site_score  # Better before the penalty.
+    assert policy.decisions[0].target == (4, 10)
+
+
+def test_fog_phantom_only_appears_near_a_seen_rival():
+    settings = SettlingSettings()
+    near = safe_loyalty_rate(14, 10, [(10, 10, 5)], [(20, 10, 6)], settings)
+    # A phantom at the range edge adds no pull, so it is the same site without the fog term.
+    no_fog = SettlingSettings(loyalty_fog_distance=settings.loyalty_range + 1)
+    assert near < safe_loyalty_rate(14, 10, [(10, 10, 5)], [(20, 10, 6)], no_fog)
+    # With no rival in range there is no phantom: only the drag.
+    assert (
+        safe_loyalty_rate(14, 10, [(10, 10, 5)], [(60, 10, 6)], settings)
+        == settings.loyalty_rate_cap - settings.loyalty_new_city_drag
+    )
 
 
 def test_first_city_ignores_loyalty():

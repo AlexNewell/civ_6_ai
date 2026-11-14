@@ -841,6 +841,13 @@ async def choose_for_city(
                     cap.allowed,
                 )
                 continue
+            # The game's own verdict (`CanStartOperation`, read with the signatures) names the
+            # failure; one that tiles cannot change here costs no advisor call and no refusal. It
+            # is read every turn, so the district competes again once the game allows it.
+            verdict = await reads.district_denied(city.city_id, option.item)
+            if verdict is not None:
+                log.debug("%s skips %s: the game says %s", city.name, option.item, verdict)
+                continue
         tried += 1
         trace = StartTrace()
         result = await _start(game, city, option, trace, chain)

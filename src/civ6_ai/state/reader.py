@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Sized
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
 from civ6_ai.state.fog import BARBARIAN_ID, is_hidden_stealth_unit
@@ -666,6 +667,107 @@ async def _rival_city_visibility(
                     t.visibility == "visible" and (t.x, t.y) == (city.x, city.y) for t in tiles
                 )
     return visible
+
+
+# Fair play: only what we have actually seen. A city of another player enters the result only
+# while its plot is *visible* to us this turn, as does a foreign-owned tile. A plot revealed long
+# ago but in the fog is not read (its live state would leak what our units cannot see). Lua is
+# also given the tiles the caller remembers and says which of them are visible now, so the caller
+# can drop a remembered city whose plot is seen without it. One call.
+_KNOWN_CITIES_HEAD = """
+local me = Game.GetLocalPlayer()
+local vis = PlayersVisibility[me]
+for i = 0, 62 do
+    local p = Players[i]
+    if i ~= me and p and p:IsAlive() and not p:IsBarbarian() then
+        for _, c in p:GetCities():Members() do
+            local x, y = c:GetX(), c:GetY()
+            if vis:IsVisible(x, y) then
+                local okc, cap = pcall(function() return c:IsCapital() end)
+                print("KCITY|" .. i .. "|" .. x .. "|" .. y .. "|" .. c:GetPopulation() .. "|"
+                    .. ((okc and cap) and 1 or 0) .. "|1")
+            end
+        end
+    end
+end
+local owned = {}
+for idx = 0, Map.GetPlotCount() - 1 do
+    local plot = Map.GetPlotByIndex(idx)
+    local o = plot:GetOwner()
+    if o ~= -1 and o ~= me and vis:IsVisible(plot:GetX(), plot:GetY()) then
+        owned[o] = owned[o] or {}
+        table.insert(owned[o], plot:GetX() .. "," .. plot:GetY())
+    end
+end
+for o, tiles in pairs(owned) do
+    print("BORDER|" .. o .. "|" .. table.concat(tiles, ";"))
+end
+local seen = {}
+for tile in string.gmatch("%s", "[^;]+") do
+    local x, y = string.match(tile, "(%%-?%%d+),(%%-?%%d+)")
+    if x and vis:IsVisible(tonumber(x), tonumber(y)) then table.insert(seen, tile) end
+end
+print("VISIBLE|" .. table.concat(seen, ";"))
+print("---END---")
+"""
+
+
+@dataclass(frozen=True)
+class KnownCity:
+    owner: int
+    x: int
+    y: int
+    pop: int
+    capital: bool
+    visible: bool = True
+
+
+@dataclass(frozen=True)
+class KnownMap:
+    cities: tuple[KnownCity, ...]
+    border_tiles: tuple[tuple[int, int, int], ...]  # (owner, x, y), visible now
+    visible_watched: frozenset[tuple[int, int]] = frozenset()  # Asked-about tiles visible now.
+
+
+def parse_known_cities(output: str) -> KnownMap:
+    """Parse the call's output. Raises ValueError unless it ends with the completion marker, so a
+    timed-out or partial read is never taken for a complete one."""
+    if "---END---" not in output:
+        raise ValueError("known-city read incomplete: no end marker")
+    cities, borders, watched = [], [], set()
+    for line in output.splitlines():
+        parts = line.strip().split("|")
+        try:
+            if parts[0] == "KCITY" and len(parts) >= 7:
+                cities.append(
+                    KnownCity(
+                        int(parts[1]),
+                        int(parts[2]),
+                        int(parts[3]),
+                        int(parts[4]),
+                        parts[5] == "1",
+                        parts[6] == "1",
+                    )
+                )
+            elif parts[0] == "BORDER" and len(parts) >= 3:
+                for tile in parts[2].split(";"):
+                    x, y = tile.split(",")
+                    borders.append((int(parts[1]), int(x), int(y)))
+            elif parts[0] == "VISIBLE" and len(parts) >= 2:
+                for tile in parts[1].split(";"):
+                    if tile:
+                        x, y = tile.split(",")
+                        watched.add((int(x), int(y)))
+        except ValueError:
+            continue
+    return KnownMap(tuple(cities), tuple(borders), frozenset(watched))
+
+
+async def read_known_cities(game, watch: Iterable[tuple[int, int]] = ()) -> KnownMap:
+    """Rival cities and foreign-owned tiles on tiles visible now, and which of the `watch` tiles
+    are visible now. `game` needs `execute_lua`."""
+    tiles = ";".join(f"{x},{y}" for x, y in watch)
+    return parse_known_cities(await game.execute_lua(_KNOWN_CITIES_HEAD % tiles, "ingame"))
 
 
 async def read_threats(game: GameReads) -> tuple[Threat, ...]:

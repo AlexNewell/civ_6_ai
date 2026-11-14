@@ -33,6 +33,7 @@ from civ6_ai.state import (
     Unit,
     read_cities,
     read_exploration,
+    read_known_cities,
     read_rivals,
     read_threats,
     read_units,
@@ -117,6 +118,12 @@ class SettlingSettings:
     # the linear margin above had passed, so the rate gates sites too.
     loyalty_range: int = 9
     loyalty_rate_cap: float = 20.0
+    # Capitals pull twice as hard (Run 12 breakdown: our capital, pop 3 at 8 tiles, 1.195 against
+    # 0.6 for a plain pop 3 city there; Sumeria's capital, pop 7 at 5 tiles, 7 against 3.5).
+    loyalty_capital_weight: float = 2.0
+    # A rival-owned revealed tile with no known city of its owner within this many tiles is
+    # evidence of an unseen city: count a phantom of `rival_city_default_pop - 2` on it.
+    loyalty_border_explain_radius: int = 5
     loyalty_reject_rate: float = -6.0  # Reject a site whose estimated rate is below this.
     loyalty_rate_penalty_weight: float = 4.0  # Score lost per point of rate below zero.
     # The estimate is a snapshot of a city that does not exist yet. Run 10 founded Palenque at an
@@ -125,8 +132,10 @@ class SettlingSettings:
     # on it and is marked down for every point under `loyalty_comfort_rate`.
     # 1. Non-pressure losses of a new city: not following the neighbour's religion (-3 in the
     #    game's breakdown), no governor and no happiness bonus yet.
-    #    Assumed -3 a turn: the religion term, happiness and governor taken as zero.
-    loyalty_new_city_drag: float = 3.0
+    #    Run 12's breakdown for Tikal (turn 84): happiness -3, religion 0, rival Diplomat
+    #    Governors nearby -4; Run 10 had religion -3. Assumed -6 a turn: happiness -3 plus the
+    #    religion term -3 taken as present. A rival's Amani (-4) is unknowable and left out.
+    loyalty_new_city_drag: float = 6.0
     # 2. Growth: a new city starts at population 1 while rival cities keep growing. Over the first
     #    ~20 turns assume rival cities gain `rival_growth` pop and our existing ones `own_growth`.
     loyalty_rival_growth: int = 2
@@ -149,6 +158,11 @@ class SettlingSettings:
     map_width: int | None = STANDARD_MAP_WIDTH
 
 
+def _unpack(city: tuple) -> tuple[int, int, int, bool]:
+    """A city as (x, y, population) or (x, y, population, is_capital)."""
+    return city[0], city[1], city[2], len(city) > 3 and bool(city[3])
+
+
 def loyalty_pressure(
     x: int,
     y: int,
@@ -161,7 +175,8 @@ def loyalty_pressure(
     site lies. A city outside the radius pulls nothing.
     """
     total = 0.0
-    for cx, cy, pop in cities:
+    for city in cities:
+        cx, cy, pop, _ = _unpack(city)
         d = hex_distance(x, y, cx, cy, settings.map_width)
         if d <= settings.loyalty_radius:
             total += (pop + settings.loyalty_city_base) * (settings.loyalty_radius + 1 - d)
@@ -198,13 +213,15 @@ def loyalty_rate(
     margin could say. The 1.0 on our side is the site's own pull, as in the game's scan.
     """
     reach = settings.loyalty_range
+    capital_weight = settings.loyalty_capital_weight
 
     def pull(cities: Iterable[tuple[int, int, int]]) -> float:
         total = 0.0
-        for cx, cy, pop in cities:
+        for city in cities:
+            cx, cy, pop, cap = _unpack(city)
             d = hex_distance(x, y, cx, cy, settings.map_width)
             if 0 < d <= reach:
-                total += pop * (reach + 1 - d) / (reach + 1)
+                total += pop * (reach + 1 - d) / (reach + 1) * (capital_weight if cap else 1.0)
         return total
 
     friendly, enemy = 1.0 + pull(own), pull(rivals)
@@ -223,9 +240,16 @@ def safe_loyalty_rate(
     """The loyalty estimate after growth, fog and the non-pressure drag. See the settings."""
     s = settings
     rivals = list(rivals)
-    grown_own = [(cx, cy, pop + s.loyalty_own_growth) for cx, cy, pop in own]
-    grown_rivals = [(cx, cy, pop + s.loyalty_rival_growth) for cx, cy, pop in rivals]
-    if any(0 < hex_distance(x, y, cx, cy, s.map_width) <= s.loyalty_range for cx, cy, _ in rivals):
+    grown_own = [
+        (cx, cy, pop + s.loyalty_own_growth, cap) for cx, cy, pop, cap in map(_unpack, own)
+    ]
+    grown_rivals = [
+        (cx, cy, pop + s.loyalty_rival_growth, cap) for cx, cy, pop, cap in map(_unpack, rivals)
+    ]
+    if any(
+        0 < hex_distance(x, y, cx, cy, s.map_width) <= s.loyalty_range
+        for cx, cy, _, _ in map(_unpack, rivals)
+    ):
         # A phantom city straight east on the same row, at the assumed distance. Only the
         # distance matters to the pull, and wrapping is handled by hex_distance's width.
         px = (x + s.loyalty_fog_distance) % (s.map_width or 10_000)
@@ -298,6 +322,7 @@ class SettleDecision:
     # remembered. Logged so a city that flips can be checked against what the estimate knew.
     own_cities: tuple[tuple[int, int, int], ...] = ()
     rival_cities: tuple[tuple[int, int, int], ...] = ()
+    phantom_cities: tuple[tuple[int, int, int], ...] = ()  # Border evidence, not seen cities.
 
 
 class SettlingGame(GameReads, Protocol):
@@ -505,6 +530,10 @@ class SettlingPolicy:
     _rival_memory: dict[tuple[int, int], tuple[int, int]] = field(
         default_factory=dict, init=False, repr=False
     )
+    _rival_capitals: set[tuple[int, int]] = field(default_factory=set, init=False, repr=False)
+    # Foreign-owned tiles seen, by tile to owner; the evidence behind border phantoms.
+    _border_memory: dict[tuple[int, int], int] = field(default_factory=dict, init=False, repr=False)
+    _phantoms: list[tuple[int, int, int]] = field(default_factory=list, init=False, repr=False)
 
     async def run(self, game: SettlingGame) -> None:
         units = await read_units(game)
@@ -517,12 +546,15 @@ class SettlingPolicy:
         # Sightings are recorded every turn, so a rival city seen while no settler could move is
         # still remembered when one can.
         cities = await read_cities(game)
-        rival_cities = await self._remember_rivals(game, cities)
+        below_target = bool(cities) and len(cities) < self.expansion.target_cities
+        # The revealed-city read is one Lua call, made only when a settler or the survey needs it.
+        rival_cities = await self._remember_rivals(
+            game, cities, need_known=bool(settlers) or below_target
+        )
         # With no settler and no scout the survey used to go stale, and production read a stale
         # survey as "sites unknown, ok" and built settlers for a map with no site (Run 11: four
         # settlers built, none used). Survey every turn while below the city target; it is
         # re-checked as the map changes, not on a timer.
-        below_target = bool(cities) and len(cities) < self.expansion.target_cities
         if not settlers and not scouts and not below_target:
             return
         turn = (await game.get_game_overview()).turn
@@ -536,7 +568,9 @@ class SettlingPolicy:
             return
         danger = _Danger(threats, self.settings.map_width)
         city_tiles = [(c.x, c.y) for c in cities]
-        self._own_cities = [(c.x, c.y, c.pop) for c in cities]
+        self._own_cities = [
+            (c.x, c.y, c.pop, True) if c.is_capital else (c.x, c.y, c.pop) for c in cities
+        ]
         claimed: set[int] = set()
         self._forget_gone_units(units, turn)
         if settlers:
@@ -559,7 +593,9 @@ class SettlingPolicy:
         for scout in scouts:
             await self._explore(game, scout, exploration, danger, turn)
 
-    async def _remember_rivals(self, game: SettlingGame, cities: Iterable[City]) -> list[RivalCity]:
+    async def _remember_rivals(
+        self, game: SettlingGame, cities: Iterable[City], need_known: bool = True
+    ) -> list[RivalCity]:
         """Update the rival city memory from what is visible now, and return those sightings.
 
         A tile now holding a city of ours is dropped (it flipped to us), and a sighting under a
@@ -572,8 +608,81 @@ class SettlingPolicy:
                 seen.append(city)
         for city in cities:
             self._rival_memory.pop((city.x, city.y), None)
-        self._rival_cities = [(x, y, pop) for (x, y), (_, pop) in self._rival_memory.items()]
+        own_tiles = {(city.x, city.y) for city in cities}
+        known = await self._read_known(game, need_known)
+        if known is not None:  # A failed read leaves the memory as it was.
+            self._merge_known(known, own_tiles)
+            self._phantoms = self._phantom_cities(own_tiles)
+        self._rival_cities = [
+            (x, y, pop, True) if (x, y) in self._rival_capitals else (x, y, pop)
+            for (x, y), (_, pop) in self._rival_memory.items()
+        ]
         return seen
+
+    def _pressure_sources(self) -> list[tuple]:
+        """Rival cities for the loyalty estimate: the remembered ones plus border phantoms.
+        Phantoms are evidence, not cities: spacing and the log use `_rival_cities` alone."""
+        return self._rival_cities + self._phantoms
+
+    async def _read_known(self, game: SettlingGame, needed: bool):
+        """Cities and borders on tiles visible now, in one Lua call; None if skipped or failed.
+
+        Fair play: a rival city enters memory only when its plot is visible to us (on any turn);
+        it stays while remembered, is updated (pop, capital, owner) only when visible again, and
+        is removed only when its plot is seen visible without it. Borders follow the same rule.
+        """
+        execute = getattr(game, "execute_lua", None)
+        if not needed or execute is None:
+            return None
+        try:
+            return await read_known_cities(game, [*self._rival_memory, *self._border_memory])
+        except Exception:
+            log.warning("Known-city read failed; keeping the memory as it was", exc_info=True)
+            return None
+
+    def _merge_known(self, known, own_tiles: set[tuple[int, int]]) -> None:
+        city_tiles = set()
+        for city in known.cities:
+            if (city.x, city.y) in own_tiles:
+                continue
+            city_tiles.add((city.x, city.y))
+            self._rival_memory[city.x, city.y] = (city.owner, city.pop)
+            if city.capital:
+                self._rival_capitals.add((city.x, city.y))
+            else:
+                self._rival_capitals.discard((city.x, city.y))
+        for tile in list(self._rival_memory):
+            if tile in known.visible_watched and tile not in city_tiles:
+                del self._rival_memory[tile]  # Seen, and no city there.
+                self._rival_capitals.discard(tile)
+        current = {(x, y): owner for owner, x, y in known.border_tiles}
+        for tile in list(self._border_memory):
+            if tile in known.visible_watched and tile not in current:
+                del self._border_memory[tile]
+        self._border_memory.update(current)
+
+    def _phantom_cities(self, own_tiles: set[tuple[int, int]]) -> list[tuple[int, int, int]]:
+        """A remembered foreign-owned tile with none of its owner's known cities near is the
+        border of a city we have not seen: stand one in at that tile (loyalty estimate only)."""
+        s = self.settings
+        by_owner: dict[int, list[tuple[int, int]]] = {}
+        for (x, y), (owner, _) in self._rival_memory.items():
+            by_owner.setdefault(owner, []).append((x, y))
+        radius = s.loyalty_border_explain_radius
+        placed: list[tuple[int, int, int]] = []
+        for (x, y), owner in self._border_memory.items():
+            if (x, y) in own_tiles:
+                continue
+            cities = by_owner.get(owner, [])
+            if any(hex_distance(x, y, cx, cy, s.map_width) <= radius for cx, cy in cities):
+                continue
+            if any(
+                o == owner and hex_distance(x, y, px, py, s.map_width) <= radius
+                for px, py, o in placed
+            ):
+                continue
+            placed.append((x, y, owner))
+        return [(x, y, s.rival_city_default_pop - 2) for x, y, _ in placed]
 
     def _forget_gone_units(self, units: Iterable[Unit], turn: int) -> None:
         """Drop what is kept per unit once the unit is gone, and any expired set-asides."""
@@ -601,7 +710,7 @@ class SettlingPolicy:
         """Record how many safe sites there are and the best one, for production and the log."""
         if not city_tiles:
             return
-        rival_tiles = [(x, y) for x, y, _ in self._rival_cities]
+        rival_tiles = [(city[0], city[1]) for city in self._rival_cities]
         origin = settlers[0] if settlers else None
         if origin is None:
             origin = unit_at(*city_tiles[0])
@@ -641,10 +750,11 @@ class SettlingPolicy:
             turns = math.ceil(distance / max(1.0, settler.max_moves))
             # The first city can't be picky: a rival's pull is only counted once we have a city.
             margin, rate, safe = 0.0, 0.0, 0.0
+            sources = self._pressure_sources()
             if not first_city:
-                margin = loyalty_margin(site.x, site.y, self._own_cities, self._rival_cities, s)
-                rate = loyalty_rate(site.x, site.y, self._own_cities, self._rival_cities, s)
-                safe = safe_loyalty_rate(site.x, site.y, self._own_cities, self._rival_cities, s)
+                margin = loyalty_margin(site.x, site.y, self._own_cities, sources, s)
+                rate = loyalty_rate(site.x, site.y, self._own_cities, sources, s)
+                safe = safe_loyalty_rate(site.x, site.y, self._own_cities, sources, s)
             penalty = max(0.0, -margin) * s.loyalty_penalty_weight
             penalty += max(0.0, -rate) * s.loyalty_rate_penalty_weight
             if not first_city:
@@ -789,6 +899,7 @@ class SettlingPolicy:
                     ),
                     own_cities=tuple(self._own_cities),
                     rival_cities=tuple(self._rival_cities),
+                    phantom_cities=tuple(self._phantoms),
                 )
             )
 

@@ -236,3 +236,10 @@ def test_blocker_policy_reports_false_when_no_option_exists():
 
 def test_blocker_policies_plug_into_the_resolver():
     assert BlockerResolver(blocker_policies())
+
+
+def test_education_and_chemistry_carry_a_science_priority():
+    from civ6_ai.policies.research import DEFAULT_PRIORITIES
+
+    names = dict(DEFAULT_PRIORITIES)
+    assert names["EDUCATION"] > 0 and names["CHEMISTRY"] > 0 and names["ASTRONOMY"] > 0

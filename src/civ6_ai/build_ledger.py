@@ -35,6 +35,7 @@ from civ6_ai.construction import (
 )
 from civ6_ai.monitors import CityLost, Event, EventBus, EventLog, event_from_json
 from civ6_ai.policies.districts import SPECIAL_DISTRICTS, is_planned, wants_district
+from civ6_ai.policies.game_data import UNIQUE_DISTRICTS
 
 log = logging.getLogger(__name__)
 
@@ -64,18 +65,6 @@ DISTRICT_BUILDINGS = {
 
 # Unique districts count as the base district they replace, so a civilization that builds one
 # is not told its base district is missing.
-UNIQUE_DISTRICTS = {
-    "OBSERVATORY": "CAMPUS",  # Maya.
-    "SEOWON": "CAMPUS",  # Korea.
-    "ACROPOLIS": "THEATER",  # Greece.
-    "LAVRA": "HOLY_SITE",  # Russia.
-    "SUGUBA": "COMMERCIAL_HUB",  # Mali.
-    "HANSA": "INDUSTRIAL_ZONE",  # Germany.
-    "ROYAL_NAVY_DOCKYARD": "HARBOR",  # England.
-    "COTHON": "HARBOR",  # Phoenicia.
-    "STREET_CARNIVAL": "ENTERTAINMENT_COMPLEX",  # Brazil.
-    "BASILIKOI_PAIDES": "ENCAMPMENT",  # Macedon.
-}
 
 
 def bare(name: str) -> str:

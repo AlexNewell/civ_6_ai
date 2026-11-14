@@ -866,6 +866,74 @@ def test_a_district_being_chosen_counts_toward_the_one_spaceport():
     assert not _districts_kept("SPACEPORT", ctx=ctx, victory="science")
 
 
+# ----- science district (Run 11: the Observatory scored as an unknown district) -----
+
+
+def _science_menu():
+    return [
+        option("DISTRICT", "DISTRICT_OBSERVATORY", 4, cost=27),
+        option("DISTRICT", "DISTRICT_COMMERCIAL_HUB", 8, cost=54),
+        option("DISTRICT", "DISTRICT_THEATER", 8, cost=54),
+    ]
+
+
+def test_a_unique_science_district_scores_as_the_campus_it_replaces():
+    ctx = ProductionContext(turn=100, num_cities=4)
+    obs = score(option("DISTRICT", "DISTRICT_OBSERVATORY", 8), city(), ctx, ProductionWeights())
+    campus = score(option("DISTRICT", "DISTRICT_CAMPUS", 8), city(), ctx, ProductionWeights())
+    unknown = score(option("DISTRICT", "DISTRICT_NOT_A_THING", 8), city(), ctx, ProductionWeights())
+    assert obs == campus > unknown
+
+
+def test_other_unique_districts_score_as_their_base_district():
+    ctx = ProductionContext(turn=100, num_cities=4)
+    for unique, base in (("HANSA", "INDUSTRIAL_ZONE"), ("ACROPOLIS", "THEATER")):
+        a = score(option("DISTRICT", f"DISTRICT_{unique}", 8), city(), ctx, ProductionWeights())
+        b = score(option("DISTRICT", f"DISTRICT_{base}", 8), city(), ctx, ProductionWeights())
+        assert a == b
+
+
+def test_observatory_beats_the_other_base_districts_while_cities_lack_one():
+    c = city(population=6)
+    ctx = ProductionContext(turn=100, num_cities=5)
+    menu = _science_menu()[:3]
+    assert best(c, menu, ctx) == "DISTRICT_OBSERVATORY"
+
+
+def test_the_science_bonus_fades_as_cities_get_a_science_district():
+    c = city(population=6)
+    obs = option("DISTRICT", "DISTRICT_OBSERVATORY", 8)
+    few = ProductionContext(turn=100, num_cities=4)
+    most = replace(few, science_districts=4)
+    assert score(obs, c, few, ProductionWeights()) > score(obs, c, most, ProductionWeights())
+    # With one in every city it is an ordinary district, level with the other base districts.
+    hub = option("DISTRICT", "DISTRICT_COMMERCIAL_HUB", 8)
+    assert score(obs, c, most, ProductionWeights()) > score(hub, c, most, ProductionWeights())
+
+
+def test_a_threatened_city_still_builds_its_defender_before_the_science_district():
+    c = city(threats=(threat(),), population=6)
+    ctx = ProductionContext(
+        turn=100, num_cities=5, threatened=frozenset({c.city_id}), short=frozenset({c.city_id})
+    )
+    menu = [
+        option("DISTRICT", "DISTRICT_OBSERVATORY", 4, cost=27),
+        option("UNIT", "UNIT_WARRIOR", 3),
+    ]
+    assert best(c, menu, ctx) == "UNIT_WARRIOR"
+
+
+def test_context_counts_science_districts_built_and_begun():
+    from civ6_ai.state.models import District
+
+    built = replace(city(population=5), districts=(District("DISTRICT_OBSERVATORY", 1, 1),))
+    empire = run(read_empire(fx.FakeGame()))
+    ctx = build_context(empire, [], (), [built])
+    assert ctx.science_districts == 1
+    assert ctx.after_choosing("DISTRICT_CAMPUS").science_districts == 2
+    assert ctx.after_choosing("DISTRICT_THEATER").science_districts == 1
+
+
 # ----- expansion target (1.41) -----
 
 

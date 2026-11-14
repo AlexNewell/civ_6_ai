@@ -74,6 +74,7 @@ SAFETY_RECHECK_TURNS = 5  # A short re-ask for a refusal the signature cannot sh
 ADJACENCY_DISTRICTS = frozenset(
     {
         "DISTRICT_CAMPUS",
+        "DISTRICT_OBSERVATORY",
         "DISTRICT_HOLY_SITE",
         "DISTRICT_INDUSTRIAL_ZONE",
         "DISTRICT_COMMERCIAL_HUB",
@@ -348,6 +349,7 @@ local function adjacencyOf(plot, dType)
     local px, py = plot:GetX(), plot:GetY()
     local mountains, jungles, forests, rivers, wonders = 0, 0, 0, 0, 0
     local mines, quarries, harbors, aqueducts, ent, geo, reefs, nat, sea = 0, 0, 0, 0, 0, 0, 0, 0, 0
+    local farms, plantations, dists = 0, 0, 0
     if plot:IsRiver() then rivers = 1 end
     for d = 0, 5 do
         local adj = Map.GetAdjacentPlot(px, py, d)
@@ -370,6 +372,7 @@ local function adjacencyOf(plot, dType)
                 local dInfo = GameInfo.Districts[distId]
                 if dInfo then
                     local dn = dInfo.DistrictType
+                    dists = dists + 1
                     if dn == "DISTRICT_HARBOR" then harbors = harbors + 1
                     elseif dn == "DISTRICT_AQUEDUCT" then aqueducts = aqueducts + 1
                     elseif dn == "DISTRICT_ENTERTAINMENT_COMPLEX" or dn == "DISTRICT_WATER_ENTERTAINMENT_COMPLEX" then ent = ent + 1 end
@@ -380,7 +383,9 @@ local function adjacencyOf(plot, dType)
                 local iInfo = GameInfo.Improvements[imp]
                 if iInfo then
                     if iInfo.ImprovementType == "IMPROVEMENT_MINE" then mines = mines + 1
-                    elseif iInfo.ImprovementType == "IMPROVEMENT_QUARRY" then quarries = quarries + 1 end
+                    elseif iInfo.ImprovementType == "IMPROVEMENT_QUARRY" then quarries = quarries + 1
+                    elseif iInfo.ImprovementType == "IMPROVEMENT_FARM" then farms = farms + 1
+                    elseif iInfo.ImprovementType == "IMPROVEMENT_PLANTATION" then plantations = plantations + 1 end
                 end
             end
             local res = adj:GetResourceType()
@@ -389,6 +394,7 @@ local function adjacencyOf(plot, dType)
         end
     end
     if dType == "DISTRICT_CAMPUS" then return mountains + math.floor(jungles / 2) + geo * 2 + reefs * 2 + nat * 2
+    elseif dType == "DISTRICT_OBSERVATORY" then return plantations * 2 + math.floor(farms / 2) + math.floor(dists / 2) + reefs * 2 + nat * 2
     elseif dType == "DISTRICT_HOLY_SITE" then return mountains + math.floor(forests / 2) + nat * 2
     elseif dType == "DISTRICT_INDUSTRIAL_ZONE" then return mines + quarries + aqueducts * 2
     elseif dType == "DISTRICT_COMMERCIAL_HUB" then return (rivers > 0 and 2 or 0) + harbors * 2

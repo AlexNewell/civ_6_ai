@@ -306,3 +306,19 @@ WONDERS: frozenset[str] = frozenset(
         "BUILDING_VENETIAN_ARSENAL",
     }
 )
+
+
+# Unique districts count as the base district they replace, so each is scored and tracked as
+# that district. Keyed by the name without its `DISTRICT_` prefix.
+UNIQUE_DISTRICTS: dict[str, str] = {
+    "OBSERVATORY": "CAMPUS",  # Maya.
+    "SEOWON": "CAMPUS",  # Korea.
+    "ACROPOLIS": "THEATER",  # Greece.
+    "LAVRA": "HOLY_SITE",  # Russia.
+    "SUGUBA": "COMMERCIAL_HUB",  # Mali.
+    "HANSA": "INDUSTRIAL_ZONE",  # Germany.
+    "ROYAL_NAVY_DOCKYARD": "HARBOR",  # England.
+    "COTHON": "HARBOR",  # Phoenicia.
+    "STREET_CARNIVAL": "ENTERTAINMENT_COMPLEX",  # Brazil.
+    "BASILIKOI_PAIDES": "ENCAMPMENT",  # Macedon.
+}

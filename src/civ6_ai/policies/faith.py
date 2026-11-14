@@ -30,15 +30,23 @@ Faith. Faith above `FaithSettings.reserve` is spent, in this order:
    Great People screen, so it is exact. Ranked by the class weights used for recruiting. A
    Great Prophet is bought only while a religion can still be founded. When none is affordable
    and the cheapest wanted one costs at most `SAVE_CAP` and the estimated income closes the gap
-   within `SAVE_TURNS`, the faith is saved toward it and nothing lower is bought. A person
-   further away than that is not saved for (Run 8 sat on 2,799 idle faith with prices of 550
-   to 1,470), so the faith goes down the list.
+   within `SAVE_TURNS`, the faith is saved toward it. There is no price cap: Run 9 judged
+   1,160 faith at 107 a turn (7 turns) not worth saving for and left up to 4,519 idle. A
+   person further than `SAVE_TURNS` away is not saved for, so the faith goes down the list.
+   While saving, a lesser buy that costs at most `SLACK_TURNS` turns of income, summed over
+   the whole wait, still goes ahead, so the saving does not stall every other outlet.
+   When no person is priced, the log counts how many are claimed, priced 0 or the sentinel.
 2. Units from the cities' production lists, tried with faith: the best defenders in a
-   threatened city (`DefenceState`), then a Builder. The game allows faith for units only under
+   threatened city (`DefenceState`), then a Builder, but no Builder while one has nothing to do
+   or no job is unclaimed (`BuilderDemand`; Run 9 had them idle on 76% of builder-turns). A
+   `STACKING_CONFLICT` refusal names the unit on the city tile: that city and item are skipped
+   until the units read shows that unit has left (`stacking.StackBlocks`), and other cities are
+   tried meanwhile. The game allows faith for units only under
    some policy cards and dedications (Theocracy, Monumentality) and the list shows gold prices
    only, so a unit is tried and a refusal that is not a price quote is remembered per item for
    `RULE_WAIT` turns.
-3. Shrine and Temple, offered by the production list (they need a Holy Site). The faith price
+3. Shrine, Temple and the worship buildings (Cathedral, Mosque and the like), offered by the
+   production list (they need a Holy Site, and the worship ones a Temple). The faith price
    is learned from the first purchase and until then an upper estimate is required.
 
 Religious units are not bought. Nothing in the bot moves or spreads missionaries yet.
@@ -67,6 +75,7 @@ from typing import Any, Protocol
 from civ6_ai.blockers import action_succeeded, move_succeeded
 from civ6_ai.policies.production import defence_strength
 from civ6_ai.policies.secondary import _GP_WEIGHTS, SecondaryWeights, canonical
+from civ6_ai.stacking import StackBlocks
 from civ6_ai.state import GameReads, Unit, read_units
 
 log = logging.getLogger(__name__)
@@ -84,8 +93,8 @@ RULE_WAIT = 15  # Turns before an item the game's rules refuse (no card or dedic
 SINK_WAIT = 3  # Turns the cities' lists are not read again when nothing could be tried.
 GP_REFRESH = 4  # Turns the great people list is reused while the cheapest price is out of reach.
 RELIGION_REFRESH = 10  # Turns the "can a religion be founded" answer is reused.
-SAVE_CAP = 300  # Most a great person may cost, in faith, to be saved toward.
-SAVE_TURNS = 20  # Most turns of saving worth waiting for a great person.
+SAVE_TURNS = 15  # Most turns of saving worth waiting for a great person (no price cap).
+SLACK_TURNS = 2  # While saving, a lesser buy is fine if it delays the target by at most this.
 
 _PROPHET = "UNIT_GREAT_PROPHET"
 _PROPHET_CLASS = "Great Prophet"
@@ -100,6 +109,17 @@ _UNKNOWN_CLASS = 0.5  # Weight of a great person class the weights don't name.
 _BUILDINGS: tuple[tuple[str, int], ...] = (
     ("BUILDING_SHRINE", 100),
     ("BUILDING_TEMPLE", 250),
+    # Worship buildings (one per religion's followers) are offered only when the city has a
+    # Temple and our religion, so the production list decides whether any is bought.
+    ("BUILDING_CATHEDRAL", 400),
+    ("BUILDING_GURDWARA", 400),
+    ("BUILDING_MEETING_HOUSE", 400),
+    ("BUILDING_MOSQUE", 400),
+    ("BUILDING_PAGODA", 400),
+    ("BUILDING_STUPA", 400),
+    ("BUILDING_SYNAGOGUE", 400),
+    ("BUILDING_WAT", 400),
+    ("BUILDING_DAR_E_MEHR", 400),
 )
 
 
@@ -166,6 +186,11 @@ class FaithPolicy:
     _costs: dict[str, int] = field(default_factory=dict, init=False, repr=False)
     _refused: dict[tuple, int] = field(default_factory=dict, init=False, repr=False)
     defence: Any = None  # The threat state (`defence.DefenceState`), or None.
+    builder_demand: Any = None  # `builder.BuilderDemand`, or None: what builders left undone.
+    _stack: StackBlocks = field(default_factory=StackBlocks, init=False, repr=False)
+    _sink_cap: float | None = field(default=None, init=False, repr=False)
+    _saving_for: int | None = field(default=None, init=False, repr=False)  # Person's id.
+    _delay: tuple[int, float] = field(default=(-1, 0.0), init=False, repr=False)
     _last: tuple[int, float] | None = field(default=None, init=False, repr=False)
     _spent_since: float = field(default=0.0, init=False, repr=False)
     _income: float | None = field(default=None, init=False, repr=False)
@@ -329,21 +354,29 @@ class FaithPolicy:
         notes: list[str] = []
         sinks: list[str] = []
         self._saving = None
+        self._saving_for = None
+        self._sink_cap = None
         for step in (self._patronise, self._production_sinks):
             spent, count, tried = await step(game, turn, budget, attempts, bought, notes, sinks)
             budget -= spent
             bought += count
             attempts += tried
             self._spent_since += spent
+            if self._saving_for is not None and step == self._production_sinks:
+                self._delay = (self._saving_for, self._delay[1] + spent)
             if bought >= self.settings.max_purchases or attempts >= MAX_ATTEMPTS:
                 break
             if self._saving is not None:
-                break  # Keep the faith for the great person it is saved toward.
+                # Keep the faith for the great person, but a buy that delays it by at most
+                # `SLACK_TURNS` turns of income is still fine.
+                # The allowance is for the whole wait, so what lesser buys already took counts.
+                used = self._delay[1] if self._delay[0] == self._saving_for else 0.0
+                self._sink_cap = max(0.0, SLACK_TURNS * (self._income or 0.0) - used)
         if bought:
             log.info("Faith %.0f, reserve %.0f: spent on %s", faith, reserve, ", ".join(sinks))
-        elif self._saving is not None:
+        if self._saving is not None:
             log.info("Faith %.0f, reserve %.0f: saving toward %s", faith, reserve, self._saving)
-        else:
+        elif not bought:
             log.info(
                 "Faith %.0f above reserve %.0f but nothing bought: %s",
                 faith,
@@ -389,7 +422,16 @@ class FaithPolicy:
         people, can_found = await self._great_people(game, turn, budget)
         offered = [p for p in people if p.claimant == _UNCLAIMED and 0 < p.faith_cost < _UNBUYABLE]
         if not offered:
-            notes.append("no great person can be bought with faith (none priced, or unreachable)")
+            claimed = sum(1 for p in people if p.claimant != _UNCLAIMED)
+            unpriced = sum(1 for p in people if p.claimant == _UNCLAIMED and p.faith_cost <= 0)
+            sentinel = sum(
+                1 for p in people if p.claimant == _UNCLAIMED and p.faith_cost >= _UNBUYABLE
+            )
+            notes.append(
+                "no great person can be bought with faith "
+                f"({len(people)} listed: {claimed} claimed, {unpriced} priced 0, "
+                f"{sentinel} not buyable)"
+            )
             return 0.0, 0, 0
 
         def class_weight(person: Any) -> float:
@@ -437,9 +479,10 @@ class FaithPolicy:
     def _save_for(self, wanted: list[Any], turn: int, budget: float, notes: list[str]) -> None:
         """Pick the cheapest wanted great person as a saving target when it is reachable.
 
-        Reachable means the price is at most `SAVE_CAP` (so idle faith stays bounded) and the
-        income estimate closes the gap within `SAVE_TURNS` turns. Otherwise the faith goes to
-        the units and buildings below.
+        Reachable means the income estimate closes the gap within `SAVE_TURNS` turns, whatever
+        the price (Run 9: 1,160 faith at 107 a turn was 7 turns off and was refused as too
+        dear, while thousands sat idle). Otherwise the faith goes to the units and buildings
+        below.
         """
         pool = [p for p in wanted if self._refused.get(("gp", p.individual_id, ""), -1) <= turn]
         if not pool:
@@ -448,7 +491,8 @@ class FaithPolicy:
         target = min(pool, key=lambda p: (p.faith_cost, p.individual_id))
         gap = target.faith_cost - budget
         income = self._income or 0.0
-        if target.faith_cost <= SAVE_CAP and income > 0 and gap / income <= SAVE_TURNS:
+        if income > 0 and gap / income <= SAVE_TURNS:
+            self._saving_for = target.individual_id
             self._saving = (
                 f"{target.individual_name} ({target.class_name}) at {target.faith_cost} faith, "
                 f"about {gap / income:.0f} turns at {income:.1f} a turn"
@@ -458,6 +502,13 @@ class FaithPolicy:
             f"great people: cheapest {target.faith_cost} faith vs {budget:.0f} above reserve, "
             f"not worth saving for at {income:.1f} a turn"
         )
+
+    def _builder_wanted(self) -> bool:
+        """False while a builder has nothing to do or no job is unclaimed (Run 9: 76% idle)."""
+        demand = self.builder_demand
+        if demand is None:
+            return True
+        return demand.idle <= 0 and demand.spare_jobs != 0
 
     def _any_threatened(self) -> bool:
         return self.defence is not None and self.defence.any
@@ -483,7 +534,7 @@ class FaithPolicy:
             defenders.sort(key=lambda o: (-defence_strength(o.item_name), o.item_name))
             out += [("UNIT", o.item_name, _estimate(o)) for o in defenders[:2]]
         builder = options.get(_BUILDER)
-        if builder is not None and builder.category == "UNIT":
+        if builder is not None and builder.category == "UNIT" and self._builder_wanted():
             out.append(("UNIT", _BUILDER, _estimate(builder)))
         out += [("BUILDING", item, est) for item, est in _BUILDINGS if item in options]
         return out
@@ -504,6 +555,8 @@ class FaithPolicy:
             notes.append(f"no unit or building to buy yet (looked again from turn {until})")
             return 0.0, 0, 0
         cities, _ = await game.get_cities()
+        if len(self._stack):
+            self._stack.refresh(cities, await read_units(game))
         ordered = sorted(cities, key=lambda c: c.city_id)
         if ordered:
             start = turn % len(ordered)  # Rotate, so the same cities aren't always read first.
@@ -526,7 +579,12 @@ class FaithPolicy:
                     continue
                 if self._refused.get((category[0], city.city_id, item), -1) > turn:
                     continue
+                if self._stack.is_blocked(city.city_id, item):
+                    notes.append(f"{item} in {city.name} blocked by a unit on the city tile")
+                    continue
                 price = self._costs.get(item, estimate)
+                if self._sink_cap is not None and price > self._sink_cap:
+                    continue  # Saving for a great person: only a cheap buy may go first.
                 if price > budget - spent:
                     cheapest_short = min(cheapest_short, price)
                     notes.append(
@@ -544,10 +602,15 @@ class FaithPolicy:
                     sinks.append(f"{item} in {city.name} for {cost}")
                     log.info("Faith bought %s in %s for %d faith", item, city.name, cost)
                     break
+                if self._stack.record(city.city_id, item, result):
+                    # The unit on the city tile decides, not a timer: see `StackBlocks`.
+                    log.info("Can't buy %s in %s with faith: %s", item, city.name, result[:120])
+                    notes.append(f"{item} in {city.name} blocked by a unit on the city tile")
+                    continue
                 quoted = _QUOTED.search(result)
                 if quoted:
                     self._costs[item] = int(quoted.group(1))
-                elif "STACKING" not in result.upper():
+                else:
                     # The game's rules, not the price, refuse it (no card or dedication yet).
                     self._refused[("rule", item)] = turn + RULE_WAIT
                 self._refused[(category[0], city.city_id, item)] = turn + REFUSED_WAIT

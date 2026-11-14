@@ -282,7 +282,7 @@ def build_orchestrator(
     military = MilitaryPolicy(defence=defence)
     diplomacy = DiplomacyPolicy()
     research_policy = research.ResearchPolicy()
-    gold = GoldPolicy(defence=defence, plans=production.planner.book)
+    gold = GoldPolicy(defence=defence, plans=production.planner.book, builder_demand=builder_demand)
     tables = [
         production.blocker_policies(),
         research.blocker_policies(),
@@ -338,7 +338,7 @@ def build_orchestrator(
         gold,
         BuilderPolicy(demand=builder_demand),
         secondary,
-        FaithPolicy(defence=defence),
+        FaithPolicy(defence=defence, builder_demand=builder_demand),
         DefenceReport(defence),
         BuildTracker(ledger, victory=lambda: production.weights.victory, watcher=watcher),
         resolver,

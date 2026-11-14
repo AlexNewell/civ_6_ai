@@ -481,7 +481,7 @@ def test_the_sentinel_is_not_logged_as_the_cheapest_price(caplog):
     with caplog.at_level(logging.INFO):
         asyncio.run(FaithPolicy(FaithSettings(reserve=60.0)).run(game))
     assert "cheapest 2147483647" not in caplog.text
-    assert "unreachable" in caplog.text
+    assert "1 not buyable" in caplog.text
 
 
 def test_a_real_person_is_still_bought_beside_an_unreachable_one():
@@ -536,7 +536,7 @@ def test_saving_holds_back_buildings_and_buys_the_person_when_reached():
 
 def test_a_great_person_too_far_to_save_for_does_not_hold_faith_back(caplog):
     policy = FaithPolicy()
-    game = Game(overview=overview(turn=100, faith=100.0), people=[person(faith=1470)])
+    game = Game(overview=overview(turn=100, faith=100.0), people=[person(faith=5000)])
     run(policy, game)
     set_overview(game, turn=101, faith=200.0)
     with caplog.at_level(logging.INFO):
@@ -648,3 +648,140 @@ def test_the_sink_cooldown_is_skipped_when_a_city_becomes_threatened():
     set_overview(game, turn=101, faith=300.0)
     run(policy, game)
     assert acted(game, "buy")[0][2] == "UNIT_CROSSBOWMAN"
+
+
+# ----- Run 9: saving rule, slack, stacking, idle builders, worship buildings -----
+
+
+def test_a_dear_great_person_is_saved_for_when_income_reaches_it_soon(caplog):
+    # Run 9: 1,160 faith at 107 a turn was 7 turns away and was judged "not worth saving for".
+    policy = FaithPolicy()
+    game = Game(overview=overview(turn=100, faith=100.0), people=[person(faith=1160)])
+    run(policy, game)
+    set_overview(game, turn=101, faith=508.0)  # 408 gained, so 448 above the reserve.
+    with caplog.at_level(logging.INFO):
+        run(policy, game)
+    assert "saving toward Hypatia" in caplog.text
+    assert "not worth saving for" not in caplog.text
+
+
+def test_a_price_many_turns_away_is_still_not_saved_for(caplog):
+    policy = FaithPolicy()
+    game = Game(overview=overview(turn=100, faith=100.0), people=[person(faith=5000)])
+    run(policy, game)
+    set_overview(game, turn=101, faith=200.0)
+    with caplog.at_level(logging.INFO):
+        run(policy, game)
+    assert "saving toward" not in caplog.text
+
+
+def test_a_cheap_buy_within_the_slack_is_made_while_saving():
+    policy = FaithPolicy()
+    game = Game(overview=overview(turn=100, faith=100.0), people=[person(faith=1000)])
+    run(policy, game)
+    game.actions.clear()
+    set_overview(game, turn=101, faith=300.0)  # About 200 a turn, so 400 of slack.
+    run(policy, game)
+    assert [a[2] for a in acted(game, "buy")] == ["BUILDING_SHRINE"]
+    assert acted(game, "patronize") == []
+
+
+def test_the_slack_is_for_the_whole_wait():
+    policy = FaithPolicy(FaithSettings(reserve=60.0, max_purchases=5))
+    game = Game(
+        overview=overview(turn=100, faith=100.0),
+        people=[person(faith=1200)],
+        production=[lq.ProductionOption("BUILDING", "BUILDING_SHRINE", 60, 6, 120)],
+    )
+    run(policy, game)
+    bought = 0
+    faith = 100.0
+    for turn in range(101, 105):
+        game.actions.clear()
+        faith += 100.0  # 100 a turn, less the 70 each purchase costs.
+        set_overview(game, turn=turn, faith=faith)
+        run(policy, game)
+        bought += len(acted(game, "buy"))
+        faith -= 70.0 * len(acted(game, "buy"))
+    assert 1 <= bought <= 2  # About 200 of slack in all, at 70 or so a purchase.
+
+
+STACKED = (
+    "Error: STACKING_CONFLICT|Cannot purchase UNIT_BUILDER - UNIT_BUILDER (unit_id=6684719) "
+    "is on the city tile. Move it first."
+)
+
+
+def builder_unit(x=10, y=10, unit_id=6684719):
+    return unit_info(
+        unit_id=unit_id,
+        unit_index=3,
+        unit_type="UNIT_BUILDER",
+        name="Builder",
+        x=x,
+        y=y,
+        combat_strength=0,
+    )
+
+
+def test_a_stacking_refusal_waits_for_the_blocking_unit_to_leave():
+    policy = FaithPolicy()
+    game = Game(production=faith_units(), units=[builder_unit()])
+    game.replies["buy"] = [STACKED]
+    run(policy, game)
+    assert acted(game, "buy")[0][2] == "UNIT_BUILDER"
+    game.actions.clear()
+    set_overview(game, turn=101, faith=300.0)  # Inside no timer: only the unit matters.
+    run(policy, game)
+    assert "UNIT_BUILDER" not in [a[2] for a in acted(game, "buy")]
+    game.actions.clear()
+    game.data["units"] = [builder_unit(x=14, y=14)]  # It walked off the city tile.
+    set_overview(game, turn=102, faith=300.0)
+    run(policy, game)
+    assert acted(game, "buy")[0][2] == "UNIT_BUILDER"
+
+
+def test_a_stacking_refusal_does_not_block_other_cities():
+    policy = FaithPolicy()
+    cities = [city_info(), city_info(city_id=65537, name="Beta", x=20, y=20)]
+    game = Game(production=faith_units(), units=[builder_unit()], cities=cities)
+    game.replies["buy"] = [STACKED]
+    run(policy, game)
+    cities_tried = [a[1] for a in acted(game, "buy")]
+    assert cities_tried[0] == 65536
+    assert 65537 in cities_tried  # The second city, whose tile is free, is tried.
+
+
+def test_a_stacking_refusal_is_not_a_rule_refusal():
+    policy = FaithPolicy()
+    game = Game(production=faith_units(), units=[builder_unit()])
+    game.replies["buy"] = [STACKED]
+    run(policy, game)
+    assert ("rule", "UNIT_BUILDER") not in policy._refused
+
+
+def test_no_builder_is_bought_while_a_builder_is_idle_or_no_job_is_open():
+    from civ6_ai.policies.builder import BuilderDemand
+
+    for demand in (BuilderDemand(idle=1, spare_jobs=2), BuilderDemand(idle=0, spare_jobs=0)):
+        game = Game(production=faith_units())
+        run(FaithPolicy(builder_demand=demand), game)
+        assert "UNIT_BUILDER" not in [a[2] for a in acted(game, "buy")]
+    game = Game(production=faith_units())
+    run(FaithPolicy(builder_demand=BuilderDemand(idle=0, spare_jobs=2)), game)
+    assert acted(game, "buy")[0][2] == "UNIT_BUILDER"
+
+
+def test_a_worship_building_is_bought_with_faith_when_offered():
+    production = [lq.ProductionOption("BUILDING", "BUILDING_CATHEDRAL", 120, 10, 300)]
+    game = Game(production=production, overview=overview(turn=100, faith=500.0))
+    run(FaithPolicy(), game)
+    assert acted(game, "buy")[0] == ("buy", 65536, "BUILDING_CATHEDRAL", "YIELD_FAITH")
+
+
+def test_an_empty_great_people_list_says_why(caplog):
+    people = [person(1, claimant="Rome"), person(2, faith=0)]
+    game = Game(people=people, production=[], overview=overview(turn=100, faith=300.0))
+    with caplog.at_level(logging.INFO):
+        run(FaithPolicy(), game)
+    assert "2 listed: 1 claimed, 1 priced 0, 0 not buyable" in caplog.text

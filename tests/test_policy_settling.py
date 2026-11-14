@@ -1088,3 +1088,49 @@ def test_an_escorted_settler_does_not_flee_back_to_the_city():
     policy = SettlingPolicy()
     run(policy, game)
     assert policy.decisions[0].action != "flee"
+
+
+def test_a_ship_in_a_coastal_city_is_not_the_settlers_companion():
+    ship = unit_info(unit_id=8, unit_index=8, x=10, y=10, unit_type="UNIT_GALLEY", name="Galley")
+    warrior = unit_info(unit_id=9, unit_index=9, x=10, y=10)
+    game = make_game(
+        _capital_pair(ship, warrior),
+        cities=[alpha()],
+        threats=[barbarian(13, 10)],
+        sites=[site(14, 6, food=40)],
+    )
+    policy = SettlingPolicy(SettlingSettings(threat_radius=2))
+    run(policy, game)
+    assert all(a[1] not in (8, 9) for a in game.actions)  # Lone land unit stays; ship never moves.
+    assert policy.decisions[-1].action == "hold"
+
+
+def test_a_refused_join_clears_when_an_engineer_blocking_the_tile_leaves():
+    class Refusing(ActionGame):
+        async def move_unit(self, unit_index, x, y):
+            self.actions.append(("move", unit_index, x, y))
+            return "Error: STACKING_CONFLICT|already on"
+
+    garrison = unit_info(unit_id=9, unit_index=9, x=10, y=10)
+    escort = unit_info(unit_id=8, unit_index=8, x=10, y=9)
+    engineer = unit_info(
+        unit_id=5, unit_index=5, x=11, y=9, unit_type="UNIT_MILITARY_ENGINEER", combat_strength=0
+    )
+
+    def play(policy, extra):
+        game = Refusing(
+            units=_capital_pair(garrison, escort, *extra),
+            cities=[alpha()],
+            threats=[barbarian(13, 10)],
+            settle=[site(14, 6, food=40)],
+            overview=overview(turn=1, num_cities=1),
+            strategic=lq.StrategicMapData([], []),
+        )
+        run(policy, game)
+        return game.actions
+
+    policy = SettlingPolicy(SettlingSettings(threat_radius=2))
+    first = play(policy, [engineer])
+    assert len(first) == 1
+    assert play(policy, [engineer]) == []
+    assert len(play(policy, [])) == 1  # The blocker left, so the order is tried again.

@@ -310,6 +310,20 @@ class SettlingGame(GameReads, Protocol):
     async def automate_explore(self, unit_index: int) -> str: ...
 
 
+def _land_military(unit: Unit) -> bool:
+    """A land combat unit: never a scout, ship or aircraft (military.py defines it)."""
+    from civ6_ai.policies.military import is_land_military  # military imports this module
+
+    return is_land_military(unit)
+
+
+def _holds_tile(unit: Unit) -> bool:
+    """A unit the game will not stack with a military unit, engineers included."""
+    from civ6_ai.policies.military import holds_tile
+
+    return holds_tile(unit)
+
+
 def find_escort(
     settler: Unit,
     units: Iterable[Unit],
@@ -323,14 +337,14 @@ def find_escort(
     Never a scout, a ship, a unit in `claimed`, or the only combat unit in a city.
     """
     city_tiles = set(city_tiles)
-    combat = [u for u in units if u.is_combat and u.can_move and u.unit_id not in claimed]
+    combat = [u for u in units if _land_military(u) and u.can_move and u.unit_id not in claimed]
     garrisons: dict[tuple[int, int], int] = {}
     for u in combat:
         garrisons[u.x, u.y] = garrisons.get((u.x, u.y), 0) + 1
     usable = [
         u
         for u in combat
-        if u.unit_type != SCOUT
+        if _land_military(u)
         and not any(word in u.unit_type for word in _SEA_UNITS)
         and not ((u.x, u.y) in city_tiles and garrisons[u.x, u.y] == 1)
         and hex_distance(u.x, u.y, settler.x, settler.y, map_width) <= radius
@@ -852,8 +866,7 @@ class SettlingPolicy:
         on_tile = [
             u
             for u in units
-            if u.is_combat
-            and u.unit_type != SCOUT
+            if _land_military(u)
             and (u.x, u.y) == (settler.x, settler.y)
             and u.unit_id not in claimed
         ]
@@ -866,7 +879,7 @@ class SettlingPolicy:
             escort = companion  # Never gather a second unit.
         else:
             escort = self._find_escort(settler, units, city_tiles, claimed, danger)
-        crowded = any(u.is_combat and (u.x, u.y) == (settler.x, settler.y) for u in units)
+        crowded = any(_holds_tile(u) and (u.x, u.y) == (settler.x, settler.y) for u in units)
         if escort is not None and companion is None:
             # Skip an escort whose order the game already refused with nothing changed.
             excluded = set(claimed)
@@ -938,7 +951,7 @@ class SettlingPolicy:
         return moved
 
     def _order_key(self, escort, dest, units) -> tuple:
-        crowd = sum(1 for u in units if u.is_combat and (u.x, u.y) == tuple(dest))
+        crowd = sum(1 for u in units if _holds_tile(u) and (u.x, u.y) == tuple(dest))
         return (escort.unit_id, (escort.x, escort.y), tuple(dest), crowd)
 
     def _refused_order(self, settler, target, escort, units, crowded) -> bool:

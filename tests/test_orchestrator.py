@@ -284,3 +284,37 @@ def test_a_report_of_the_advance_gets_longer_looks_before_a_block(tmp_path):
     reason, turn_log = play(SlowUiGame(stale_reads=stale), [DoNothing()], 2, tmp_path)
     assert reason is StopReason.TURN_LIMIT
     assert [record.stop_reason for record in turn_log.records] == [None, None]
+
+
+@dataclass
+class Ranking:
+    player_id: int
+    score: int
+
+
+@dataclass
+class ScoredOverview:
+    turn: int
+    score: int = 40
+    num_cities: int = 3
+    total_population: int = 11
+    rankings: list | None = None
+
+
+class ScoredGame(FakeGame):
+    async def get_game_overview(self):
+        return ScoredOverview(self.turn, rankings=[Ranking(1, 55), Ranking(4, 30)])
+
+
+def test_turn_record_holds_scores_cities_and_population(tmp_path):
+    _, turn_log = play(ScoredGame(), [], 1, tmp_path)
+    line = json.loads((tmp_path / "runs" / "game.jsonl").read_text(encoding="utf-8"))
+    assert (line["score"], line["cities"], line["population"]) == (40, 3, 11)
+    assert line["rival_scores"] == {"1": 55, "4": 30}
+    assert turn_log.records[0].score == 40
+
+
+def test_unreadable_score_is_left_empty_and_the_run_goes_on(tmp_path):
+    reason, turn_log = play(FakeGame(), [], 2, tmp_path)  # Its overview has only a turn.
+    assert reason is StopReason.TURN_LIMIT
+    assert [r.score for r in turn_log.records] == [None, None]

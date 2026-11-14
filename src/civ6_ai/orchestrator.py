@@ -89,6 +89,33 @@ def advance_reported(report: str, turn_before: int) -> bool:
     return False
 
 
+def read_standing(overview: object) -> dict:
+    """Pull our score, cities, population and the met rivals' scores out of a game overview.
+
+    The overview's own Lua already reads every met rival's `GetScore()`, and the turn loop reads
+    the overview every turn, so this costs no game call. It never raises: what can't be read is
+    left out, and the caller's record then holds None for it.
+    """
+    standing: dict = {}
+    try:
+        standing["score"] = int(overview.score)  # type: ignore[attr-defined]
+        standing["cities"] = int(overview.num_cities)  # type: ignore[attr-defined]
+        standing["population"] = int(overview.total_population)  # type: ignore[attr-defined]
+        rankings = overview.rankings  # type: ignore[attr-defined]
+        if rankings is not None:
+            standing["rival_scores"] = {
+                str(entry.player_id): int(entry.score) for entry in rankings
+            }
+    except (AttributeError, TypeError, ValueError):
+        if not _standing_warned:
+            _standing_warned.append(True)
+            log.warning("Could not read the score from the game overview", exc_info=True)
+    return standing
+
+
+_standing_warned: list[bool] = []  # Set after the first failure, so it logs once per process.
+
+
 @dataclass(frozen=True)
 class TurnRecord:
     turn: int
@@ -100,6 +127,13 @@ class TurnRecord:
     detail: str = ""
     # Per handler, per game call: [count, seconds]. Empty if the run didn't time calls.
     handler_calls: dict[str, dict[str, list[float]]] = field(default_factory=dict)
+    # Where we stood at the start of the turn, from the overview the turn loop reads anyway: our
+    # score, cities and population, and the score of every rival we've met, by player id. None
+    # when the overview didn't carry it. See `read_standing`.
+    score: int | None = None
+    cities: int | None = None
+    population: int | None = None
+    rival_scores: dict[str, int] | None = None
 
 
 @dataclass
@@ -136,6 +170,7 @@ class Orchestrator:
         self._call_timer = call_timer
         # The newest turn a notification has shown the game reached, for a UI that reads stale.
         self._confirmed_turn = 0
+        self._overview: object = None  # The newest overview `_read_turn` saw.
         self._screenshots = screenshots
         self._shot_handlers: set[str] = set()
         self._game = game
@@ -157,6 +192,7 @@ class Orchestrator:
 
         started = time.perf_counter()
         turn = max(await self._read_turn(), self._confirmed_turn)
+        standing = read_standing(self._overview)
         seconds, errors = await self._run_handlers()
         calls = self._call_timer.take() if self._call_timer else {}
 
@@ -193,6 +229,7 @@ class Orchestrator:
                 total_seconds=time.perf_counter() - started,
                 stop_reason=reason,
                 detail=detail,
+                **standing,
             )
         )
         return reason
@@ -320,4 +357,5 @@ class Orchestrator:
         return seconds, errors
 
     async def _read_turn(self) -> int:
-        return (await self._game.get_game_overview()).turn
+        self._overview = await self._game.get_game_overview()
+        return self._overview.turn  # type: ignore[attr-defined]

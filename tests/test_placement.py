@@ -1161,6 +1161,7 @@ def test_the_plan_query_checks_the_games_full_list_resources_and_owning_city():
     assert "PGAMEBUY|" in lua
     # Run 9: Wine, Iron and Tobacco tiles were predicted valid; only a bonus resource is cleared.
     assert '~= "RESOURCECLASS_BONUS" then return false' in lua
+    assert "IsResourceVisible(res)" in lua  # An unrevealed resource does not block.
     # A tile another of our cities owns is that city's, whatever the distance.
     assert "GetPlotPurchaseCity" in lua
 

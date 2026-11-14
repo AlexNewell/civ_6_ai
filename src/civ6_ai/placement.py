@@ -442,7 +442,10 @@ local function valid(plot)
     if res >= 0 then
         -- Only a bonus resource is cleared for a district or wonder; any other blocks the tile.
         local rInfo = GameInfo.Resources[res]
-        if rInfo and rInfo.ResourceClassType ~= "RESOURCECLASS_BONUS" then return false end
+        -- An unrevealed resource does not block placement, so only a visible one counts.
+        local seen = true
+        pcall(function() seen = Players[me]:GetResources():IsResourceVisible(res) end)
+        if seen and rInfo and rInfo.ResourceClassType ~= "RESOURCECLASS_BONUS" then return false end
     end
     local feat = plot:GetFeatureType()
     local fType = nil

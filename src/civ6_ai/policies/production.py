@@ -827,6 +827,20 @@ async def choose_for_city(
             and await memory.blocked(city, option.item, context.turn, reads)
         ):
             continue
+        # The game will not start a new district while the city is at its population limit, and
+        # no tile changes that, so it is not tried. The cap is read once a turn for every city,
+        # so the district competes again as soon as the city may hold one more.
+        if option.category == "DISTRICT" and not option.is_repair and reads is not None:
+            cap = await reads.district_cap(city.city_id, option.item)
+            if cap is not None:
+                log.debug(
+                    "%s skips %s: %s of %s districts for its population",
+                    city.name,
+                    option.item,
+                    cap.zoned,
+                    cap.allowed,
+                )
+                continue
         tried += 1
         trace = StartTrace()
         result = await _start(game, city, option, trace, chain)

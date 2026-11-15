@@ -3,6 +3,8 @@
   "items": [
     {"id": "night1-a", "save": "STD_T1_01", "turns": 350},
     {"id": "night1-b", "save": "STD_T1_02", "turns": 350, "max_attempts": 3},
-    {"id": "short-check", "save": "STD_T1_03", "turns": 20, "options": {}}
+    {"id": "short-check", "save": "STD_T1_03", "turns": 20, "options": {}},
+    {"id": "early-slice", "save": "STD_T1_01", "turns": 50, "options": {"save_at": [50]}},
+    {"id": "mid-slice", "save": "STD_T1_01", "load": "CKPT_STD_T1_01_T050", "turns": 50}
   ]
 }

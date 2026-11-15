@@ -1739,3 +1739,18 @@ def test_a_settlers_own_far_site_is_always_measured():
     assert [spec[:2] for spec in policy._fog_sites] == [(18, 10)]
     policy._choose_fog_sites(exploration, [(10, 10)])
     assert [spec[:2] for spec in policy._fog_sites] == [(12, 10)]
+
+
+def test_run_14_el_mirador_reads_below_the_floor_once_the_unseen_city_is_sized_right(
+    real_safe_rate,
+):
+    # Founded at (60,29) with 81% of its rival side unexplored; the unseen Mapuche capital (pop
+    # 13, 6 tiles) pressed 10.4 and the city flipped 13 turns later. Sized like our median city
+    # (pop 4) it read +11.9; sized like the largest known city (pop 8) and as a capital, below 0.
+    own = [(66, 25, 5, True), (62, 25, 4), (69, 27, 2), (64, 29, 3)]
+    rivals = [(64, 18, 7, True), (56, 19, 7, True), (60, 18, 4), (59, 14, 3), (55, 15, 5)]
+    rivals += [(57, 9, 8, True), (61, 8, 2)]
+    fog = FogCount(60, 29, 154, 125, 6, -5, 1)
+    (c,) = _fog_policy((60, 29), own, rivals, fog)
+    assert c.robust_rate < SettlingSettings().loyalty_reject_safe
+    assert c.loyalty_penalty > 0

@@ -1298,3 +1298,174 @@ def test_the_known_city_read_does_not_rely_on_the_stripped_end_marker():
     assert known.cities[0].x == 61 and (61, 20) in known.visible_watched
     with pytest.raises(ValueError):
         parse_known_cities("KCITY|5|61|20|13|0|1\n---END---")
+
+
+# ----- a city's last defender escorting when the threat near it is limited -----
+
+
+class _War:
+    def __init__(self, at_war=False):
+        self.at_war = at_war
+
+
+def _t(unit_type, x, y, strength=0, **changes):
+    return threat_info(unit_type=unit_type, x=x, y=y, combat_strength=strength, **changes)
+
+
+def _stand_in_city(strength=12):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(x=10, y=10, defense_strength=strength)
+
+
+def _state_threat(unit_type, x, y, hostile=True, strength=0):
+    from civ6_ai.state.models import Threat
+
+    return Threat(BARBARIANS, "Barbarians", unit_type, x, y, 100, 100, strength, 0, 3, hostile)
+
+
+@pytest.mark.parametrize(
+    ("threats", "at_war", "expected"),
+    [
+        ([], False, True),
+        ([("UNIT_SCOUT", 14, 10)], False, True),
+        ([("UNIT_WARRIOR", 13, 10), ("UNIT_SLINGER", 12, 12)], False, True),
+        ([("UNIT_BARBARIAN_HORSEMAN", 12, 10), ("UNIT_WARRIOR", 13, 10)], False, True),
+        ([("UNIT_WARRIOR", 13, 10)], True, False),  # A civ at war: every city is a target.
+        ([("UNIT_WARRIOR", 13, 10)] * 3, False, False),  # Three is a raid, not a stray.
+        ([("UNIT_CATAPULT", 14, 10)], False, False),  # Siege takes a city a warrior cannot.
+        ([("UNIT_SWORDSMAN", 13, 10)], False, False),  # Stronger than the city holds.
+        ([("UNIT_SPEARMAN", 13, 10), ("UNIT_SPEARMAN", 12, 10)], False, False),  # 50 > 2 x 20.
+        ([("UNIT_WARRIOR", 18, 10)] * 4, False, True),  # Out of the weighing radius.
+    ],
+)
+def test_garrison_may_leave_weighs_count_strength_siege_and_war(threats, at_war, expected):
+    from civ6_ai.policies.settling import garrison_may_leave
+
+    near = [_state_threat(*t) for t in threats]
+    assert garrison_may_leave(_stand_in_city(), near, at_war) is expected
+
+
+def test_a_rival_at_peace_is_not_a_threat_to_the_garrison():
+    from civ6_ai.policies.settling import garrison_may_leave
+
+    peaceful = [_state_threat("UNIT_SWORDSMAN", 11, 10, hostile=False)] * 4
+    assert garrison_may_leave(_stand_in_city(), peaceful, False)
+
+
+def _lone_garrison_game(threats, turn=1, units_extra=()):
+    garrison = unit_info(unit_id=9, unit_index=9, x=10, y=10)
+    return make_game(
+        [settler(), garrison, *units_extra],
+        cities=[alpha()],
+        threats=threats,
+        sites=[site(14, 6, food=40)],
+        turn=turn,
+    )
+
+
+def _policy(at_war=False):
+    return SettlingPolicy(SettlingSettings(threat_radius=2), defence=_War(at_war))
+
+
+def test_a_lone_garrison_leads_the_settler_past_one_barbarian_scout():
+    # Run 12 turns 49-51: a lone scout 3 tiles away held the settler for three turns.
+    game = _lone_garrison_game([_t("UNIT_SCOUT", 13, 10, 10)])
+    policy = _policy()
+    run(policy, game)
+    assert [a[1] for a in game.actions] == [9, 7]
+    assert policy.decisions[-1].action == "escort_move"
+    assert policy._stripped == {(10, 10): 9}
+
+
+@pytest.mark.parametrize(
+    "threats",
+    [
+        # Run 12 turns 29-40 around the capital: two slingers, two warriors and a scout.
+        [
+            _t("UNIT_SLINGER", 11, 10, 5),
+            _t("UNIT_SLINGER", 11, 11, 5),
+            _t("UNIT_WARRIOR", 12, 10, 20),
+            _t("UNIT_WARRIOR", 13, 10, 20),
+            _t("UNIT_SCOUT", 13, 11, 10),
+        ],
+        [_t("UNIT_CATAPULT", 13, 10, 25)],
+    ],
+)
+def test_the_lone_garrison_stays_when_the_threat_is_real(threats):
+    game = _lone_garrison_game(threats)
+    policy = _policy()
+    run(policy, game)
+    assert game.actions == []
+    assert policy.decisions[-1].action == "hold"
+    assert policy._stripped == {}
+
+
+def test_the_lone_garrison_stays_at_war_or_without_the_threat_state():
+    for policy in (_policy(at_war=True), SettlingPolicy(SettlingSettings(threat_radius=2))):
+        game = _lone_garrison_game([_t("UNIT_SCOUT", 13, 10, 10)])
+        run(policy, game)
+        assert game.actions == []
+
+
+def test_the_escort_and_settler_go_back_when_the_stripped_city_is_threatened_again():
+    policy = _policy()
+    run(policy, _lone_garrison_game([_t("UNIT_SCOUT", 13, 10, 10)]))
+    assert policy._stripped == {(10, 10): 9}
+    # Next turn both stand one step out and a war party shows up beside the city.
+    out = [(11, 9)]
+    garrison = unit_info(unit_id=9, unit_index=9, x=out[0][0], y=out[0][1])
+    game = make_game(
+        [settler(x=out[0][0], y=out[0][1]), garrison],
+        cities=[alpha()],
+        threats=[_t("UNIT_WARRIOR", 12, 9, 20) for _ in range(3)],
+        sites=[site(14, 6, food=40)],
+        turn=2,
+    )
+    run(policy, game)
+    assert game.actions == [("move", 9, 10, 10), ("move", 7, 10, 10)]
+
+
+def test_no_recall_while_the_threat_stays_limited_and_the_record_clears_when_it_is_held():
+    policy = _policy()
+    run(policy, _lone_garrison_game([_t("UNIT_SCOUT", 13, 10, 10)]))
+    garrison = unit_info(unit_id=9, unit_index=9, x=11, y=9)
+    game = make_game(
+        [settler(x=11, y=9), garrison],
+        cities=[alpha()],
+        threats=[_t("UNIT_SCOUT", 13, 10, 10)],
+        sites=[site(14, 6, food=40)],
+        turn=2,
+    )
+    run(policy, game)
+    assert not any(a[2:] == (10, 10) for a in game.actions)
+    # A new defender arrives in the city: the record is dropped.
+    back = unit_info(unit_id=11, unit_index=11, x=10, y=10)
+    run(policy, make_game([settler(x=11, y=9), garrison, back], cities=[alpha()], turn=3))
+    assert policy._stripped == {}
+
+
+def test_a_spare_unit_is_chosen_before_the_lone_garrison():
+    from civ6_ai.policies.settling import find_escort
+
+    garrison = unit_info(unit_id=9, unit_index=9, x=10, y=10)
+    other = unit_info(unit_id=8, unit_index=8, x=11, y=11)
+    from civ6_ai.state import read_units
+
+    units = asyncio.run(read_units(make_game([settler(), garrison, other])))
+    settler_unit = next(u for u in units if u.unit_id == 7)
+    pick = find_escort(settler_unit, units, [(10, 10)], set(), 5, lone_ok={(10, 10)})
+    assert pick is not None and pick.unit_id == 8
+
+
+def test_a_garrison_that_walks_out_to_join_the_settler_is_recorded_for_recall():
+    policy = _policy()
+    garrison = unit_info(unit_id=9, unit_index=9, x=10, y=10)
+    game = make_game(
+        [settler(x=10, y=13), garrison],
+        cities=[alpha()],
+        threats=[_t("UNIT_SCOUT", 13, 13, 10)],
+        sites=[site(14, 6, food=40)],
+    )
+    run(policy, game)
+    assert policy._stripped == {(10, 10): 9}

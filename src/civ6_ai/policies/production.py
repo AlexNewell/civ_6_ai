@@ -43,6 +43,7 @@ from civ6_ai.policies.game_data import (
 from civ6_ai.policies.growth import (
     CityGrowth,
     GrowthPolicy,
+    Stance,
     food_multiplier,
     housing_multiplier,
 )
@@ -451,6 +452,11 @@ _STARVING_FOOD_BOOST = 4.0  # Extra weight on the food yield of a food building 
 _HOUSING_ITEMS = frozenset({"SEWER", "NEIGHBORHOOD"})  # Their food profile stands for housing.
 
 
+def _deficit_tolerated(city: City, ctx: ProductionContext) -> bool:
+    plan = ctx.growth.get(city.city_id)
+    return plan is not None and plan.stance is Stance.SHRINK_OK
+
+
 def _growth_adjusted(
     value: float,
     name: str,
@@ -566,10 +572,10 @@ def _building_score(
     if profile is None:
         return _UNKNOWN_BUILDING
     value = _yield_value(profile, w)
-    if name == "GRANARY" and city.food_surplus > 3:
+    if name == "GRANARY" and city.food_surplus > 3 and city.city_id not in ctx.growth:
         value *= 0.5
     value = _growth_adjusted(value, name, profile, city, ctx, w)
-    if name in _FOOD_BUILDINGS and is_starving(city):
+    if name in _FOOD_BUILDINGS and is_starving(city) and not _deficit_tolerated(city, ctx):
         value += _STARVING_FOOD_BOOST * profile[0] * w.food
     return value
 
@@ -597,7 +603,7 @@ def _district_score(
             value = value * 2.0 if city.housing - city.pop <= 1 else value * 0.3
     else:
         value = _growth_adjusted(value, name, profile, city, ctx, w)
-    if name in _FOOD_BUILDINGS and is_starving(city):
+    if name in _FOOD_BUILDINGS and is_starving(city) and not _deficit_tolerated(city, ctx):
         value += _STARVING_FOOD_BOOST * profile[0] * w.food
     return value
 

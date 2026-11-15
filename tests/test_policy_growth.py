@@ -186,3 +186,22 @@ def test_policy_logs_changes_once_and_every_n_turns(caplog):
 
 def fx_empire(turn):
     return asyncio.run(read_empire(fx.FakeGame(overview=fx.overview(turn=turn))))
+
+
+def test_hold_granary_keeps_a_positive_value_with_high_surplus():
+    pw = ProductionWeights()
+    granary = option("BUILDING", "BUILDING_GRANARY")
+    c = city(population=9, housing=9.0, food_surplus=4.0, turns_to_grow=30)
+    p = plan(c)
+    assert p.stance is Stance.HOLD
+    assert score(granary, c, ctx_with(c, p), pw) > 0
+
+
+def test_tolerated_deficit_gets_no_starving_bonus():
+    pw = ProductionWeights()
+    granary = option("BUILDING", "BUILDING_GRANARY")
+    c = city(population=9, housing=14.0, food_surplus=-1.0, food_stored=40.0, turns_to_grow=0)
+    tolerated = plan(c, turn=320)
+    assert tolerated.stance is Stance.SHRINK_OK
+    fed = plan(c, turn=100)
+    assert score(granary, c, ctx_with(c, tolerated), pw) < score(granary, c, ctx_with(c, fed), pw)

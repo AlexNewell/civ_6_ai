@@ -46,6 +46,7 @@ log = logging.getLogger(__name__)
 
 HOSTILE_NEAR_SITE = "hostile unit near the site"
 FOG_PENDING = "fog around the site not measured yet"
+BELOW_MIN_SCORE = "below minimum site score"
 NEEDS_LOOK = "rival side of the site unexplored (needs a look)"
 # How much further than the middle of an unexplained border its unseen city is placed.
 PHANTOM_PUSH = 2.0
@@ -174,6 +175,7 @@ class SettlingSettings:
     #    `fog_min_tiles`) are unrevealed, it needs a look: not taken while a scout lives to look,
     #    and when none does it competes with `fog_penalty_weight` score per point of shortfall.
     unseen_pop_min: int = 2
+    unseen_capital_share: float = 0.5  # This much of the rival side unexplored: a heartland.
     unseen_min_distance: int = 5
     fog_share_min: float = 0.25
     fog_min_tiles: int = 6
@@ -273,6 +275,8 @@ def safe_loyalty_rate(
     rivals: Iterable[tuple[int, int, int]],
     settings: SettlingSettings,
     unseen_distance: int | None = None,
+    unseen_pop: int | None = None,
+    unseen_capital: bool = False,
 ) -> float:
     """The loyalty estimate after growth, fog and the non-pressure drag. See the settings.
 
@@ -291,10 +295,12 @@ def safe_loyalty_rate(
         # Its size follows the game: as large as our median city (never under `unseen_pop_min`),
         # and not a capital. A fixed pop-5 capital (as heavy as pop 10) flagged every early site
         # near a pop-2 or pop-3 capital, when every city on the map is that small.
-        pops = sorted(pop for _, _, pop, _ in map(_unpack, own)) or [s.unseen_pop_min]
-        unseen = max(s.unseen_pop_min, pops[len(pops) // 2])
+        if unseen_pop is None:
+            pops = sorted(pop for _, _, pop, _ in map(_unpack, own)) or [s.unseen_pop_min]
+            unseen_pop = pops[len(pops) // 2]
+        unseen = max(s.unseen_pop_min, unseen_pop)
         px = (x + max(unseen_distance, s.unseen_min_distance)) % (s.map_width or 10_000)
-        grown_rivals.append((px, y, unseen + s.loyalty_rival_growth, False))
+        grown_rivals.append((px, y, unseen + s.loyalty_rival_growth, unseen_capital))
     if any(
         0 < hex_distance(x, y, cx, cy, s.map_width) <= s.loyalty_range
         for cx, cy, _, _ in map(_unpack, rivals)
@@ -921,7 +927,8 @@ class SettlingPolicy:
         self._look_points = []
         for c in candidates:
             info = self._fog.get((c.x, c.y))
-            usable = c.rejected is None or c.rejected == FOG_PENDING
+            # A site marked below the minimum by its own fog penalty is still worth a look.
+            usable = c.rejected in (None, FOG_PENDING, BELOW_MIN_SCORE)
             if (
                 usable
                 and (c.x, c.y) in self._needs_look
@@ -978,8 +985,23 @@ class SettlingPolicy:
         info = self._fog.get((x, y))
         if info is None or info.unrevealed == 0 or info.total == 0:
             return safe, 0.0, False
-        robust = safe_loyalty_rate(x, y, own, sources, s, unseen_distance=info.nearest)
         share = info.unrevealed / info.total
+        # The unseen city is as large as the largest city we know on either side (early on every
+        # city is small, so this stays small), and counts as a capital when most of the rival
+        # side is unexplored: a heartland we have not seen. Run 14: El Mirador at (60,29), 81%
+        # unexplored, was judged against an unseen pop-6 city and read +11.9; the unseen Mapuche
+        # capital (pop 13, 6 tiles) pressed 10.4 and the city flipped 13 turns after founding.
+        sizes = [pop for _, _, pop, _ in map(_unpack, list(own) + list(sources))]
+        robust = safe_loyalty_rate(
+            x,
+            y,
+            own,
+            sources,
+            s,
+            unseen_distance=info.nearest,
+            unseen_pop=max(sizes, default=s.unseen_pop_min),
+            unseen_capital=share >= s.unseen_capital_share,
+        )
         needs = (
             robust < s.loyalty_reject_safe
             and share >= s.fog_share_min
@@ -1061,7 +1083,7 @@ class SettlingPolicy:
             elif not first_city and self._fog_can and (site.x, site.y) not in self._fog:
                 rejected = FOG_PENDING
             elif not first_city and site_score < s.min_site_score:
-                rejected = "below minimum site score"
+                rejected = BELOW_MIN_SCORE
             elif nearest_own is not None and nearest_own > s.max_city_distance:
                 if (
                     nearest_own <= s.far_city_distance
@@ -1070,7 +1092,7 @@ class SettlingPolicy:
                 ):
                     site_score -= s.far_penalty * (nearest_own - s.max_city_distance)
                     if site_score < s.min_site_score:
-                        rejected = "below minimum site score"
+                        rejected = BELOW_MIN_SCORE
                 else:
                     rejected = "too far from our cities"
             path_threat = rejected is None and danger.on_path(

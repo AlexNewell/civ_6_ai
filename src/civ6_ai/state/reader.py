@@ -708,6 +708,7 @@ for tile in string.gmatch("%s", "[^;]+") do
     if x and vis:IsVisible(tonumber(x), tonumber(y)) then table.insert(seen, tile) end
 end
 print("VISIBLE|" .. table.concat(seen, ";"))
+print("KDONE")
 print("---END---")
 """
 
@@ -730,9 +731,10 @@ class KnownMap:
 
 
 def parse_known_cities(output: str) -> KnownMap:
-    """Parse the call's output. Raises ValueError unless it ends with the completion marker, so a
-    timed-out or partial read is never taken for a complete one."""
-    if "---END---" not in output:
+    """Parse the call's output. Raises ValueError unless the read's own `KDONE` line is present, so
+    a timed-out or partial read is never taken for a complete one. (civ6-mcp's `execute_lua`
+    strips the `---END---` marker before returning, so that marker cannot be the check.)"""
+    if "KDONE" not in output.split():
         raise ValueError("known-city read incomplete: no end marker")
     cities, borders, watched = [], [], set()
     for line in output.splitlines():

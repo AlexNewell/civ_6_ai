@@ -1024,7 +1024,7 @@ KCITY|5|59|14|2|0|1
 BORDER|5|57,19;58,19;59,15
 BORDER|9|70,5;71,5
 VISIBLE|
----END---"""
+KDONE"""
 
 
 def test_known_city_output_is_parsed():
@@ -1099,7 +1099,7 @@ def test_a_failed_or_partial_read_keeps_the_memory():
     before = list(policy._rival_cities), list(policy._phantoms)
     run(policy, lua_game("KCITY|5|56|19|7|1|1\n"))  # No end marker.
     assert (list(policy._rival_cities), list(policy._phantoms)) == before
-    run(policy, lua_game("---END---"))  # Complete but sees nothing: nothing is seen to be gone.
+    run(policy, lua_game("KDONE"))  # Complete but sees nothing: nothing is seen to be gone.
     assert sorted(policy._rival_cities) == sorted(before[0])
 
 
@@ -1107,10 +1107,10 @@ def test_a_remembered_city_is_dropped_only_when_its_plot_is_seen_empty():
     policy = SettlingPolicy()
     run(policy, lua_game(KNOWN_LUA_OUTPUT))
     # Out of sight: the memory (and the live game state) is not consulted for it.
-    run(policy, lua_game("VISIBLE|59,14\n---END---"))  # (59,14) visible and city-free
+    run(policy, lua_game("VISIBLE|59,14\nKDONE"))  # (59,14) visible and city-free
     assert [c for c in policy._rival_cities if c[0] > 50] == [(56, 19, 7, True)]
     # Only visible tiles are watched: Lua is told what we remember.
-    game = lua_game("---END---")
+    game = lua_game("KDONE")
     run(policy, game)
     assert "56,19" in game.lua_code[0] and "59,14" not in game.lua_code[0]
 
@@ -1118,7 +1118,7 @@ def test_a_remembered_city_is_dropped_only_when_its_plot_is_seen_empty():
 def test_a_remembered_city_updates_only_when_visible_again():
     policy = SettlingPolicy()
     run(policy, lua_game(KNOWN_LUA_OUTPUT))
-    run(policy, lua_game("KCITY|7|56|19|9|0|1\n---END---"))
+    run(policy, lua_game("KCITY|7|56|19|9|0|1\nKDONE"))
     assert policy._rival_memory[56, 19] == (7, 9)
     assert (56, 19, 9) in policy._rival_cities  # No longer a capital, new owner.
 
@@ -1286,3 +1286,15 @@ def test_a_refused_join_clears_when_an_engineer_blocking_the_tile_leaves():
     assert len(first) == 1
     assert play(policy, [engineer]) == []
     assert len(play(policy, [])) == 1  # The blocker left, so the order is tried again.
+
+
+def test_the_known_city_read_does_not_rely_on_the_stripped_end_marker():
+    # civ6-mcp's execute_lua strips ---END--- before returning (Run 12 live check), so the read's
+    # own KDONE line is the completeness check.
+    from civ6_ai.state.reader import _KNOWN_CITIES_HEAD, parse_known_cities
+
+    assert 'print("KDONE")' in _KNOWN_CITIES_HEAD
+    known = parse_known_cities("KCITY|5|61|20|13|0|1\nVISIBLE|61,20\nKDONE")
+    assert known.cities[0].x == 61 and (61, 20) in known.visible_watched
+    with pytest.raises(ValueError):
+        parse_known_cities("KCITY|5|61|20|13|0|1\n---END---")

@@ -812,3 +812,13 @@ def test_an_empty_great_people_list_says_why(caplog):
     with caplog.at_level(logging.INFO):
         run(FaithPolicy(), game)
     assert "2 listed: 1 claimed, 1 priced 0, 0 not buyable" in caplog.text
+
+
+def test_a_floor_rejection_with_no_saving_target_does_not_crash(caplog):
+    # Turn 328: a Shrine can no longer pay back, and no great person is a target.
+    policy = FaithPolicy()
+    game = Game(overview=overview(turn=328, faith=400.0), people=[])
+    with caplog.at_level(logging.INFO):
+        run(policy, game)
+    assert acted(game, "buy") == []
+    assert "returns too little" in caplog.text

@@ -596,6 +596,7 @@ class GoldPolicy:
                 turn.save_by_return(*found)
         bought_cities: set[int] = set()
         bought_kinds: set[str] = set()
+        bought_items: list[str] = []
         skipped: list[str] = []
         for entry in sorted(pool, key=lambda p: (-p.priced.roi, p.priced.cost, p.priced.label)):
             priced = entry.priced
@@ -608,6 +609,15 @@ class GoldPolicy:
                 kind in _ONE_A_TURN and kind in bought_kinds
             ):
                 continue
+            if bought_items and entry.option is not None:
+                # What was bought this turn counts: one scout wanted is not bought by each city.
+                context = entry.context
+                for item in bought_items:
+                    context = context.after_choosing(item)
+                worth = valuation.value_option(entry.option, entry.city, context, self.weights)
+                if worth is None:
+                    continue
+                priced = valuation.price(priced.label, priced.cost, worth, turn.now, turn.last)
             bar = valuation.floor(turn.budget, turn.income)
             if not priced.valuation.always:
                 if priced.roi < bar:
@@ -625,10 +635,13 @@ class GoldPolicy:
                 elif turn.target is not None and priced.cost > turn.slack:
                     skipped.append(f"{priced.label} waits for {turn.target}")
                     continue
+            entry.priced = priced
             if await self._purchase(game, turn, entry, bar, notes):
                 if entry.city is not None:
                     bought_cities.add(entry.city.city_id)
                 bought_kinds.add(kind)
+                if entry.option is not None:
+                    bought_items.append(entry.option.item)
         notes += skipped[:4]
         if not turn.purchases:
             best = sorted(reach, key=lambda p: -p.roi)[:4]

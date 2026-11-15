@@ -137,6 +137,14 @@ class Valuation:
     fixed: float = 0.0
     basis: str = ""
     always: bool = False  # Defence under threat: bought before any return is compared.
+    payback: float = 0.0  # One-shot items: `fixed` is cut when fewer turns than this remain.
+
+    def at(self, turn: int, last_turn: int, wait: float = 0.0) -> float:
+        """The value of having it `wait` turns from `turn` (a one-shot's payback shrinks too)."""
+        fixed = self.fixed
+        if self.payback > 0:
+            fixed *= min(1.0, max(0.0, last_turn - turn - wait) / self.payback)
+        return self.rate * horizon(turn, last_turn, wait) + fixed
 
     def value(self, horizon_now: float) -> float:
         return self.rate * horizon_now + self.fixed
@@ -234,8 +242,7 @@ def catalogue_valuation(category: str, item: str, weights: ProductionWeights) ->
 
 
 def price(label: str, cost: int, valuation: Valuation, turn: int, last_turn: int) -> Priced:
-    now = horizon(turn, last_turn)
-    return Priced(label, cost, valuation, valuation.value(now))
+    return Priced(label, cost, valuation, valuation.at(turn, last_turn))
 
 
 def era_index(era_name: str) -> int:
@@ -253,12 +260,11 @@ def great_person_valuation(
     attr = _GP_WEIGHTS.get(person.class_name)
     class_weight = getattr(weights, attr) if attr else 0.5
     era = 1.0 + GP_ERA_STEP * era_index(person.era_name)
-    left = max(0.0, last_turn - turn - wait)
-    payback = min(1.0, left / GP_PAYBACK_TURNS)
     return Valuation(
         0.0,
-        GP_UNIT_VALUE * class_weight * era * payback,
+        GP_UNIT_VALUE * class_weight * era,
         f"great person: class weight {class_weight:g}, era x{era:g}",
+        payback=GP_PAYBACK_TURNS,
     )
 
 
@@ -285,7 +291,7 @@ def pick_target(
         wait = gap / income
         if wait > MAX_WAIT_FRACTION * left:
             continue
-        later = replace(item, value=item.valuation.value(horizon(turn, last_turn, wait)))
+        later = replace(item, value=item.valuation.at(turn, last_turn, wait))
         if later.value <= 0:
             continue
         if later.roi < floor(spare, income):

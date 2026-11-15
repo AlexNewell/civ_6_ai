@@ -884,3 +884,16 @@ def test_defence_under_threat_is_bought_whatever_its_return():
     )
     run(game)
     assert any(a[3] == "UNIT_ARCHER" for a in game.actions if a[0] == "buy")
+
+
+def test_one_scout_wanted_is_not_bought_by_every_city():
+    cities = [fx.city_info(city_id=65536 + i, name=f"C{i}", x=10 + 3 * i) for i in range(3)]
+    game = GoldGame(
+        gold_amount=3000,
+        cities=cities,
+        units=[],
+        production=[option("UNIT_SCOUT", 80, "UNIT", turns=3)],
+    )
+    run(game)
+    scouts = [a for a in game.actions if a[0] == "buy" and a[3] == "UNIT_SCOUT"]
+    assert len(scouts) == 1

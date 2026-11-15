@@ -77,7 +77,17 @@ def test_great_person_value_follows_class_weight_era_and_the_end_of_the_game():
     scientist = v.great_person_valuation(person(cls="Great Scientist"), sw, 100, 330)
     general = v.great_person_valuation(person(cls="Great General"), sw, 100, 330)
     later = v.great_person_valuation(person(era_name="Modern"), sw, 100, 330)
-    ending = v.great_person_valuation(person(cls="Great Scientist"), sw, 325, 330)
     assert scientist.fixed > general.fixed
     assert later.fixed > scientist.fixed
-    assert ending.fixed < scientist.fixed / 3
+    assert scientist.at(325, 330) < scientist.at(100, 330) / 3
+
+
+def test_a_great_person_target_is_valued_when_it_is_reached_not_today():
+    from civ6_ai.policies.secondary import SecondaryWeights
+    from test_policy_faith import person
+
+    worth = v.great_person_valuation(person(), SecondaryWeights(), 315, 330)
+    assert worth.at(315, 330, wait=6) < worth.at(315, 330)
+    item = v.price("gp", 600, worth, 315, 330)
+    target, _ = v.pick_target([item], 0, 100.0, 315, 330)
+    assert target.value < item.value

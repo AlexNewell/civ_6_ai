@@ -614,7 +614,12 @@ class FaithPolicy:
                     continue
                 price = self._costs.get(item, estimate)
                 if not self._worth_buying(category, item, price, budget - spent, turn, city):
-                    notes.append(f"{item} in {city.name} ({price}) waits for {self._target.label}")
+                    why = (
+                        f"waits for {self._target.label}"
+                        if self._target is not None
+                        else "returns too little"
+                    )
+                    notes.append(f"{item} in {city.name} ({price}) {why}")
                     continue
                 if price > budget - spent:
                     cheapest_short = min(cheapest_short, price)

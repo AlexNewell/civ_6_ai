@@ -40,6 +40,20 @@ Written offline against civ6-mcp's source, so none of this has run in a game yet
 | Ranged units are not hit back by melee defenders, and ranged defenders do hit back (`assess_attack` assumes both) | Not reached |
 | `Unit.targets` lists only targets in range with line of sight, and ranged units fire at adjacent targets | Not reached |
 
+## Run 13: turns 1 to 327, with PRs 216 to 219, stopped twice and fixed mid-run (PRs 220 to 222)
+
+STD_T1_01 on main from e4ee537, 2026-11-15, three sessions on one game: `20261115T132807Z` (turns 1 to 27), `20261115T134719Z` (27 to 130) and `20261115T141921Z` (130 to 327). A first start (`20261115T035715Z`) was abandoned at turn 51 after a reload. Result: defeat on turn 327, `winning_team=4` (Mapuche: 77 techs, 4 spaceports, and they conquered the Khmer outright), almost certainly science. Final scores: Mapuche 1,492, Brazil 1,293, Sumeria 1,285, Germany 1,092, Maya 778 (5th of 5 left). $0.00 in model spend. Decision time mean 12.5 s (p90 14.8 s).
+
+| Check | Result |
+|---|---|
+| Expansion | Two stalls, each found live and fixed. First start: barbarians near the capital made the survey refuse every site ("hostile unit near the site"), so PR 209's gate built no settler by turn 51. Fixed by PR 220 (survey as an escorted settler; settlers gather an escort for such sites). Second start: from turn 15 every site was refused for loyalty because a border phantom stood on the nearest rival border tile; fixed by PR 221 (phantom behind the border, map seam handled). Turns 76 to 104: all sites refused again with real rivals known; Run 12's Palenque site read safe -1.0 and a settler was disbanded on turn 95; fixed by PR 222 (drag 3, floor 0). Cities: 2 on turn 49, 6 by turn 147, 4 at the end. |
+| No city lost | Fail: Uxmal (60,29), founded on turn 146 at raw +11.1 (safe +4.1), flipped on turn 185 at about -3.5 a turn even with Amani. The breakdown showed Mapuche cities never seen: (55,30) pop 19 pressing 15, (57,27) pop 6. Their borders were "explained" by a known Mapuche city, so no phantom stood in. Coba (64,28, pop 13) fell to the Mapuche on turn 300, six turns after their second declaration of war. |
+| Food focus (217) | Works: cities now show `favored=YIELD_FOOD` the turn after it is set. The starving cities have no free food tiles: the capital at pop 17 to 19 ran 6 specialists with 0 unworked food tiles and ended at -10 food. 143 starving notices. |
+| Valuation (219) | 21 valuation lines, 23 gold purchases, 27 upgrades, 9 faith purchases. Faith saved for a Great Scientist about 185 turns away because the game's length read as 500 turns: civ6-mcp never reported the speed (Quick, 330 turns). Fixed by PR 223. |
+| Production refused | Pass: 8 of 209. Wonders 15. Observatories completed on turns 27, 77 and 173. |
+| Blockers | Gate fail: 3 turns held by `ENDTURN_BLOCKING_RELIGION` with no handler. |
+| Score | Ahead of Runs 11 and 12 from turn 100 to 250 (147, 309, 487, 673), then 748 on turn 300 after losing two cities. Share of the leader's score 0.67 on turn 200. |
+
 ## Run 12: turns 1 to 331, with the Run 11 fixes (PRs 207, 209 and 210)
 
 STD_T1_01 from turn 1 on main at 0e686cf, 2026-11-14, in one session (`20261114T225042Z`) with `--probe placement`, no hands-on help and no stop other than game over. Result: defeat at the turn limit, `winning_team=1` (Germany, on score). Final scores: Germany 1,435, Brazil 1,072, Sumeria 1,072, Maya 924 (4th), Mapuche 889, Khmer 642. $0.00 in model spend. 331 turns in 7,364 s; decision time mean 11.4 s (p90 14.9 s), end-turn wait mean 10.9 s.

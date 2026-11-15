@@ -40,6 +40,23 @@ Written offline against civ6-mcp's source, so none of this has run in a game yet
 | Ranged units are not hit back by melee defenders, and ranged defenders do hit back (`assess_attack` assumes both) | Not reached |
 | `Unit.targets` lists only targets in range with line of sight, and ranged units fire at adjacent targets | Not reached |
 
+## Run 12: turns 1 to 331, with the Run 11 fixes (PRs 207, 209 and 210)
+
+STD_T1_01 from turn 1 on main at 0e686cf, 2026-11-14, in one session (`20261114T225042Z`) with `--probe placement`, no hands-on help and no stop other than game over. Result: defeat at the turn limit, `winning_team=1` (Germany, on score). Final scores: Germany 1,435, Brazil 1,072, Sumeria 1,072, Maya 924 (4th), Mapuche 889, Khmer 642. $0.00 in model spend. 331 turns in 7,364 s; decision time mean 11.4 s (p90 14.9 s), end-turn wait mean 10.9 s.
+
+| Check | Result |
+|---|---|
+| Science (210) | Pass: Observatories completed on turns 79, 91, 162 and 168 (Run 11: first one started on turn 184). At the end: 67 techs (Run 11: 48; Germany 74), science 203 a turn (Run 11: 78), 5 Libraries, 5 Universities and 5 Research Labs. No rival won early: the game reached the turn limit (Run 11 ended on turn 301). |
+| Expansion (209) | Better: 7 cities at the end (Run 11: 5), the 7th captured from the Mapuche on turn 300. The second city came only on turn 57: barbarians held the first settlers, the escort could never join (`STACKING_CONFLICT` every turn, turns 29 to 39), and the settler that left alone on turn 40 was lost (fixed by PR 211). |
+| No new-city loyalty loss (205, 209) | Fail: Tikal at (61,20), the site lost in Runs 9 and 11, founded on turn 83 at estimate +20 (safe +17), lost on turn 88. |
+| Loyalty breakdown (207) | Pass: logged on turn 84. Pressure -13.3, happiness -3, a rival Diplomat governor -4. The settle record showed `rival_cities: []`: the estimate knew no rival city, and the Sumerian city 5 tiles away (pop 7) pressed with 7, double the distance formula, as did our own capital, so capitals count twice. Fixed by PR 212 (rival cities from visible tiles, kept in memory; capital weight; border phantoms) and PR 213 (its Lua read never completed in a live game, because `execute_lua` strips the end marker). |
+| Production refused | Pass: 16 of 248 (6%). |
+| Wonders | 13. |
+| Faith idle at most 250 | Fail: up to 2,872; 18 purchases. |
+| Gold used | Fail: nothing bought on 71% of turns above the reserve. |
+| Builders idle under 50% | Fail: 69%. Starving notices 124. |
+| Score | 924 on turn 331, 4th of 6. Behind Run 11 on turns 100 to 200 (slow start) and level from turn 250 (632 each); 814 on turn 300 (Run 11: 759). |
+
 ## Run 11: turns 1 to 301, with the Run 10 fixes (PRs 204 to 206)
 
 STD_T1_01 from turn 1 on main at 69f758d, 2026-11-14, in one session (`20261114T152535Z`) with `--probe placement`, no hands-on help and no stop other than game over. Result: defeat on turn 301, `winning_team=1` (Germany), before the turn limit. The end screen names no victory; Germany, Brazil, Mapuche and Sumeria each had 4 spaceports and 65 to 68 techs against our 48, so it was almost certainly a science victory. The bot never raised a science warning (issue 182). Final scores: Brazil 1,117, Sumeria 1,092, Germany 1,034, Mapuche 964, Maya 760 (5th), Khmer 348. First run with per-turn scores (PR 202): 49, 132, 267, 480, 632 and 759 on turns 50 to 300. $0.00 in model spend. 301 turns in 6,429 s; decision time mean 11.1 s (p90 14.5 s), end-turn wait mean 10.3 s.

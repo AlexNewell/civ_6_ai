@@ -9,3 +9,4 @@ Run 8,STD_T1_01,manual,2026-11-13,lost,,,330,291,796,,,,139,272,432,612,,,,,,,,,
 Run 9,STD_T1_01,manual,2026-11-14,lost,Germany,score,330,329,902,,,,153,277,452,623,,,,,,,,,,,,,,Checkpoints from docs/live-checks.md
 Run 10,STD_T1_01,manual,2026-11-14,lost,Germany,score,330,330,921,,,,,,,,,,,,,,,,,,,,,"Final scores read from the game after it ended: Germany 1471, Sumeria 1372, Mapuche 1117, Maya 921 (4th), Brazil 718, Khmer 622; no per-turn scores (run predates PR 202)"
 Run 11,STD_T1_01,log,2026-11-14,lost,Germany,technology,301,301,760,326.8,0.591,49,132,267,480,632,759,0.415,0.485,0.578,0.724,0.691,0.686,3,3,3,2,4,5,"Victory type inferred: game ended turn 301 with Germany, Brazil, Mapuche and Sumeria at 4 spaceports each; we had 48 techs vs their 65-68"
+Run 12,STD_T1_01,log,2026-11-14,lost,Germany,score,331,331,924,360.0,0.542,45,114,232,429,632,814,0.381,0.403,0.427,0.603,0.709,0.679,4,4,3,3,3,3,

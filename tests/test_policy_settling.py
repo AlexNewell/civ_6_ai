@@ -1107,7 +1107,7 @@ def test_a_remembered_city_is_dropped_only_when_its_plot_is_seen_empty():
     policy = SettlingPolicy()
     run(policy, lua_game(KNOWN_LUA_OUTPUT))
     # Out of sight: the memory (and the live game state) is not consulted for it.
-    run(policy, lua_game("VISIBLE|59,14\n---END---"))  # (59,14) visible and city-free
+    run(policy, lua_game("VISIBLE|59,14\nKDONE"))  # (59,14) visible and city-free
     assert [c for c in policy._rival_cities if c[0] > 50] == [(56, 19, 7, True)]
     # Only visible tiles are watched: Lua is told what we remember.
     game = lua_game("KDONE")
@@ -1118,7 +1118,7 @@ def test_a_remembered_city_is_dropped_only_when_its_plot_is_seen_empty():
 def test_a_remembered_city_updates_only_when_visible_again():
     policy = SettlingPolicy()
     run(policy, lua_game(KNOWN_LUA_OUTPUT))
-    run(policy, lua_game("KCITY|7|56|19|9|0|1\n---END---"))
+    run(policy, lua_game("KCITY|7|56|19|9|0|1\nKDONE"))
     assert policy._rival_memory[56, 19] == (7, 9)
     assert (56, 19, 9) in policy._rival_cities  # No longer a capital, new owner.
 

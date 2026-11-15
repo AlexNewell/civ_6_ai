@@ -215,3 +215,97 @@ def test_the_policy_uses_the_speeds_last_turn_when_the_game_sets_no_limit():
     empire = replace(fx_empire(turn=320), max_turns=0, game_speed="GAMESPEED_QUICK")
     policy.update([c], empire, 6)
     assert policy.plan_for(c.city_id).stance is Stance.HOLD
+
+
+# --- Food capacity from the tile read (issue 215, Run 13) ---
+
+from civ6_ai.city_tiles import CITY_TILES_LUA, CityTiles, parse_city_tiles  # noqa: E402
+from civ6_ai.policies.growth import food_capacity  # noqa: E402
+
+
+def tiles_of(pop, worked=(), land=(), water=()):
+    return CityTiles(1, pop, tuple(worked), tuple(land), tuple(water))
+
+
+def test_parse_city_tiles_needs_its_own_end_marker():
+    text = "CT|7|9|2,2,1|3,1|\nCT|8|4||2|1\n"
+    try:
+        parse_city_tiles(text)
+        raise AssertionError("partial read accepted")
+    except ValueError:
+        pass
+    got = parse_city_tiles(text + "CTDONE\n")
+    assert got[7].worked == (2, 2, 1) and got[7].free_land == (3, 1)
+    assert got[8].free_water == (1,) and got[8].specialists == 4
+    assert "CTDONE" in CITY_TILES_LUA
+
+
+def test_capacity_with_no_free_tiles_counts_specialists_at_minus_two():
+    # The Run 13 capital: all tiles worked, surplus +4: two specialists fit, then it starves.
+    t = tiles_of(18, worked=[2] * 12)
+    assert food_capacity(18, 4.0, t) == (20, 0)
+
+
+def test_capacity_uses_free_tiles_first():
+    t = tiles_of(5, worked=[2] * 5, land=[3, 2, 1])
+    # +3 -> take the 3 (net +1) -> +4... 3: gain 1, left 4; 2: gain 0; 1: gain -1 left 3; then -2.
+    assert food_capacity(5, 3.0, t)[0] == 5 + 3 + 1
+
+
+def test_starving_city_sheds_specialists_then_weak_tiles():
+    # The Run 13 Quirigua: pop 9, 1 specialist, 8 worked tiles, -2.6 food.
+    t = tiles_of(9, worked=[3, 2, 2, 1, 1, 1, 1, 1])
+    size, over = food_capacity(9, -2.6, t)
+    assert (size, over) == (7, 2)
+
+
+def test_over_capacity_without_a_cure_accepts_the_shrink():
+    c = city(population=9, housing=10.0, food_surplus=-2.6, turns_to_grow=0)
+    t = tiles_of(9, worked=[3, 2, 2, 1, 1, 1, 1, 1])
+    p = plan(c, tiles=t)
+    assert p.stance is Stance.SHRINK_OK
+    assert p.over_capacity == 2 and p.food_limit == 7
+    assert food_multiplier(p) == 0.0
+
+
+def test_over_capacity_with_a_free_tile_is_still_fed():
+    c = city(population=9, housing=10.0, food_surplus=-2.6, turns_to_grow=0)
+    t = tiles_of(9, worked=[1, 1, 1, 1, 1, 1, 1, 1], land=[3])
+    assert plan(c, tiles=t).stance is Stance.FEED
+
+
+def test_target_respects_food_capacity():
+    c = city(population=18, housing=25.0, food_surplus=4.0, turns_to_grow=5)
+    old = plan(c, turn=250)
+    new = plan(c, turn=250, tiles=tiles_of(18, worked=[2] * 12))
+    assert old.target == 21 and new.target == 20 and new.food_limit == 20
+
+
+def test_focus_gain_needs_a_better_free_tile():
+    assert tiles_of(2, worked=[1, 2], land=[3]).focus_gain() == 2
+    assert tiles_of(2, worked=[2, 2], land=[2, 1]).focus_gain() == 0
+
+
+def test_no_read_keeps_the_old_estimate():
+    c = city(population=5, housing=10.0, food_surplus=2.0)
+    assert plan(c).food_limit == 7
+
+
+def test_focus_gain_counts_a_specialist_moving_onto_a_free_tile():
+    # 2 worked tiles, pop 3: one specialist. A free 1-food tile is no better than the worked
+    # ones but feeds the specialist.
+    t = tiles_of(3, worked=[2, 2], land=[1])
+    assert t.focus_gain() == 1
+    c = city(population=3, housing=10.0, food_surplus=-1.0, turns_to_grow=0)
+    assert plan(c, tiles=t).stance is Stance.FEED
+
+
+def test_a_city_with_a_harbor_district_has_no_pending_harbor_food():
+    from civ6_ai.policies.growth import pending_food
+    from civ6_ai.state.models import District
+
+    t = tiles_of(5, worked=[2] * 5, water=[2, 1])
+    c = city(population=5)
+    assert pending_food(c, t) == 2
+    harbor = replace(c, districts=(District("DISTRICT_HARBOR", 1, 1),))
+    assert pending_food(harbor, t) == 0

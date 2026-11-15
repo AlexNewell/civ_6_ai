@@ -20,7 +20,7 @@ import json
 import logging
 import math
 from collections.abc import Collection, Iterable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Protocol
 
 from civ6_ai.blockers import action_succeeded, move_succeeded
@@ -43,6 +43,8 @@ from civ6_ai.state.models import RivalCity, SettleSite
 from civ6_ai.state.reader import STANDARD_MAP_WIDTH, hex_distance
 
 log = logging.getLogger(__name__)
+
+HOSTILE_NEAR_SITE = "hostile unit near the site"
 
 SETTLER = "UNIT_SETTLER"
 SCOUT = "UNIT_SCOUT"
@@ -881,7 +883,7 @@ class SettlingPolicy:
             ):
                 rejected = "reserved by another settler"
             elif not escorted and danger.near(site.x, site.y, s.threat_radius):
-                rejected = "hostile unit near the site"
+                rejected = HOSTILE_NEAR_SITE
             elif (
                 margin < -s.loyalty_reject_margin
                 or rate < s.loyalty_reject_rate
@@ -967,6 +969,15 @@ class SettlingPolicy:
             escorted,
         )
         usable = [c for c in candidates if c.rejected is None]
+        if not escorted:
+            # A site refused only because a hostile unit is near it is open to an escorted
+            # settler, which is how the survey counts it (Run 13). Offer it as a site that needs
+            # an escort: the route rules below then gather one, or hold, and never go alone.
+            usable += [
+                replace(c, rejected=None, path_threat=True)
+                for c in candidates
+                if c.rejected == HOSTILE_NEAR_SITE
+            ]
 
         def record(action: str, reason: str, target=None, result: str = "") -> None:
             self._record(

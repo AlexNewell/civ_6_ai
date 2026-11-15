@@ -979,12 +979,6 @@ def test_survey_runs_without_settlers_while_below_the_city_target():
     assert full.survey_turn is None
 
 
-def test_default_safe_floor_refuses_the_run_11_chichen_itza_site():
-    # Founded on a safe rate of 1.9 (estimate +16.5), it read -27 a turn and flipped.
-    assert SettlingSettings().loyalty_reject_safe > 1.9
-    assert SettlingSettings().loyalty_reject_safe <= 9.0  # Every city that held was at 9 or more.
-
-
 # Run 12 (STD_T1_01): Tikal at (61,20), the game's breakdown on turn 84. Pressure -13.28, from
 # these sources (owner, x, y, pop, capital).
 TIKAL = (61, 20)
@@ -1542,3 +1536,12 @@ def test_a_phantom_across_the_map_seam_stays_by_its_border():
     policy._border_memory = {(0, 10): 5}
     (x, y, _) = policy._phantom_cities({(width - 4, 10)})[0]
     assert x in (1, 2, 3) and y == 10  # Pushed east, past the seam, away from us.
+
+
+def test_default_floor_refuses_tikal_and_passes_run_12_palenque():
+    # Run 13: a -6 drag and a +4 floor refused (67,21), Run 12's Palenque, which held all game
+    # (raw +9.4 there in Run 13). With the rivals known, Tikal reads far below the floor.
+    s = SettlingSettings()
+    assert s.loyalty_reject_safe <= 9.4 - s.loyalty_new_city_drag - 4.0
+    tikal = safe_loyalty_rate(*TIKAL, TIKAL_OWN, TIKAL_RIVALS, s)
+    assert tikal < s.loyalty_reject_safe

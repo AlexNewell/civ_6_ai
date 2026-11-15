@@ -52,7 +52,9 @@ class ExpansionState:
         settler waited for a scout and started on turn 13 (second city on turn 32). Before turn
         EARLY_UNSURVEYED_TURNS a survey proves nothing about the land, so it is not trusted.
         """
-        if turn <= EARLY_UNSURVEYED_TURNS or self.survey_turn is None or turn - self.survey_turn > STALE_TURNS:
+        if turn <= EARLY_UNSURVEYED_TURNS or self.survey_turn is None:
+            return True
+        if turn - self.survey_turn > STALE_TURNS:
             return True
         return self.safe_sites > 0
 

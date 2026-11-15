@@ -35,6 +35,13 @@ WANTED_DEFENDERS = 2  # In the city or on a tile beside it, with no hostile unit
 MAX_WANTED_DEFENDERS = 5  # However many hostile units are near: no city is stacked past this.
 # How a rival that means us harm shows up in civ6-mcp's `diplomatic_state`.
 HOSTILE_STATES = ("DENOUNCED", "UNFRIENDLY", "WAR")
+# A rival not at war with us that could take a city if it chose to. Run 13: the Mapuche (60 techs
+# to our 77, 16 cities to our 5) declared on turn 241 and again on 294, and Coba fell six turns
+# into the second war with no wall or garrison made ready. civ6-mcp's own "MILITARY THREAT" flag is
+# 1.5x with a hostile state; a rival twice our strength counts whatever its state, short of a pact.
+WARY_RATIO_HOSTILE = 1.5
+WARY_RATIO_ANY = 2.0
+FRIENDLY_STATES = ("ALLIED", "DECLARED_FRIEND")
 
 
 @dataclass(frozen=True)
@@ -77,11 +84,13 @@ class DefenceState:
     turn: int = 0
     cities: dict[int, CityThreat] = field(default_factory=dict)
     notes: dict[int, list[str]] = field(default_factory=dict)
+    wary: tuple[str, ...] = ()  # Rivals at peace with us that are much stronger. See `wary_of`.
 
-    def reset(self, turn: int, cities: dict[int, CityThreat]) -> None:
+    def reset(self, turn: int, cities: dict[int, CityThreat], wary: tuple[str, ...] = ()) -> None:
         self.turn = turn
         self.cities = cities
         self.notes = {}
+        self.wary = wary
 
     @property
     def any(self) -> bool:
@@ -139,6 +148,29 @@ def count_defenders(
     return inside, beside
 
 
+def wary_of(civs: list[Any]) -> tuple[str, ...]:
+    """Met majors, not at war with us, that are much stronger than we are.
+
+    A rival at `WARY_RATIO_HOSTILE` times our military strength while denouncing or unfriendly to
+    us, or at `WARY_RATIO_ANY` times it in any state but an alliance or declared friendship. Our
+    own strength comes from the same `get_diplomacy` read; with none, nobody is judged. The
+    production policy only asks for walls on the strength of this, so a false alarm costs one
+    building per city, and no unit is built or bought for it.
+    """
+    found = []
+    for civ in civs:
+        ours = getattr(civ, "_our_military", 0)
+        if not civ.has_met or civ.is_at_war or ours <= 0 or civ.military_strength <= 0:
+            continue
+        ratio = civ.military_strength / ours
+        state = civ.diplomatic_state
+        if (state in HOSTILE_STATES and ratio >= WARY_RATIO_HOSTILE) or (
+            state not in FRIENDLY_STATES and ratio >= WARY_RATIO_ANY
+        ):
+            found.append(civ.civ_name)
+    return tuple(sorted(found))
+
+
 def assess(
     cities: list[City],
     units: list[Unit],
@@ -190,13 +222,16 @@ class DefencePolicy:
         civs = await game.get_diplomacy()
         threats = await _read_threats(game)
         at_war = any(c.has_met and c.is_at_war for c in civs)
+        wary = wary_of(civs)
         if not at_war and not threats:
-            self.state.reset(turn, {})
+            self.state.reset(turn, {}, wary)
             return
         cities = await _read_cities(game, self._map_width)
         units = await _read_units(game, self._map_width)
         self.state.reset(
-            turn, assess(list(cities), list(units), threats, civs, map_width=self._map_width)
+            turn,
+            assess(list(cities), list(units), threats, civs, map_width=self._map_width),
+            wary,
         )
 
 

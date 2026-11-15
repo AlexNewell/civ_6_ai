@@ -12,6 +12,7 @@ from civ6_ai.policies.defence import (
     DefenceState,
     assess,
     count_defenders,
+    wary_of,
 )
 from civ6_ai.policies.gold import GoldPolicy, reserve_for, threat_reserve
 from civ6_ai.policies.military import MilitaryPolicy
@@ -485,3 +486,87 @@ def test_the_wanted_defenders_grow_with_the_hostile_units_near_the_city():
     assert not threat(5, 2, 3).short
     assert threat(40, 0, 0).wanted == 5  # Capped: no city is stacked without end.
     assert threat(2, 1, 1).short and not threat(2, 2, 1).short
+
+
+# ----- Run 13: Coba fell with two Drones as its garrison, and no wall made ready -----
+
+
+def test_a_drone_is_no_defender():
+    drone = build_unit(fx.unit_info(unit_id=1, unit_index=1, unit_type="UNIT_DRONE", x=10, y=10))
+    cavalry = build_unit(
+        fx.unit_info(unit_id=2, unit_index=2, unit_type="UNIT_CAVALRY", x=10, y=10)
+    )
+    city = build_city(fx.city_info(), (), set())
+    assert count_defenders(city, [drone, drone]) == (0, 0)
+    assert count_defenders(city, [drone, cavalry]) == (1, 0)
+
+
+def test_a_war_city_held_by_drones_is_short_and_builds_a_defender_not_a_trader():
+    state = marked(ALPHA, inside=0, beside=1, reasons=("war:Rome", "hostile_units:2"))
+    assert state.cities[ALPHA].short
+    ctx = mid(threatened=state.threatened_ids, short=state.short_ids, trade_capacity=3)
+    menu = [
+        choice("UNIT", "UNIT_DRONE", 5),
+        choice("UNIT", "UNIT_TRADER", 5),
+        choice("UNIT", "UNIT_CROSSBOWMAN", 5),
+    ]
+    kept, _ = drop_dominated(menu, prod_city(), ctx)
+    assert "UNIT_DRONE" not in [o.item for o in kept]
+    ranked = rank_production(prod_city(), kept, ctx, ProductionWeights())
+    assert ranked[0].item == "UNIT_CROSSBOWMAN"
+
+
+def _civ(**changes):
+    civ = fx.civ_info(**changes)
+    civ._our_military = 100
+    return civ
+
+
+def test_a_much_stronger_rival_at_peace_makes_us_wary():
+    assert wary_of([_civ(military_strength=210)]) == ("Rome",)
+    assert wary_of([_civ(military_strength=150, diplomatic_state="DENOUNCED")]) == ("Rome",)
+
+
+def test_wary_needs_the_ratio_a_met_rival_and_no_friendship_or_war():
+    assert wary_of([_civ(military_strength=150)]) == ()  # Neutral and only 1.5x.
+    assert wary_of([_civ(military_strength=300, diplomatic_state="DECLARED_FRIEND")]) == ()
+    assert wary_of([_civ(military_strength=300, is_at_war=True)]) == ()
+    assert wary_of([_civ(military_strength=300, has_met=False)]) == ()
+    assert wary_of([fx.civ_info(military_strength=300)]) == ()  # Our strength unknown.
+
+
+def test_wary_walls_are_wanted_but_never_ahead_of_a_defender_and_only_where_missing():
+    state = DefenceState()
+    state.reset(20, {}, ("Rome",))
+    empire = asyncio.run(_empire())
+    ctx = mid(**{"wary": build_context(empire, [], (), (), state).wary})
+    assert ctx.wary
+    ranked = rank_production(prod_city(), MENU, ctx, ProductionWeights())
+    walls = next(o for o in ranked if o.item == "BUILDING_WALLS")
+    library = next(o for o in ranked if o.item == "BUILDING_LIBRARY")
+    assert ranked.index(walls) < ranked.index(library)
+    assert not mid().wary
+    assert ranked[0].item != "UNIT_SETTLER" or ranked.index(walls) > 0
+    short = mid(wary=True, threatened=frozenset({ALPHA}), short=frozenset({ALPHA}))
+    top = rank_production(prod_city(), MENU, short, ProductionWeights())[0]
+    assert top.category == "UNIT"
+
+
+def test_the_policy_records_a_wary_rival_even_on_a_quiet_turn():
+    state = DefenceState()
+    game = fx.FakeGame(civs=[_civ(military_strength=250)], threats=[])
+    asyncio.run(DefencePolicy(state).run(game))
+    assert state.wary == ("Rome",) and not state.any
+
+
+def test_a_short_city_with_hostile_units_calls_a_spare_unit_from_further_away():
+    far = warrior(uid=2, x=16, y=10)  # Six tiles: past the usual reach of four, within eight.
+    state = marked(ALPHA, inside=0, beside=0, reasons=("war:Rome", "hostile_units:2"))
+    state.cities[ALPHA] = CityThreat(ALPHA, "Alpha", 10, 10, ("war:Rome",), 2, 0, 0)
+    game = MilitaryGame([far], [])
+    mil_run(game, state)
+    assert [m[0] for m in moves(game)] == [2]
+    quiet = marked(ALPHA, inside=0, beside=0)
+    game = MilitaryGame([warrior(uid=2, x=16, y=10)], [])
+    mil_run(game, quiet)
+    assert moves(game) == []

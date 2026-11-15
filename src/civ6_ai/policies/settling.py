@@ -40,11 +40,13 @@ from civ6_ai.state import (
     read_units,
 )
 from civ6_ai.state.models import RivalCity, SettleSite
-from civ6_ai.state.reader import STANDARD_MAP_WIDTH, hex_distance
+from civ6_ai.state.reader import STANDARD_MAP_WIDTH, FogCount, hex_distance
 
 log = logging.getLogger(__name__)
 
 HOSTILE_NEAR_SITE = "hostile unit near the site"
+FOG_PENDING = "fog around the site not measured yet"
+NEEDS_LOOK = "rival side of the site unexplored (needs a look)"
 # How much further than the middle of an unexplained border its unseen city is placed.
 PHANTOM_PUSH = 2.0
 
@@ -137,7 +139,9 @@ class SettlingSettings:
     loyalty_capital_weight: float = 2.0
     # A rival-owned revealed tile with no known city of its owner within this many tiles is
     # evidence of an unseen city: count a phantom of `rival_city_default_pop - 2` on it.
-    loyalty_border_explain_radius: int = 5
+    # Run 13: a Mapuche city 5 tiles off "explained" the borders of three cities we never saw, and
+    # Uxmal, founded among them, flipped. A city owns tiles out to about 3, so more is another city.
+    loyalty_border_explain_radius: int = 3
     loyalty_reject_rate: float = -6.0  # Reject a site whose estimated rate is below this.
     loyalty_rate_penalty_weight: float = 4.0  # Score lost per point of rate below zero.
     # The estimate is a snapshot of a city that does not exist yet. Run 10 founded Palenque at an
@@ -161,6 +165,21 @@ class SettlingSettings:
     #    `loyalty_fog_distance` tiles. Rival-owned tiles are not in the settle scan, so this is the
     #    only stand-in for them.
     loyalty_fog_distance: int = 8
+    # 4. Unexplored rival side (Run 13: Uxmal, safe +4.1, lost to three Mapuche cities that were
+    #    never seen, one a capital 6 tiles off). The robust rate also counts one unseen city, as
+    #    large as our median city (at least `unseen_pop_min`), at the nearest unrevealed far-side
+    #    tile (never closer than `unseen_min_distance`; a city nearer than that shows its border).
+    #    A site that stays at or above `loyalty_reject_safe` on it is held by our own pull and
+    #    needs no look. Otherwise, if `fog_share_min` of the far-side tiles in range (and at least
+    #    `fog_min_tiles`) are unrevealed, it needs a look: not taken while a scout lives to look,
+    #    and when none does it competes with `fog_penalty_weight` score per point of shortfall.
+    unseen_pop_min: int = 2
+    unseen_min_distance: int = 5
+    fog_share_min: float = 0.25
+    fog_min_tiles: int = 6
+    fog_penalty_weight: float = 3.0
+    fog_max_sites: int = 12  # Sites whose fog is read each turn (nearest to our cities first).
+    fog_own_cities: int = 4  # Our nearest cities that define a site's far side.
     # Run 11's Chichen Itza (safe 1.9 then) was judged with no rival city known at all; with the
     # rival cities, capitals and border phantoms now counted (PRs 212 and 221), that site reads
     # about -10 and Run 12's Tikal about -19, so a floor of 0 refuses both. Run 13: a floor of 4
@@ -253,8 +272,12 @@ def safe_loyalty_rate(
     own: Iterable[tuple[int, int, int]],
     rivals: Iterable[tuple[int, int, int]],
     settings: SettlingSettings,
+    unseen_distance: int | None = None,
 ) -> float:
-    """The loyalty estimate after growth, fog and the non-pressure drag. See the settings."""
+    """The loyalty estimate after growth, fog and the non-pressure drag. See the settings.
+
+    With `unseen_distance` it is the robust rate: one more rival city, as large as our median city,
+    is assumed that far off."""
     s = settings
     rivals = list(rivals)
     grown_own = [
@@ -263,6 +286,15 @@ def safe_loyalty_rate(
     grown_rivals = [
         (cx, cy, pop + s.loyalty_rival_growth, cap) for cx, cy, pop, cap in map(_unpack, rivals)
     ]
+    if unseen_distance is not None:
+        # The pessimistic stand-in for what the fog may hide, straight east at that distance.
+        # Its size follows the game: as large as our median city (never under `unseen_pop_min`),
+        # and not a capital. A fixed pop-5 capital (as heavy as pop 10) flagged every early site
+        # near a pop-2 or pop-3 capital, when every city on the map is that small.
+        pops = sorted(pop for _, _, pop, _ in map(_unpack, own)) or [s.unseen_pop_min]
+        unseen = max(s.unseen_pop_min, pops[len(pops) // 2])
+        px = (x + max(unseen_distance, s.unseen_min_distance)) % (s.map_width or 10_000)
+        grown_rivals.append((px, y, unseen + s.loyalty_rival_growth, False))
     if any(
         0 < hex_distance(x, y, cx, cy, s.map_width) <= s.loyalty_range
         for cx, cy, _, _ in map(_unpack, rivals)
@@ -304,6 +336,8 @@ class CandidateLog:
     loyalty_penalty: float = 0.0  # Taken off the site score.
     loyalty_rate: float = 0.0  # Estimated loyalty per turn at the site. Below zero it falls.
     safe_rate: float = 0.0  # The same after growth, fog and new-city drag.
+    robust_rate: float = 0.0  # The same with an unseen rival capital at the nearest fogged tile.
+    fog_share: float = 0.0  # Unrevealed share of the far-side tiles within loyalty range.
 
 
 @dataclass(frozen=True)
@@ -626,12 +660,26 @@ class SettlingPolicy:
     # Foreign-owned tiles seen, by tile to owner; the evidence behind border phantoms.
     _border_memory: dict[tuple[int, int], int] = field(default_factory=dict, init=False, repr=False)
     _phantoms: list[tuple[int, int, int]] = field(default_factory=list, init=False, repr=False)
+    # Unrevealed far-side tiles around the candidate sites (last read), by site; and whether a scout
+    # lives to look. Both are re-read every turn, so a site is judged again when the fog moves.
+    _fog: dict[tuple[int, int], FogCount] = field(default_factory=dict, init=False, repr=False)
+    _fog_sites: list[tuple[int, ...]] = field(default_factory=list, init=False, repr=False)
+    _scout_alive: bool = field(default=False, init=False, repr=False)
+    # Whether the fog can be measured this turn (the game runs Lua and the read has not failed).
+    # While it can, a site with no measurement yet is not founded on: it is asked for by the
+    # survey and judged the turn its counts arrive.
+    _fog_can: bool = field(default=False, init=False, repr=False)
+    # Where the unrevealed far side of each needs-a-look site lies, best site first: scouts head
+    # for these ahead of the plain frontier.
+    _look_points: list[tuple[int, int]] = field(default_factory=list, init=False, repr=False)
 
     async def run(self, game: SettlingGame) -> None:
         units = await read_units(game)
         settlers = [u for u in units if u.unit_type == SETTLER and u.can_move]
         scouts = [u for u in units if u.unit_type == SCOUT and u.can_move]
         self._founded = set()
+        self._scout_alive = any(u.unit_type == SCOUT for u in units)
+        self._fog_can = getattr(game, "execute_lua", None) is not None
         # Run 8: the count stayed at 1 from the turn a settler founded its city to the end of the
         # game, because it was only taken on turns with a settler to move. It is free here.
         self.expansion.settlers_on_map = sum(1 for u in units if u.unit_type == SETTLER)
@@ -690,8 +738,9 @@ class SettlingPolicy:
                     claimed,
                 )
         self._survey(settlers, units, exploration, city_tiles, danger, turn)
-        for scout in scouts:
-            await self._explore(game, scout, exploration, danger, turn)
+        for rank, scout in enumerate(sorted(scouts, key=lambda u: u.unit_id)):
+            look = self._look_points[rank % len(self._look_points)] if self._look_points else None
+            await self._explore(game, scout, exploration, danger, turn, look)
 
     async def _remember_rivals(
         self, game: SettlingGame, cities: Iterable[City], need_known: bool = True
@@ -712,6 +761,8 @@ class SettlingPolicy:
         known = await self._read_known(game, need_known)
         if known is not None:  # A failed read leaves the memory as it was.
             self._merge_known(known, own_tiles)
+            if self._fog_sites:
+                self._fog = {(f.x, f.y): f for f in known.fog}
             self._phantoms = self._phantom_cities(own_tiles)
         self._rival_cities = [
             (x, y, pop, True) if (x, y) in self._rival_capitals else (x, y, pop)
@@ -735,9 +786,15 @@ class SettlingPolicy:
         if not needed or execute is None:
             return None
         try:
-            return await read_known_cities(game, [*self._rival_memory, *self._border_memory])
+            return await read_known_cities(
+                game,
+                [*self._rival_memory, *self._border_memory],
+                self._fog_sites,
+                self.settings.loyalty_range,
+            )
         except Exception:
             log.warning("Known-city read failed; keeping the memory as it was", exc_info=True)
+            self._fog_can = False  # Unmeasurable this turn: sites are not held back for it.
             return None
 
     def _merge_known(self, known, own_tiles: set[tuple[int, int]]) -> None:
@@ -855,7 +912,22 @@ class SettlingPolicy:
         candidates = self._candidates(
             origin, exploration, city_tiles, rival_tiles, danger, False, turn, [], escorted=True
         )
-        sites = [c for c in candidates if c.rejected is None]
+        # Needs-a-look sites count while a scout lives to look, so production still builds one.
+        sites = [
+            c
+            for c in candidates
+            if c.rejected is None
+            or c.rejected == FOG_PENDING
+            or (c.rejected == NEEDS_LOOK and self._scout_alive)
+        ]
+        self._choose_fog_sites(exploration, city_tiles, [(u.x, u.y) for u in settlers])
+        width = self.settings.map_width
+        self._look_points = []
+        for c in candidates:
+            info = self._fog.get((c.x, c.y))
+            if c.rejected == NEEDS_LOOK and info is not None and len(self._look_points) < 3:
+                lx = c.x + info.dx
+                self._look_points.append((lx % width if width else lx, max(0, c.y + info.dy)))
         rejected: dict[str, int] = {}
         for c in candidates:
             if c.rejected is not None:
@@ -869,6 +941,49 @@ class SettlingPolicy:
         state.settlers_on_map = sum(
             1 for u in units if u.unit_type == SETTLER and u.unit_id not in self._founded
         )
+
+    def _choose_fog_sites(
+        self, exploration: Exploration, city_tiles, settler_tiles: Iterable = ()
+    ) -> None:
+        """The sites whose fog the next known-city read counts: settlers' own sites first, then
+        the nearest to our cities."""
+        s = self.settings
+        if not city_tiles:
+            self._fog_sites = []
+            return
+
+        def gap(site: SettleSite) -> int:
+            return min(hex_distance(site.x, site.y, cx, cy, s.map_width) for cx, cy in city_tiles)
+
+        ranked = sorted(exploration.settle_sites, key=lambda site: (gap(site), site.x, site.y))
+        # A settler's target, and the tile it stands on, are always measured: founding waits for
+        # a measurement (FOG_PENDING), so a far site outside the nearest few would never get one
+        # and its settler would wait for nothing.
+        wanted = set(self._site_claims.values()) | set(settler_tiles)
+        chosen = [site for site in ranked if (site.x, site.y) in wanted]
+        chosen += [site for site in ranked if (site.x, site.y) not in wanted]
+        specs = []
+        for site in chosen[: s.fog_max_sites]:
+            near = sorted(
+                city_tiles, key=lambda c: (hex_distance(site.x, site.y, *c, s.map_width), c)
+            )[: s.fog_own_cities]
+            specs.append((site.x, site.y, *(n for c in near for n in c)))
+        self._fog_sites = specs
+
+    def _fog_verdict(self, x: int, y: int, safe: float, own, sources) -> tuple[float, float, bool]:
+        """(robust rate, unrevealed share, needs a look) for a site; see the settings."""
+        s = self.settings
+        info = self._fog.get((x, y))
+        if info is None or info.unrevealed == 0 or info.total == 0:
+            return safe, 0.0, False
+        robust = safe_loyalty_rate(x, y, own, sources, s, unseen_distance=info.nearest)
+        share = info.unrevealed / info.total
+        needs = (
+            robust < s.loyalty_reject_safe
+            and share >= s.fog_share_min
+            and info.unrevealed >= s.fog_min_tiles
+        )
+        return robust, share, needs
 
     def _candidates(
         self,
@@ -895,7 +1010,15 @@ class SettlingPolicy:
                 margin = loyalty_margin(site.x, site.y, self._own_cities, sources, s)
                 rate = loyalty_rate(site.x, site.y, self._own_cities, sources, s)
                 safe = safe_loyalty_rate(site.x, site.y, self._own_cities, sources, s)
+            robust, fog_share, needs_look = safe, 0.0, False
+            if not first_city:
+                robust, fog_share, needs_look = self._fog_verdict(
+                    site.x, site.y, safe, self._own_cities, sources
+                )
             penalty = max(0.0, -margin) * s.loyalty_penalty_weight
+            if needs_look and not self._scout_alive:
+                # Nobody can look, so it competes, marked down for the shortfall, never for ever.
+                penalty += (s.loyalty_reject_safe - robust) * s.fog_penalty_weight
             penalty += max(0.0, -rate) * s.loyalty_rate_penalty_weight
             if not first_city:
                 # Run 10: 17 site points of difference beat a site 3.4 rate points safer.
@@ -928,6 +1051,10 @@ class SettlingPolicy:
                 or (not first_city and safe < s.loyalty_reject_safe)
             ):
                 rejected = "likely to flip to a rival (loyalty)"
+            elif not first_city and self._fog_can and (site.x, site.y) not in self._fog:
+                rejected = FOG_PENDING
+            elif needs_look and self._scout_alive:
+                rejected = NEEDS_LOOK
             elif not first_city and site_score < s.min_site_score:
                 rejected = "below minimum site score"
             elif nearest_own is not None and nearest_own > s.max_city_distance:
@@ -958,6 +1085,8 @@ class SettlingPolicy:
                     penalty,
                     rate,
                     safe,
+                    robust,
+                    fog_share,
                 )
             )
         found.sort(key=lambda c: (-c.net_score, c.distance, c.x, c.y))
@@ -1314,6 +1443,7 @@ class SettlingPolicy:
         exploration: Exploration,
         danger: _Danger,
         turn: int,
+        look: tuple[int, int] | None = None,
     ) -> None:
         s = self.settings
         taken = {t for uid, t in self._scout_targets.items() if uid != scout.unit_id}
@@ -1325,10 +1455,19 @@ class SettlingPolicy:
         ]
         # A hostile unit only rules a frontier out for this turn, because it will move.
         frontier = [p for p in reachable if not danger.near(*p, s.scout_threat_radius)]
+        if look is not None and look != here and self._bad_frontiers.get(look, -1) < turn:
+            frontier.append(look)  # The fog a site's loyalty depends on, itself a target.
         previous = self._scout_targets.get(scout.unit_id)
+
+        def toward(p: tuple[int, int]) -> int:
+            return hex_distance(*look, *p, s.map_width) if look is not None else 0
+
         frontier.sort(
             key=lambda p: (
-                p != previous,  # Keep a heading that is still on the edge of the fog.
+                # Keep a heading that is still on the edge of the fog, unless a look is wanted:
+                # that takes priority over persistence.
+                look is None and p != previous,
+                toward(p),
                 hex_distance(scout.x, scout.y, *p, s.map_width),
                 p,
             )

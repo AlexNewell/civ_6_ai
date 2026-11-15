@@ -8,6 +8,8 @@ from civ_mcp import lua as lq
 from civ6_ai.orchestrator import Handler
 from civ6_ai.policies.expansion import ExpansionState
 from civ6_ai.policies.settling import (
+    FOG_PENDING,
+    NEEDS_LOOK,
     SettlingPolicy,
     SettlingSettings,
     frontier_points,
@@ -18,8 +20,8 @@ from civ6_ai.policies.settling import (
     safe_loyalty_rate,
     score_site,
 )
-from civ6_ai.state.models import SettleSite
-from civ6_ai.state.reader import build_exploration, hex_distance
+from civ6_ai.state.models import Exploration, SettleSite
+from civ6_ai.state.reader import FogCount, build_exploration, hex_distance
 from fixtures.civ_state import (
     BARBARIANS,
     FakeGame,
@@ -1545,3 +1547,193 @@ def test_default_floor_refuses_tikal_and_passes_run_12_palenque():
     assert s.loyalty_reject_safe <= 9.4 - s.loyalty_new_city_drag - 4.0
     tikal = safe_loyalty_rate(*TIKAL, TIKAL_OWN, TIKAL_RIVALS, s)
     assert tikal < s.loyalty_reject_safe
+
+
+# ----- fog: judge a site by what its far side may hide (Run 13: Uxmal) -----
+
+UXMAL = (60, 29)
+UXMAL_OWN = [(66, 25, 10, True), (64, 22, 9), (64, 28, 11), (69, 27, 3), (68, 21, 4)]
+UXMAL_RIVALS = [
+    (64, 18, 7, True),
+    (66, 15, 2),
+    (60, 24, 9),
+    (67, 32, 5, True),
+    (56, 19, 11, True),
+    (55, 15, 9),
+]
+
+
+def test_robust_rate_flags_uxmal_but_passes_a_site_our_own_pull_holds():
+    s = SettlingSettings(map_width=84)
+    floor = s.loyalty_reject_safe
+    assert safe_loyalty_rate(*UXMAL, UXMAL_OWN, UXMAL_RIVALS, s) >= floor  # What the bot saw.
+    for d in (5, 6, 7):  # The Mapuche capital was 6 tiles off, unseen.
+        assert safe_loyalty_rate(*UXMAL, UXMAL_OWN, UXMAL_RIVALS, s, unseen_distance=d) < floor
+    # Run 12 Palenque (67,21), among four cities of ours: held even with a capital 5 tiles off.
+    palenque_own = [(66, 25, 10, True), (64, 22, 9), (63, 27, 6), (61, 20, 4)]
+    assert safe_loyalty_rate(67, 21, palenque_own, [], s, unseen_distance=5) >= floor
+    # Run 13 Coba (64,28) with the capital and El Mirador: held once the fog is 9+ tiles away.
+    coba_own = [(66, 25, 10, True), (64, 22, 9)]
+    assert safe_loyalty_rate(64, 28, coba_own, [], s, unseen_distance=9) >= floor
+
+
+def _fog_policy(site_xy, own, rivals, fog, scout_alive=True):
+    policy = SettlingPolicy(SettlingSettings(map_width=84))
+    policy._own_cities = own
+    policy._rival_cities = rivals
+    policy._fog = {site_xy: fog} if fog else {}
+    policy._scout_alive = scout_alive
+    exploration = Exploration((), (), (SettleSite(*site_xy, 30, 10, "fresh", (), 0, 0, 0),))
+    unit = settler(x=site_xy[0], y=site_xy[1], max_moves=2)
+    tiles = [(c[0], c[1]) for c in own]
+    return policy._candidates(
+        unit, exploration, tiles, [(c[0], c[1]) for c in rivals], _NoDanger(), False, 146, []
+    )
+
+
+class _NoDanger:
+    threats: tuple = ()
+
+    def near(self, *a):
+        return False
+
+    def on_path(self, *a):
+        return False
+
+
+def test_a_fogged_rival_side_needs_a_look_while_a_scout_lives(real_safe_rate):
+    fog = FogCount(*UXMAL, 120, 60, 5, -4, -2)
+    (c,) = _fog_policy(UXMAL, UXMAL_OWN, UXMAL_RIVALS, fog)
+    assert c.rejected == NEEDS_LOOK
+    assert c.robust_rate < c.safe_rate and c.fog_share == 0.5
+
+
+def test_with_no_scout_a_needs_a_look_site_competes_with_a_penalty(real_safe_rate):
+    fog = FogCount(*UXMAL, 120, 60, 5, -4, -2)
+    (looked,) = _fog_policy(UXMAL, UXMAL_OWN, UXMAL_RIVALS, fog, scout_alive=True)
+    (blind,) = _fog_policy(UXMAL, UXMAL_OWN, UXMAL_RIVALS, fog, scout_alive=False)
+    (seen,) = _fog_policy(UXMAL, UXMAL_OWN, UXMAL_RIVALS, None, scout_alive=False)
+    assert blind.rejected is None and blind.loyalty_penalty > seen.loyalty_penalty
+    assert looked.rejected == NEEDS_LOOK
+
+
+def test_a_revealed_far_side_or_a_small_fogged_share_needs_no_look(real_safe_rate):
+    revealed = FogCount(*UXMAL, 120, 0, 99, 0, 0)
+    assert _fog_policy(UXMAL, UXMAL_OWN, UXMAL_RIVALS, revealed)[0].rejected is None
+    thin = FogCount(*UXMAL, 120, 20, 5, -4, -2)  # A sixth of it: not enough to wait for.
+    assert _fog_policy(UXMAL, UXMAL_OWN, UXMAL_RIVALS, thin)[0].rejected is None
+
+
+def test_a_site_in_our_own_pull_passes_even_with_a_fogged_far_side(real_safe_rate):
+    own = [(66, 25, 10, True), (64, 22, 9), (63, 27, 6), (61, 20, 4)]
+    fog = FogCount(67, 21, 100, 80, 6, 4, 0)
+    (c,) = _fog_policy((67, 21), own, [], fog)
+    assert c.rejected is None and c.robust_rate >= 0
+
+
+def test_the_known_city_read_returns_fog_counts_and_asks_for_sites():
+    from civ6_ai.state.reader import read_known_cities
+
+    out = "FOG|16|10|40|12|6|3|-1\nKDONE"
+    game = LuaGame(out)
+    known = asyncio.run(read_known_cities(game, [(1, 2)], [(16, 10, 10, 10)], 9))
+    assert known.fog == (FogCount(16, 10, 40, 12, 6, 3, -1),)
+    assert game.lua_calls == 1 and '"16,10,10,10"' in game.lua_code[0]
+    assert 'print("KDONE")' in game.lua_code[0]
+
+
+def test_next_turn_reads_the_fog_of_the_sites_the_survey_found_and_a_scout_goes_to_look(
+    real_safe_rate,
+):
+    out = "FOG|4|10|40|30|6|-5|0\nKDONE"
+    scout = unit_info(unit_id=3, unit_index=3, x=10, y=12, **SCOUT)
+    game = LuaGame(
+        out,
+        units=[scout],
+        cities=[alpha()],
+        settle=[site(4, 10, food=40)],
+        overview=overview(turn=30, num_cities=1),
+        strategic=lq.StrategicMapData([], []),
+    )
+    policy = SettlingPolicy(SettlingSettings(loyalty_reject_safe=15.0))
+    run(policy, game)  # Survey: the site (4,10) is picked for the next read.
+    assert policy._fog_sites and policy._fog_sites[0][:4] == (4, 10, 10, 10)
+    run(policy, game)
+    assert policy._fog[4, 10].unrevealed == 30
+    assert policy._look_points == [(73, 10)]
+    assert ("move", 3, 73, 10) in game.actions
+
+
+def test_a_border_four_tiles_from_a_known_city_is_not_explained_by_it():
+    # Run 13: a city 5 tiles off explained borders that belonged to three unseen cities.
+    policy = SettlingPolicy()
+    policy._rival_memory = {(60, 24): (4, 9)}
+    policy._border_memory = {(57, 27): 4, (56, 27): 4}
+    assert policy._phantom_cities({(66, 25)})
+    policy._border_memory = {(60, 27): 4}  # Three tiles from the city: its own.
+    assert not policy._phantom_cities({(66, 25)})
+
+
+def test_early_sites_near_a_small_capital_need_no_look():
+    # Every city is small early on: the unseen rival is sized like our median city, not a
+    # pop-5 capital (as heavy as pop 10), which flagged every site near a pop-2 or pop-3 capital.
+    s = SettlingSettings()
+    for pop in (2, 3):
+        for unseen in (5, 6, 7):
+            rate = safe_loyalty_rate(62, 25, [(66, 25, pop, True)], [], s, unseen_distance=unseen)
+            assert rate >= s.loyalty_reject_safe
+
+
+def test_a_needed_look_outranks_a_scouts_previous_heading():
+    # Codex on PR 228: `p != previous` sorted first, so a scout kept its old heading for ever.
+    fog = lq.StrategicMapData([lq.FogBoundary("Alpha", 10, 10, [-1, 5, -1, 4, -1, -1])], [])
+    scout = unit_info(unit_id=3, unit_index=3, x=10, y=12, **SCOUT)
+    policy = SettlingPolicy()
+    game = make_game([scout], cities=[alpha()], strategic=fog)
+    run(policy, game)
+    assert game.actions == [("move", 3, 10, 13)]  # Heading (10,13), kept next turn:
+    game.actions.clear()
+    run(policy, game)
+    assert game.actions == [("move", 3, 10, 13)]
+    # A site now needs the fog around (14,6) looked at: that beats the old heading.
+    exploration = build_exploration(fog, [])
+    game.actions.clear()
+    asyncio.run(policy._explore(game, scout, exploration, _NoDanger(), 5, (14, 6)))
+    assert game.actions[0][:2] == ("move", 3) and game.actions[0][2:] != (10, 13)
+
+
+def test_a_site_whose_fog_is_not_measured_yet_is_not_founded_on(real_safe_rate):
+    # Codex on PR 228: a site new to the scan had no fog record and passed as seen.
+    out = "KDONE"  # The read works but brings no FOG line for the site yet.
+    game = LuaGame(
+        out,
+        units=[settler(x=4, y=10)],
+        cities=[alpha()],
+        settle=[site(4, 10, food=40)],
+        overview=overview(turn=30, num_cities=1),
+        strategic=lq.StrategicMapData([], []),
+    )
+    policy = SettlingPolicy()
+    run(policy, game)
+    assert ("found", 7) not in game.actions
+    assert policy.decisions[-1].action == "no_site"
+    assert policy.decisions[-1].candidates[0].rejected == FOG_PENDING
+    assert policy._fog_sites  # The survey asked for it, so the next read measures it.
+    game.output = "FOG|4|10|40|0|99|0|0\nKDONE"  # Fully revealed: judged, and acceptable.
+    run(policy, game)
+    assert ("found", 7) in game.actions
+
+
+def test_a_settlers_own_far_site_is_always_measured():
+    # Founding waits for a fog measurement; a site outside the nearest few must still get one.
+    policy = SettlingPolicy(SettlingSettings(fog_max_sites=1))
+    near, far = site(12, 10), site(18, 10)
+    exploration = type("E", (), {"settle_sites": [near, far]})()
+    policy._site_claims = {7: (18, 10)}
+    policy._choose_fog_sites(exploration, [(10, 10)])
+    assert [spec[:2] for spec in policy._fog_sites] == [(18, 10)]
+    policy._site_claims = {}
+    policy._choose_fog_sites(exploration, [(10, 10)], [(18, 10)])
+    assert [spec[:2] for spec in policy._fog_sites] == [(18, 10)]
+    policy._choose_fog_sites(exploration, [(10, 10)])
+    assert [spec[:2] for spec in policy._fog_sites] == [(12, 10)]

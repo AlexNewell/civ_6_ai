@@ -787,18 +787,31 @@ class SettlingPolicy:
                     break
             else:
                 clusters.append((owner, [(x, y)]))
+        width = s.map_width
+
+        def near(x: float, ref: float) -> float:
+            """`x` moved by whole map widths to the copy nearest `ref` (the map wraps east-west)."""
+            if not width:
+                return x
+            return x - width * round((x - ref) / width)
+
         placed = []
         for _, tiles in clusters:
-            mx = sum(t[0] for t in tiles) / len(tiles)
+            ref = tiles[0][0]
+            mx = sum(near(t[0], ref) for t in tiles) / len(tiles)
             my = sum(t[1] for t in tiles) / len(tiles)
             if own_tiles:
-                ox, oy = min(own_tiles, key=lambda c: (c[0] - mx) ** 2 + (c[1] - my) ** 2)
+                ox, oy = min(
+                    ((near(c[0], mx), c[1]) for c in own_tiles),
+                    key=lambda c: (c[0] - mx) ** 2 + (c[1] - my) ** 2,
+                )
                 dx, dy = mx - ox, my - oy
                 length = (dx * dx + dy * dy) ** 0.5
                 if length > 0:
                     mx += PHANTOM_PUSH * dx / length
                     my += PHANTOM_PUSH * dy / length
-            placed.append((round(mx), round(my), s.rival_city_default_pop - 2))
+            x = round(mx) % width if width else round(mx)
+            placed.append((x, round(my), s.rival_city_default_pop - 2))
         return placed
 
     def _forget_gone_units(self, units: Iterable[Unit], turn: int) -> None:

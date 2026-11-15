@@ -1079,18 +1079,18 @@ def test_visible_cities_capitals_and_borders_feed_the_estimate():
     assert game.lua_calls == 1
     assert sorted(c for c in policy._rival_cities if c[0] > 50) == [(56, 19, 7, True), (59, 14, 2)]
     # The unexplained Sumerian-free border (owner 9) is a phantom; owner 5's are explained.
-    assert policy._phantoms == [(72, 5, 3)]
+    assert policy._phantoms == [(69, 4, 3)]
 
 
 def test_phantoms_are_not_cities_for_spacing_or_the_log():
     game = lua_game(KNOWN_LUA_OUTPUT)
     policy = SettlingPolicy()
     run(policy, game)
-    assert (72, 5) not in [(c[0], c[1]) for c in policy._rival_cities]
-    assert (72, 5, 3) in policy._pressure_sources()
+    assert (69, 4) not in [(c[0], c[1]) for c in policy._rival_cities]
+    assert (69, 4, 3) in policy._pressure_sources()
     decision = policy.decisions[0]
-    assert (72, 5, 3) not in decision.rival_cities
-    assert decision.phantom_cities == ((72, 5, 3),)
+    assert (69, 4, 3) not in decision.rival_cities
+    assert decision.phantom_cities == ((69, 4, 3),)
 
 
 def test_a_failed_or_partial_read_keeps_the_memory():
@@ -1528,3 +1528,17 @@ def test_a_phantom_stands_behind_the_border_not_on_it():
     assert x >= 20 and pop == policy.settings.rival_city_default_pop - 2
     nearest_border = min(hex_distance(10, 10, bx, by, 80) for bx, by in policy._border_memory)
     assert hex_distance(10, 10, x, y, 80) >= nearest_border + 2
+
+
+def test_a_phantom_across_the_map_seam_stays_by_its_border():
+    # Codex on PR 221: the map wraps east-west, so a cluster on both sides of the seam must not
+    # average to the middle of the map, and the push must go the short way round.
+    policy = SettlingPolicy()
+    width = policy.settings.map_width
+    policy._border_memory = {(width - 1, 10): 5, (0, 10): 5}
+    (x, y, _) = policy._phantom_cities({(width - 6, 10)})[0]
+    assert hex_distance(0, 10, x, y, width) <= 3
+    assert hex_distance(width - 6, 10, x, y, width) >= 6
+    policy._border_memory = {(0, 10): 5}
+    (x, y, _) = policy._phantom_cities({(width - 4, 10)})[0]
+    assert x in (1, 2, 3) and y == 10  # Pushed east, past the seam, away from us.

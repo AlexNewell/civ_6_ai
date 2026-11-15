@@ -1722,3 +1722,18 @@ def test_a_site_whose_fog_is_not_measured_yet_is_not_founded_on(real_safe_rate):
     game.output = "FOG|4|10|40|0|99|0|0\nKDONE"  # Fully revealed: judged, and acceptable.
     run(policy, game)
     assert ("found", 7) in game.actions
+
+
+def test_a_settlers_own_far_site_is_always_measured():
+    # Founding waits for a fog measurement; a site outside the nearest few must still get one.
+    policy = SettlingPolicy(SettlingSettings(fog_max_sites=1))
+    near, far = site(12, 10), site(18, 10)
+    exploration = type("E", (), {"settle_sites": [near, far]})()
+    policy._site_claims = {7: (18, 10)}
+    policy._choose_fog_sites(exploration, [(10, 10)])
+    assert [spec[:2] for spec in policy._fog_sites] == [(18, 10)]
+    policy._site_claims = {}
+    policy._choose_fog_sites(exploration, [(10, 10)], [(18, 10)])
+    assert [spec[:2] for spec in policy._fog_sites] == [(18, 10)]
+    policy._choose_fog_sites(exploration, [(10, 10)])
+    assert [spec[:2] for spec in policy._fog_sites] == [(12, 10)]

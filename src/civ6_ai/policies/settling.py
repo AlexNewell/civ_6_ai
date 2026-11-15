@@ -920,7 +920,7 @@ class SettlingPolicy:
             or c.rejected == FOG_PENDING
             or (c.rejected == NEEDS_LOOK and self._scout_alive)
         ]
-        self._choose_fog_sites(exploration, city_tiles)
+        self._choose_fog_sites(exploration, city_tiles, [(u.x, u.y) for u in settlers])
         width = self.settings.map_width
         self._look_points = []
         for c in candidates:
@@ -942,8 +942,11 @@ class SettlingPolicy:
             1 for u in units if u.unit_type == SETTLER and u.unit_id not in self._founded
         )
 
-    def _choose_fog_sites(self, exploration: Exploration, city_tiles) -> None:
-        """The sites whose fog the next known-city read counts: the nearest to our cities."""
+    def _choose_fog_sites(
+        self, exploration: Exploration, city_tiles, settler_tiles: Iterable = ()
+    ) -> None:
+        """The sites whose fog the next known-city read counts: settlers' own sites first, then
+        the nearest to our cities."""
         s = self.settings
         if not city_tiles:
             self._fog_sites = []
@@ -953,8 +956,14 @@ class SettlingPolicy:
             return min(hex_distance(site.x, site.y, cx, cy, s.map_width) for cx, cy in city_tiles)
 
         ranked = sorted(exploration.settle_sites, key=lambda site: (gap(site), site.x, site.y))
+        # A settler's target, and the tile it stands on, are always measured: founding waits for
+        # a measurement (FOG_PENDING), so a far site outside the nearest few would never get one
+        # and its settler would wait for nothing.
+        wanted = set(self._site_claims.values()) | set(settler_tiles)
+        chosen = [site for site in ranked if (site.x, site.y) in wanted]
+        chosen += [site for site in ranked if (site.x, site.y) not in wanted]
         specs = []
-        for site in ranked[: s.fog_max_sites]:
+        for site in chosen[: s.fog_max_sites]:
             near = sorted(
                 city_tiles, key=lambda c: (hex_distance(site.x, site.y, *c, s.map_width), c)
             )[: s.fog_own_cities]

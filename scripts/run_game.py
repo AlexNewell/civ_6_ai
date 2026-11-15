@@ -219,13 +219,15 @@ async def play_with_checkpoints(
     remaining = turns
     while remaining > 0:
         turn = await turn_now()
-        if pending and pending[0] <= turn:
-            if pending[0] == turn:
-                try:
-                    await save(turn)
-                except Exception:
-                    logging.getLogger("civ6_ai").exception("Checkpoint at turn %d failed", turn)
-            pending = [t for t in pending if t > turn]
+        # Drop the targets already behind us first, so a slice resumed on a checkpoint turn
+        # still saves it (Codex on #232: save_at=[30, 50] from turn 50 skipped 50).
+        pending = [t for t in pending if t >= turn]
+        if pending and pending[0] == turn:
+            try:
+                await save(turn)
+            except Exception:
+                logging.getLogger("civ6_ai").exception("Checkpoint at turn %d failed", turn)
+            pending = pending[1:]
         chunk = remaining if not pending else min(remaining, pending[0] - turn)
         reason = await play(chunk)
         remaining -= chunk

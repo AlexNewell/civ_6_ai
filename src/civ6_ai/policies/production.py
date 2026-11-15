@@ -1087,7 +1087,13 @@ class CityProductionPolicy:
             if _failed(str(result)):
                 log.info("%s: set_city_focus %s refused: %s", city.name, focus, str(result)[:120])
                 continue
-            log.info("%s: focus %s (food %+.1f)", city.name, focus, city.food_surplus)
+            log.info(
+                "%s: focus %s (food %+.1f) %s",
+                city.name,
+                focus,
+                city.food_surplus,
+                str(result)[:200],
+            )
             if add:
                 self._food_focus.add(city.city_id)
                 if city.city_id in self._reset:  # The deficit came back: the focus was the cure.

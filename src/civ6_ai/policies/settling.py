@@ -45,6 +45,8 @@ from civ6_ai.state.reader import STANDARD_MAP_WIDTH, hex_distance
 log = logging.getLogger(__name__)
 
 HOSTILE_NEAR_SITE = "hostile unit near the site"
+# How much further than the middle of an unexplained border its unseen city is placed.
+PHANTOM_PUSH = 2.0
 
 SETTLER = "UNIT_SETTLER"
 SCOUT = "UNIT_SCOUT"
@@ -757,27 +759,60 @@ class SettlingPolicy:
         self._border_memory.update(current)
 
     def _phantom_cities(self, own_tiles: set[tuple[int, int]]) -> list[tuple[int, int, int]]:
-        """A remembered foreign-owned tile with none of its owner's known cities near is the
-        border of a city we have not seen: stand one in at that tile (loyalty estimate only)."""
+        """Remembered foreign-owned tiles with none of their owner's known cities near are the
+        border of a city we have not seen: stand one in for each such cluster (loyalty estimate
+        only), where the city most likely is.
+
+        A border is seen from our side, so its tiles lie between us and the city. Run 13: a
+        phantom on the nearest border tile counted a pop-3 city 3 or 4 tiles from every early
+        site, and all ten were refused while the real city was 7 tiles away. The stand-in goes
+        to the middle of the cluster's tiles, moved `PHANTOM_PUSH` tiles further from our
+        nearest city.
+        """
         s = self.settings
         by_owner: dict[int, list[tuple[int, int]]] = {}
         for (x, y), (owner, _) in self._rival_memory.items():
             by_owner.setdefault(owner, []).append((x, y))
         radius = s.loyalty_border_explain_radius
-        placed: list[tuple[int, int, int]] = []
-        for (x, y), owner in self._border_memory.items():
+        clusters: list[tuple[int, list[tuple[int, int]]]] = []
+        for (x, y), owner in sorted(self._border_memory.items()):
             if (x, y) in own_tiles:
                 continue
             cities = by_owner.get(owner, [])
             if any(hex_distance(x, y, cx, cy, s.map_width) <= radius for cx, cy in cities):
                 continue
-            if any(
-                o == owner and hex_distance(x, y, px, py, s.map_width) <= radius
-                for px, py, o in placed
-            ):
-                continue
-            placed.append((x, y, owner))
-        return [(x, y, s.rival_city_default_pop - 2) for x, y, _ in placed]
+            for o, tiles in clusters:
+                if o == owner and hex_distance(x, y, *tiles[0], s.map_width) <= radius:
+                    tiles.append((x, y))
+                    break
+            else:
+                clusters.append((owner, [(x, y)]))
+        width = s.map_width
+
+        def near(x: float, ref: float) -> float:
+            """`x` moved by whole map widths to the copy nearest `ref` (the map wraps east-west)."""
+            if not width:
+                return x
+            return x - width * round((x - ref) / width)
+
+        placed = []
+        for _, tiles in clusters:
+            ref = tiles[0][0]
+            mx = sum(near(t[0], ref) for t in tiles) / len(tiles)
+            my = sum(t[1] for t in tiles) / len(tiles)
+            if own_tiles:
+                ox, oy = min(
+                    ((near(c[0], mx), c[1]) for c in own_tiles),
+                    key=lambda c: (c[0] - mx) ** 2 + (c[1] - my) ** 2,
+                )
+                dx, dy = mx - ox, my - oy
+                length = (dx * dx + dy * dy) ** 0.5
+                if length > 0:
+                    mx += PHANTOM_PUSH * dx / length
+                    my += PHANTOM_PUSH * dy / length
+            x = round(mx) % width if width else round(mx)
+            placed.append((x, round(my), s.rival_city_default_pop - 2))
+        return placed
 
     def _forget_gone_units(self, units: Iterable[Unit], turn: int) -> None:
         """Drop what is kept per unit once the unit is gone, and any expired set-asides."""

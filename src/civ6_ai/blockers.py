@@ -124,6 +124,7 @@ class BlockerType(StrEnum):
     GOVERNOR_IDLE = "ENDTURN_BLOCKING_GOVERNOR_IDLE"
     UNIT_PROMOTION = "ENDTURN_BLOCKING_UNIT_PROMOTION"
     PANTHEON = "ENDTURN_BLOCKING_PANTHEON"
+    RELIGION = "ENDTURN_BLOCKING_RELIGION"  # "Choose Religion", after a prophet is activated.
     COMMEMORATION_AVAILABLE = "ENDTURN_BLOCKING_COMMEMORATION_AVAILABLE"
     GIVE_INFLUENCE_TOKEN = "ENDTURN_BLOCKING_GIVE_INFLUENCE_TOKEN"
     WORLD_CONGRESS_SESSION = "ENDTURN_BLOCKING_WORLD_CONGRESS_SESSION"
@@ -184,6 +185,10 @@ class BlockerGame(Protocol):
     async def get_game_overview(self) -> Any: ...
     async def get_pantheon_status(self) -> Any: ...
     async def choose_pantheon(self, belief_type: str) -> str: ...
+    async def get_religion_founding_status(self) -> Any: ...
+    async def found_religion(
+        self, religion_type: str, follower_belief: str, founder_belief: str
+    ) -> str: ...
     async def get_dedications(self) -> Any: ...
     async def choose_dedication(self, dedication_index: int) -> str: ...
     async def get_city_states(self) -> Any: ...
@@ -447,6 +452,21 @@ async def choose_first_pantheon(game: BlockerGame, blocker: Blocker) -> bool:
     return _succeeded(await game.choose_pantheon(status.available_beliefs[0].belief_type))
 
 
+async def found_first_religion(game: BlockerGame, blocker: Blocker) -> bool:
+    """Found with the first religion and first follower and founder beliefs offered."""
+    status = await game.get_religion_founding_status()
+    if status.has_religion:
+        return True
+    followers = status.beliefs_by_class.get("BELIEF_CLASS_FOLLOWER", [])
+    founders = status.beliefs_by_class.get("BELIEF_CLASS_FOUNDER", [])
+    if not (status.available_religions and followers and founders):
+        return False
+    result = await game.found_religion(
+        status.available_religions[0][0], followers[0].belief_type, founders[0].belief_type
+    )
+    return _succeeded(result) and bool((await game.get_religion_founding_status()).has_religion)
+
+
 async def choose_first_dedications(game: BlockerGame, blocker: Blocker) -> bool:
     status = await game.get_dedications()
     chosen = status.choices[: status.selections_allowed]
@@ -538,6 +558,7 @@ DEFAULT_RESOLVERS: Mapping[str, Resolve] = {
     BlockerType.GOVERNOR_IDLE: leave_to_end_turn,
     BlockerType.UNIT_PROMOTION: promote_units,
     BlockerType.PANTHEON: choose_first_pantheon,
+    BlockerType.RELIGION: found_first_religion,
     BlockerType.COMMEMORATION_AVAILABLE: choose_first_dedications,
     BlockerType.GIVE_INFLUENCE_TOKEN: send_envoys_to_one,
     BlockerType.WORLD_CONGRESS_SESSION: vote_in_open_session,

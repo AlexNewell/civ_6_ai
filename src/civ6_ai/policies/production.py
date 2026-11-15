@@ -118,6 +118,7 @@ class ProductionContext:
     science_districts: int = 0  # Campuses (or the unique district in their place) built or begun.
     threatened: frozenset[int] = frozenset()  # Ids of cities the threat state marks (1.35).
     short: frozenset[int] = frozenset()  # Of those, the ones with fewer than two defenders.
+    wary: bool = False  # A much stronger rival at peace with us (`defence.wary_of`): walls.
     sites_ok: bool = True  # False when settling found no safe site to send a settler to.
     idle_builders: int = 0  # Builders that found no job on offer the last time they ran (1.45).
     spare_jobs: int | None = None  # Jobs no builder holds; None when not known this turn.
@@ -183,6 +184,7 @@ def build_context(
         trade_capacity=empire.trade_capacity,
         threatened=defence.threatened_ids if defence is not None else frozenset(),
         short=defence.short_ids if defence is not None else frozenset(),
+        wary=bool(defence is not None and defence.wary),
         districts=frozenset(_short(d.district_type) for c in cities for d in c.districts),
         science_districts=sum(
             _base_district(d.district_type) == "CAMPUS" for c in cities for d in c.districts
@@ -219,6 +221,8 @@ _UNPLANNED_WORDS = (
     "MEDIC",
     "BATTERING",
     "OBSERVATION",
+    "DRONE",  # Run 13: Coba built two while at war; they cannot fortify or hold a city.
+    "BALLOON",
     "SUPPLY",
     "SIEGE_TOWER",
 )
@@ -272,6 +276,7 @@ _BUILDING_YIELDS: dict[str, tuple[float, float, float, float, float, float]] = {
     "POWER_PLANT": (0, 4.0, 0, 0, 0, 0),
 }
 _DEFENSIVE_BUILDINGS = frozenset({"WALLS", "CASTLE", "STAR_FORT"})
+_WARY_WALLS_SCORE = 12.0
 _TRAINING_BUILDINGS = frozenset({"BARRACKS", "STABLE", "ARMORY", "MILITARY_ACADEMY"})
 _WONDER_VALUE = 8.0
 _UNKNOWN_BUILDING = 1.0  # Anything not listed still helps a little, so it ranks last, not never.
@@ -565,6 +570,10 @@ def _building_score(
             return 26.0 + len(city.threats)  # Walls come right after the first defender.
         if is_pressed(city, ctx) and not city.has_walls:
             return 17.0 + len(city.threats)
+        if ctx.wary and name == "WALLS" and not city.has_walls:
+            # A stronger neighbour can declare any turn (Run 13: Coba fell six turns after the
+            # second declaration with no wall). Above a typical building, below a marked city's.
+            return _WARY_WALLS_SCORE
         return 0.0  # Unthreatened, walls are an expense with no return.
     if name in _TRAINING_BUILDINGS:
         return 0.5 * w.military

@@ -20,7 +20,7 @@ import json
 import logging
 import math
 from collections.abc import Collection, Iterable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Protocol
 
 from civ6_ai.blockers import action_succeeded, move_succeeded
@@ -43,6 +43,8 @@ from civ6_ai.state.models import RivalCity, SettleSite
 from civ6_ai.state.reader import STANDARD_MAP_WIDTH, hex_distance
 
 log = logging.getLogger(__name__)
+
+HOSTILE_NEAR_SITE = "hostile unit near the site"
 
 SETTLER = "UNIT_SETTLER"
 SCOUT = "UNIT_SCOUT"
@@ -807,17 +809,24 @@ class SettlingPolicy:
         origin = settlers[0] if settlers else None
         if origin is None:
             origin = unit_at(*city_tiles[0])
-        sites = [
-            c
-            for c in self._candidates(
-                origin, exploration, city_tiles, rival_tiles, danger, False, turn, []
-            )
-            if c.rejected is None
-        ]
+        # Judged as an escorted settler would judge them. A settler waits for an escort when a
+        # hostile unit is near (and production builds one under threat), so a barbarian near
+        # a site is no reason to build no settler at all. Run 13: four barbarians shadowed the
+        # capital, every site read "hostile unit near the site", safe_sites stayed 0 from turn
+        # 15 and no settler was built by turn 51.
+        candidates = self._candidates(
+            origin, exploration, city_tiles, rival_tiles, danger, False, turn, [], escorted=True
+        )
+        sites = [c for c in candidates if c.rejected is None]
+        rejected: dict[str, int] = {}
+        for c in candidates:
+            if c.rejected is not None:
+                rejected[c.rejected] = rejected.get(c.rejected, 0) + 1
         # Updated in place: production and the log line hold this same object.
         state = self.expansion
         state.survey_turn = turn
         state.safe_sites = len(sites)
+        state.rejected = rejected
         state.best_site_score = max((c.site_score for c in sites), default=None)
         state.settlers_on_map = sum(
             1 for u in units if u.unit_type == SETTLER and u.unit_id not in self._founded
@@ -874,7 +883,7 @@ class SettlingPolicy:
             ):
                 rejected = "reserved by another settler"
             elif not escorted and danger.near(site.x, site.y, s.threat_radius):
-                rejected = "hostile unit near the site"
+                rejected = HOSTILE_NEAR_SITE
             elif (
                 margin < -s.loyalty_reject_margin
                 or rate < s.loyalty_reject_rate
@@ -960,6 +969,15 @@ class SettlingPolicy:
             escorted,
         )
         usable = [c for c in candidates if c.rejected is None]
+        if not escorted:
+            # A site refused only because a hostile unit is near it is open to an escorted
+            # settler, which is how the survey counts it (Run 13). Offer it as a site that needs
+            # an escort: the route rules below then gather one, or hold, and never go alone.
+            usable += [
+                replace(c, rejected=None, path_threat=True)
+                for c in candidates
+                if c.rejected == HOSTILE_NEAR_SITE
+            ]
 
         def record(action: str, reason: str, target=None, result: str = "") -> None:
             self._record(

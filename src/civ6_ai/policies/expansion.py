@@ -12,7 +12,7 @@ and cost no game call. Site figures are therefore from the last survey, at most 
 
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from civ6_ai.state import read_cities
@@ -41,6 +41,8 @@ class ExpansionState:
     best_site_score: float | None = None  # Best adjusted score among them.
     settlers_on_map: int = 0
     target_cities: int = TARGET_CITIES  # Set by production from its weights.
+    # Why surveyed sites were refused, by reason, so a stall shows its cause in the log line.
+    rejected: dict[str, int] = field(default_factory=dict)
 
     def sites_ok(self, turn: int) -> bool:
         """False only when a recent survey found no safe site. Unknown counts as ok."""
@@ -65,6 +67,11 @@ def expansion_line(
         f"expected={expected} behind={max(0, expected - cities)} "
         f"settlers_building={settlers_building} settlers_map={state.settlers_on_map} "
         f"safe_sites={state.safe_sites} best_site={best} survey_age={age}"
+        + (
+            " rejected=" + ",".join(f"{k}:{v}" for k, v in sorted(state.rejected.items()))
+            if state.rejected
+            else ""
+        )
     )
 
 

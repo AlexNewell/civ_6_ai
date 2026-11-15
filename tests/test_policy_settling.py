@@ -1469,3 +1469,24 @@ def test_a_garrison_that_walks_out_to_join_the_settler_is_recorded_for_recall():
     )
     run(policy, game)
     assert policy._stripped == {(10, 10): 9}
+
+
+def test_a_barbarian_near_the_sites_does_not_zero_the_survey():
+    # Run 13: barbarians shadowed the capital, the survey judged every site as an unescorted
+    # settler would ("hostile unit near the site"), safe_sites stayed 0 and no settler was built.
+    state = ExpansionState(target_cities=6)
+    game = make_game(
+        [], cities=[alpha()], threats=[barbarian(14, 11)], sites=[site(14, 10, food=25)]
+    )
+    run(SettlingPolicy(expansion=state), game)
+    assert state.safe_sites == 1
+    assert state.rejected == {}
+
+
+def test_the_expansion_line_names_why_sites_were_refused():
+    from civ6_ai.policies.expansion import expansion_line
+
+    state = ExpansionState(survey_turn=5, safe_sites=0, rejected={"too far from our cities": 3})
+    line = expansion_line(5, 1, 0, state)
+    assert line.endswith("rejected=too far from our cities:3")
+    assert "rejected" not in expansion_line(5, 1, 0, ExpansionState(survey_turn=5))

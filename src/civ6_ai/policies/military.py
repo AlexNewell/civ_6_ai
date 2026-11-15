@@ -99,6 +99,11 @@ _NOT_LAND = (
     "UBOAT",
     "LONGSHIP",
     "BIREME",
+    # Run 13: two Drones (the Observation Balloon's upgrade, which cannot fortify) stood in Coba
+    # and counted as its garrison, so the city read as held and built a Trader while Mapuche
+    # artillery and mechanized infantry closed in. They hold nothing.
+    "DRONE",
+    "BALLOON",
     "FIGHTER",
     "BOMBER",
     "HELICOPTER",
@@ -168,6 +173,7 @@ class MilitarySettings:
     max_garrison: int = 2  # Defenders wanted in a city under heavy threat.
     reinforce_threat_count: int = 3  # Hostile units near a city that call for a second defender.
     garrison_reach: int = 4  # How far a spare unit is called from.
+    reinforce_reach: int = 8  # The same, for a short city with hostile units at it.
     retreat_reach: int = 6  # How far a hurt or exposed unit will walk to a city.
     flee_radius: int = 3  # A unit outside a city this close to a hostile unit goes home.
     camp_search_radius: int = 8  # Barbarians this close to a city start a look for a camp.
@@ -532,6 +538,21 @@ class MilitaryPolicy:
         if city is None:
             return self._covering(t, unit) is None
         return t.at_city.get((unit.x, unit.y), 0) > garrison_required(city, self.settings)
+
+    def _reach(self, city: City) -> int:
+        """How far a spare unit is called from. Further for a city with hostile units at it.
+
+        Run 10 and 13: the city under attack stood short for turns while spare units sat just past
+        `garrison_reach`. A city with a hostile unit within the threat radius and fewer defenders
+        than wanted calls from `reinforce_reach`, two turns of marching. Only units that are
+        already spare (outside any city, or beyond a city's own garrison) come, so no other
+        city is stripped, and each still has to pass the usual walk-home and hp checks.
+        """
+        s = self.settings
+        found = self.defence.cities.get(city.city_id) if self.defence is not None else None
+        if found is not None and found.hostile_units > 0 and found.short:
+            return max(s.garrison_reach, s.reinforce_reach)
+        return s.garrison_reach
 
     def _state_threatened(self, city: City) -> bool:
         return self.defence is not None and self.defence.is_threatened(city.city_id)
@@ -1032,7 +1053,7 @@ class MilitaryPolicy:
                     and u.hp >= s.weights.heal_below * u.max_hp
                     and (self._spare(t, u) or self._covering(t, u) is city)
                 ]
-                candidates = [c for c in candidates if c[0] <= s.garrison_reach]
+                candidates = [c for c in candidates if c[0] <= self._reach(city)]
                 if not candidates:
                     break
                 unit = min(candidates, key=lambda c: c[:2])[2]
@@ -1109,7 +1130,7 @@ class MilitaryPolicy:
                 and u.hp >= s.weights.heal_below * u.max_hp
                 and self._spare(t, u)
             ]
-            candidates = [c for c in candidates if c[0] <= s.garrison_reach]
+            candidates = [c for c in candidates if c[0] <= self._reach(city)]
             if not candidates:
                 return
             unit = min(candidates, key=lambda c: c[:2])[2]

@@ -3,6 +3,7 @@ import inspect
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from civ_mcp import end_turn as civ_mcp_end_turn
@@ -188,6 +189,14 @@ class FakeGame:
         self.pantheon = lq.PantheonStatus(
             False, None, None, 25.0, [lq.BeliefInfo("BELIEF_A", "A", "")]
         )
+        self.religion = SimpleNamespace(
+            has_religion=False,
+            available_religions=[("RELIGION_X", "X")],
+            beliefs_by_class={
+                "BELIEF_CLASS_FOLLOWER": [lq.ReligionBeliefOption("F", "BELIEF_F", "", "")],
+                "BELIEF_CLASS_FOUNDER": [lq.ReligionBeliefOption("O", "BELIEF_O", "", "")],
+            },
+        )
         self.dedications = lq.DedicationStatus(
             "Normal", 1, 0, 0, 0, 1, [], [lq.DedicationChoice(3, "A", "", "", "")]
         )
@@ -339,6 +348,15 @@ class FakeGame:
     async def choose_pantheon(self, belief_type):
         self.clear(BlockerType.PANTHEON)
         return self.did("choose_pantheon", belief_type)
+
+    async def get_religion_founding_status(self):
+        # The religion shows once the blocker is cleared, and not while it is open.
+        done = BlockerType.RELIGION not in self.open
+        return SimpleNamespace(**{**vars(self.religion), "has_religion": done})
+
+    async def found_religion(self, religion_type, follower_belief, founder_belief):
+        self.clear(BlockerType.RELIGION)
+        return self.did("found_religion", religion_type, follower_belief, founder_belief)
 
     async def get_dedications(self):
         return self.dedications

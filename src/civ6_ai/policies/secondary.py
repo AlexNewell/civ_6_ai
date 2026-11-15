@@ -308,6 +308,7 @@ class SecondaryPolicy:
     _great_done: set[int] = field(default_factory=set, init=False, repr=False)
     _pantheon_retry: int = field(default=-1, init=False, repr=False)
     _found_attempts: int = field(default=0, init=False, repr=False)
+    _blocker_found: tuple[int, int] = field(default=(-1, 0), init=False, repr=False)
     _prophet_turn: int | None = field(default=None, init=False, repr=False)
     _can_found: bool = field(default=True, init=False, repr=False)
 
@@ -338,6 +339,7 @@ class SecondaryPolicy:
         """Policies to pass to `BlockerResolver`."""
         return {
             BlockerType.PANTHEON: self.resolve_pantheon,
+            BlockerType.RELIGION: self.resolve_religion,
             BlockerType.GREAT_PERSON_CLAIM: self.resolve_great_people,
             BlockerType.CLAIM_GREAT_PERSON: self.resolve_great_people,
         }
@@ -345,6 +347,40 @@ class SecondaryPolicy:
     async def resolve_pantheon(self, game: SecondaryGame, blocker: Blocker) -> bool:
         turn = (await game.get_game_overview()).turn
         return await self._pantheon(game, turn, force=True)
+
+    async def resolve_religion(self, game: SecondaryGame, blocker: Blocker) -> bool:
+        """Clear "Choose Religion", which holds the turn once a prophet founds one (Run 13).
+
+        Run 13 turn 299 activated its first prophet and three end-turn tries stopped on this
+        blocker, because only a notification or a recent prophet made `_religion` found, and
+        the end-turn blocking type was unhandled. Here the game's own blocker is the signal:
+        found at once, rotating religion and beliefs on a refusal, at most `MAX_FOUND_ATTEMPTS`
+        tries a turn. True only when the status read after the try shows a religion.
+        """
+        turn = (await game.get_game_overview()).turn
+        status = await game.get_religion_founding_status()
+        if status.has_religion:
+            return True  # Founded already, so the blocker is clearing on its own.
+        followers = rank_beliefs(status.beliefs_by_class.get(_FOLLOWER, []), self.weights)
+        founders = rank_beliefs(status.beliefs_by_class.get(_FOUNDER, []), self.weights)
+        religions = sorted(status.available_religions)
+        if not (followers and founders and religions):
+            log.warning("Choose Religion is open but the game offers no religion or beliefs")
+            return False
+        if self._blocker_found[0] != turn:
+            self._blocker_found = (turn, 0)
+        n = self._blocker_found[1]
+        if n >= MAX_FOUND_ATTEMPTS:
+            return False
+        self._blocker_found = (turn, n + 1)
+        choice = (
+            religions[n % len(religions)][0],
+            followers[n % len(followers)].belief_type,
+            founders[n % len(founders)].belief_type,
+        )
+        result = await game.found_religion(*choice)
+        log.info("Choose Religion blocker (try %d): %s -> %s", n + 1, choice, result[:120])
+        return bool((await game.get_religion_founding_status()).has_religion)
 
     async def resolve_great_people(self, game: SecondaryGame, blocker: Blocker) -> bool:
         await self._recruit(game)

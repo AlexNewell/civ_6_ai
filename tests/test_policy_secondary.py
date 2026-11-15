@@ -405,6 +405,7 @@ def test_blocker_policies_cover_pantheon_and_great_people():
     policies = SecondaryPolicy().blocker_policies()
     assert set(policies) == {
         BlockerType.PANTHEON,
+        BlockerType.RELIGION,
         BlockerType.GREAT_PERSON_CLAIM,
         BlockerType.CLAIM_GREAT_PERSON,
     }
@@ -470,6 +471,39 @@ def test_nothing_is_founded_once_we_have_a_religion_or_none_is_left():
     for status in (religion_status(has_religion=True), religion_status(available_religions=[])):
         game = make_game(religion=status, notifications=[note("NOTIFICATION_CHOOSE_RELIGION")])
         run(SecondaryPolicy(), game)
+        assert not acted(game, "religion")
+
+
+def resolve_religion(policy, game):
+    from civ6_ai.blockers import Blocker
+
+    return asyncio.run(policy.resolve_religion(game, Blocker(BlockerType.RELIGION)))
+
+
+def test_religion_blocker_founds_without_a_notification():
+    game = make_game(religion=religion_status())
+    assert resolve_religion(SecondaryPolicy(), game) is False  # The fake never shows a religion.
+    assert acted(game, "religion")[0] == (
+        "religion",
+        "RELIGION_BUDDHISM",
+        "BELIEF_WORK_ETHIC",
+        "BELIEF_CHURCH_PROPERTY",
+    )
+
+
+def test_religion_blocker_is_bounded_per_turn_and_rotates():
+    game = make_game(religion=religion_status())
+    policy = SecondaryPolicy()
+    results = [resolve_religion(policy, game) for _ in range(10)]
+    tried = acted(game, "religion")
+    assert len(tried) == 6 and not any(results)
+    assert tried[0] != tried[1]
+
+
+def test_religion_blocker_with_a_religion_or_no_options_does_not_act():
+    for status in (religion_status(has_religion=True), religion_status(available_religions=[])):
+        game = make_game(religion=status)
+        resolve_religion(SecondaryPolicy(), game)
         assert not acted(game, "religion")
 
 

@@ -44,6 +44,7 @@ All of these come from civ6-mcp's blocking query, run through `execute_lua` in t
 | `ENDTURN_BLOCKING_GOVERNOR_IDLE` | Left to `end_turn`, which dismisses it. The governor stays unassigned until a policy places it. |
 | `ENDTURN_BLOCKING_UNIT_PROMOTION` | Asks each combat unit for its options and takes the first. Stale notifications are left to `end_turn`. `MilitaryPolicy.blocker_policies()` takes this over with a preference list and keeps the default as the fallback. It also spends promotions every turn from the non-blocking `NOTIFICATION_UNIT_PROMOTION_AVAILABLE`. |
 | `ENDTURN_BLOCKING_PANTHEON` | Chooses the first belief offered. |
+| `ENDTURN_BLOCKING_RELIGION` | "Choose Religion", after a Great Prophet founds a religion. Founds with the first religion and first follower and founder beliefs, true only when a read afterwards shows a religion. `SecondaryPolicy` takes it over with ranked beliefs and rotation on refusal. Unhandled in Run 13 (turn 299, three holds). **Not live-verified.** |
 | `ENDTURN_BLOCKING_COMMEMORATION_AVAILABLE` | Chooses the first dedications, up to the number allowed. This is the era choice. |
 | `ENDTURN_BLOCKING_GIVE_INFLUENCE_TOKEN` | Sends each envoy to the first city-state that accepts it. With no envoys left it's stale, and `end_turn` clears it. |
 | `ENDTURN_BLOCKING_WORLD_CONGRESS_SESSION` | If a session is open, casts one free vote on option A, target 0, for each open resolution, then submits. Otherwise queues the default voter. civ6-mcp's `submit_congress` isn't used, because it also ends the turn and a second end-turn request can skip turns. |
@@ -76,7 +77,7 @@ These have no entry in `BlockerType`, because the bot never sees them.
 
 ## Things that look like blockers
 
-- **Choosing a religion:** civ6-mcp has hints for `NOTIFICATION_CHOOSE_RELIGION` and `NOTIFICATION_CHOOSE_BELIEF` but no blocking type. They follow a Great Prophet's activation, which no default does, so they're left to the religion policy. [`SecondaryPolicy`](../src/civ6_ai/policies/secondary.py) founds the religion on that notification or the turn after it activates a prophet, and can take over `PANTHEON` and `GREAT_PERSON_CLAIM` through `blocker_policies()`.
+- **Choosing a religion:** the game does hold the turn with `ENDTURN_BLOCKING_RELIGION` ("Choose Religion", Run 13 turn 299, three tries unhandled); `SecondaryPolicy.resolve_religion` founds on it, rotating religion and beliefs on a refusal. civ6-mcp also has hints for `NOTIFICATION_CHOOSE_RELIGION` and `NOTIFICATION_CHOOSE_BELIEF`. They follow a Great Prophet's activation, which no default does, so they're left to the religion policy. [`SecondaryPolicy`](../src/civ6_ai/policies/secondary.py) founds the religion on that notification or the turn after it activates a prophet, and can take over `PANTHEON` and `GREAT_PERSON_CLAIM` through `blocker_policies()`.
 - **Choosing a first government:** no type names this. `CONSIDER_GOVERNMENT_CHANGE` only keeps what's there, so changing government is left to a policy.
 
 ## Unknown blockers

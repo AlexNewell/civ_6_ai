@@ -23,6 +23,7 @@ TARGET_CITIES = 6
 TARGET_TURN = 150
 STALE_TURNS = 10  # A survey older than this says nothing about sites.
 SETTLER = "UNIT_SETTLER"
+EARLY_UNSURVEYED_TURNS = 12  # Too early for a survey to rule a settler out.
 
 
 def expected_cities(turn: int, target: int = TARGET_CITIES, by_turn: int = TARGET_TURN) -> int:
@@ -45,8 +46,13 @@ class ExpansionState:
     rejected: dict[str, int] = field(default_factory=dict)
 
     def sites_ok(self, turn: int) -> bool:
-        """False only when a recent survey found no safe site. Unknown counts as ok."""
-        if self.survey_turn is None or turn - self.survey_turn > STALE_TURNS:
+        """False only when a recent survey found no safe site. Unknown counts as ok.
+
+        Run 15: the survey on turn 2 sees almost nothing and found no safe site, so the first
+        settler waited for a scout and started on turn 13 (second city on turn 32). Before turn
+        EARLY_UNSURVEYED_TURNS a survey proves nothing about the land, so it is not trusted.
+        """
+        if turn <= EARLY_UNSURVEYED_TURNS or self.survey_turn is None or turn - self.survey_turn > STALE_TURNS:
             return True
         return self.safe_sites > 0
 

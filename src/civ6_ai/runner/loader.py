@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 LOAD_TIMEOUT_SECONDS = 300  # Late-game saves on a slow disk take longer than turn-1 ones.
 ESCAPE_AFTER_SECONDS = 90  # No tuner by now: the loading screen may be waiting for input.
 POLL_SECONDS = 3
-QUERY_WAIT_SECONDS = 15
+QUERY_WAIT_SECONDS = 45  # The main menu answers the save-list query slowly (Run 15).
 
 _LOAD_LUA = """
 if not ExposedMembers then ExposedMembers = {{}} end
@@ -156,6 +156,18 @@ async def current_turn(connection: GameConnection) -> int:
     raise LoadError(f"no turn in {lines!r}")
 
 
+def _menu_state(connection: GameConnection) -> int:
+    """The Lua state to load from at the main menu: the load-game screen's, else the first.
+
+    Checked live on 2026-11-15: state 0 (Main State) has no SaveLocationOptions, so the save-list
+    query fails there; the LoadGameMenu context is the one that loads saves itself.
+    """
+    for index, name in sorted(connection.lua_states.items()):
+        if name == "LoadGameMenu":
+            return index
+    return 0
+
+
 async def load_save(
     name: str,
     factory: Callable[[], GameConnection] = GameConnection,
@@ -173,7 +185,7 @@ async def load_save(
     started = clock()
     connection = await _connect(factory, 15)
     in_game = connection.ingame_index is not None
-    state = connection.ingame_index if in_game else 0
+    state = connection.ingame_index if in_game else _menu_state(connection)
     try:
         await connection.execute_in_state(state, build_load_lua(name, in_game))
         status = "PENDING"

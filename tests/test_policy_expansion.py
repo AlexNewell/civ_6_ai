@@ -53,3 +53,10 @@ def test_handler_logs_one_line_with_city_and_settler_counts(caplog):
 
 def test_state_carries_the_city_target_for_the_survey_gate():
     assert ExpansionState().target_cities == 6
+
+
+def test_early_survey_is_not_trusted():
+    # Run 15: the turn-2 survey saw no safe site and held the first settler back until turn 13.
+    assert ExpansionState(survey_turn=2, safe_sites=0).sites_ok(3)
+    assert ExpansionState(survey_turn=11, safe_sites=0).sites_ok(12)
+    assert not ExpansionState(survey_turn=13, safe_sites=0).sites_ok(14)

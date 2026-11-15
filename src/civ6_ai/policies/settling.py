@@ -21,10 +21,11 @@ import logging
 import math
 from collections.abc import Collection, Iterable
 from dataclasses import asdict, dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 
 from civ6_ai.blockers import action_succeeded, move_succeeded
 from civ6_ai.policies.expansion import ExpansionState
+from civ6_ai.policies.game_data import COMBAT_UNITS
 from civ6_ai.state import (
     City,
     Exploration,
@@ -104,6 +105,15 @@ class SettlingSettings:
     flee_radius: int = 2  # A settler this close to a hostile unit runs.
     escort_search_radius: int = 5
     scout_threat_radius: int = 2
+    # A city's last defender may escort a settler when the threat near the city is limited.
+    # Hostile units within `garrison_threat_radius` of the city (two turns of march) are weighed:
+    # at most `garrison_max_hostiles` of them, none a siege unit, none stronger than the city's
+    # own defence strength (floored at `garrison_min_strength`, the ancient-era melee value), and
+    # together at most `garrison_total_ratio` times that. Never while we are at war with a civ.
+    garrison_threat_radius: int = 5
+    garrison_max_hostiles: int = 2
+    garrison_min_strength: int = 20
+    garrison_total_ratio: float = 2.0
     # Bounds on waiting and retrying, so nothing stalls for good.
     no_site_disband_turns: int = 20  # A settler with no site this many turns in a row is disbanded.
     max_move_failures: int = 3  # Refused moves to one site before it is set aside.
@@ -349,6 +359,60 @@ def _holds_tile(unit: Unit) -> bool:
     return holds_tile(unit)
 
 
+def _strength(threat: Threat) -> tuple[float, bool]:
+    """A hostile unit's best attack value (game data first, the reading otherwise), and siege."""
+    stats = COMBAT_UNITS.get(threat.unit_type)
+    if stats is not None:
+        return float(max(stats[0], stats[1])), stats[4] == "SIEGE" or stats[2] > 0
+    return float(max(threat.combat_strength, threat.ranged_strength)), False
+
+
+def garrison_may_leave(
+    city: City,
+    threats: Iterable[Threat],
+    at_war: bool,
+    settings: SettlingSettings | None = None,
+    map_width: int | None = STANDARD_MAP_WIDTH,
+) -> bool:
+    """True when `city` can stand without its last defender: the hostile units near it are few,
+    weak and not siege. Run 12, turns 29-40: two slingers, two warriors and a scout sat beside the
+    capital, so it must stay; turns 49-51: one scout, so the garrison may lead the settler out.
+    """
+    if at_war:
+        return False
+    s = settings or SettlingSettings()
+    near = [
+        t
+        for t in threats
+        if t.hostile
+        and hex_distance(city.x, city.y, t.x, t.y, map_width) <= s.garrison_threat_radius
+    ]
+    if len(near) > s.garrison_max_hostiles:
+        return False
+    ceiling = float(max(city.defense_strength, s.garrison_min_strength))
+    total = 0.0
+    for t in near:
+        strength, siege = _strength(t)
+        if siege or strength > ceiling:
+            return False
+        total += strength
+    return total <= s.garrison_total_ratio * ceiling
+
+
+def spare_garrison_tiles(
+    cities: Iterable[City],
+    threats: Iterable[Threat],
+    at_war: bool,
+    settings: SettlingSettings | None = None,
+    map_width: int | None = STANDARD_MAP_WIDTH,
+) -> frozenset[tuple[int, int]]:
+    """Tiles of the cities whose last defender may leave (see `garrison_may_leave`)."""
+    threats = tuple(threats)
+    return frozenset(
+        (c.x, c.y) for c in cities if garrison_may_leave(c, threats, at_war, settings, map_width)
+    )
+
+
 def find_escort(
     settler: Unit,
     units: Iterable[Unit],
@@ -356,10 +420,12 @@ def find_escort(
     claimed: Collection[int],
     radius: int,
     map_width: int | None = STANDARD_MAP_WIDTH,
+    lone_ok: Collection[tuple[int, int]] = (),
 ) -> Unit | None:
     """The nearest combat unit that can leave to escort `settler`, or None.
 
-    Never a scout, a ship, a unit in `claimed`, or the only combat unit in a city.
+    Never a scout, a ship, a unit in `claimed`, or the only combat unit in a city, unless that
+    city is in `lone_ok` (its threat is limited). A unit that leaves a spare is preferred.
     """
     city_tiles = set(city_tiles)
     combat = [u for u in units if _land_military(u) and u.can_move and u.unit_id not in claimed]
@@ -371,10 +437,22 @@ def find_escort(
         for u in combat
         if _land_military(u)
         and not any(word in u.unit_type for word in _SEA_UNITS)
-        and not ((u.x, u.y) in city_tiles and garrisons[u.x, u.y] == 1)
+        and not (
+            (u.x, u.y) in city_tiles and garrisons[u.x, u.y] == 1 and (u.x, u.y) not in lone_ok
+        )
         and hex_distance(u.x, u.y, settler.x, settler.y, map_width) <= radius
     ]
-    usable.sort(key=lambda u: (hex_distance(u.x, u.y, settler.x, settler.y, map_width), u.unit_id))
+
+    def strips(u: Unit) -> bool:
+        return (u.x, u.y) in city_tiles and garrisons[u.x, u.y] == 1
+
+    usable.sort(
+        key=lambda u: (
+            strips(u),
+            hex_distance(u.x, u.y, settler.x, settler.y, map_width),
+            u.unit_id,
+        )
+    )
     return usable[0] if usable else None
 
 
@@ -383,6 +461,7 @@ def units_reserved_for_settling(
     city_tiles: Iterable[tuple[int, int]],
     radius: int = SettlingSettings.escort_search_radius,
     map_width: int | None = STANDARD_MAP_WIDTH,
+    lone_ok: Collection[tuple[int, int]] = (),
 ) -> frozenset[int]:
     """Ids of the units settling may use: scouts, and the escort each settler would take.
 
@@ -403,7 +482,7 @@ def units_reserved_for_settling(
     for settler in settlers:
         if (settler.x, settler.y) in on_road:
             continue  # Already travelling with an escort, as `_settle` also reads it.
-        escort = find_escort(settler, units, city_tiles, reserved, radius, map_width)
+        escort = find_escort(settler, units, city_tiles, reserved, radius, map_width, lone_ok)
         if escort is not None:
             reserved.add(escort.unit_id)
     return frozenset(reserved)
@@ -513,6 +592,12 @@ class SettlingPolicy:
     # Escort orders the game refused, as (escort, from, to, military units on `to`): not sent again
     # until one of those changes.
     _refused: set = field(default_factory=set, init=False, repr=False)
+    # The threat state, or None to play without it (a war is then unknown, so no lone garrison
+    # leaves). `_lone_ok` is this turn's cities whose last defender may leave; `_stripped` maps a
+    # city tile whose last defender left with a settler to that escort's id.
+    defence: Any = field(default=None, repr=False)
+    _lone_ok: frozenset = field(default_factory=frozenset, init=False, repr=False)
+    _stripped: dict[tuple[int, int], int] = field(default_factory=dict, init=False, repr=False)
     _automated: dict[int, int] = field(default_factory=dict, init=False, repr=False)
     _scout_targets: dict[int, tuple[int, int]] = field(default_factory=dict, init=False, repr=False)
     _scout_waits: dict[int, int] = field(default_factory=dict, init=False, repr=False)
@@ -568,6 +653,14 @@ class SettlingPolicy:
             return
         danger = _Danger(threats, self.settings.map_width)
         city_tiles = [(c.x, c.y) for c in cities]
+        self._lone_ok = (
+            spare_garrison_tiles(
+                cities, threats, self.defence.at_war, self.settings, self.settings.map_width
+            )
+            if self.defence is not None
+            else frozenset()
+        )
+        self._tidy_stripped(units)
         self._own_cities = [
             (c.x, c.y, c.pop, True) if c.is_capital else (c.x, c.y, c.pop) for c in cities
         ]
@@ -903,6 +996,8 @@ class SettlingPolicy:
                 )
             )
 
+        if escorted and self._stripped and await self._recall(game, settler, units, record):
+            return
         threatened = danger.near(settler.x, settler.y, s.flee_radius)
         # Live (Run 12): an escorted settler stepped out, then fled back to the city next turn
         # and the pair repeated it. A settler with its escort on the tile goes on instead.
@@ -981,7 +1076,9 @@ class SettlingPolicy:
             and (u.x, u.y) == (settler.x, settler.y)
             and u.unit_id not in claimed
         ]
-        spare = len(on_tile) >= (2 if (settler.x, settler.y) in city_tiles else 1)
+        here_tile = (settler.x, settler.y)
+        in_city = here_tile in city_tiles
+        spare = len(on_tile) >= (2 if in_city and here_tile not in self._lone_ok else 1)
         movable = [u for u in on_tile if u.can_move]
         companion = min(movable, key=lambda u: u.unit_id) if spare and movable else None
         if on_tile and spare and companion is None:
@@ -990,6 +1087,9 @@ class SettlingPolicy:
             escort = companion  # Never gather a second unit.
         else:
             escort = self._find_escort(settler, units, city_tiles, claimed, danger)
+        held_here = sum(1 for u in units if _land_military(u) and (u.x, u.y) == here_tile)
+        if escort is not None and in_city and (escort.x, escort.y) == here_tile and held_here == 1:
+            self._stripped[here_tile] = escort.unit_id  # The city is left without a defender.
         crowded = any(_holds_tile(u) and (u.x, u.y) == (settler.x, settler.y) for u in units)
         if escort is not None and companion is None:
             # Skip an escort whose order the game already refused with nothing changed.
@@ -1080,7 +1180,42 @@ class SettlingPolicy:
 
     def _find_escort(self, settler, units, city_tiles, claimed, danger) -> Unit | None:
         s = self.settings
-        return find_escort(settler, units, city_tiles, claimed, s.escort_search_radius, s.map_width)
+        return find_escort(
+            settler,
+            units,
+            city_tiles,
+            claimed,
+            s.escort_search_radius,
+            s.map_width,
+            self._lone_ok,
+        )
+
+    def _tidy_stripped(self, units: Iterable[Unit]) -> None:
+        """Forget a stripped city once it holds a defender again or its escort is gone."""
+        units = list(units)
+        ids = {u.unit_id for u in units}
+        for tile, escort_id in list(self._stripped.items()):
+            held = any(_land_military(u) and (u.x, u.y) == tile for u in units)
+            if held or escort_id not in ids:
+                del self._stripped[tile]
+
+    async def _recall(self, game, settler, units, record) -> bool:
+        """Bring a settler and the escort that was a city's last defender back to that city once
+        the threat there is no longer limited, so a second wave never finds it empty."""
+        here = (settler.x, settler.y)
+        for tile, escort_id in sorted(self._stripped.items()):
+            if tile in self._lone_ok or tile == here:
+                continue
+            escort = next((u for u in units if u.unit_id == escort_id and (u.x, u.y) == here), None)
+            if escort is None or not escort.can_move:
+                continue
+            result = await game.move_unit(escort.unit_index, *tile)
+            if not move_succeeded(result):
+                continue
+            await game.move_unit(settler.unit_index, *tile)
+            record("flee", "the escort's city is threatened again, so both go back", tile, result)
+            return True
+        return False
 
     async def _disband(self, game, settler, record, idle: int) -> bool:
         """Disband a settler that has had no site for many turns. True if it is gone.

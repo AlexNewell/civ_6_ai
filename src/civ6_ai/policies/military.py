@@ -56,7 +56,12 @@ from typing import Any, Protocol
 
 from civ6_ai.blockers import Blocker, BlockerType, action_succeeded, move_succeeded
 from civ6_ai.policies.game_data import COMBAT_UNITS
-from civ6_ai.policies.settling import SCOUT, hex_line, units_reserved_for_settling
+from civ6_ai.policies.settling import (
+    SCOUT,
+    hex_line,
+    spare_garrison_tiles,
+    units_reserved_for_settling,
+)
 from civ6_ai.state import City, GameReads, Threat, Tile, Unit, read_area
 from civ6_ai.state import read_cities as _read_cities
 from civ6_ai.state import read_threats as _read_threats
@@ -418,8 +423,13 @@ class MilitaryPolicy:
             return
         cities = await _read_cities(game, s.map_width)
         threats = await _read_threats(game)
+        lone_ok: frozenset = frozenset()
+        if self.defence is not None:  # The same read settling makes, so both agree on who leaves.
+            lone_ok = spare_garrison_tiles(
+                cities, threats, self.defence.at_war, map_width=s.map_width
+            )
         reserved = units_reserved_for_settling(
-            units, [(c.x, c.y) for c in cities], map_width=s.map_width
+            units, [(c.x, c.y) for c in cities], map_width=s.map_width, lone_ok=lone_ok
         )
         mine = [u for u in mine if u.unit_id not in reserved]
         t = _Turn(turn, tuple(units), cities, threats, mine, reserved)

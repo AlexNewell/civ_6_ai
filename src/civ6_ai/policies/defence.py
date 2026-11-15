@@ -88,6 +88,11 @@ class DefenceState:
         return bool(self.cities)
 
     @property
+    def at_war(self) -> bool:
+        """True when we are at war with a major civ (every city then carries a `war:` reason)."""
+        return any(r.startswith("war:") for c in self.cities.values() for r in c.reasons)
+
+    @property
     def threatened_ids(self) -> frozenset[int]:
         return frozenset(self.cities)
 

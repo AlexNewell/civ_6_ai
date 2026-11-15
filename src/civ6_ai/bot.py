@@ -328,9 +328,9 @@ def build_orchestrator(
         diplomacy,
         WarPolicy(state_path=wars_state),
         *([TradeOfferPolicy(diplomacy.weights)] if trade_offers else []),
-        SettlingPolicy(expansion=expansion),
+        DefencePolicy(defence),  # Before settling: its war flag gates a garrison leaving.
+        SettlingPolicy(expansion=expansion, defence=defence),
         LoyaltyResponse(bus),
-        DefencePolicy(defence),
         military,
         research_policy,
         government,

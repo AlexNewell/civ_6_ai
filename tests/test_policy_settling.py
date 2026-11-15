@@ -1671,3 +1671,13 @@ def test_a_border_four_tiles_from_a_known_city_is_not_explained_by_it():
     assert policy._phantom_cities({(66, 25)})
     policy._border_memory = {(60, 27): 4}  # Three tiles from the city: its own.
     assert not policy._phantom_cities({(66, 25)})
+
+
+def test_early_sites_near_a_small_capital_need_no_look():
+    # Every city is small early on: the unseen rival is sized like our median city, not a
+    # pop-5 capital (as heavy as pop 10), which flagged every site near a pop-2 or pop-3 capital.
+    s = SettlingSettings()
+    for pop in (2, 3):
+        for unseen in (5, 6, 7):
+            rate = safe_loyalty_rate(62, 25, [(66, 25, pop, True)], [], s, unseen_distance=unseen)
+            assert rate >= s.loyalty_reject_safe

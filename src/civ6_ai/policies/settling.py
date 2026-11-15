@@ -165,14 +165,14 @@ class SettlingSettings:
     #    only stand-in for them.
     loyalty_fog_distance: int = 8
     # 4. Unexplored rival side (Run 13: Uxmal, safe +4.1, lost to three Mapuche cities that were
-    #    never seen, one a capital 6 tiles off). The robust rate also counts one unseen capital of
-    #    `unseen_pop` at the nearest unrevealed far-side tile (never closer than
-    #    `unseen_min_distance`; a city nearer than that shows its border). A site that stays at or
-    #    above `loyalty_reject_safe` on it is held by our own pull and needs no look. Otherwise,
-    #    if `fog_share_min` of the far-side tiles in range (and at least `fog_min_tiles`) are
-    #    unrevealed, it needs a look: not taken while a scout lives to look, and when none does it
-    #    competes with `fog_penalty_weight` score per point of shortfall.
-    unseen_pop: int = 5
+    #    never seen, one a capital 6 tiles off). The robust rate also counts one unseen city, as
+    #    large as our median city (at least `unseen_pop_min`), at the nearest unrevealed far-side
+    #    tile (never closer than `unseen_min_distance`; a city nearer than that shows its border).
+    #    A site that stays at or above `loyalty_reject_safe` on it is held by our own pull and
+    #    needs no look. Otherwise, if `fog_share_min` of the far-side tiles in range (and at least
+    #    `fog_min_tiles`) are unrevealed, it needs a look: not taken while a scout lives to look,
+    #    and when none does it competes with `fog_penalty_weight` score per point of shortfall.
+    unseen_pop_min: int = 2
     unseen_min_distance: int = 5
     fog_share_min: float = 0.25
     fog_min_tiles: int = 6
@@ -275,7 +275,8 @@ def safe_loyalty_rate(
 ) -> float:
     """The loyalty estimate after growth, fog and the non-pressure drag. See the settings.
 
-    With `unseen_distance` it is the robust rate: one more rival capital is assumed that far off."""
+    With `unseen_distance` it is the robust rate: one more rival city, as large as our median city,
+    is assumed that far off."""
     s = settings
     rivals = list(rivals)
     grown_own = [
@@ -286,8 +287,13 @@ def safe_loyalty_rate(
     ]
     if unseen_distance is not None:
         # The pessimistic stand-in for what the fog may hide, straight east at that distance.
+        # Its size follows the game: as large as our median city (never under `unseen_pop_min`),
+        # and not a capital. A fixed pop-5 capital (as heavy as pop 10) flagged every early site
+        # near a pop-2 or pop-3 capital, when every city on the map is that small.
+        pops = sorted(pop for _, _, pop, _ in map(_unpack, own)) or [s.unseen_pop_min]
+        unseen = max(s.unseen_pop_min, pops[len(pops) // 2])
         px = (x + max(unseen_distance, s.unseen_min_distance)) % (s.map_width or 10_000)
-        grown_rivals.append((px, y, s.unseen_pop, True))
+        grown_rivals.append((px, y, unseen + s.loyalty_rival_growth, False))
     if any(
         0 < hex_distance(x, y, cx, cy, s.map_width) <= s.loyalty_range
         for cx, cy, _, _ in map(_unpack, rivals)

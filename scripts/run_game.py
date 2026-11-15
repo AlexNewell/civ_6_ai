@@ -21,6 +21,7 @@ from civ_mcp.game_state import GameState
 from civ6_ai.bot import SettleDecisionLog, build_orchestrator
 from civ6_ai.build_ledger import BuildLedger, earlier_event_files
 from civ6_ai.city_attack import fix_city_attack
+from civ6_ai.city_focus import fix_set_yield_focus
 from civ6_ai.district_advisor import fix_district_advisor, fix_wonder_advisor
 from civ6_ai.effectiveness import end_of_run_lines
 from civ6_ai.fastcalls import fix_units_query, narrow_popup_scan, shorten_call_waits
@@ -101,6 +102,7 @@ async def play_game(
                 ("fix_units_query", fix_units_query),
                 ("fix_gp_advisor", fix_gp_advisor),
                 ("fix_city_attack", fix_city_attack),
+                ("fix_set_yield_focus", fix_set_yield_focus),
                 ("fix_victory_check", fix_victory_check),
                 ("fix_district_advisor", fix_district_advisor),
                 ("fix_wonder_advisor", fix_wonder_advisor),

@@ -708,6 +708,48 @@ for tile in string.gmatch("%s", "[^;]+") do
     if x and vis:IsVisible(tonumber(x), tonumber(y)) then table.insert(seen, tile) end
 end
 print("VISIBLE|" .. table.concat(seen, ";"))
+-- Fog around candidate sites: for each "sx,sy,ox,oy,..." (a site, then its nearest own cities), the
+-- tiles within range of the site on its far side from our cities (none nearer to one of ours than
+-- to the site), how many are not revealed yet, the distance of the nearest such tile and their
+-- mean offset. Revealed flags only: nothing about a fogged tile is read.
+local gw, gh = Map.GetGridSize()
+for spec in string.gmatch("%s", "[^;]+") do
+    local nums = {}
+    for n in string.gmatch(spec, "-?%%d+") do table.insert(nums, tonumber(n)) end
+    local sx, sy = nums[1], nums[2]
+    local total, unrev, near, sdx, sdy = 0, 0, 99, 0, 0
+    for dy = -%d, %d do
+        local y = sy + dy
+        if y >= 0 and y < gh then
+            for dx = -%d, %d do
+                local x = sx + dx
+                if x < 0 then x = x + gw elseif x >= gw then x = x - gw end
+                local ds = Map.GetPlotDistance(sx, sy, x, y)
+                if ds <= %d then
+                    local away = true
+                    for k = 3, #nums - 1, 2 do
+                        if Map.GetPlotDistance(nums[k], nums[k + 1], x, y) < ds then
+                            away = false
+                            break
+                        end
+                    end
+                    if away then
+                        total = total + 1
+                        if not vis:IsRevealed(x, y) then
+                            unrev = unrev + 1
+                            if ds < near then near = ds end
+                            sdx = sdx + dx
+                            sdy = sdy + dy
+                        end
+                    end
+                end
+            end
+        end
+    end
+    local cx, cy = 0, 0
+    if unrev > 0 then cx, cy = math.floor(sdx / unrev + 0.5), math.floor(sdy / unrev + 0.5) end
+    print(table.concat({"FOG", sx, sy, total, unrev, near, cx, cy}, "|"))
+end
 print("KDONE")
 print("---END---")
 """
@@ -724,10 +766,24 @@ class KnownCity:
 
 
 @dataclass(frozen=True)
+class FogCount:
+    """Unrevealed tiles on a site's far side (from our cities) within loyalty range."""
+
+    x: int
+    y: int
+    total: int  # Tiles on the far side within range, revealed or not.
+    unrevealed: int
+    nearest: int  # Distance from the site to the nearest unrevealed one (99 if none).
+    dx: int  # Mean offset of the unrevealed ones from the site.
+    dy: int
+
+
+@dataclass(frozen=True)
 class KnownMap:
     cities: tuple[KnownCity, ...]
     border_tiles: tuple[tuple[int, int, int], ...]  # (owner, x, y), visible now
     visible_watched: frozenset[tuple[int, int]] = frozenset()  # Asked-about tiles visible now.
+    fog: tuple[FogCount, ...] = ()  # One per candidate site asked about.
 
 
 def parse_known_cities(output: str) -> KnownMap:
@@ -736,7 +792,7 @@ def parse_known_cities(output: str) -> KnownMap:
     strips the `---END---` marker before returning, so that marker cannot be the check.)"""
     if "KDONE" not in output.split():
         raise ValueError("known-city read incomplete: no end marker")
-    cities, borders, watched = [], [], set()
+    cities, borders, watched, fog = [], [], set(), []
     for line in output.splitlines():
         parts = line.strip().split("|")
         try:
@@ -755,6 +811,8 @@ def parse_known_cities(output: str) -> KnownMap:
                 for tile in parts[2].split(";"):
                     x, y = tile.split(",")
                     borders.append((int(parts[1]), int(x), int(y)))
+            elif parts[0] == "FOG" and len(parts) >= 8:
+                fog.append(FogCount(*(int(p) for p in parts[1:8])))
             elif parts[0] == "VISIBLE" and len(parts) >= 2:
                 for tile in parts[1].split(";"):
                     if tile:
@@ -762,14 +820,23 @@ def parse_known_cities(output: str) -> KnownMap:
                         watched.add((int(x), int(y)))
         except ValueError:
             continue
-    return KnownMap(tuple(cities), tuple(borders), frozenset(watched))
+    return KnownMap(tuple(cities), tuple(borders), frozenset(watched), tuple(fog))
 
 
-async def read_known_cities(game, watch: Iterable[tuple[int, int]] = ()) -> KnownMap:
+async def read_known_cities(
+    game,
+    watch: Iterable[tuple[int, int]] = (),
+    fog_sites: Iterable[tuple[int, ...]] = (),
+    fog_range: int = 9,
+) -> KnownMap:
     """Rival cities and foreign-owned tiles on tiles visible now, and which of the `watch` tiles
-    are visible now. `game` needs `execute_lua`."""
+    are visible now. Each of `fog_sites`, as (x, y, own city x, y, ...), also gets a FogCount.
+    `game` needs `execute_lua`."""
     tiles = ";".join(f"{x},{y}" for x, y in watch)
-    return parse_known_cities(await game.execute_lua(_KNOWN_CITIES_HEAD % tiles, "ingame"))
+    sites = ";".join(",".join(str(n) for n in spec) for spec in fog_sites)
+    r = fog_range
+    code = _KNOWN_CITIES_HEAD % (tiles, sites, r, r, r, r, r)
+    return parse_known_cities(await game.execute_lua(code, "ingame"))
 
 
 async def read_threats(game: GameReads) -> tuple[Threat, ...]:

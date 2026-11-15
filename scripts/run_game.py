@@ -10,7 +10,7 @@ import asyncio
 import json
 import logging
 import sys
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -40,6 +40,7 @@ from civ6_ai.preflight import (
     report,
 )
 from civ6_ai.probes import PROBE_KINDS, ProbeShots, parse_kinds
+from civ6_ai.runner.loader import LoadError, checkpoint_name, load_save, save_checkpoint
 from civ6_ai.saves import disable_mcp_saves, use_real_save_dirs
 from civ6_ai.screenshots import Screenshotter
 from civ6_ai.victory_check import fix_victory_check
@@ -86,6 +87,7 @@ async def play_game(
     on_turn: Callable[[TurnRecord], None] | None = None,
     probe_kinds: list[str] | None = None,
     probe_overlay: bool = False,
+    save_at: Sequence[int] = (),
 ) -> GameRun | None:
     """Play `turns` turns in the open game. None if it is not a standard save (or `expect_save`).
 
@@ -179,7 +181,13 @@ async def play_game(
             event_log=event_log,
             probes=probes,
         )
-        reason = await orchestrator.play(turns)
+        reason = await play_with_checkpoints(
+            orchestrator.play,
+            lambda: _turn_now(game),
+            lambda turn: save_checkpoint(connection.execute_write, checkpoint_name(name, turn)),
+            turns,
+            save_at,
+        )
     finally:
         try:
             event_log.flush()  # Also on a crash, so the turn's events are not lost.
@@ -191,8 +199,56 @@ async def play_game(
     return GameRun(name, reason, turn_log, decisions)
 
 
-async def run(turns: int, probe_kinds: list[str] | None = None, overlay: bool = False) -> int:
-    played = await play_game(turns, probe_kinds=probe_kinds, probe_overlay=overlay)
+async def _turn_now(game: GameState) -> int:
+    return (await game.get_game_overview()).turn
+
+
+async def play_with_checkpoints(
+    play: Callable[[int], Awaitable[StopReason]],
+    turn_now: Callable[[], Awaitable[int]],
+    save: Callable[[int], Awaitable[bool]],
+    turns: int,
+    save_at: Sequence[int] = (),
+) -> StopReason:
+    """Play `turns` turns, writing a checkpoint save at the start of each turn in `save_at`.
+
+    The turns between checkpoints are played as one call each, so the turn loop itself is
+    unchanged. A checkpoint that cannot be written is logged and play goes on.
+    """
+    pending = sorted({t for t in save_at if t > 0})
+    remaining = turns
+    while remaining > 0:
+        turn = await turn_now()
+        if pending and pending[0] <= turn:
+            if pending[0] == turn:
+                try:
+                    await save(turn)
+                except Exception:
+                    logging.getLogger("civ6_ai").exception("Checkpoint at turn %d failed", turn)
+            pending = [t for t in pending if t > turn]
+        chunk = remaining if not pending else min(remaining, pending[0] - turn)
+        reason = await play(chunk)
+        remaining -= chunk
+        if reason != StopReason.TURN_LIMIT:
+            return reason
+    return StopReason.TURN_LIMIT
+
+
+async def run(
+    turns: int,
+    probe_kinds: list[str] | None = None,
+    overlay: bool = False,
+    load: str | None = None,
+    save_at: Sequence[int] = (),
+) -> int:
+    if load:
+        try:
+            loaded = await load_save(load)
+        except LoadError as error:
+            print(f"FAILED: load {load}: {error}")
+            return 1
+        print(f"Loaded {loaded.name} at turn {loaded.turn} in {loaded.seconds:.0f}s")
+    played = await play_game(turns, probe_kinds=probe_kinds, probe_overlay=overlay, save_at=save_at)
     if played is None:
         return 1
     name, reason, turn_log, decisions = (
@@ -237,12 +293,24 @@ def main() -> int:
         action="store_true",
         help="also open the game's placement view for a placement probe (unverified live)",
     )
+    parser.add_argument(
+        "--load",
+        metavar="SAVE",
+        help="load this save first, by name (STD_T1_01, CKPT_STD_T1_01_T100); needs no input",
+    )
+    parser.add_argument(
+        "--save-at",
+        default="",
+        metavar="TURN[,TURN]",
+        help="write a checkpoint save CKPT_<scenario>_T<turn> at the start of these turns",
+    )
     args = parser.parse_args()
     try:
         kinds = parse_kinds(args.probe)
+        save_at = [int(t) for t in args.save_at.split(",") if t.strip()]
     except ValueError as error:
         parser.error(str(error))
-    return asyncio.run(run(args.turns, kinds, args.probe_overlay))
+    return asyncio.run(run(args.turns, kinds, args.probe_overlay, args.load, save_at))
 
 
 if __name__ == "__main__":

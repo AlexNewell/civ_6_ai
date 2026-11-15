@@ -42,6 +42,9 @@ class QueueItem:
     id: str
     save: str  # A name in config/standard_saves.json.
     turns: int
+    # The save file to load first, e.g. a checkpoint CKPT_STD_T1_01_T100 (issue 17). None loads
+    # `save` itself. Either way the open game must then be `save` by its seed.
+    load: str | None = None
     options: dict = field(default_factory=dict)
     max_attempts: int = DEFAULT_MAX_ATTEMPTS
     status: Status = Status.PENDING
@@ -55,7 +58,10 @@ class QueueItem:
 
     def validate(self) -> None:
         # The names reach file paths and the launch step, so only plain characters are allowed.
-        for label, value in (("id", self.id), ("save", self.save)):
+        named = [("id", self.id), ("save", self.save)]
+        if self.load is not None:
+            named.append(("load", self.load))
+        for label, value in named:
             if not isinstance(value, str) or not _NAME.fullmatch(value):
                 raise QueueError(f"item {label} {value!r} must match {_NAME.pattern}")
         if isinstance(self.turns, bool) or not isinstance(self.turns, int):

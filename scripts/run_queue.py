@@ -4,10 +4,12 @@
 through run_game.py's turn loop, so it must never be passed by accident. The queue file is JSON
 (see config/queue.example.json) and stays out of git. The default is runs/queue.json.
 
-Launching and loading a save is not built yet (issue 17: a Lua load stops at the loading screen
-until someone clicks). For now each item's save must already be open, and the game fails if a
-different one is. Crash restart is not built either: a crashed game fails after the watchdog
-gives up, and the next item then fails the same way until the game is restarted by hand.
+Each item's save is loaded first with no one at the keyboard (`runner.loader`: the game's
+automation auto-start skips the "Continue Game" button). An item may name a checkpoint to load
+(`"load": "CKPT_STD_T1_01_T100"`) and checkpoints to write (`"options": {"save_at": [150]}`), so
+a queue can play short slices of a game. Pass `--no-load` to expect the save to be open already.
+Crash restart is not built: a crashed game fails after the watchdog gives up, and the next item
+then fails the same way until the game is restarted by hand.
 """
 
 import argparse
@@ -28,8 +30,19 @@ RUNS = ROOT / "runs"
 
 
 async def attach_to_open_game(item: QueueItem) -> None:
-    """The launch step for now: do nothing, and expect the item's save to be open already."""
+    """A launch step that does nothing and expects the item's save to be open already."""
     logging.getLogger(__name__).info("Expecting %s to be open already", item.save)
+
+
+async def load_item_save(item: QueueItem) -> None:
+    """The launch step: load the item's save (or its `load` checkpoint) with no one at the
+    keyboard, from whatever game is open, the defeat screen included. See runner.loader."""
+    from civ6_ai.runner.loader import load_save
+
+    loaded = await load_save(item.load or item.save)
+    logging.getLogger(__name__).info(
+        "Loaded %s at turn %d in %.0fs", loaded.name, loaded.turn, loaded.seconds
+    )
 
 
 def live_play_step() -> PlayStep:
@@ -40,7 +53,12 @@ def live_play_step() -> PlayStep:
         def on_turn(record: TurnRecord) -> None:
             progress.beat(record.turn, record)
 
-        played = await run_game.play_game(item.turns, expect_save=item.save, on_turn=on_turn)
+        played = await run_game.play_game(
+            item.turns,
+            expect_save=item.save,
+            on_turn=on_turn,
+            save_at=[int(t) for t in item.options.get("save_at", [])],
+        )
         if played is None:
             return PlayOutcome("failed", detail=f"the open game is not {item.save}")
         paths = [
@@ -112,6 +130,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--status", action="store_true", help="show the queue and exit")
     parser.add_argument("--live", action="store_true", help="play the queue in the open game")
     parser.add_argument("--max-items", type=int, default=None)
+    parser.add_argument(
+        "--no-load", action="store_true", help="do not load saves: expect each one to be open"
+    )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     try:
@@ -121,7 +142,8 @@ def main(argv: list[str] | None = None) -> int:
         if not args.live:
             print("Nothing done. Use --status to read the queue, or --live to play it.")
             return 2
-        return asyncio.run(run(args.queue, args.max_items, attach_to_open_game, live_play_step()))
+        launch = attach_to_open_game if args.no_load else load_item_save
+        return asyncio.run(run(args.queue, args.max_items, launch, live_play_step()))
     except QueueError as error:
         print(f"Queue problem: {error}")
         return 2

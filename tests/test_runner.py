@@ -332,3 +332,27 @@ def test_cli_reports_a_bad_queue(tmp_path, capsys):
     path = tmp_path / "queue.json"
     path.write_text("{", encoding="utf-8")
     assert cli.main(["--queue", str(path), "--status"]) == 2
+
+
+def test_an_item_may_name_a_checkpoint_to_load():
+    item = QueueItem(id="mid", save="STD_T1_01", turns=50, load="CKPT_STD_T1_01_T050")
+    item.validate()
+    with pytest.raises(QueueError):
+        QueueItem(id="bad", save="STD_T1_01", turns=5, load='x" os.exit()').validate()
+
+
+def test_the_launch_step_loads_the_checkpoint_when_one_is_named(monkeypatch):
+    from civ6_ai.runner import loader
+
+    asked: list[str] = []
+
+    async def fake_load(name):
+        asked.append(name)
+        return loader.Loaded(name, 50, 24.0, False)
+
+    monkeypatch.setattr(loader, "load_save", fake_load)
+    asyncio.run(cli.load_item_save(QueueItem(id="a", save="STD_T1_01", turns=5)))
+    asyncio.run(
+        cli.load_item_save(QueueItem(id="b", save="STD_T1_01", turns=5, load="CKPT_STD_T1_01_T050"))
+    )
+    assert asked == ["STD_T1_01", "CKPT_STD_T1_01_T050"]

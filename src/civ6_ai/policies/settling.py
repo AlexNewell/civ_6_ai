@@ -147,9 +147,11 @@ class SettlingSettings:
     # 1. Non-pressure losses of a new city: not following the neighbour's religion (-3 in the
     #    game's breakdown), no governor and no happiness bonus yet.
     #    Run 12's breakdown for Tikal (turn 84): happiness -3, religion 0, rival Diplomat
-    #    Governors nearby -4; Run 10 had religion -3. Assumed -6 a turn: happiness -3 plus the
-    #    religion term -3 taken as present. A rival's Amani (-4) is unknowable and left out.
-    loyalty_new_city_drag: float = 6.0
+    #    Governors nearby -4; Run 10 had religion -3. Assumed -3 a turn, the happiness term seen
+    #    in the game; religion and a rival's Amani (-4) are not known at the site and left out.
+    #    Run 13: at -6 with the +4 floor, Run 12's Palenque site (67,21), which held all game,
+    #    read safe -1.0 and was refused, and a settler was disbanded with no site for 20 turns.
+    loyalty_new_city_drag: float = 3.0
     # 2. Growth: a new city starts at population 1 while rival cities keep growing. Over the first
     #    ~20 turns assume rival cities gain `rival_growth` pop and our existing ones `own_growth`.
     loyalty_rival_growth: int = 2
@@ -159,10 +161,11 @@ class SettlingSettings:
     #    `loyalty_fog_distance` tiles. Rival-owned tiles are not in the settle scan, so this is the
     #    only stand-in for them.
     loyalty_fog_distance: int = 8
-    # Run 11: every city founded on a safe rate of 9 or more held; Chichen Itza, founded on 1.9
-    # (estimate +16.5), read -27 a turn and was lost twice. So the floor sits below the lowest safe
-    # success and above the failure.
-    loyalty_reject_safe: float = 4.0  # Reject a site whose safe rate is below this.
+    # Run 11's Chichen Itza (safe 1.9 then) was judged with no rival city known at all; with the
+    # rival cities, capitals and border phantoms now counted (PRs 212 and 221), that site reads
+    # about -10 and Run 12's Tikal about -19, so a floor of 0 refuses both. Run 13: a floor of 4
+    # on top of a -6 drag refused Run 12's Palenque site (67,21), which held all game.
+    loyalty_reject_safe: float = 0.0  # Reject a site whose safe rate is below this.
     loyalty_comfort_rate: float = 8.0  # A safe rate under this costs score.
     loyalty_safe_penalty_weight: float = 2.0  # Score lost per point of safe rate under comfort.
     rival_city_default_pop: int = 5  # A rival city seen but never with its population read.

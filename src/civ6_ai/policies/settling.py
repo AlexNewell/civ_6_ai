@@ -45,6 +45,7 @@ from civ6_ai.state.reader import STANDARD_MAP_WIDTH, FogCount, hex_distance
 log = logging.getLogger(__name__)
 
 HOSTILE_NEAR_SITE = "hostile unit near the site"
+FOG_PENDING = "fog around the site not measured yet"
 NEEDS_LOOK = "rival side of the site unexplored (needs a look)"
 # How much further than the middle of an unexplained border its unseen city is placed.
 PHANTOM_PUSH = 2.0
@@ -664,6 +665,10 @@ class SettlingPolicy:
     _fog: dict[tuple[int, int], FogCount] = field(default_factory=dict, init=False, repr=False)
     _fog_sites: list[tuple[int, ...]] = field(default_factory=list, init=False, repr=False)
     _scout_alive: bool = field(default=False, init=False, repr=False)
+    # Whether the fog can be measured this turn (the game runs Lua and the read has not failed).
+    # While it can, a site with no measurement yet is not founded on: it is asked for by the
+    # survey and judged the turn its counts arrive.
+    _fog_can: bool = field(default=False, init=False, repr=False)
     # Where the unrevealed far side of each needs-a-look site lies, best site first: scouts head
     # for these ahead of the plain frontier.
     _look_points: list[tuple[int, int]] = field(default_factory=list, init=False, repr=False)
@@ -674,6 +679,7 @@ class SettlingPolicy:
         scouts = [u for u in units if u.unit_type == SCOUT and u.can_move]
         self._founded = set()
         self._scout_alive = any(u.unit_type == SCOUT for u in units)
+        self._fog_can = getattr(game, "execute_lua", None) is not None
         # Run 8: the count stayed at 1 from the turn a settler founded its city to the end of the
         # game, because it was only taken on turns with a settler to move. It is free here.
         self.expansion.settlers_on_map = sum(1 for u in units if u.unit_type == SETTLER)
@@ -788,6 +794,7 @@ class SettlingPolicy:
             )
         except Exception:
             log.warning("Known-city read failed; keeping the memory as it was", exc_info=True)
+            self._fog_can = False  # Unmeasurable this turn: sites are not held back for it.
             return None
 
     def _merge_known(self, known, own_tiles: set[tuple[int, int]]) -> None:
@@ -909,7 +916,9 @@ class SettlingPolicy:
         sites = [
             c
             for c in candidates
-            if c.rejected is None or (c.rejected == NEEDS_LOOK and self._scout_alive)
+            if c.rejected is None
+            or c.rejected == FOG_PENDING
+            or (c.rejected == NEEDS_LOOK and self._scout_alive)
         ]
         self._choose_fog_sites(exploration, city_tiles)
         width = self.settings.map_width
@@ -1033,6 +1042,8 @@ class SettlingPolicy:
                 or (not first_city and safe < s.loyalty_reject_safe)
             ):
                 rejected = "likely to flip to a rival (loyalty)"
+            elif not first_city and self._fog_can and (site.x, site.y) not in self._fog:
+                rejected = FOG_PENDING
             elif needs_look and self._scout_alive:
                 rejected = NEEDS_LOOK
             elif not first_city and site_score < s.min_site_score:
@@ -1444,7 +1455,9 @@ class SettlingPolicy:
 
         frontier.sort(
             key=lambda p: (
-                p != previous,  # Keep a heading that is still on the edge of the fog.
+                # Keep a heading that is still on the edge of the fog, unless a look is wanted:
+                # that takes priority over persistence.
+                look is None and p != previous,
                 toward(p),
                 hex_distance(scout.x, scout.y, *p, s.map_width),
                 p,

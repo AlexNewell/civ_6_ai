@@ -8,6 +8,7 @@ from civ_mcp import lua as lq
 from civ6_ai.orchestrator import Handler
 from civ6_ai.policies.expansion import ExpansionState
 from civ6_ai.policies.settling import (
+    FOG_PENDING,
     NEEDS_LOOK,
     SettlingPolicy,
     SettlingSettings,
@@ -1681,3 +1682,43 @@ def test_early_sites_near_a_small_capital_need_no_look():
         for unseen in (5, 6, 7):
             rate = safe_loyalty_rate(62, 25, [(66, 25, pop, True)], [], s, unseen_distance=unseen)
             assert rate >= s.loyalty_reject_safe
+
+
+def test_a_needed_look_outranks_a_scouts_previous_heading():
+    # Codex on PR 228: `p != previous` sorted first, so a scout kept its old heading for ever.
+    fog = lq.StrategicMapData([lq.FogBoundary("Alpha", 10, 10, [-1, 5, -1, 4, -1, -1])], [])
+    scout = unit_info(unit_id=3, unit_index=3, x=10, y=12, **SCOUT)
+    policy = SettlingPolicy()
+    game = make_game([scout], cities=[alpha()], strategic=fog)
+    run(policy, game)
+    assert game.actions == [("move", 3, 10, 13)]  # Heading (10,13), kept next turn:
+    game.actions.clear()
+    run(policy, game)
+    assert game.actions == [("move", 3, 10, 13)]
+    # A site now needs the fog around (14,6) looked at: that beats the old heading.
+    exploration = build_exploration(fog, [])
+    game.actions.clear()
+    asyncio.run(policy._explore(game, scout, exploration, _NoDanger(), 5, (14, 6)))
+    assert game.actions[0][:2] == ("move", 3) and game.actions[0][2:] != (10, 13)
+
+
+def test_a_site_whose_fog_is_not_measured_yet_is_not_founded_on(real_safe_rate):
+    # Codex on PR 228: a site new to the scan had no fog record and passed as seen.
+    out = "KDONE"  # The read works but brings no FOG line for the site yet.
+    game = LuaGame(
+        out,
+        units=[settler(x=4, y=10)],
+        cities=[alpha()],
+        settle=[site(4, 10, food=40)],
+        overview=overview(turn=30, num_cities=1),
+        strategic=lq.StrategicMapData([], []),
+    )
+    policy = SettlingPolicy()
+    run(policy, game)
+    assert ("found", 7) not in game.actions
+    assert policy.decisions[-1].action == "no_site"
+    assert policy.decisions[-1].candidates[0].rejected == FOG_PENDING
+    assert policy._fog_sites  # The survey asked for it, so the next read measures it.
+    game.output = "FOG|4|10|40|0|99|0|0\nKDONE"  # Fully revealed: judged, and acceptable.
+    run(policy, game)
+    assert ("found", 7) in game.actions

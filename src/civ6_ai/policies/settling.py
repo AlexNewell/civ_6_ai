@@ -921,7 +921,13 @@ class SettlingPolicy:
         self._look_points = []
         for c in candidates:
             info = self._fog.get((c.x, c.y))
-            if (c.x, c.y) in self._needs_look and info is not None and len(self._look_points) < 3:
+            usable = c.rejected is None or c.rejected == FOG_PENDING
+            if (
+                usable
+                and (c.x, c.y) in self._needs_look
+                and info is not None
+                and len(self._look_points) < 3
+            ):
                 lx = c.x + info.dx
                 self._look_points.append((lx % width if width else lx, max(0, c.y + info.dy)))
         rejected: dict[str, int] = {}

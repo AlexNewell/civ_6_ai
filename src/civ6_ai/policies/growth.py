@@ -142,7 +142,8 @@ def _specialty_districts(city: City) -> int:
 def pending_food(city: City, tiles: CityTiles | None) -> int:
     """Food the city can still add: improvable food resources and a Harbor on free water."""
     total = sum(1 for item in city.unimproved_resources if item.name in _FOOD_RESOURCES)
-    if tiles is not None and "HARBOR" not in city.buildings:
+    harbor = any(d.district_type.removeprefix("DISTRICT_") == "HARBOR" for d in city.districts)
+    if tiles is not None and not harbor:
         total += min(len(tiles.free_water), _HARBOR_FOOD_CAP)
     return total
 

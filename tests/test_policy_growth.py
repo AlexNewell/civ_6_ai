@@ -282,10 +282,30 @@ def test_target_respects_food_capacity():
 
 
 def test_focus_gain_needs_a_better_free_tile():
-    assert tiles_of(5, worked=[1, 2], land=[3]).focus_gain() == 2
-    assert tiles_of(5, worked=[2, 2], land=[2, 1]).focus_gain() == 0
+    assert tiles_of(2, worked=[1, 2], land=[3]).focus_gain() == 2
+    assert tiles_of(2, worked=[2, 2], land=[2, 1]).focus_gain() == 0
 
 
 def test_no_read_keeps_the_old_estimate():
     c = city(population=5, housing=10.0, food_surplus=2.0)
     assert plan(c).food_limit == 7
+
+
+def test_focus_gain_counts_a_specialist_moving_onto_a_free_tile():
+    # 2 worked tiles, pop 3: one specialist. A free 1-food tile is no better than the worked
+    # ones but feeds the specialist.
+    t = tiles_of(3, worked=[2, 2], land=[1])
+    assert t.focus_gain() == 1
+    c = city(population=3, housing=10.0, food_surplus=-1.0, turns_to_grow=0)
+    assert plan(c, tiles=t).stance is Stance.FEED
+
+
+def test_a_city_with_a_harbor_district_has_no_pending_harbor_food():
+    from civ6_ai.policies.growth import pending_food
+    from civ6_ai.state.models import District
+
+    t = tiles_of(5, worked=[2] * 5, water=[2, 1])
+    c = city(population=5)
+    assert pending_food(c, t) == 2
+    harbor = replace(c, districts=(District("DISTRICT_HARBOR", 1, 1),))
+    assert pending_food(harbor, t) == 0

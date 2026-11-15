@@ -71,10 +71,15 @@ class CityTiles:
         return tuple(sorted((*self.free_land, *self.free_water), reverse=True))
 
     def focus_gain(self) -> int:
-        """Food a food focus could add now: swap the worst worked tiles for better free ones."""
-        gain = 0
-        worst = sorted(self.worked)
-        for new, old in zip(self.free, worst, strict=False):
+        """Food that rearranging citizens could add now.
+
+        A specialist moved onto a free tile gains that tile's whole food (it made none). Free
+        tiles left over replace the worst worked tiles when they are better.
+        """
+        free = list(self.free)
+        moved = free[: self.specialists]
+        gain = sum(moved)
+        for new, old in zip(free[len(moved) :], sorted(self.worked), strict=False):
             if new <= old:
                 break
             gain += new - old

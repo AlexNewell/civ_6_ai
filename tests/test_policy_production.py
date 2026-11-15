@@ -1144,6 +1144,42 @@ def test_a_city_that_starves_again_after_the_reset_keeps_its_food_focus():
     assert game.focus_calls == [(65536, "food"), (65536, "default"), (65536, "food")]
 
 
+class TileGame(FocusGame):
+    def __init__(self, reply, **kw):
+        super().__init__(**kw)
+        self.reply = reply
+        self.lua_calls = 0
+
+    async def execute_lua(self, code, context="gamecore"):
+        self.lua_calls += 1
+        return self.reply
+
+
+def test_no_food_focus_when_no_free_tile_could_take_it_and_one_read_serves_several_turns():
+    busy = dict(currently_building="BUILDING_LIBRARY")
+    game = TileGame(
+        "CT|65536|5|1,1,1,1||\nCTDONE\n",
+        cities=[fx.city_info(food_surplus=-1.0, **busy)],
+    )
+    policy = CityProductionPolicy()
+    for _ in range(3):
+        run(policy.assign(game))
+    assert game.focus_calls == []  # Run 13: the focus changed nothing for such a city.
+    assert game.lua_calls == 1  # Size and food sign unchanged: no re-read within the interval.
+    game.reply = "CT|65536|5|1,1,1,1|3|\nCTDONE\n"
+    game.data["cities"] = [fx.city_info(population=6, food_surplus=-1.0, **busy)]
+    run(policy.assign(game))  # The city changed size: read again; a free 3-food tile exists.
+    assert game.lua_calls == 2
+    assert game.focus_calls == [(65536, "food")]
+
+
+def test_a_partial_tile_read_is_dropped():
+    busy = dict(currently_building="BUILDING_LIBRARY")
+    game = TileGame("CT|65536|5|1,1||\n", cities=[fx.city_info(food_surplus=-1.0, **busy)])
+    run(CityProductionPolicy().assign(game))
+    assert game.focus_calls == [(65536, "food")]  # No usable read: the old behaviour.
+
+
 # ----- military readiness (Run 10) -----
 
 

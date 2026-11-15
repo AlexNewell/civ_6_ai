@@ -17,6 +17,7 @@ from dataclasses import dataclass, field, fields, replace
 from typing import Any, Protocol
 
 from civ6_ai.blockers import Blocker, BlockerGame, BlockerType
+from civ6_ai.city_tiles import REFRESH_TURNS, CityTiles, read_city_tiles
 from civ6_ai.construction import ProductionRefused, ProductionSet
 from civ6_ai.monitors import Event, EventBus
 from civ6_ai.placement import (
@@ -1014,6 +1015,9 @@ class CityProductionPolicy:
         self.weights = weights or ProductionWeights()  # The strategist replaces this later.
         self.refusals = RefusalMemory()
         self.growth = GrowthPolicy()  # Target size and stance per city (1.47).
+        self._tiles: dict[int, CityTiles] = {}  # Food of each city's tiles (`city_tiles.py`).
+        self._tiles_age = REFRESH_TURNS  # Turns since the last read.
+        self._tiles_seen: dict[int, tuple[int, bool]] = {}  # (pop, starving) at the last read.
         self.planner = Planner(
             emit=self._emit
         )  # Chained tile buys. Its `book` is the gold policy's saving list.
@@ -1037,7 +1041,7 @@ class CityProductionPolicy:
             spare_jobs=demand.spare_jobs if demand is not None else None,
         )
         self.expansion.target_cities = self.weights.target_cities
-        growth = self.growth.update(cities, empire, self.weights.target_cities)
+        growth = self.growth.update(cities, empire, self.weights.target_cities, tiles=self._tiles)
         return replace(context, sites_ok=self.expansion.sites_ok(empire.turn), growth=growth)
 
     async def assign(self, game: ProductionGame) -> list[str]:
@@ -1048,6 +1052,7 @@ class CityProductionPolicy:
         already building a defender or walls is left alone, so a switch never repeats.
         """
         cities = await _read_cities(game)
+        await self._read_tiles(game, cities)
         await self._feed_starving(game, cities)
         marked = self.defence.threatened_ids if self.defence is not None else frozenset()
         switching = [c for c in cities if _should_switch(c, marked)]
@@ -1113,6 +1118,26 @@ class CityProductionPolicy:
             return 0
         return int(empire.gold) - reserve_for(empire.num_cities, empire.gold_per_turn)
 
+    async def _read_tiles(self, game: ProductionGame, cities: list[City]) -> None:
+        """Refresh the per-city tile foods: every `REFRESH_TURNS`, or when a city's size changed or
+        it started or stopped starving. One batched call for all cities. Never raises on a bad
+        read (a partial read is dropped and the last good one kept)."""
+        execute = getattr(game, "execute_lua", None)
+        if execute is None or not cities:
+            return
+        self._tiles_age += 1  # One call per turn: no extra read just to learn the turn.
+        seen = {c.city_id: (c.pop, is_starving(c)) for c in cities}
+        if self._tiles_age < REFRESH_TURNS and seen == self._tiles_seen:
+            return
+        try:
+            tiles = await read_city_tiles(game)
+        except ConnectionError:
+            raise
+        except Exception as err:
+            log.warning("City tile read failed, keeping the last one: %s", err)
+            return
+        self._tiles, self._tiles_age, self._tiles_seen = tiles, 0, seen
+
     async def _feed_starving(self, game: ProductionGame, cities: list[City]) -> None:
         """Set a food focus on a starving city, and clear it once the city has recovered.
 
@@ -1123,6 +1148,11 @@ class CityProductionPolicy:
         """
         for city in cities:
             if is_starving(city) and city.city_id not in self._food_focus:
+                tiles = self._tiles.get(city.city_id)
+                if tiles is not None and tiles.focus_gain() <= 0:
+                    # Run 13: the capital and Quirigua had no free food tile, so the focus
+                    # (a call and a log line) changed nothing. Asked again when the tiles do.
+                    continue
                 focus, add = "food", True
             elif (
                 city.city_id in self._food_focus

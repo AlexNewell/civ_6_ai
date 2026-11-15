@@ -13,7 +13,7 @@ balanced game.
 import logging
 import math
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, field, fields, replace
 from typing import Any, Protocol
 
 from civ6_ai.blockers import Blocker, BlockerGame, BlockerType
@@ -39,6 +39,13 @@ from civ6_ai.policies.game_data import (
     UNIQUE_DISTRICTS,
     UPGRADES,
     WONDERS,
+)
+from civ6_ai.policies.growth import (
+    CityGrowth,
+    GrowthPolicy,
+    Stance,
+    food_multiplier,
+    housing_multiplier,
 )
 from civ6_ai.state import City, Empire, ProductionChoice, Unit
 from civ6_ai.state import read_cities as _read_cities
@@ -114,6 +121,8 @@ class ProductionContext:
     sites_ok: bool = True  # False when settling found no safe site to send a settler to.
     idle_builders: int = 0  # Builders that found no job on offer the last time they ran (1.45).
     spare_jobs: int | None = None  # Jobs no builder holds; None when not known this turn.
+    # Each city's growth plan (`growth.py`). Empty: food and housing items score the old way.
+    growth: Mapping[int, CityGrowth] = field(default_factory=dict, compare=False)
 
     def after_choosing(
         self, item: str, unknown_combat: bool = False, orders: bool = True
@@ -440,6 +449,40 @@ _FOOD_BUILDINGS = frozenset({"GRANARY", "LIGHTHOUSE", "HARBOR", "WATER_MILL"})
 _STARVING_FOOD_BOOST = 4.0  # Extra weight on the food yield of a food building in a starving city.
 
 
+_HOUSING_ITEMS = frozenset({"SEWER", "NEIGHBORHOOD"})  # Their food profile stands for housing.
+
+
+def _deficit_tolerated(city: City, ctx: ProductionContext) -> bool:
+    plan = ctx.growth.get(city.city_id)
+    return plan is not None and plan.stance is Stance.SHRINK_OK
+
+
+def _growth_adjusted(
+    value: float,
+    name: str,
+    profile: tuple[float, ...],
+    city: City,
+    ctx: ProductionContext,
+    w: ProductionWeights,
+) -> float:
+    """Rescale the food part of a building by the city's growth plan. Other yields are untouched.
+
+    A food building is worth what the gap to the city's target makes it, a housing building what
+    the housing cap costs, and neither once the city has reached its target size.
+    """
+    plan = ctx.growth.get(city.city_id)
+    if plan is None or profile[0] <= 0:
+        return value
+    if name in _HOUSING_ITEMS:
+        factor = housing_multiplier(plan)
+    elif name in _FOOD_BUILDINGS or name == "GRANARY":
+        factor = food_multiplier(plan)
+    else:
+        return value
+    food_part = profile[0] * w.food
+    return value + (factor - 1.0) * food_part
+
+
 def _unit_score(
     option: ProductionChoice, city: City, ctx: ProductionContext, w: ProductionWeights
 ) -> float:
@@ -529,9 +572,10 @@ def _building_score(
     if profile is None:
         return _UNKNOWN_BUILDING
     value = _yield_value(profile, w)
-    if name == "GRANARY" and city.food_surplus > 3:
+    if name == "GRANARY" and city.food_surplus > 3 and city.city_id not in ctx.growth:
         value *= 0.5
-    if name in _FOOD_BUILDINGS and is_starving(city):
+    value = _growth_adjusted(value, name, profile, city, ctx, w)
+    if name in _FOOD_BUILDINGS and is_starving(city) and not _deficit_tolerated(city, ctx):
         value += _STARVING_FOOD_BOOST * profile[0] * w.food
     return value
 
@@ -549,11 +593,18 @@ def _district_score(
     if name == "CAMPUS" and ctx.num_cities > 0:
         behind = max(0.0, 1.0 - ctx.science_districts / ctx.num_cities)
         value += _SCIENCE_CATCHUP * behind * w.science
-    if name in _FOOD_BUILDINGS and is_starving(city):
-        value += _STARVING_FOOD_BOOST * profile[0] * w.food
+    plan = ctx.growth.get(city.city_id)
     if name == "AQUEDUCT":
-        # Worth building when growth is capped by housing, not before.
-        value = value * 2.0 if city.housing - city.pop <= 1 else value * 0.3
+        # Worth building when growth is capped by housing, not before. With a growth plan, by
+        # how many citizens the cap costs toward the target.
+        if plan is not None:
+            value *= housing_multiplier(plan)
+        else:
+            value = value * 2.0 if city.housing - city.pop <= 1 else value * 0.3
+    else:
+        value = _growth_adjusted(value, name, profile, city, ctx, w)
+    if name in _FOOD_BUILDINGS and is_starving(city) and not _deficit_tolerated(city, ctx):
+        value += _STARVING_FOOD_BOOST * profile[0] * w.food
     return value
 
 
@@ -962,6 +1013,7 @@ class CityProductionPolicy:
         self.defence = defence  # The threat state (`defence.DefenceState`), or None.
         self.weights = weights or ProductionWeights()  # The strategist replaces this later.
         self.refusals = RefusalMemory()
+        self.growth = GrowthPolicy()  # Target size and stance per city (1.47).
         self.planner = Planner(
             emit=self._emit
         )  # Chained tile buys. Its `book` is the gold policy's saving list.
@@ -985,7 +1037,8 @@ class CityProductionPolicy:
             spare_jobs=demand.spare_jobs if demand is not None else None,
         )
         self.expansion.target_cities = self.weights.target_cities
-        return replace(context, sites_ok=self.expansion.sites_ok(empire.turn))
+        growth = self.growth.update(cities, empire, self.weights.target_cities)
+        return replace(context, sites_ok=self.expansion.sites_ok(empire.turn), growth=growth)
 
     async def assign(self, game: ProductionGame) -> list[str]:
         """Choose for each idle city, and return the names of any left without a choice.

@@ -29,12 +29,13 @@ Faith. Faith above `FaithSettings.reserve` is spent, in this order:
    the person can't be bought, so it is never the cheapest option. The price is read from the
    Great People screen, so it is exact. Ranked by the class weights used for recruiting. A
    Great Prophet is bought only while a religion can still be founded. When none is affordable
-   and the cheapest wanted one costs at most `SAVE_CAP` and the estimated income closes the gap
-   within `SAVE_TURNS`, the faith is saved toward it. There is no price cap: Run 9 judged
-   1,160 faith at 107 a turn (7 turns) not worth saving for and left up to 4,519 idle. A
-   person further than `SAVE_TURNS` away is not saved for, so the faith goes down the list.
-   While saving, a lesser buy that costs at most `SLACK_TURNS` turns of income, summed over
-   the whole wait, still goes ahead, so the saving does not stall every other outlet.
+   the faith is saved toward the person with the best return (`valuation`: value by class and
+   era over the price, at the turn it would be reached). There is no price or wait cutoff: Run 12
+   judged "not worth saving for" on 200 turns, with up to 2,872 faith idle and no other use.
+   Faith that sits unspent returns nothing, so a person is a target while the wait stays inside
+   `valuation.MAX_WAIT_FRACTION` of the turns left and the return clears the floor, which falls
+   as faith piles up. While saving, a lesser buy goes first only when
+   `valuation.buy_now_beats_saving` says it is worth more than the delay it causes.
    When no person is priced, the log counts how many are claimed, priced 0 or the sentinel.
 2. Units from the cities' production lists, tried with faith: the best defenders in a
    threatened city (`DefenceState`), then a Builder, but no Builder while one has nothing to do
@@ -73,7 +74,9 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from civ6_ai.blockers import action_succeeded, move_succeeded
-from civ6_ai.policies.production import defence_strength
+from civ6_ai.placement import last_turn_for
+from civ6_ai.policies import valuation
+from civ6_ai.policies.production import ProductionWeights, defence_strength
 from civ6_ai.policies.secondary import _GP_WEIGHTS, SecondaryWeights, canonical
 from civ6_ai.stacking import StackBlocks
 from civ6_ai.state import GameReads, Unit, read_units
@@ -93,8 +96,6 @@ RULE_WAIT = 15  # Turns before an item the game's rules refuse (no card or dedic
 SINK_WAIT = 3  # Turns the cities' lists are not read again when nothing could be tried.
 GP_REFRESH = 4  # Turns the great people list is reused while the cheapest price is out of reach.
 RELIGION_REFRESH = 10  # Turns the "can a religion be founded" answer is reused.
-SAVE_TURNS = 15  # Most turns of saving worth waiting for a great person (no price cap).
-SLACK_TURNS = 2  # While saving, a lesser buy is fine if it delays the target by at most this.
 
 _PROPHET = "UNIT_GREAT_PROPHET"
 _PROPHET_CLASS = "Great Prophet"
@@ -188,9 +189,9 @@ class FaithPolicy:
     defence: Any = None  # The threat state (`defence.DefenceState`), or None.
     builder_demand: Any = None  # `builder.BuilderDemand`, or None: what builders left undone.
     _stack: StackBlocks = field(default_factory=StackBlocks, init=False, repr=False)
-    _sink_cap: float | None = field(default=None, init=False, repr=False)
-    _saving_for: int | None = field(default=None, init=False, repr=False)  # Person's id.
-    _delay: tuple[int, float] = field(default=(-1, 0.0), init=False, repr=False)
+    _target: Any = field(default=None, init=False, repr=False)  # `valuation.Priced` saved for.
+    _last_turn: int = field(default=330, init=False, repr=False)
+    production_weights: ProductionWeights = field(default_factory=ProductionWeights)
     _last: tuple[int, float] | None = field(default=None, init=False, repr=False)
     _spent_since: float = field(default=0.0, init=False, repr=False)
     _income: float | None = field(default=None, init=False, repr=False)
@@ -336,7 +337,8 @@ class FaithPolicy:
             self._last = (turn, faith)
 
     async def _spend(self, game: FaithGame, turn: int) -> None:
-        faith = (await game.get_game_overview()).faith
+        overview = await game.get_game_overview()
+        faith = overview.faith
         reserve = self.settings.reserve
         self._track_income(turn, faith)
         if faith <= reserve or self.settings.max_purchases <= 0:
@@ -354,25 +356,16 @@ class FaithPolicy:
         notes: list[str] = []
         sinks: list[str] = []
         self._saving = None
-        self._saving_for = None
-        self._sink_cap = None
+        self._target = None
+        self._last_turn = last_turn_for(overview.game_speed, overview.max_turns)
         for step in (self._patronise, self._production_sinks):
             spent, count, tried = await step(game, turn, budget, attempts, bought, notes, sinks)
             budget -= spent
             bought += count
             attempts += tried
             self._spent_since += spent
-            if self._saving_for is not None and step == self._production_sinks:
-                before = self._delay[1] if self._delay[0] == self._saving_for else 0.0
-                self._delay = (self._saving_for, before + spent)
             if bought >= self.settings.max_purchases or attempts >= MAX_ATTEMPTS:
                 break
-            if self._saving is not None:
-                # Keep the faith for the great person, but a buy that delays it by at most
-                # `SLACK_TURNS` turns of income is still fine.
-                # The allowance is for the whole wait, so what lesser buys already took counts.
-                used = self._delay[1] if self._delay[0] == self._saving_for else 0.0
-                self._sink_cap = max(0.0, SLACK_TURNS * (self._income or 0.0) - used)
         if bought:
             log.info("Faith %.0f, reserve %.0f: spent on %s", faith, reserve, ", ".join(sinks))
         if self._saving is not None:
@@ -478,30 +471,66 @@ class FaithPolicy:
         return spent, count, tried
 
     def _save_for(self, wanted: list[Any], turn: int, budget: float, notes: list[str]) -> None:
-        """Pick the cheapest wanted great person as a saving target when it is reachable.
+        """Pick the great person with the best return as the saving target.
 
-        Reachable means the income estimate closes the gap within `SAVE_TURNS` turns, whatever
-        the price (Run 9: 1,160 faith at 107 a turn was 7 turns off and was refused as too
-        dear, while thousands sat idle). Otherwise the faith goes to the units and buildings
-        below.
+        The return is the person's value (class weight, era, cut near the game's end) over the
+        price, valued at the turn the income would reach it, and it must clear the floor
+        (`valuation.floor`), which falls as faith idles. The wait must be inside the share of the
+        turns left that `valuation.MAX_WAIT_FRACTION` allows. With no income there is no target.
+        Run 12: "cheapest 6470 faith vs 2001 above reserve, not worth saving for at 148.6 a
+        turn" was a 30 turn wait with a game of 80 turns left and no other use for the faith.
         """
         pool = [p for p in wanted if self._refused.get(("gp", p.individual_id, ""), -1) <= turn]
         if not pool:
             notes.append("great people: none wanted or all refused recently")
             return
-        target = min(pool, key=lambda p: (p.faith_cost, p.individual_id))
-        gap = target.faith_cost - budget
         income = self._income or 0.0
-        if income > 0 and gap / income <= SAVE_TURNS:
-            self._saving_for = target.individual_id
+        last = self._last_turn
+        priced = [
+            valuation.price(
+                f"{p.individual_name} ({p.class_name})",
+                p.faith_cost,
+                valuation.great_person_valuation(p, self.weights, turn, last),
+                turn,
+                last,
+            )
+            for p in pool
+        ]
+        found = valuation.pick_target(priced, budget, income, turn, last)
+        if found is not None:
+            target, wait = found
+            self._target = target
             self._saving = (
-                f"{target.individual_name} ({target.class_name}) at {target.faith_cost} faith, "
-                f"about {gap / income:.0f} turns at {income:.1f} a turn"
+                f"{target.label} at {target.cost} faith, value {target.value:.0f}, "
+                f"roi {target.roi:.2f}, about {wait:.0f} turns at {income:.1f} a turn"
             )
             return
+        best = min(priced, key=lambda p: (p.cost, p.label))
         notes.append(
-            f"great people: cheapest {target.faith_cost} faith vs {budget:.0f} above reserve, "
-            f"not worth saving for at {income:.1f} a turn"
+            f"great people: best {best.label} {best.cost} faith vs {budget:.0f} above reserve "
+            f"(roi {best.roi:.2f}), no target at {income:.1f} a turn with {last - turn} turns left"
+        )
+
+    def _worth_buying(
+        self, category: str, item: str, price: float, spare: float, turn: int, city: Any
+    ) -> bool:
+        """False when the item returns too little, or when buying it delays a better target.
+
+        Defence in a threatened city is never held back: losing a city beats any return.
+        """
+        if self._threatened(city) and category == "UNIT" and defence_strength(item) > 0:
+            return True
+        worth = valuation.catalogue_valuation(category, item, self.production_weights)
+        if worth is None:
+            return True
+        priced = valuation.price(item, int(price), worth, turn, self._last_turn)
+        if priced.roi < valuation.floor(spare, self._income or 0.0):
+            return False
+        target = self._target
+        if target is None:
+            return True
+        return valuation.buy_now_beats_saving(
+            priced.value, priced.cost, target.value, target.cost - spare
         )
 
     def _builder_wanted(self) -> bool:
@@ -584,8 +613,14 @@ class FaithPolicy:
                     notes.append(f"{item} in {city.name} blocked by a unit on the city tile")
                     continue
                 price = self._costs.get(item, estimate)
-                if self._sink_cap is not None and price > self._sink_cap - spent:
-                    continue  # Saving for a great person: only a cheap buy may go first.
+                if not self._worth_buying(category, item, price, budget - spent, turn, city):
+                    why = (
+                        f"waits for {self._target.label}"
+                        if self._target is not None
+                        else "returns too little"
+                    )
+                    notes.append(f"{item} in {city.name} ({price}) {why}")
+                    continue
                 if price > budget - spent:
                     cheapest_short = min(cheapest_short, price)
                     notes.append(

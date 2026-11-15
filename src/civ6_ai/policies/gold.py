@@ -5,11 +5,19 @@ this order, until the turn's bounds or the gold run out:
 
 1. Upgrade combat units the game says can upgrade now (the game's own check covers tech, gold
    and strategic resources). Units next to a hostile unit go first, then the most outdated.
-2. Buy one unit or building in a city. The choice is `rank_production`'s, the same ranking
-   production uses, so a Settler or Builder it wants, defence for a threatened city and the
-   high-value buildings come out in its order. A city's own current build does not count against
-   it, so the builder production just picked can be bought rather than skipped as "already
-   building one".
+2. Buy units, buildings and great people by return (`valuation`, added after Run 12, where
+   nothing was bought on 71% of turns above the reserve and the saving target was whatever
+   production ranked first, a 1,015 gold building valued at 1.0). Every unthreatened city's list
+   is read and each option valued: yields per turn (production's own tables, weighted by
+   `ProductionWeights`) over the turns of game left, plus time saved when the city is already
+   building it. Options are bought in ROI order down to a floor that falls as gold idles. The
+   unaffordable option with the best ROI at the turn it would be reached is the saving target,
+   and a lesser buy goes first only if buying it costs less than the delay it causes. A great
+   person patronised with gold is one more option (the faith policy does the same with faith,
+   and leaves Great Prophets to itself). Defence for a threatened city, no Builder while one is
+   idle, and one Builder, Settler or Trader a turn are kept from production's ranking. Every
+   purchase logs a `valuation` line with its value, cost, ROI, the floor and its basis. When
+   gold is below half of the cheapest price seen in the last three turns the lists are not read.
 3. Buy tiles, resource tiles first. A tile with no resource is bought only when it costs at most
    half of what is left to spend.
 
@@ -20,8 +28,9 @@ gold of income (never below `RESERVE_MIN`), plus ten turns of any deficit, cappe
 refills a spent reserve quickly. The deficit term keeps a negative income from emptying the
 treasury.
 
-Saving: when the best upgrade (or the top-ranked item of an unthreatened city) is out of reach
-but income closes the gap within `SAVE_TURNS` turns, it becomes the saving target. While there
+Saving: when the best upgrade is out of reach but income closes the gap within `SAVE_TURNS`
+turns, it becomes the saving target (the best-return item, step 2, is saved for by value, with no
+turn cutoff). While there
 is one, tiles and other purchases wait (a threatened city's defence does not), so small buys do
 not keep the gold below one price. A target further away is not saved for.
 
@@ -48,18 +57,21 @@ import re
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
-from civ6_ai.placement import PlanBook
+from civ6_ai.placement import PlanBook, last_turn_for
+from civ6_ai.policies import valuation
 from civ6_ai.policies.game_data import COMBAT_UNITS, UPGRADES
 from civ6_ai.policies.military import holds_tile
 from civ6_ai.policies.production import (
     ProductionContext,
     ProductionWeights,
     build_context,
+    canonical,
     defence_strength,
     is_defence,
     rank_production,
     score,
 )
+from civ6_ai.policies.secondary import _GP_WEIGHTS, SecondaryWeights
 from civ6_ai.policies.settling import SCOUT
 from civ6_ai.stacking import StackBlocks
 from civ6_ai.state import City, Unit
@@ -91,7 +103,14 @@ THREAT_DEFICIT_TURNS = 2  # The reserve under threat: enough that a deficit cann
 THREAT_MAX_UPGRADES = 5
 MAX_CLEARED_PER_CITY = 2  # Units moved off one city tile to make room for a purchase.
 MAX_CLEARED_PER_TURN = 4
+SCAN_AGE = 3  # Turns the cheapest price seen holds the scan off while gold is far below it.
+SCAN_MARGIN = 0.5  # ... and gold must be below this share of that price (prices only fall slowly).
+GP_MIN_BUDGET = 150  # Gold above the reserve before the great people list is first read.
+GP_REFRESH = 4  # Turns the great people list is reused while none is in reach.
+_PROPHET = "Great Prophet"  # Left to the faith policy: it needs a religion to be founded.
+_UNBUYABLE = 2_000_000_000  # The game reports INT_MAX (or near) for a person who can't be bought.
 _PURCHASABLE = ("UNIT", "BUILDING")
+_ONE_A_TURN = ("UNIT_BUILDER", "UNIT_SETTLER", "UNIT_TRADER")  # Never two in one turn.
 _NAME = re.compile(r"[A-Z0-9_]+")
 _RESOURCE_RANK = {"luxury": 0, "strategic": 1, "bonus": 2}
 
@@ -113,9 +132,26 @@ class GoldGame(Protocol):
     async def purchase_item(
         self, city_id: int, item_type: str, item_name: str, yield_type: str = "YIELD_GOLD"
     ) -> str: ...
+    async def patronize_great_person(self, individual_id: int, yield_type: str = ...) -> str: ...
+    async def get_great_people(self) -> list[Any]: ...
     async def get_purchasable_tiles(self, city_id: int) -> Any: ...
     async def purchase_tile(self, city_id: int, x: int, y: int) -> str: ...
     async def move_unit(self, unit_index: int, target_x: int, target_y: int) -> str: ...
+
+
+@dataclass
+class _Option:
+    """A valued purchase: an item in a city, or a great person (`person`)."""
+
+    priced: Any  # `valuation.Priced`
+    city: City | None
+    option: Any
+    context: ProductionContext | None
+    person: Any = None
+
+
+def _ok_any(result: str) -> bool:
+    return isinstance(result, str) and not result.startswith(("Error", "ERR:"))
 
 
 def _ok(result: str, marker: str) -> bool:
@@ -197,6 +233,9 @@ class _Turn:
     slack: float = 0.0  # Gold lesser buys may still take while saving (see `SLACK_TURNS`).
     key: str | None = None  # Identifies the target across turns, for `delay`.
     delay: dict[str, float] = field(default_factory=dict)  # Gold lesser buys took per target.
+    now: int = 0  # The game turn, and the turn the game ends, for the horizon of a valuation.
+    last: int = 330
+    roi_target: Any = None  # `valuation.Priced` being saved for by return, not by an upgrade.
 
     def spend(self, cost: int) -> None:
         """Take a spend off the budget, and off the slack when it is made while saving."""
@@ -224,6 +263,16 @@ class _Turn:
         self.slack = max(0.0, SLACK_TURNS * self.income - self.delay.get(self.key, 0.0))
         return True
 
+    def save_by_return(self, item: Any, wait: float) -> None:
+        """Make a valued item the saving target. Its worth was checked (`valuation.pick_target`)."""
+        self.roi_target = item
+        self.target = (
+            f"{item.label} (cost {item.cost}, value {item.value:.0f}, roi {item.roi:.2f}, "
+            f"{wait:.0f} turns at {self.income:.0f} a turn)"
+        )
+        self.key = f"{item.label}:{item.cost}"
+        self.slack = max(0.0, SLACK_TURNS * self.income - self.delay.get(self.key, 0.0))
+
     @property
     def refused_out(self) -> bool:
         return self.refusals >= MAX_REFUSALS
@@ -250,6 +299,9 @@ class GoldPolicy:
         self.plans = plans if plans is not None else PlanBook()
         self.weights = weights or ProductionWeights()
         self.defence = defence  # The threat state (`defence.DefenceState`), or None.
+        self._cheapest: tuple[int, int] | None = None  # (turn, price) of the cheapest option.
+        self._people: tuple[int, list] | None = None  # (turn read, great people).
+        self._refused_people: dict[int, int] = {}  # Person id -> gold price when refused.
 
     async def run(self, game: GoldGame) -> None:
         # The overview alone settles whether there is anything to spend. The full empire read is
@@ -266,7 +318,13 @@ class GoldPolicy:
         empire = await _read_empire(game)
         reserve = self._reserve(empire.num_cities, empire.gold_per_turn)
         budget = int(empire.gold) - reserve
-        turn = _Turn(budget, income=empire.gold_per_turn, delay=self._delay)
+        turn = _Turn(
+            budget,
+            income=empire.gold_per_turn,
+            delay=self._delay,
+            now=empire.turn,
+            last=last_turn_for(empire.game_speed, empire.max_turns),
+        )
         notes: list[str] = []
         log.info("Gold %d, reserve %d, %d to spend", empire.gold, reserve, budget)
         if threatened:
@@ -394,17 +452,25 @@ class GoldPolicy:
         return any(hex_distance(unit.x, unit.y, x, y) <= 4 for x, y in hostile)
 
     async def _buy(self, game, turn, empire, cities: list[City], units, notes: list[str]):
+        """Threatened cities buy defence first (as before). The rest compete on return.
+
+        Every unthreatened city's list is read, each option is valued (`valuation`), and the
+        affordable ones are bought in order of ROI down to the floor, which falls as gold idles.
+        The unaffordable option with the best ROI at the turn it would be reached becomes the
+        saving target; a lesser buy goes first only if `valuation.buy_now_beats_saving` says so.
+        """
         building = {c.city_id: c.building for c in cities if c.building}
         self._stack.refresh(cities, units)
         demand = self.builder_demand
-        bought: list[str] = []
         limit = MAX_PURCHASES
         if self.defence is not None:
             limit = max(limit, len(self.defence.cities))
+        threatened = [c for c in cities if self._may_buy_while_saving(c)]
+        pool: list[_Option] = []
+        if not threatened and self._scan_skipped(turn, notes):
+            return
         for city in cities:
-            if turn.purchases >= limit or turn.refused_out:
-                break
-            if turn.budget <= 0:
+            if turn.refused_out:
                 break
             try:
                 options = await _read_production(game, city.city_id)
@@ -413,24 +479,230 @@ class GoldPolicy:
             except Exception:
                 log.exception("Production read failed for %s", city.name)
                 continue
-            if turn.target is not None and not self._may_buy_while_saving(city) and turn.slack <= 0:
-                notes.append(f"{city.name}: saving toward {turn.target}")
-                continue
             others = [item for cid, item in building.items() if cid != city.city_id]
             context = build_context(
                 empire,
                 units,
-                [*others, *bought],
+                others,
                 cities,
                 self.defence,
                 idle_builders=demand.idle if demand is not None else 0,
                 spare_jobs=demand.spare_jobs if demand is not None else None,
             )
             ranked = rank_production(city, options, context, self.weights)
-            if self.defence is not None and self.defence.is_threatened(city.city_id):
+            if city in threatened:
+                if turn.purchases >= limit or turn.budget <= 0:
+                    continue
                 # Defenders and walls only. A threatened city does not buy a library.
                 ranked = strongest_first([o for o in ranked if is_defence(o)], turn.budget)
-            await self._buy_in(game, turn, city, ranked, context, bought, notes, units)
+                await self._buy_in(game, turn, city, ranked, context, [], notes, units)
+                continue
+            for option in ranked:
+                if score(option, city, context, self.weights) <= 0:
+                    break
+                if (
+                    option.category not in _PURCHASABLE
+                    or option.is_repair
+                    or option.gold_cost is None
+                    or option.gold_cost <= 0
+                    or not _NAME.fullmatch(option.item)
+                ):
+                    continue
+                if self._stack.is_blocked(city.city_id, option.item):
+                    notes.append(f"{city.name} {option.item} blocked by a unit on the city tile")
+                    continue
+                worth = valuation.value_option(option, city, context, self.weights)
+                if worth is None:
+                    continue
+                label = f"{city.name} {option.item}"
+                priced = valuation.price(label, option.gold_cost, worth, turn.now, turn.last)
+                pool.append(_Option(priced, city, option, context))
+        pool += await self._great_people(game, turn)
+        self._note_scan(turn, pool)
+        await self._spend_by_return(game, turn, pool, notes, limit)
+
+    def _scan_skipped(self, turn: _Turn, notes: list[str]) -> bool:
+        """True when gold is far below the cheapest price seen a moment ago.
+
+        Reading every city's list costs a call each. The price only falls as a city's own
+        production progresses, so a short memory with a wide margin is safe; any threat, or gold
+        reaching the margin, reads the lists again at once.
+        """
+        seen = self._cheapest
+        if seen is None or turn.now - seen[0] > SCAN_AGE or turn.now < seen[0]:
+            return False
+        if turn.budget >= SCAN_MARGIN * seen[1]:
+            return False
+        notes.append(
+            f"gold {turn.budget} is below half of the cheapest price seen ({seen[1]}) "
+            f"on turn {seen[0]}, lists not read"
+        )
+        return True
+
+    def _note_scan(self, turn: _Turn, pool: list) -> None:
+        prices = [p.priced.cost for p in pool if not p.priced.valuation.always]
+        self._cheapest = (turn.now, min(prices)) if prices else None
+
+    async def _great_people(self, game: GoldGame, turn: _Turn) -> list:
+        """Great people the game lets us patronize with gold, valued by class and era."""
+        read = getattr(game, "get_great_people", None)
+        if read is None or (turn.budget < GP_MIN_BUDGET and self._people is None):
+            return []
+        cached = self._people
+        if (
+            cached is not None
+            and 0 <= turn.now - cached[0] < GP_REFRESH
+            and not any(0 < p.gold_cost <= turn.budget for p in cached[1])
+        ):
+            people = cached[1]
+        else:
+            try:
+                people = list(await read())
+            except ConnectionError:
+                raise
+            except Exception:
+                log.exception("Great people read failed")
+                return []
+            self._people = (turn.now, people)
+        out = []
+        weights = SecondaryWeights()
+        for person in people:
+            attr = _GP_WEIGHTS.get(person.class_name)
+            if (
+                person.claimant != "Unclaimed"
+                or not 0 < person.gold_cost < _UNBUYABLE
+                or person.class_name == _PROPHET
+                or attr is None
+                or getattr(weights, attr) <= 0
+                or self._refused_people.get(person.individual_id) == person.gold_cost
+            ):
+                continue
+            worth = valuation.great_person_valuation(person, weights, turn.now, turn.last)
+            label = f"{person.individual_name} ({person.class_name})"
+            priced = valuation.price(label, person.gold_cost, worth, turn.now, turn.last)
+            out.append(_Option(priced, None, None, None, person))
+        return out
+
+    async def _spend_by_return(
+        self, game: GoldGame, turn: _Turn, pool: list, notes: list[str], limit: int
+    ) -> None:
+        """Buy in ROI order down to the floor, keeping gold for a better item out of reach."""
+        if not pool:
+            return
+        reach = [p.priced for p in pool if p.priced.cost > turn.budget]
+        if turn.target is None:
+            found = valuation.pick_target(reach, turn.budget, turn.income, turn.now, turn.last)
+            if found is not None:
+                turn.save_by_return(*found)
+        bought_cities: set[int] = set()
+        bought_kinds: set[str] = set()
+        bought_items: list[str] = []
+        skipped: list[str] = []
+        for entry in sorted(pool, key=lambda p: (-p.priced.roi, p.priced.cost, p.priced.label)):
+            priced = entry.priced
+            if turn.purchases >= limit or turn.refused_out or turn.budget <= 0:
+                break
+            if priced.cost > turn.budget:
+                continue
+            kind = canonical(entry.option.item) if entry.option is not None else ""
+            if (entry.city is not None and entry.city.city_id in bought_cities) or (
+                kind in _ONE_A_TURN and kind in bought_kinds
+            ):
+                continue
+            if bought_items and entry.option is not None:
+                # What was bought this turn counts: one scout wanted is not bought by each city.
+                context = entry.context
+                for item in bought_items:
+                    context = context.after_choosing(item)
+                worth = valuation.value_option(entry.option, entry.city, context, self.weights)
+                if worth is None:
+                    continue
+                priced = valuation.price(priced.label, priced.cost, worth, turn.now, turn.last)
+            bar = valuation.floor(turn.budget, turn.income)
+            if not priced.valuation.always:
+                if priced.roi < bar:
+                    skipped.append(f"{priced.label} roi {priced.roi:.2f} < floor {bar:.2f}")
+                    continue
+                if turn.roi_target is not None:
+                    target = turn.roi_target
+                    if not valuation.buy_now_beats_saving(
+                        priced.value, priced.cost, target.value, target.cost - turn.budget
+                    ):
+                        skipped.append(
+                            f"{priced.label} roi {priced.roi:.2f} waits for {target.label}"
+                        )
+                        continue
+                elif turn.target is not None and priced.cost > turn.slack:
+                    skipped.append(f"{priced.label} waits for {turn.target}")
+                    continue
+            entry.priced = priced
+            if await self._purchase(game, turn, entry, bar, notes):
+                if entry.city is not None:
+                    bought_cities.add(entry.city.city_id)
+                bought_kinds.add(kind)
+                if entry.option is not None:
+                    bought_items.append(entry.option.item)
+        notes += skipped[:4]
+        if not turn.purchases:
+            best = sorted(reach, key=lambda p: -p.roi)[:4]
+            notes += [
+                f"{p.label} costs {p.cost} (roi {p.roi:.2f}, value {p.value:.0f})" for p in best
+            ]
+            if len(reach) > len(best):
+                notes.append(f"{len(reach) - len(best)} more cost more than {turn.budget}")
+
+    async def _purchase(
+        self, game: GoldGame, turn: _Turn, entry: "_Option", bar: float, notes: list[str]
+    ) -> bool:
+        priced = entry.priced
+        audit = (
+            f"value={priced.value:.0f} cost={priced.cost} roi={priced.roi:.2f} floor={bar:.2f} "
+            f"basis={priced.valuation.basis!r} target={turn.target or 'none'!r}"
+        )
+        if entry.person is not None:
+            person = entry.person
+            result = await self._call(
+                game.patronize_great_person(person.individual_id, "YIELD_GOLD")
+            )
+            if "PATRONIZED" in str(result) and _ok_any(result):
+                turn.spend(priced.cost)
+                turn.purchases += 1
+                self._people = None  # Prices change with every great person recruited.
+                log.info("Bought %s for %d gold (great person)", priced.label, priced.cost)
+                log.info(
+                    "valuation turn=%d buy kind=great_person item=%r %s",
+                    turn.now,
+                    priced.label,
+                    audit,
+                )
+                return True
+            turn.refusals += 1
+            self._refused_people[person.individual_id] = person.gold_cost
+            log.info("Patronage of %s refused: %s", priced.label, str(result)[:120])
+            return False
+        city, option = entry.city, entry.option
+        result = await self._call(game.purchase_item(city.city_id, option.category, option.item))
+        if _ok(result, "PURCHASED"):
+            turn.spend(priced.cost)
+            turn.purchases += 1
+            why = "threatened" if priced.valuation.always else "best return affordable"
+            if self.defence is not None:
+                self.defence.note(city.city_id, f"gold: bought {option.item} for {priced.cost}")
+            log.info("Bought %s in %s for %d (%s)", option.item, city.name, priced.cost, why)
+            log.info(
+                "valuation turn=%d buy kind=%s city=%r item=%s %s",
+                turn.now,
+                option.category.lower(),
+                city.name,
+                option.item,
+                audit,
+            )
+            return True
+        turn.refusals += 1
+        if self._stack.record(city.city_id, option.item, result):
+            notes.append(f"{city.name} {option.item} blocked by a unit on the city tile")
+        log.info("Purchase of %s in %s refused: %s", option.item, city.name, str(result)[:120])
+        return False
 
     def _may_buy_while_saving(self, city: City) -> bool:
         """Only a threatened city's defence is bought while gold is saved for something else."""

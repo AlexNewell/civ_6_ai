@@ -450,6 +450,46 @@ class MilitaryPolicy:
         await self._spare_units(game, t)
         await self._idle(game, t)
         self._publish_defence(t)
+        self._log_offense(t)
+
+    # ----- offense summary -----
+
+    def _log_offense(self, t: _Turn) -> None:
+        """One line a turn on how much offense there was and what it faced (Run 15).
+
+        The effectiveness report reads it to judge barbarian handling in the early game and
+        attacking later. `kills_barb` counts only kills the attack reply reported, so a city
+        strike's kill may be missed. Turns with no combat unit write no line.
+        """
+        s = self.settings
+        barbs = [b for b in t.threats if b.owner_id == BARBARIAN_ID and b.hostile]
+        barb_tiles = {(b.x, b.y) for b in barbs}
+        near = [
+            b
+            for b in barbs
+            if any(hex_distance(b.x, b.y, c.x, c.y, s.map_width) <= s.camp_search_radius
+                   for c in t.cities)
+        ]  # fmt: skip
+        mine = [d for d in self.decisions if d.turn == t.turn]
+        landed = [
+            d
+            for d in mine
+            if d.action in ("attack", "city_strike") and "refused" not in d.reason
+            and "refused" not in d.result
+        ]  # fmt: skip
+        on_barb = [d for d in landed if d.target in barb_tiles]
+        line = {
+            "turn": t.turn,
+            "combat_units": len(t.mine),
+            "spare": sum(1 for u in t.mine if self._spare(t, u)),
+            "barb_visible": len(barbs),
+            "barb_near": len(near),
+            "attacks_barb": len(on_barb),
+            "attacks_other": len(landed) - len(on_barb),
+            "kills_barb": len(t.dead & barb_tiles),
+            "camp_orders": sum(1 for d in mine if d.action == "camp" and "refused" not in d.reason),
+        }
+        log.info("military_offense %s", json.dumps(line, sort_keys=True))
 
     # ----- bookkeeping -----
 

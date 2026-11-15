@@ -67,6 +67,11 @@ MAX_STARVING_NOTICES = 25
 MAX_WASTED_GREAT_PEOPLE = 3
 MAX_IDLE_ENVOY_TURNS = 5
 MAX_FAILED_TILE_BUYS = 2  # Each is gold spent for nothing: the placement rules need a look.
+# Offense is judged by game phase (Run 15). Barbarians spawn early and camps keep spawning, so the
+# early window asks whether the bot answers them; later windows only count the fighting.
+OFFENSE_PHASES = (("early", 1, 75), ("middle", 76, 150), ("late", 151, 10_000))
+MAX_BARB_UNANSWERED_SHARE = 0.7  # Barbarians near a city, spare units, and no attack or camp order.
+MAX_BARB_NO_SPARE_SHARE = 0.5  # Barbarians near a city and no unit free to answer.
 PLANNED_STOPS = ("game_over", "turn_limit")
 
 # The checks that gate G1 (a run is clean only if none fails); the rest only warn. See
@@ -791,6 +796,75 @@ def military_checks(run: RunLogs) -> list[Check]:
     return out
 
 
+def offense_checks(run: RunLogs) -> list[Check]:
+    """How much offense the bot does, by phase, and whether it answers early barbarians.
+
+    Reads the `military_offense` line (one per turn with a combat unit). Only the early window
+    carries pass/fail rules, since barbarians are the early threat; the other windows are counts.
+    A window the run did not reach, or that has no such lines, is "no data".
+    """
+    rows = [d for d in _decisions(run, "policies.military", "military_offense") if "turn" in d]
+    out: list[Check] = []
+    if not rows:
+        return [_no_data("offense", "offense by phase", "see rule", "no military_offense lines")]
+    last = max((r["turn"] for r in run.records), default=0)
+    for phase, first, final in OFFENSE_PHASES:
+        window = [d for d in rows if first <= d["turn"] <= final]
+        if last < first or not window:
+            out.append(_no_data("offense", f"{phase}: attacks", "see rule", "phase not reached"))
+            continue
+        turns = min(last, final) - first + 1
+        barb = sum(d["attacks_barb"] for d in window)
+        other = sum(d["attacks_other"] for d in window)
+        out.append(
+            _info(
+                "offense",
+                f"{phase}: attacks (turns {first}-{min(last, final)})",
+                barb + other,
+                f"{barb} on barbarians, {other} on others, {(barb + other) * 10 / turns:.1f} "
+                f"per 10 turns; {sum(d['kills_barb'] for d in window)} barbarian kills reported",
+            )
+        )
+        if phase != "early":
+            continue
+        pressed = [d for d in window if d["barb_near"] > 0]
+        free = [d for d in pressed if d["spare"] > 0]
+        out.append(
+            _share_check(
+                "offense",
+                "early: barbarian turns with no spare unit to answer",
+                len(pressed) - len(free),
+                len(pressed),
+                MAX_BARB_NO_SPARE_SHARE,
+                f"at most {MAX_BARB_NO_SPARE_SHARE:.0%} of turns with barbarians near a city "
+                "leave no unit free",
+                "early defenders are all pinned to garrisons: build one more combat unit",
+            )
+        )
+        quiet = sum(1 for d in free if d["attacks_barb"] + d["camp_orders"] == 0)
+        out.append(
+            _share_check(
+                "offense",
+                "early: barbarian turns answered by no attack or camp order",
+                quiet,
+                len(free),
+                MAX_BARB_UNANSWERED_SHARE,
+                f"at most {MAX_BARB_UNANSWERED_SHARE:.0%} of turns with barbarians near and a "
+                "spare unit end without an attack or a camp advance",
+                "a barbarian beside a city that is never hit keeps raiding its tiles",
+            )
+        )
+        out.append(
+            _info(
+                "offense",
+                "early: camp advances",
+                sum(d["camp_orders"] for d in window),
+                f"{sum(1 for d in window if d['barb_visible'] > 0)} turns with barbarians in sight",
+            )
+        )
+    return out
+
+
 def settling_checks(run: RunLogs) -> list[Check]:
     out: list[Check] = []
     covered = run.settle_records() if run.has_settle else run.records
@@ -1048,6 +1122,7 @@ ALL_CHECKS = (
     production_checks,
     builder_checks,
     military_checks,
+    offense_checks,
     settling_checks,
     research_checks,
     government_checks,

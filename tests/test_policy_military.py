@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import math
 
@@ -1202,3 +1203,34 @@ def test_a_lua_error_from_a_strike_is_logged_once_and_backs_off(caplog):
     assert len(game.orders("city_attack")) == 1
     assert len([r for r in caplog.records if "City strike" in r.getMessage()]) == 1
     assert any(d.action == "city_strike" and "refused" in d.reason for d in policy.decisions)
+
+
+def offense_rows(caplog):
+    prefix = "military_offense "
+    return [
+        json.loads(r.getMessage()[len(prefix) :])
+        for r in caplog.records
+        if r.getMessage().startswith(prefix)
+    ]
+
+
+def test_the_offense_line_counts_an_attack_on_a_barbarian(caplog):
+    game = MilitaryGame(
+        [archer(targets=[target()])], [barbarian()], cities=[city_info(garrison_unit="UNIT_ARCHER")]
+    )
+    with caplog.at_level(logging.INFO):
+        run(MilitaryPolicy(), game)
+    (row,) = offense_rows(caplog)
+    assert row["attacks_barb"] == 1
+    assert row["attacks_other"] == 0
+    assert row["barb_visible"] == 1
+    assert row["combat_units"] == 1
+
+
+def test_the_offense_line_counts_camp_orders(caplog):
+    game = camp_game(strong_pair(), [barbarian(x=15, y=10, cs=5)])
+    with caplog.at_level(logging.INFO):
+        run(MilitaryPolicy(), game)
+    (row,) = offense_rows(caplog)
+    assert row["camp_orders"] == 2
+    assert row["attacks_barb"] == 0

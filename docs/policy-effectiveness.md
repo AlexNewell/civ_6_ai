@@ -147,6 +147,8 @@ The others (production refusals, builder idle, policy re-sets, military refusals
 
 **Logged since issue 141.** `great_people activated|wasted|idle turn N` (secondary), `gold_spent turn total: S of B to spend` (gold) and `envoy_tokens turn N: K available` (wars, from the read it already makes). The checks use them when present and fall back to call counts on older logs.
 
+**Offense, by phase (Run 15).** The military policy writes one `military_offense {json}` line a turn (combat units, spare units, barbarians in sight and near a city, attacks on barbarians and on others, barbarian kills reported, camp orders). `offense_checks` reads it in three windows: early (turns 1-75), middle (76-150), late (151 on). Every window reports attacks per 10 turns as a count. Only the early window has rules, both warnings: at most 50% of turns with barbarians near a city may leave no unit free, and at most 70% of such turns with a spare unit may end without an attack or a camp advance. A window the run never reached, or a log from before the line existed, reads "no data". Turns with no combat unit write no line, so a barbarian beside a city with no unit at all is not counted. City-strike kills may be missed in `kills_barb`.
+
 **Cost.** Nothing in the script touches the game. All the data is in the logs the bot already writes. Two measures need new logging, with no new game calls:
 
 - an activation success line next to the refusal line (great-person flow),

@@ -205,3 +205,13 @@ def test_tolerated_deficit_gets_no_starving_bonus():
     assert tolerated.stance is Stance.SHRINK_OK
     fed = plan(c, turn=100)
     assert score(granary, c, ctx_with(c, tolerated), pw) < score(granary, c, ctx_with(c, fed), pw)
+
+
+def test_the_policy_uses_the_speeds_last_turn_when_the_game_sets_no_limit():
+    # Run 13: GAME_MAX_TURNS is unset, so max_turns was 0 and the late-game rules never applied.
+    # A Quick game ends at turn 330.
+    policy = GrowthPolicy()
+    c = city(population=9, housing=14.0, food_surplus=4.0, turns_to_grow=5)
+    empire = replace(fx_empire(turn=320), max_turns=0, game_speed="GAMESPEED_QUICK")
+    policy.update([c], empire, 6)
+    assert policy.plan_for(c.city_id).stance is Stance.HOLD

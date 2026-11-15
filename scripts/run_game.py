@@ -25,6 +25,7 @@ from civ6_ai.city_focus import fix_set_yield_focus
 from civ6_ai.district_advisor import fix_district_advisor, fix_wonder_advisor
 from civ6_ai.effectiveness import end_of_run_lines
 from civ6_ai.fastcalls import fix_units_query, narrow_popup_scan, shorten_call_waits
+from civ6_ai.game_speed import fix_overview_speed
 from civ6_ai.gp_advisor import fix_gp_advisor
 from civ6_ai.metrics.costs import game_id_for_new_session, game_id_of_log
 from civ6_ai.metrics.speed import summarise as summarise_speed
@@ -103,6 +104,7 @@ async def play_game(
                 ("fix_gp_advisor", fix_gp_advisor),
                 ("fix_city_attack", fix_city_attack),
                 ("fix_set_yield_focus", fix_set_yield_focus),
+                ("fix_overview_speed", fix_overview_speed),
                 ("fix_victory_check", fix_victory_check),
                 ("fix_district_advisor", fix_district_advisor),
                 ("fix_wonder_advisor", fix_wonder_advisor),

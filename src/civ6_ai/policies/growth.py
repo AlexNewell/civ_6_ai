@@ -40,6 +40,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from civ6_ai.placement import last_turn_for
 from civ6_ai.state import City, Empire
 
 log = logging.getLogger(__name__)
@@ -267,7 +268,9 @@ class GrowthPolicy:
             plans[city.city_id] = plan_city(
                 city,
                 empire.turn,
-                empire.max_turns,
+                # The game's limit, or the speed's usual last turn: GAME_MAX_TURNS is unset in
+                # STD_T1_01, so max_turns alone (0) left the late-game rules off (Run 13).
+                last_turn_for(empire.game_speed, empire.max_turns),
                 empire.num_cities,
                 target_cities,
                 self.weights,

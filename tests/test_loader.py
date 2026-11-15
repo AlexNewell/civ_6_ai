@@ -168,3 +168,25 @@ def test_play_with_checkpoints_stops_when_the_game_does():
 
     reason = asyncio.run(run_game.play_with_checkpoints(play, turn_now, save, 50, [20]))
     assert reason == StopReason.GAME_OVER
+
+
+def test_a_slice_resumed_on_a_checkpoint_turn_still_saves_it():
+    # Codex on PR 232: from turn 50 with save_at [30, 50], turn 50 was never saved.
+    import run_game
+
+    state = {"turn": 50}
+    saved: list[int] = []
+
+    async def play(n):
+        state["turn"] += n
+        return StopReason.TURN_LIMIT
+
+    async def turn_now():
+        return state["turn"]
+
+    async def save(turn):
+        saved.append(turn)
+        return True
+
+    asyncio.run(run_game.play_with_checkpoints(play, turn_now, save, 60, [30, 50, 100]))
+    assert saved == [50, 100]

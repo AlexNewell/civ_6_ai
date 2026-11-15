@@ -1456,3 +1456,16 @@ def test_a_spare_unit_is_chosen_before_the_lone_garrison():
     settler_unit = next(u for u in units if u.unit_id == 7)
     pick = find_escort(settler_unit, units, [(10, 10)], set(), 5, lone_ok={(10, 10)})
     assert pick is not None and pick.unit_id == 8
+
+
+def test_a_garrison_that_walks_out_to_join_the_settler_is_recorded_for_recall():
+    policy = _policy()
+    garrison = unit_info(unit_id=9, unit_index=9, x=10, y=10)
+    game = make_game(
+        [settler(x=10, y=13), garrison],
+        cities=[alpha()],
+        threats=[_t("UNIT_SCOUT", 13, 13, 10)],
+        sites=[site(14, 6, food=40)],
+    )
+    run(policy, game)
+    assert policy._stripped == {(10, 10): 9}

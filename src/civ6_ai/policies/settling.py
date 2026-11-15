@@ -1087,9 +1087,6 @@ class SettlingPolicy:
             escort = companion  # Never gather a second unit.
         else:
             escort = self._find_escort(settler, units, city_tiles, claimed, danger)
-        held_here = sum(1 for u in units if _land_military(u) and (u.x, u.y) == here_tile)
-        if escort is not None and in_city and (escort.x, escort.y) == here_tile and held_here == 1:
-            self._stripped[here_tile] = escort.unit_id  # The city is left without a defender.
         crowded = any(_holds_tile(u) and (u.x, u.y) == (settler.x, settler.y) for u in units)
         if escort is not None and companion is None:
             # Skip an escort whose order the game already refused with nothing changed.
@@ -1099,6 +1096,10 @@ class SettlingPolicy:
             ):
                 excluded.add(escort.unit_id)
                 escort = self._find_escort(settler, units, city_tiles, excluded, danger)
+        if escort is not None and (escort.x, escort.y) in city_tiles:
+            origin = (escort.x, escort.y)  # Wherever the settler is, this city loses its defender.
+            if sum(1 for u in units if _land_military(u) and (u.x, u.y) == origin) == 1:
+                self._stripped[origin] = escort.unit_id
         target = next((c for c in better if not c.path_threat or escort is not None), None)
         if target is None:
             # Going alone is for a route the threat read finds clear (those candidates have no

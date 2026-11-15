@@ -19,7 +19,7 @@ from civ6_ai.policies.settling import (
     score_site,
 )
 from civ6_ai.state.models import SettleSite
-from civ6_ai.state.reader import build_exploration
+from civ6_ai.state.reader import build_exploration, hex_distance
 from fixtures.civ_state import (
     BARBARIANS,
     FakeGame,
@@ -1079,18 +1079,18 @@ def test_visible_cities_capitals_and_borders_feed_the_estimate():
     assert game.lua_calls == 1
     assert sorted(c for c in policy._rival_cities if c[0] > 50) == [(56, 19, 7, True), (59, 14, 2)]
     # The unexplained Sumerian-free border (owner 9) is a phantom; owner 5's are explained.
-    assert policy._phantoms == [(70, 5, 3)]
+    assert policy._phantoms == [(72, 5, 3)]
 
 
 def test_phantoms_are_not_cities_for_spacing_or_the_log():
     game = lua_game(KNOWN_LUA_OUTPUT)
     policy = SettlingPolicy()
     run(policy, game)
-    assert (70, 5) not in [(c[0], c[1]) for c in policy._rival_cities]
-    assert (70, 5, 3) in policy._pressure_sources()
+    assert (72, 5) not in [(c[0], c[1]) for c in policy._rival_cities]
+    assert (72, 5, 3) in policy._pressure_sources()
     decision = policy.decisions[0]
-    assert (70, 5, 3) not in decision.rival_cities
-    assert decision.phantom_cities == ((70, 5, 3),)
+    assert (72, 5, 3) not in decision.rival_cities
+    assert decision.phantom_cities == ((72, 5, 3),)
 
 
 def test_a_failed_or_partial_read_keeps_the_memory():
@@ -1517,3 +1517,14 @@ def test_with_no_escort_free_a_settler_holds_for_a_site_near_a_hostile_unit():
     run(policy, game)
     assert policy.decisions[-1].action in ("hold", "flee")
     assert not any(a[1] == 7 and a[0] == "move" and a[2:] == (13, 10) for a in game.actions)
+
+
+def test_a_phantom_stands_behind_the_border_not_on_it():
+    # Run 13: a phantom on the nearest border tile refused every early site; the border is
+    # seen from our side, so the unseen city stands further away.
+    policy = SettlingPolicy()
+    policy._border_memory = {(18, 10): 5, (18, 11): 5, (19, 9): 5}
+    (x, y, pop) = policy._phantom_cities({(10, 10)})[0]
+    assert x >= 20 and pop == policy.settings.rival_city_default_pop - 2
+    nearest_border = min(hex_distance(10, 10, bx, by, 80) for bx, by in policy._border_memory)
+    assert hex_distance(10, 10, x, y, 80) >= nearest_border + 2

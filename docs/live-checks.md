@@ -40,6 +40,20 @@ Written offline against civ6-mcp's source, so none of this has run in a game yet
 | Ranged units are not hit back by melee defenders, and ranged defenders do hit back (`assess_attack` assumes both) | Not reached |
 | `Unit.targets` lists only targets in range with line of sight, and ranged units fire at adjacent targets | Not reached |
 
+## Run 14: turns 1 to 296, with PRs 225 to 228, stopped once (PR 229); eliminated
+
+STD_T1_01 on main from 5736c59, 2026-11-15, two sessions on one game: `20261115T162807Z` (turns 1 to 53) and `20261115T165303Z` (53 to 296). Result: eliminated on turn 296. Sumeria declared war on turn 241 and took the capital on turn 249, Xunantunich on turn 289 and Coba on turn 291, and then the last city. Final standing: Germany 1,377, Sumeria 1,208, Brazil 870, Mapuche 815, Khmer 791, Maya 385 (40 techs against 63 to 65). $0.00 in model spend. Decision time mean 12.1 s.
+
+| Check | Result |
+|---|---|
+| Expansion | Stalled on turns 42 to 53: every site near the pop-2 capital failed PR 228's robust test and was refused as "needs a look" while a scout lived, but the scout was on automatic exploration and never looked. Fixed live by PR 229 (needs-a-look marks a site down, never refuses it). The 2nd city came on turn 75, and there were 4 cities by turn 103. From turn 130 the survey refused every remaining site for loyalty. |
+| No new-city loyalty loss (228) | Fail: El Mirador at (60,29), Run 13's Uxmal site, founded on turn 114 with robust +11.9 and 81% of its rival side unexplored, flipped on turn 127. The unseen Mapuche capital (pop 13, 6 tiles) pressed 10.4. My change sizing the unseen city like our median city (pop 6 here) made the test too lenient; fixed by PR 230 (largest known city, as a capital in an unexplored heartland). |
+| Defence (225) | Fail: the "wary" walls rule never fired, and Sumeria's war took every city. Military strength from civ6-mcp's `get_diplomacy` (`GetStats():GetMilitaryStrength()`) read 426 for us with no units after elimination, so the input is suspect. It is not logged per turn yet. |
+| Science | 2 Observatories (turns 53 and 110), 40 techs at the end. |
+| Production refused | 13 of 141. Wonders 13. |
+| Gold and faith | 6 purchases, 13 upgrades; gold unspent on 82% of turns above the reserve; faith idle up to 557. |
+| Score | 44, 121, 229, 340, 398 on turns 50 to 250, behind Runs 12 and 13 throughout; 385 at elimination. |
+
 ## Run 13: turns 1 to 327, with PRs 216 to 219, stopped twice and fixed mid-run (PRs 220 to 222)
 
 STD_T1_01 on main from e4ee537, 2026-11-15, three sessions on one game: `20261115T132807Z` (turns 1 to 27), `20261115T134719Z` (27 to 130) and `20261115T141921Z` (130 to 327). A first start (`20261115T035715Z`) was abandoned at turn 51 after a reload. Result: defeat on turn 327, `winning_team=4` (Mapuche: 77 techs, 4 spaceports, and they conquered the Khmer outright), almost certainly science. Final scores: Mapuche 1,492, Brazil 1,293, Sumeria 1,285, Germany 1,092, Maya 778 (5th of 5 left). $0.00 in model spend. Decision time mean 12.5 s (p90 14.8 s).

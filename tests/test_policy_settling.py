@@ -1601,20 +1601,22 @@ class _NoDanger:
         return False
 
 
-def test_a_fogged_rival_side_needs_a_look_while_a_scout_lives(real_safe_rate):
+def test_a_fogged_rival_side_is_marked_down_not_refused(real_safe_rate):
+    # Run 14: refusing these while a scout lived stalled expansion; the scout was on automatic
+    # exploration and never looked. The site competes, marked down, and is a look point.
     fog = FogCount(*UXMAL, 120, 60, 5, -4, -2)
     (c,) = _fog_policy(UXMAL, UXMAL_OWN, UXMAL_RIVALS, fog)
-    assert c.rejected == NEEDS_LOOK
+    assert c.rejected != NEEDS_LOOK
     assert c.robust_rate < c.safe_rate and c.fog_share == 0.5
 
 
-def test_with_no_scout_a_needs_a_look_site_competes_with_a_penalty(real_safe_rate):
+def test_a_needs_a_look_site_competes_with_a_penalty_scout_or_not(real_safe_rate):
     fog = FogCount(*UXMAL, 120, 60, 5, -4, -2)
     (looked,) = _fog_policy(UXMAL, UXMAL_OWN, UXMAL_RIVALS, fog, scout_alive=True)
     (blind,) = _fog_policy(UXMAL, UXMAL_OWN, UXMAL_RIVALS, fog, scout_alive=False)
     (seen,) = _fog_policy(UXMAL, UXMAL_OWN, UXMAL_RIVALS, None, scout_alive=False)
     assert blind.rejected is None and blind.loyalty_penalty > seen.loyalty_penalty
-    assert looked.rejected == NEEDS_LOOK
+    assert looked.rejected is None and looked.loyalty_penalty == blind.loyalty_penalty
 
 
 def test_a_revealed_far_side_or_a_small_fogged_share_needs_no_look(real_safe_rate):

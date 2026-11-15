@@ -665,6 +665,8 @@ class SettlingPolicy:
     _fog: dict[tuple[int, int], FogCount] = field(default_factory=dict, init=False, repr=False)
     _fog_sites: list[tuple[int, ...]] = field(default_factory=list, init=False, repr=False)
     _scout_alive: bool = field(default=False, init=False, repr=False)
+    # Sites the last scan found needing a look at their rival side (marked down, never refused).
+    _needs_look: set[tuple[int, int]] = field(default_factory=set, init=False, repr=False)
     # Whether the fog can be measured this turn (the game runs Lua and the read has not failed).
     # While it can, a site with no measurement yet is not founded on: it is asked for by the
     # survey and judged the turn its counts arrive.
@@ -912,20 +914,20 @@ class SettlingPolicy:
         candidates = self._candidates(
             origin, exploration, city_tiles, rival_tiles, danger, False, turn, [], escorted=True
         )
-        # Needs-a-look sites count while a scout lives to look, so production still builds one.
-        sites = [
-            c
-            for c in candidates
-            if c.rejected is None
-            or c.rejected == FOG_PENDING
-            or (c.rejected == NEEDS_LOOK and self._scout_alive)
-        ]
+        # Pending-fog sites count: their measurement arrives with the next read.
+        sites = [c for c in candidates if c.rejected is None or c.rejected == FOG_PENDING]
         self._choose_fog_sites(exploration, city_tiles, [(u.x, u.y) for u in settlers])
         width = self.settings.map_width
         self._look_points = []
         for c in candidates:
             info = self._fog.get((c.x, c.y))
-            if c.rejected == NEEDS_LOOK and info is not None and len(self._look_points) < 3:
+            usable = c.rejected is None or c.rejected == FOG_PENDING
+            if (
+                usable
+                and (c.x, c.y) in self._needs_look
+                and info is not None
+                and len(self._look_points) < 3
+            ):
                 lx = c.x + info.dx
                 self._look_points.append((lx % width if width else lx, max(0, c.y + info.dy)))
         rejected: dict[str, int] = {}
@@ -997,6 +999,7 @@ class SettlingPolicy:
         reserved: list[tuple[int, int]],
         escorted: bool = False,
     ) -> list[CandidateLog]:
+        self._needs_look = set()  # This scan's sites that need a look.
         s = self.settings
         found = []
         for site in exploration.settle_sites:
@@ -1016,9 +1019,13 @@ class SettlingPolicy:
                     site.x, site.y, safe, self._own_cities, sources
                 )
             penalty = max(0.0, -margin) * s.loyalty_penalty_weight
-            if needs_look and not self._scout_alive:
-                # Nobody can look, so it competes, marked down for the shortfall, never for ever.
+            if needs_look:
+                # Run 14: refusing these while a scout lived stalled expansion for 12+ turns (the
+                # scout was on automatic exploration and never looked), and early on every site
+                # near a small capital reads this way. The site competes, marked down for the
+                # shortfall; scouts the bot directs still go to look (`_look_points`).
                 penalty += (s.loyalty_reject_safe - robust) * s.fog_penalty_weight
+                self._needs_look.add((site.x, site.y))
             penalty += max(0.0, -rate) * s.loyalty_rate_penalty_weight
             if not first_city:
                 # Run 10: 17 site points of difference beat a site 3.4 rate points safer.
@@ -1053,8 +1060,6 @@ class SettlingPolicy:
                 rejected = "likely to flip to a rival (loyalty)"
             elif not first_city and self._fog_can and (site.x, site.y) not in self._fog:
                 rejected = FOG_PENDING
-            elif needs_look and self._scout_alive:
-                rejected = NEEDS_LOOK
             elif not first_city and site_score < s.min_site_score:
                 rejected = "below minimum site score"
             elif nearest_own is not None and nearest_own > s.max_city_distance:

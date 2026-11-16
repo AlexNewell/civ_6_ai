@@ -170,6 +170,7 @@ class MilitaryWeights:
     planned_kill_hp_after: float = 0.25
     camp_force_ratio: float = 2.0  # Our strength over theirs, to go for a camp.
     camp_min_hp: float = 0.8  # Only healthy units are sent to a camp.
+    camp_leave_hp: float = 0.5  # A unit on a camp mission goes home once under this health.
 
 
 @dataclass(frozen=True)
@@ -189,6 +190,7 @@ class MilitarySettings:
     camp_home_scan_turns: int = 3  # Turns between those reads, as they cost a call per city.
     camp_home_radius: int = 9  # A camp further than this from every city is left alone.
     camp_reach: int = 6  # How far a unit is called from to a camp.
+    camp_mission_turns: int = 6  # A unit sent at a camp keeps to it this long after the last order.
     camp_defender_radius: int = 2  # Barbarians this close to a camp defend it.
     camp_min_units: int = 2
     max_camp_turns: int = 8  # Turns spent advancing on one camp before it is set aside.
@@ -433,6 +435,9 @@ class MilitaryPolicy:
     )
     _camp_aside: dict[tuple[int, int], int] = field(default_factory=dict, init=False, repr=False)
     _camps: dict[tuple[int, int], int] = field(default_factory=dict, init=False, repr=False)
+    _mission: dict[int, tuple[tuple[int, int], int]] = field(
+        default_factory=dict, init=False, repr=False
+    )  # Unit id to the camp it was sent at and the turn.
     _camp_home_scan: int = field(default=-99, init=False, repr=False)
     # The threat state (see `defence.DefenceState`), or None to play without it.
     defence: Any = field(default=None, repr=False)
@@ -1332,6 +1337,7 @@ class MilitaryPolicy:
             return
         occupied = any((b.x, b.y) == where for b in t.threats if b.hostile)
         for unit in sorted(force, key=lambda u: u.unit_id):
+            self._mission[unit.unit_id] = (where, t.turn)
             if not self._available(t, unit, "move"):
                 continue
             # Run 15: a move straight onto a camp three tiles off is refused (the game only allows
@@ -1349,6 +1355,16 @@ class MilitaryPolicy:
             else:
                 self._refuse(t, unit, "move")
                 self._log(t, unit, "camp", "move refused", where, result=result or "")
+
+    def _on_camp_mission(self, t: _Turn, unit: Unit) -> bool:
+        """A healthy unit sent at a camp lately, still near it. Run 15: a unit that had shot the
+        camp's guards for two turns fled home the moment they were within `flee_radius`."""
+        s = self.settings
+        sent = self._mission.get(unit.unit_id)
+        if sent is None or t.turn - sent[1] > s.camp_mission_turns:
+            return False
+        near = hex_distance(unit.x, unit.y, *sent[0], s.map_width) <= s.camp_reach
+        return near and unit.hp >= s.weights.camp_leave_hp * unit.max_hp
 
     async def _scan_camps(self, game: MilitaryGame, t: _Turn, barbarians: list[Threat]) -> None:
         """Remember each camp seen on a visible tile, and forget one seen gone.
@@ -1523,6 +1539,8 @@ class MilitaryPolicy:
 
     def _exposed(self, t: _Turn, unit: Unit) -> bool:
         s = self.settings
+        if self._on_camp_mission(t, unit):
+            return False  # The guards beside it are the point, not a reason to go home.
         return any(
             th.hostile and hex_distance(unit.x, unit.y, th.x, th.y, s.map_width) <= s.flee_radius
             for th in t.threats

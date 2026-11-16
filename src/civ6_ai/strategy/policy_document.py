@@ -69,6 +69,7 @@ _FRACTION_FIELDS = {
         "garrison_min_hp_after",
         "planned_kill_hp_after",
         "camp_min_hp",
+        "camp_leave_hp",
         "damage_variance",
     }
 }

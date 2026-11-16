@@ -708,6 +708,20 @@ def test_a_camp_that_will_not_fall_is_set_aside_after_the_turn_limit():
     assert (14, 10) not in policy._camp_turns
 
 
+def test_a_unit_on_a_camp_mission_does_not_flee_the_guards_until_it_is_hurt():
+    def moves(policy, hp):
+        unit = warrior(uid=3, x=12, y=10, health=hp)
+        game = MilitaryGame([warrior(uid=1), unit], [barbarian(x=13, y=10, cs=40)])
+        run(policy, game)
+        return game.orders("move")
+
+    assert moves(MilitaryPolicy(), 100)  # No mission: it goes home.
+    sent = MilitaryPolicy()
+    sent._mission[3] = ((14, 10), 20)  # The game's turn in these tests is 20.
+    assert not moves(sent, 100)
+    assert moves(sent, 40)  # Hurt: the mission no longer holds it.
+
+
 def test_the_camp_scan_reads_around_the_barbarian_and_each_city_once_a_turn():
     game = camp_game(strong_pair(), [barbarian(x=15, y=10, cs=5), barbarian(x=15, y=11, cs=5)])
     policy = MilitaryPolicy()

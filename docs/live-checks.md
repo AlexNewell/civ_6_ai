@@ -489,3 +489,9 @@ Findings:
 - Boosts are 40% of base cost in the game's `Boosts` table (125 of 126 rows; Near Future Governance is 90).
 - Every Ancient era ended below the Dark Age threshold of 9 (scores 2 to 8): a Dark Age at turn 41 in all slices. The cheap early era points in `Moments` are camps (2-3), natural wonders (1), pantheon (1), meeting civs (1), small and medium city sizes (1), government tier (2) and great people (1).
 - Decision time stayed under 10 s per turn.
+
+### How to read a slice (added after review)
+
+- **Horizon.** A 50-turn slice judges changes whose effect lands by about turn 35-40. A change that acts late (a second city founded at T36 pays off in yields and growth over the next 30+ turns; a builder's tile improvements compound) has not finished showing its effect at T50. `slice_report.py` prints the score and city trajectory every 10 turns and the gain over the last 10; if a gap is still widening at the end, play on from a checkpoint (`--save-at 50`, then load it with `--turns 50`) to T100 before keeping or rejecting. Screen fast at 50, confirm slow at 100.
+- **One start is one data point.** Every row above is one civilization, one map and one seed (STD_T1_01). "Kept" means kept as a default for that start, not proven in general. Re-run a kept change on a second start before treating it as more than that.
+- **Nothing is a hard rule.** Results are encoded as defaults in the policy document's weights, never as unconditional code. The attack ratio is `military.min_damage_ratio` (postures already move it: DEFEND 1.3, CONQUER 0.8). The builder hold is `production.builder_hold_turns` (0 turns it off) and applies only while a settler is wanted: a site is known, expansion is weighted, and more than one city is the target. A tall start (one city, target_cities 1, or no survey site) trains builders at once. Reverting any kept change is a policy-document edit.

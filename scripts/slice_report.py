@@ -28,6 +28,16 @@ print(
     f"pop {last.get('population')} second_city_T {second} third_city_T {third} "
     f"units_lost {lost} settlers_lost {settlers_lost}"
 )
+# The trajectory shows whether a change is still paying off at the end of the slice. A gap that
+# is still widening at the last turn has not finished showing its effect: extend the run
+# (`--save-at` a checkpoint, then play on) before keeping or rejecting it.
+by_turn = {r["turn"]: r for r in rows}
+marks = [t for t in range(10, last["turn"] + 1, 10) if t in by_turn]
+print("  score by turn: " + " ".join(f"T{t}={by_turn[t].get('score')}" for t in marks))
+print("  cities by turn: " + " ".join(f"T{t}={by_turn[t].get('cities')}" for t in marks))
+tail = [r.get("score") for r in rows[-11:] if r.get("score") is not None]
+if len(tail) >= 2:
+    print(f"  score gain over the last {len(tail) - 1} turns: {tail[-1] - tail[0]:+}")
 for c in run_checks(load_run([path])):
     if c.policy in ("offense", "boosts", "era score"):
         print(f"  {c.status:7} {c.name}: {c.figures()} {c.note[:110]}")

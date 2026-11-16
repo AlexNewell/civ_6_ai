@@ -89,6 +89,18 @@ def test_plays_requested_turns_and_logs_each_with_timing(tmp_path):
         assert line["handler_seconds"]["do_nothing"] >= 0
 
 
+def test_turn_shots_save_one_screenshot_per_turn_before_the_turn_ends(tmp_path):
+    from civ6_ai.screenshots import Screenshotter
+
+    game = FakeGame()
+    shots = Screenshotter(tmp_path / "shots", "g-turns", cap=100, capture=lambda: b"jpeg")
+    orchestrator = Orchestrator(game, [Recording("a")], TurnLog(tmp_path / "runs" / "game.jsonl"))
+    orchestrator.turn_shots = shots
+    asyncio.run(orchestrator.play(5))
+    assert shots.count() == 5  # Past the triage reserve of three, with no per-game limit of 20.
+    assert (tmp_path / "shots" / "g-turns_T001_end-of-turn.jpg").exists()
+
+
 def test_handlers_run_in_order_before_the_turn_ends(tmp_path):
     game = FakeGame()
     play(game, [Recording("first"), Recording("second")], 1, tmp_path)

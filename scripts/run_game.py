@@ -88,6 +88,7 @@ async def play_game(
     probe_kinds: list[str] | None = None,
     probe_overlay: bool = False,
     save_at: Sequence[int] = (),
+    shots_every_turn: bool = False,
 ) -> GameRun | None:
     """Play `turns` turns in the open game. None if it is not a standard save (or `expect_save`).
 
@@ -181,6 +182,11 @@ async def play_game(
             event_log=event_log,
             probes=probes,
         )
+        if shots_every_turn:
+            # No cap: a run reviewed by eye wants every turn. Kept apart from the triage shots.
+            orchestrator.turn_shots = Screenshotter(
+                ROOT / "runs" / "screenshots", f"{game_id}-turns", cap=100_000
+            )
         reason = await play_with_checkpoints(
             orchestrator.play,
             lambda: _turn_now(game),
@@ -242,6 +248,7 @@ async def run(
     overlay: bool = False,
     load: str | None = None,
     save_at: Sequence[int] = (),
+    shots_every_turn: bool = False,
 ) -> int:
     if load:
         try:
@@ -250,7 +257,13 @@ async def run(
             print(f"FAILED: load {load}: {error}")
             return 1
         print(f"Loaded {loaded.name} at turn {loaded.turn} in {loaded.seconds:.0f}s")
-    played = await play_game(turns, probe_kinds=probe_kinds, probe_overlay=overlay, save_at=save_at)
+    played = await play_game(
+        turns,
+        probe_kinds=probe_kinds,
+        probe_overlay=overlay,
+        save_at=save_at,
+        shots_every_turn=shots_every_turn,
+    )
     if played is None:
         return 1
     name, reason, turn_log, decisions = (
@@ -306,13 +319,20 @@ def main() -> int:
         metavar="TURN[,TURN]",
         help="write a checkpoint save CKPT_<scenario>_T<turn> at the start of these turns",
     )
+    parser.add_argument(
+        "--shots-every-turn",
+        action="store_true",
+        help="save a screenshot after each turn's actions, before ending it, with no count cap",
+    )
     args = parser.parse_args()
     try:
         kinds = parse_kinds(args.probe)
         save_at = [int(t) for t in args.save_at.split(",") if t.strip()]
     except ValueError as error:
         parser.error(str(error))
-    return asyncio.run(run(args.turns, kinds, args.probe_overlay, args.load, save_at))
+    return asyncio.run(
+        run(args.turns, kinds, args.probe_overlay, args.load, save_at, args.shots_every_turn)
+    )
 
 
 if __name__ == "__main__":

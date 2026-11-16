@@ -187,6 +187,9 @@ class Orchestrator:
         self._overview: object = None  # The newest overview `_read_turn` saw.
         self._screenshots = screenshots
         self._shot_handlers: set[str] = set()
+        # Set to a Screenshotter to save the screen after every turn's handlers, before the turn
+        # ends (for reviewing a run by eye). Its own game id and cap keep it off the triage budget.
+        self.turn_shots: Screenshotter | None = None
         self._game = game
         self._handlers = handlers
         self._log = turn_log
@@ -209,6 +212,8 @@ class Orchestrator:
         standing = read_standing(self._overview)
         seconds, errors = await self._run_handlers()
         calls = self._call_timer.take() if self._call_timer else {}
+        if self.turn_shots is not None:
+            await asyncio.to_thread(self.turn_shots.take, turn, "end-of-turn")
 
         end_turn_started = time.perf_counter()
         try:

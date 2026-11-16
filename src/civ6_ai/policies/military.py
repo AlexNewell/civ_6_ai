@@ -192,6 +192,12 @@ class MilitarySettings:
     )
     spare_hunt_radius: int = 3  # A hostile unit this close to a spare unit may be walked at.
     spare_leash: int = 4  # A spare unit never goes further than this from its nearest city.
+    # Run 15: a settler waited on a scout that could not leave while three spare units fortified
+    # beside unexplored land. While no hostile unit is in sight a spare unit explores (the game's
+    # own explorer), up to this many at once; the first hostile unit in sight brings it home
+    # through the usual flee step. 0 turns this off, as a map that is mostly barbarians may want.
+    spare_explorers: int = 2
+    spare_explore_until: int = 120  # Turn after which spare units stay home.
     max_spare_orders: int = 6  # Hunt and fortify orders for spare units in one turn.
     max_actions: int = 12  # Orders sent to the game in one turn, whatever the number of units.
     attempts_per_unit: int = 2  # Calls spent on one unit in a turn, as each refusal costs one.
@@ -399,6 +405,7 @@ class MilitaryPolicy:
     decisions: list[MilitaryDecision] = field(default_factory=list)
     # Per unit, kept across turns and pruned each turn against the units that still exist.
     _resting: dict[int, tuple[int, int]] = field(default_factory=dict, init=False, repr=False)
+    _explorers: set[int] = field(default_factory=set, init=False, repr=False)
     _fortified: dict[int, tuple[int, int]] = field(default_factory=dict, init=False, repr=False)
     _refused: dict[tuple[int, str], int] = field(default_factory=dict, init=False, repr=False)
     _strike_refused: dict[int, int] = field(default_factory=dict, init=False, repr=False)
@@ -509,6 +516,7 @@ class MilitaryPolicy:
         self._fortified = {
             k: v for k, v in self._fortified.items() if k in by_id and (by_id[k].x, by_id[k].y) == v
         }
+        self._explorers &= by_id.keys()
         self._refused = {k: v for k, v in self._refused.items() if v >= turn and k[0] in by_id}
         self._strike_refused = {k: v for k, v in self._strike_refused.items() if v >= turn}
         self._promotion_refused = {
@@ -919,10 +927,14 @@ class MilitaryPolicy:
             odds = assess_attack(unit, live, defender, w, floor, s.map_width)
             if odds is None:
                 continue
-            if odds.favourable and (odds.sure_kill or not hurt):
+            # Run 15: a hurt slinger beside a city under attack sat out every turn while barbarians
+            # pillaged. A hurt unit only needs to heal rather than fight when the fight can cost
+            # it health: a shot that takes nothing back (ranged at a melee unit) is free.
+            risky = hurt and not odds.sure_kill and odds.taken > 0
+            if odds.favourable and not risky:
                 found.append((odds, live, defender))
                 continue
-            if hurt and not odds.sure_kill:
+            if risky:
                 reason = f"unit is hurt (hp {unit.hp}/{unit.max_hp}) and this is no sure kill"
             elif odds.hp_after < used * unit.max_hp:
                 reason = (
@@ -1380,10 +1392,16 @@ class MilitaryPolicy:
                 continue  # Needed for the garrison, so it stays as it is.
             if self._city_at(t, unit) is None and self._exposed(t, unit):
                 continue  # Alone outside with hostile units close: the idle step runs for home.
+            if unit.unit_id in self._explorers:
+                if self._city_at(t, unit) is None:
+                    continue  # Out exploring, nothing hostile close: leave the game's explorer be.
+                self._explorers.discard(unit.unit_id)  # Back home, free to be sent again.
             if t.spare_orders >= s.max_spare_orders or t.actions >= s.max_actions:
                 self._log(t, unit, "skip", "spare, but the orders for this turn are used up")
                 continue
             if await self._hunt(game, t, unit):
+                continue
+            if await self._explore(game, t, unit):
                 continue
             if self._fortified.get(unit.unit_id) == (unit.x, unit.y) or (
                 self._resting.get(unit.unit_id) == (unit.x, unit.y)
@@ -1405,6 +1423,33 @@ class MilitaryPolicy:
             else:
                 self._refuse(t, unit, "spare")
                 self._log(t, unit, "skip", "spare, fortify refused", result=result or "")
+
+    async def _explore(self, game: MilitaryGame, t: _Turn, unit: Unit) -> bool:
+        """Send a spare unit to explore while nothing hostile is in sight. True if it was sent."""
+        s = self.settings
+        automate = getattr(game, "automate_explore", None)
+        if (
+            automate is None
+            or s.spare_explorers <= 0
+            or t.turn > s.spare_explore_until
+            or any(th.hostile for th in t.threats)
+            or len(self._explorers) >= s.spare_explorers
+            or not self._available(t, unit, "spare")
+        ):
+            return False
+        t.spare_orders += 1
+        result = await self._order(t, unit, "spare", automate(unit.unit_index))
+        if result is None or not action_succeeded(result):
+            self._refuse(t, unit, "spare")
+            return False
+        t.acted.add(unit.unit_id)
+        self._explorers.add(unit.unit_id)
+        if (unit.x, unit.y) in t.at_city:
+            t.at_city[unit.x, unit.y] -= 1  # It is leaving, so the city's count is one fewer.
+        self._fortified.pop(unit.unit_id, None)
+        self._log(t, unit, "explore", "spare unit, nothing hostile in sight, so exploring",
+                  result=result)  # fmt: skip
+        return True
 
     def _exposed(self, t: _Turn, unit: Unit) -> bool:
         s = self.settings

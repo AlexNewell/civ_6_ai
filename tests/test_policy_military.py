@@ -142,6 +142,9 @@ class MilitaryGame(FakeGame):
     async def city_attack(self, city_id, target_x, target_y):
         return self.did("city_attack", city_id, target_x, target_y, default=CITY_HIT)
 
+    async def automate_explore(self, unit_index):
+        return self.did("explore", unit_index, default="EXPLORING")
+
     async def heal_unit(self, unit_index):
         return self.did("heal", unit_index, default="HEALING|HP:40/100")
 
@@ -284,6 +287,15 @@ def test_a_ranged_unit_shoots_a_barbarian_at_the_gate():
     assert policy.decisions[-1].odds["favourable"]
 
 
+def test_a_hurt_ranged_unit_still_shoots_a_melee_unit_that_cannot_hit_back():
+    game = MilitaryGame([archer(health=45, targets=[target()]), warrior(uid=5)], [barbarian()])
+    run(MilitaryPolicy(), game)
+    assert game.orders("attack") == [("attack", 2, 11, 10)]  # Free: nothing comes back.
+    hurt_melee = MilitaryGame([warrior(health=45, targets=[target()])], [barbarian(hp=60, cs=8)])
+    run(MilitaryPolicy(), hurt_melee)
+    assert not hurt_melee.orders("attack")  # A hurt melee unit heals instead.
+
+
 def test_a_losing_melee_fight_is_not_started():
     game = MilitaryGame([warrior(targets=[target()])], [barbarian(cs=20)])
     run(MilitaryPolicy(), game)
@@ -349,7 +361,10 @@ def test_the_lone_defender_of_a_city_needs_a_safer_fight_than_a_spare_one():
 
 
 def test_a_hurt_unit_goes_to_heal_instead_of_a_poor_attack():
-    game = MilitaryGame([archer(health=40, targets=[target()]), warrior(uid=5)], [barbarian()])
+    # A melee unit would take damage back, so it heals; a ranged unit's free shot is the test above.
+    game = MilitaryGame(
+        [warrior(uid=2, health=40, targets=[target()]), warrior(uid=5)], [barbarian()]
+    )
     run(MilitaryPolicy(), game)
     assert not game.orders("attack")
     assert game.orders("heal") == [("heal", 2)]
@@ -1070,11 +1085,37 @@ def spare_decisions(policy, action):
 
 def test_a_spare_unit_in_a_quiet_city_fortifies_and_the_garrison_is_left_alone():
     game = MilitaryGame([warrior(uid=1), warrior(uid=3)], [])
-    policy = MilitaryPolicy()
+    policy = MilitaryPolicy(settings=MilitarySettings(spare_explorers=0))
     run(policy, game)
     # Neither leaves, so both may fortify; the floor matters only for a unit that walks away.
     assert game.orders("fortify") == [("fortify", 1), ("fortify", 3)]
     assert "spare" in spare_decisions(policy, "fortify")[0].reason
+
+
+def test_a_spare_unit_explores_while_nothing_hostile_is_in_sight():
+    game = MilitaryGame([warrior(uid=1), warrior(uid=3), warrior(uid=4)], [])
+    policy = MilitaryPolicy()
+    run(policy, game)
+    assert len(game.orders("explore")) == 2  # Up to two explorers.
+    assert game.orders("fortify") == []  # The third unit is the city's garrison.
+    assert "exploring" in spare_decisions(policy, "explore")[0].reason
+    # Out exploring with nothing hostile close, it is left to the game's explorer.
+    out = warrior(uid=3, x=14, y=10)
+    later = MilitaryGame([warrior(uid=1), out, warrior(uid=4)], [])
+    policy._explorers.add(3)
+    run(policy, later)
+    assert all(order[1] != 3 for order in later.actions)
+
+
+def test_spare_units_stay_home_with_a_hostile_unit_in_sight_or_with_exploring_off():
+    seen = MilitaryGame([warrior(uid=1), warrior(uid=3)], [barbarian(x=17, y=10)])
+    run(MilitaryPolicy(), seen)
+    assert seen.orders("explore") == []
+    off = MilitaryGame([warrior(uid=1), warrior(uid=3)], [])
+    policy = MilitaryPolicy(settings=MilitarySettings(spare_explorers=0))
+    run(policy, off)
+    assert off.orders("explore") == []
+    assert off.orders("fortify")
 
 
 def test_the_last_defender_of_a_city_is_never_given_a_spare_order():
@@ -1094,7 +1135,7 @@ def test_spare_units_never_leave_a_city_below_its_requirement_when_hunting():
 
 def test_a_fortified_spare_unit_is_not_ordered_again_and_the_idleness_is_logged():
     game = MilitaryGame([warrior(uid=1), warrior(uid=3)], [])
-    policy = MilitaryPolicy()
+    policy = MilitaryPolicy(settings=MilitarySettings(spare_explorers=0))
     run(policy, game)
     run(policy, game)
     assert game.orders("fortify") == [("fortify", 1), ("fortify", 3)]
@@ -1103,7 +1144,7 @@ def test_a_fortified_spare_unit_is_not_ordered_again_and_the_idleness_is_logged(
 
 def test_a_spare_unit_outside_a_city_fortifies_in_place():
     game = MilitaryGame([warrior(uid=1), warrior(uid=3, x=12, y=10)], [])
-    policy = MilitaryPolicy()
+    policy = MilitaryPolicy(settings=MilitarySettings(spare_explorers=0))
     run(policy, game)
     assert game.orders("fortify") == [("fortify", 3)]
 
@@ -1111,7 +1152,7 @@ def test_a_spare_unit_outside_a_city_fortifies_in_place():
 def test_a_refused_spare_fortify_is_logged_and_not_repeated_next_turn():
     game = MilitaryGame([warrior(uid=1), warrior(uid=3)], [])
     game.replies["fortify"] = "Error: cannot fortify"
-    policy = MilitaryPolicy()
+    policy = MilitaryPolicy(settings=MilitarySettings(spare_explorers=0))
     run(policy, game)
     run(policy, game)
     assert len(game.orders("fortify")) == 2  # One try for each unit, none on the second turn.
@@ -1187,7 +1228,7 @@ def test_a_spare_unit_in_reach_of_an_enemy_unit_attacks_it_by_the_attack_step():
 def test_spare_orders_are_bounded_per_turn_and_the_rest_logged():
     units = [warrior(uid=1)] + [warrior(uid=i, x=12, y=10 + i) for i in (3, 4, 5)]
     game = MilitaryGame(units, [])
-    policy = MilitaryPolicy(MilitarySettings(max_spare_orders=1))
+    policy = MilitaryPolicy(MilitarySettings(max_spare_orders=1, spare_explorers=0))
     run(policy, game)
     assert len(game.orders("fortify")) == 1
     assert sum("used up" in d.reason for d in policy.decisions) == 2

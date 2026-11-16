@@ -36,6 +36,7 @@ SLOT_TAKES = re.compile(r"^Slot (\d+) takes (\w+)")
 FINISHED = re.compile(r"^\s*>> (.+?) finished building (\w+)\.")
 OWN_KILLED = re.compile(r"^\s*!!! Your .+? \((UNIT_\w+)\) was killed")
 EMPTY_QUEUE = re.compile(r"^\s*>> (?:Research|Civic) complete: .*Now: None")
+COMPLETED_ITEM = re.compile(r"^\s*>> (Research|Civic) complete: (.+?)!")
 CIVIC_RESEARCH_DONE = re.compile(r"^\s*>> (?:Research|Civic) complete:")
 STARVING = re.compile(r"^\s*!!! STARVING")
 IDLE_ROUTES = re.compile(r"^\s*>> IDLE TRADE ROUTE")
@@ -72,6 +73,8 @@ MAX_FAILED_TILE_BUYS = 2  # Each is gold spent for nothing: the placement rules 
 OFFENSE_PHASES = (("early", 1, 75), ("middle", 76, 150), ("late", 151, 10_000))
 MAX_BARB_UNANSWERED_SHARE = 0.7  # Barbarians near a city, spare units, and no attack or camp order.
 MAX_BARB_NO_SPARE_SHARE = 0.5  # Barbarians near a city and no unit free to answer.
+BOOST_SHARE = 0.5  # Of an item's cost a boost supplies (check live against the logged jump).
+MIN_BOOSTED_POINT_SHARE = 0.3  # First guess, to tighten once there are baselines.
 PLANNED_STOPS = ("game_over", "turn_limit")
 
 # The checks that gate G1 (a run is clean only if none fails); the rest only warn. See
@@ -944,6 +947,116 @@ def research_checks(run: RunLogs) -> list[Check]:
     ]
 
 
+def _boost_points(rows: list[dict], key: str) -> dict[str, tuple[int, float]]:
+    """Per item: its cost and the points its boost saved, from the `research_boosts` lines.
+
+    A boost lifts an item to `BOOST_SHARE` of its cost, so it saves that share less the progress
+    the item had when the boost came. That progress is the last one seen before the item showed
+    boosted (none if it was boosted the first time it was seen, as with an item not yet open).
+    The progress is a whole percent read once a turn, so the saving is approximate.
+    """
+    cost: dict[str, int] = {}
+    before: dict[str, int] = {}
+    boosted: set[str] = set()
+    for row in rows:
+        for name, (c, pct, flag) in row.get(key, {}).items():
+            cost[name] = max(cost.get(name, 0), c)
+            if flag:
+                boosted.add(name)
+            elif name not in boosted:
+                before[name] = pct
+    return {
+        name: (
+            cost[name],
+            cost[name] * max(0.0, BOOST_SHARE - before.get(name, 0) / 100)
+            if name in boosted
+            else 0,
+        )
+        for name in cost
+    }
+
+
+def _boost_totals(
+    points: dict[str, tuple[int, float]], window: list[tuple[int, str]]
+) -> tuple[int, int]:
+    """The most boosts could save on these finished items, and what they did save."""
+    cost = sum(points[n][0] for _, n in window)
+    saved = sum(points[n][1] for _, n in window)
+    return round(cost * BOOST_SHARE), round(saved)
+
+
+def _too_few(
+    policy: str, name: str, created: int, used: int, floor: float, rule: str, note: str = ""
+) -> Check:
+    return Check(policy, name, created, used, PASS, rule, f"{note} (too few items to judge)")
+
+
+def boost_checks(run: RunLogs) -> list[Check]:
+    """Eurekas (techs) and inspirations (civics): the share of points that came from boosts.
+
+    Counts points, not items, so a boost earned when the item was nearly done earns almost
+    nothing. The best an item can score is `BOOST_SHARE` of its cost. Reads the `research_boosts`
+    line and the game's completion notices; the phase split is by the turn each item finished,
+    as in `offense_checks`. A boost earned and researched inside one turn is missed.
+    """
+    rows = _decisions(run, "policies.research", "research_boosts")
+    if not rows:
+        return [_no_data("boosts", "boosts earned", "see rule", "no research_boosts lines")]
+    finished: list[tuple[int, str, str]] = []
+    for record in run.records:
+        for ln in record.get("detail", "").splitlines():
+            if m := COMPLETED_ITEM.match(ln):
+                finished.append((record["turn"], m[1], m[2]))
+    last = max((r["turn"] for r in run.records), default=0)
+    out: list[Check] = []
+    for kind, key, label, boost in (
+        ("Research", "techs", "tech", "eureka"),
+        ("Civic", "civics", "civic", "inspiration"),
+    ):
+        points = _boost_points(rows, key)
+        earned = sum(1 for _, saved in points.values() if saved > 0)
+        mine = [(t, n) for t, k, n in finished if k == kind and n in points]
+
+        out.append(
+            _info(
+                "boosts",
+                f"{boost}s earned",
+                earned,
+                f"{sum(1 for _, n in mine if points[n][1] > 0)} of {len(mine)} finished "
+                f"{label}s had one",
+            )
+        )
+        possible, saved = _boost_totals(points, mine)
+        enough = len(mine) >= MIN_CREATED  # A handful of early items says nothing about a policy.
+        out.append(
+            (_ratio_check if enough else _too_few)(
+                "boosts",
+                f"{label} points saved by boosts",
+                possible,
+                saved,
+                MIN_BOOSTED_POINT_SHARE,
+                f"at least {MIN_BOOSTED_POINT_SHARE:.0%} of the most boosts could save "
+                f"({BOOST_SHARE:.0%} of each finished {label}'s cost)",
+                f"{saved} of {round(sum(points[n][0] for _, n in mine))} {label} points came "
+                "from boosts; a boost earned late saves little",
+            )
+        )
+        for phase, first, final in OFFENSE_PHASES:
+            window = [(t, n) for t, n in mine if first <= t <= final]
+            if last < first or not window:
+                continue
+            possible, saved = _boost_totals(points, window)
+            out.append(
+                _info(
+                    "boosts",
+                    f"{phase}: {label} points saved (turns {first}-{min(last, final)})",
+                    saved,
+                    f"of {possible} possible, {len(window)} {label}s finished",
+                )
+            )
+    return out
+
+
 def government_checks(run: RunLogs) -> list[Check]:
     if not run.has_bot_log:
         return [_no_data("government", "policy changes", "see rule", "needs the bot log")]
@@ -1126,6 +1239,7 @@ ALL_CHECKS = (
     offense_checks,
     settling_checks,
     research_checks,
+    boost_checks,
     government_checks,
     diplomacy_checks,
     trade_checks,

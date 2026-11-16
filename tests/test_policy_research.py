@@ -243,3 +243,34 @@ def test_education_and_chemistry_carry_a_science_priority():
 
     names = dict(DEFAULT_PRIORITIES)
     assert names["EDUCATION"] > 0 and names["CHEMISTRY"] > 0 and names["ASTRONOMY"] > 0
+
+
+def test_boost_line_names_boosted_options_and_locked_items(caplog):
+    import json
+    import logging
+
+    from civ6_ai.policies.research import log_boosts, research_snapshot
+    from civ6_ai.state.models import ResearchOption
+
+    class R:
+        techs = (
+            ResearchOption("TECH_MINING", "Mining", 50, 0, 5, True, "", (), ""),
+            ResearchOption("TECH_POTTERY", "Pottery", 50, 0, 5, False, "", (), ""),
+        )
+        locked_techs = ()
+        civics = ()
+        locked_civics = ()
+
+    assert research_snapshot(R.techs, R.locked_techs) == {
+        "Mining": [50, 0, 1],
+        "Pottery": [50, 0, 0],
+    }
+    with caplog.at_level(logging.INFO):
+        log_boosts(R)
+    line = next(
+        r.getMessage() for r in caplog.records if r.getMessage().startswith("research_boosts")
+    )
+    assert json.loads(line.split(" ", 1)[1]) == {
+        "civics": {},
+        "techs": {"Mining": [50, 0, 1], "Pottery": [50, 0, 0]},
+    }

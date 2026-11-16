@@ -623,12 +623,17 @@ def test_two_strong_units_walk_on_a_weak_camp():
     assert {d.unit_id for d in camp_orders(policy)} == {1, 2}
 
 
-def test_an_empty_camp_is_entered_not_staged_beside():
-    game = camp_game(strong_pair(), [barbarian(x=15, y=9, cs=5)])
+def test_an_empty_camp_is_entered_from_beside_it_and_walked_to_from_afar():
+    units = [
+        warrior(uid=1, x=13, y=10, **STRONG),
+        warrior(uid=2, x=12, y=11, **STRONG),
+        warrior(uid=3),
+    ]
+    game = camp_game(units, [barbarian(x=15, y=9, cs=5)])
     policy = MilitaryPolicy()
     run(policy, game)
-    assert {d.target for d in camp_orders(policy)} == {(14, 10)}
-    assert (("move", 1, 14, 10)) in game.orders("move")
+    assert ("move", 1, 14, 10) in game.orders("move")  # Beside it: the capture move.
+    assert ("move", 2, 13, 10) in game.orders("move")  # Two off: the tile beside it first.
 
 
 def test_a_camp_with_a_garrison_is_approached_to_the_adjacent_tile():

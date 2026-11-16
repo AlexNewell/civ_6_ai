@@ -1334,7 +1334,10 @@ class MilitaryPolicy:
         for unit in sorted(force, key=lambda u: u.unit_id):
             if not self._available(t, unit, "move"):
                 continue
-            goal = where if not occupied else self._stage_tile(unit, where)
+            # Run 15: a move straight onto a camp three tiles off is refused (the game only allows
+            # that capture move from beside it), so walk to the tile beside it first.
+            adjacent = hex_distance(unit.x, unit.y, *where, s.map_width) <= 1
+            goal = where if (adjacent and not occupied) else self._stage_tile(unit, where)
             if goal is None or goal == (unit.x, unit.y):
                 continue
             result = await self._order(t, unit, "move", game.move_unit(unit.unit_index, *goal))

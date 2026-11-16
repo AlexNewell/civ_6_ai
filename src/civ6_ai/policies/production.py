@@ -68,6 +68,7 @@ STARVING_FOCUS_RECOVERED = 2.0  # Food per turn at which a food-focused city goe
 _TURN_SCALE = 20.0  # A build this many turns away scores half as much as an instant one.
 _URGENT_SCALE = 10.0
 _FINISHING_TURNS = 2  # A build this close to done is let finish.
+_FIRST_SETTLER_TURNS = 45  # No builders before the first settler until this turn.
 _EARLY_TURNS = 60  # Turns in which a city with no garrison should get one first.
 
 
@@ -529,6 +530,8 @@ def _unit_score(
                 wanted = min(wanted, ctx.spare_jobs)
         if wanted <= 0 or threatened:
             return 0.0
+        if ctx.num_cities <= 1 and ctx.turn <= _FIRST_SETTLER_TURNS:
+            return 0.0  # Run 15: a builder before the first settler delayed the second city.
         return (6.0 + 2.0 * min(wanted, 3) + len(city.unimproved_resources)) * w.builders
     if kind == "UNIT_TRADER":
         # Every route slot needs a trader. Traders already on a route count, since they fill a slot.

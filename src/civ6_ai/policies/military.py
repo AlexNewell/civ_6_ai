@@ -152,7 +152,9 @@ class MilitaryWeights:
     heal_below: float = 0.7  # A unit under this goes to heal instead of fighting.
     min_hp_after_attack: float = 0.4  # Health left after the bad-side roll, or no attack.
     garrison_min_hp_after: float = 0.6  # The same, for the unit holding a city on its own.
-    min_damage_ratio: float = 1.0  # Damage dealt over taken, unless the attack kills. Run 15 slices: 1.5 -> 1.0 gave score 61 -> 69 by turn 50, 0.7 gave 61.
+    min_damage_ratio: float = (
+        1.0  # Dealt over taken, unless it kills (Run 15: 1.5 to 1.0, score 61 to 69)
+    )
     damage_variance: float = 0.2  # The game rolls damage within this fraction either way.
     assumed_defender_bonus: float = 6.0  # Strength for terrain and fortification we can't see.
     kill_bonus: float = 50.0  # Rank a kill above any amount of damage.

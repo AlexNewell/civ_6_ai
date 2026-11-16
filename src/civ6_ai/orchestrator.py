@@ -110,6 +110,14 @@ def read_standing(overview: object) -> dict:
         if not _standing_warned:
             _standing_warned.append(True)
             log.warning("Could not read the score from the game overview", exc_info=True)
+    try:  # Apart from the score, so an overview without era fields keeps the rest.
+        standing["era"] = str(overview.era_name)  # type: ignore[attr-defined]
+        standing["era_score"] = int(overview.era_score)  # type: ignore[attr-defined]
+        standing["era_dark"] = int(overview.era_dark_threshold)  # type: ignore[attr-defined]
+        standing["era_golden"] = int(overview.era_golden_threshold)  # type: ignore[attr-defined]
+    except (AttributeError, TypeError, ValueError):
+        for key in ("era", "era_score", "era_dark", "era_golden"):
+            standing.pop(key, None)
     return standing
 
 
@@ -134,6 +142,12 @@ class TurnRecord:
     cities: int | None = None
     population: int | None = None
     rival_scores: dict[str, int] | None = None
+    # Era score at the start of the turn, and the thresholds for a Dark or Golden Age when the
+    # era ends (era_dark, era_golden). None when the overview didn't carry them.
+    era: str | None = None
+    era_score: int | None = None
+    era_dark: int | None = None
+    era_golden: int | None = None
 
 
 @dataclass

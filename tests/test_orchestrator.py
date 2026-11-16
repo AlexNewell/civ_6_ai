@@ -299,6 +299,10 @@ class ScoredOverview:
     num_cities: int = 3
     total_population: int = 11
     rankings: list | None = None
+    era_name: str = "Ancient"
+    era_score: int = 9
+    era_dark_threshold: int = 5
+    era_golden_threshold: int = 14
 
 
 class ScoredGame(FakeGame):
@@ -318,3 +322,14 @@ def test_unreadable_score_is_left_empty_and_the_run_goes_on(tmp_path):
     reason, turn_log = play(FakeGame(), [], 2, tmp_path)  # Its overview has only a turn.
     assert reason is StopReason.TURN_LIMIT
     assert [r.score for r in turn_log.records] == [None, None]
+
+
+def test_turn_record_holds_the_era_score_and_thresholds(tmp_path):
+    play(ScoredGame(), [], 1, tmp_path)
+    line = json.loads((tmp_path / "runs" / "game.jsonl").read_text(encoding="utf-8"))
+    assert (line["era"], line["era_score"], line["era_dark"], line["era_golden"]) == (
+        "Ancient",
+        9,
+        5,
+        14,
+    )

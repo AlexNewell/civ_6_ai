@@ -621,7 +621,6 @@ def test_two_strong_units_walk_on_a_weak_camp():
     policy = MilitaryPolicy()
     run(policy, game)
     assert {d.unit_id for d in camp_orders(policy)} == {1, 2}
-    assert game.calls.count("get_map_area") == 1
 
 
 def test_an_empty_camp_is_entered_not_staged_beside():
@@ -704,10 +703,40 @@ def test_a_camp_that_will_not_fall_is_set_aside_after_the_turn_limit():
     assert (14, 10) not in policy._camp_turns
 
 
-def test_the_camp_scan_runs_once_a_turn():
+def test_the_camp_scan_reads_around_the_barbarian_and_each_city_once_a_turn():
     game = camp_game(strong_pair(), [barbarian(x=15, y=10, cs=5), barbarian(x=15, y=11, cs=5)])
-    run(MilitaryPolicy(), game)
-    assert game.calls.count("get_map_area") == 1
+    policy = MilitaryPolicy()
+    run(policy, game)
+    assert (
+        game.calls.count("get_map_area") == 2
+    )  # One around the nearer barbarian, one at the city.
+    run(policy, game)
+    assert game.calls.count("get_map_area") == 3  # The city is read only every few turns.
+
+
+def test_a_camp_in_plain_view_is_attacked_though_the_only_barbarian_is_a_ship():
+    ship = barbarian(kind="UNIT_GALLEY", x=20, y=10, cs=5)
+    game = camp_game(strong_pair(), [ship])
+    policy = MilitaryPolicy()
+    run(policy, game)
+    assert {d.unit_id for d in camp_orders(policy)} == {1, 2}
+
+
+def test_a_camp_seen_once_is_remembered_while_it_is_fogged_and_forgotten_when_seen_gone():
+    policy = MilitaryPolicy()
+    seen = camp_game(strong_pair(), [barbarian(x=15, y=10, cs=5)])
+    run(policy, seen)
+    assert (14, 10) in policy._camps
+    fogged = camp_game(
+        strong_pair(), [barbarian(x=15, y=10, cs=5)], camp=tile(x=14, y=10, visibility="revealed")
+    )
+    run(policy, fogged)
+    assert (14, 10) in policy._camps  # A fogged tile proves nothing either way.
+    gone = camp_game(
+        strong_pair(), [barbarian(x=15, y=10, cs=5)], camp=tile(x=14, y=10, improvement=None)
+    )
+    run(policy, gone)
+    assert (14, 10) not in policy._camps
 
 
 # ----- promotions -----
@@ -1116,9 +1145,18 @@ def test_a_spare_unit_explores_while_nothing_hostile_is_in_sight():
     # Out exploring with nothing hostile close, it is left to the game's explorer.
     out = warrior(uid=3, x=14, y=10)
     later = MilitaryGame([warrior(uid=1), out, warrior(uid=4)], [])
-    policy._explorers.add(3)
+    policy._explorers[3] = (13, 10)  # It was last seen elsewhere, so it is still moving.
     run(policy, later)
     assert all(order[1] != 3 for order in later.actions)
+
+
+def test_an_explorer_that_stopped_moving_is_free_to_be_sent_again():
+    stuck = warrior(uid=3, x=14, y=10)
+    policy = MilitaryPolicy(settings=MilitarySettings(spare_explorers=1))
+    policy._explorers[3] = (14, 10)  # Same tile as last turn: the game's explorer is done.
+    game = MilitaryGame([warrior(uid=1), stuck, warrior(uid=4)], [])
+    run(policy, game)
+    assert game.orders("explore")  # With the cap of one, a stale entry would have blocked it.
 
 
 def test_spare_units_stay_home_with_a_hostile_unit_in_sight_or_with_exploring_off():

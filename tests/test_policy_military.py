@@ -1122,9 +1122,18 @@ def test_a_spare_unit_explores_while_nothing_hostile_is_in_sight():
 
 
 def test_spare_units_stay_home_with_a_hostile_unit_in_sight_or_with_exploring_off():
-    seen = MilitaryGame([warrior(uid=1), warrior(uid=3)], [barbarian(x=17, y=10)])
+    seen = MilitaryGame([warrior(uid=1), warrior(uid=3)], [barbarian(x=14, y=10)])
     run(MilitaryPolicy(), seen)
     assert seen.orders("explore") == []
+    # A hostile unit far off, or one in a ship, could not reach an explorer: no reason to stay.
+    far = MilitaryGame([warrior(uid=1), warrior(uid=3)], [barbarian(x=25, y=10)])
+    run(MilitaryPolicy(), far)
+    assert far.orders("explore")
+    ship = MilitaryGame(
+        [warrior(uid=1), warrior(uid=3)], [barbarian(kind="UNIT_GALLEY", x=12, y=10)]
+    )
+    run(MilitaryPolicy(), ship)
+    assert ship.orders("explore")
     off = MilitaryGame([warrior(uid=1), warrior(uid=3)], [])
     policy = MilitaryPolicy(settings=MilitarySettings(spare_explorers=0))
     run(policy, off)

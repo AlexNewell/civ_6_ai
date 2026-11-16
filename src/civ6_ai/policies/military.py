@@ -57,6 +57,7 @@ from typing import Any, Protocol
 from civ6_ai.blockers import Blocker, BlockerType, action_succeeded, move_succeeded
 from civ6_ai.policies.game_data import COMBAT_UNITS
 from civ6_ai.policies.settling import (
+    _SEA_UNITS,
     SCOUT,
     hex_line,
     spare_garrison_tiles,
@@ -203,6 +204,7 @@ class MilitarySettings:
     # through the usual flee step. 0 turns this off, as a map that is mostly barbarians may want.
     spare_explorers: int = 2
     spare_explore_until: int = 120  # Turn after which spare units stay home.
+    explore_clear_radius: int = 6  # A hostile land unit this close to a unit keeps it at home.
     max_spare_orders: int = 6  # Hunt and fortify orders for spare units in one turn.
     max_actions: int = 12  # Orders sent to the game in one turn, whatever the number of units.
     attempts_per_unit: int = 2  # Calls spent on one unit in a turn, as each refusal costs one.
@@ -1452,7 +1454,7 @@ class MilitaryPolicy:
             automate is None
             or s.spare_explorers <= 0
             or t.turn > s.spare_explore_until
-            or any(th.hostile for th in t.threats)
+            or self._land_threat_near(t, unit)
             or len(self._explorers) >= s.spare_explorers
             or not self._available(t, unit, "spare")
         ):
@@ -1470,6 +1472,18 @@ class MilitaryPolicy:
         self._log(t, unit, "explore", "spare unit, nothing hostile in sight, so exploring",
                   result=result)  # fmt: skip
         return True
+
+    def _land_threat_near(self, t: _Turn, unit: Unit) -> bool:
+        """A hostile land unit within `explore_clear_radius` of the unit. Run 15 screenshots: a
+        barbarian ship in a bay or a camp across the map kept every spare unit home for ten turns,
+        while nothing could reach the ship. Only what could reach the explorer counts."""
+        s = self.settings
+        return any(
+            th.hostile
+            and not any(word in th.unit_type for word in _SEA_UNITS)
+            and hex_distance(unit.x, unit.y, th.x, th.y, s.map_width) <= s.explore_clear_radius
+            for th in t.threats
+        )
 
     def _exposed(self, t: _Turn, unit: Unit) -> bool:
         s = self.settings

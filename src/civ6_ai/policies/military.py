@@ -152,6 +152,10 @@ class MilitaryWeights:
     heal_below: float = 0.7  # A unit under this goes to heal instead of fighting.
     min_hp_after_attack: float = 0.4  # Health left after the bad-side roll, or no attack.
     garrison_min_hp_after: float = 0.6  # The same, for the unit holding a city on its own.
+    # Dealt over taken for a target on our own doorstep (within `defend_radius` of a city). The
+    # unit is judged on survival alone: damage taken while a city holds it is cheap, doing nothing
+    # lets the target pillage, and the attack is one blow of a group fight. 1.0 turns it off.
+    defend_damage_ratio: float = 0.0
     min_damage_ratio: float = (
         1.0  # Dealt over taken, unless it kills (Run 15: 1.5 to 1.0, score 61 to 69)
     )
@@ -190,6 +194,7 @@ class MilitarySettings:
     fallback_tiles: int = (
         2  # Other tiles tried for a unit whose move was refused, before it fortifies.
     )
+    defend_radius: int = 3  # A target this close to one of our cities is on our doorstep.
     spare_hunt_radius: int = 3  # A hostile unit this close to a spare unit may be walked at.
     spare_leash: int = 4  # A spare unit never goes further than this from its nearest city.
     # Run 15: a settler waited on a scout that could not leave while three spare units fortified
@@ -243,6 +248,7 @@ def assess_attack(
     weights: MilitaryWeights,
     min_hp_after: float | None = None,
     map_width: int | None = STANDARD_MAP_WIDTH,
+    min_ratio: float | None = None,
 ) -> AttackOdds | None:
     """Judge an attack by `unit` on `target`, or None if the target has no strength to judge.
 
@@ -273,7 +279,10 @@ def assess_attack(
     floor = weights.min_hp_after_attack if min_hp_after is None else min_hp_after
     safe = hp_after >= floor * unit.max_hp
     worthwhile = (
-        sure_kill or taken == 0 or dealt * (1 - v) >= weights.min_damage_ratio * taken * (1 + v)
+        sure_kill
+        or taken == 0
+        or dealt * (1 - v)
+        >= (weights.min_damage_ratio if min_ratio is None else min_ratio) * taken * (1 + v)
     )
     rank = min(dealt, target.hp) - taken + (weights.kill_bonus if sure_kill else 0.0)
     return AttackOdds(dealt, taken, sure_kill, hp_after, safe and worthwhile, rank)
@@ -683,6 +692,15 @@ class MilitaryPolicy:
             return None  # The scan did not show it, so there is nothing to judge it by.
         return max(defenders, key=lambda d: (d.combat_strength, d.ranged_strength))
 
+    def _doorstep_ratio(self, t: _Turn, target: Target) -> float | None:
+        """The ratio to use for a target near one of our cities, else None for the usual one."""
+        s = self.settings
+        near = any(
+            hex_distance(c.x, c.y, target.x, target.y, s.map_width) <= s.defend_radius
+            for c in t.cities
+        )
+        return s.weights.defend_damage_ratio if near else None
+
     def _live(self, t: _Turn, target: Target) -> Target:
         where = (target.x, target.y)
         return Target(target.unit_type, target.x, target.y, int(t.target_hp.get(where, target.hp)))
@@ -924,7 +942,9 @@ class MilitaryPolicy:
             if where in t.dead or defender is None:
                 continue
             live = self._live(t, target)
-            odds = assess_attack(unit, live, defender, w, floor, s.map_width)
+            odds = assess_attack(
+                unit, live, defender, w, floor, s.map_width, self._doorstep_ratio(t, target)
+            )
             if odds is None:
                 continue
             # Run 15: a hurt slinger beside a city under attack sat out every turn while barbarians

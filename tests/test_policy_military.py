@@ -296,6 +296,20 @@ def test_a_hurt_ranged_unit_still_shoots_a_melee_unit_that_cannot_hit_back():
     assert not hurt_melee.orders("attack")  # A hurt melee unit heals instead.
 
 
+def test_a_target_on_the_doorstep_is_attacked_if_the_unit_would_survive_even_at_a_poor_ratio():
+    def tried(weights, x=11):
+        game = MilitaryGame(
+            [warrior(targets=[target(x=x)]), warrior(uid=5)], [barbarian(x=x, cs=14)]
+        )
+        run(MilitaryPolicy(MilitarySettings(weights=weights)), game)
+        return bool(game.orders("attack"))
+
+    assert tried(MilitaryWeights())  # Beside the city: survival is the only test.
+    assert not tried(MilitaryWeights(defend_damage_ratio=1.0))  # The old duel rule, one setting.
+    assert not tried(MilitaryWeights(), x=16)  # Far from any city the duel rule still holds.
+    assert not tried(MilitaryWeights(min_hp_after_attack=0.99, garrison_min_hp_after=0.99))
+
+
 def test_a_losing_melee_fight_is_not_started():
     game = MilitaryGame([warrior(targets=[target()])], [barbarian(cs=20)])
     run(MilitaryPolicy(), game)

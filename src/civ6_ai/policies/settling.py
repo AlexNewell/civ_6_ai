@@ -1480,8 +1480,11 @@ class SettlingPolicy:
             for p in frontier_points(exploration, s.map_width)
             if self._bad_frontiers.get(p, -1) < turn and p not in taken and p != here
         ]
+        # Live (Run 15): a scout sat in the capital for ever because a camp's guards ruled out
+        # every frontier, and the wait below never ended. After a short wait it goes anyway.
+        impatient = self._scout_waits.get(scout.unit_id, 0) >= s.scout_wait_turns
         # A hostile unit only rules a frontier out for this turn, because it will move.
-        frontier = [p for p in reachable if not danger.near(*p, s.scout_threat_radius)]
+        frontier = [p for p in reachable if impatient or not danger.near(*p, s.scout_threat_radius)]
         if look is not None and look != here and self._bad_frontiers.get(look, -1) < turn:
             frontier.append(look)  # The fog a site's loyalty depends on, itself a target.
         previous = self._scout_targets.get(scout.unit_id)
@@ -1503,7 +1506,6 @@ class SettlingPolicy:
         blocked_by_threat = len(reachable) > len(frontier)
         # Live: barbarians camped beside the capital from turn 9, so every route out started
         # within their radius and the first scout waited for ever. After a short wait it goes.
-        impatient = self._scout_waits.get(scout.unit_id, 0) >= s.scout_wait_turns
         for target in frontier:
             if not impatient and danger.on_path(here, target, s.scout_threat_radius):
                 blocked_by_threat = True
@@ -1519,6 +1521,13 @@ class SettlingPolicy:
         self._scout_targets.pop(scout.unit_id, None)
         if blocked_by_threat and not tried:
             self._scout_waits[scout.unit_id] = self._scout_waits.get(scout.unit_id, 0) + 1
+            log.info(
+                "scout %s waits at %s: every frontier is near a hostile unit (wait %d of %d)",
+                scout.unit_id,
+                here,
+                self._scout_waits[scout.unit_id],
+                s.scout_wait_turns,
+            )
             return  # Wait a turn for the hostile unit to move on.
         last = self._automated.get(scout.unit_id)
         if last is None or turn - last >= s.automate_retry_turns:

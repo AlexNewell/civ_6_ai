@@ -416,6 +416,24 @@ def test_a_threat_near_a_scout_route_only_blocks_that_turn():
     assert clear.actions == [("move", 3, 10, 13)]
 
 
+def test_a_scout_blocked_by_a_threat_goes_anyway_after_waiting():
+    scout = unit_info(unit_id=3, unit_index=3, x=10, y=12, **SCOUT)
+    only = lq.StrategicMapData([lq.FogBoundary("Alpha", 10, 10, [-1, -1, -1, 4, -1, -1])], [])
+    policy = SettlingPolicy()
+    waits = SettlingPolicy().settings.scout_wait_turns
+    for turn in range(5, 5 + waits):
+        game = make_game(
+            [scout], cities=[alpha()], strategic=only, threats=[barbarian(10, 15)], turn=turn
+        )
+        run(policy, game)
+        assert game.actions == []
+    game = make_game(
+        [scout], cities=[alpha()], strategic=only, threats=[barbarian(10, 15)], turn=5 + waits
+    )
+    run(policy, game)
+    assert game.actions == [("move", 3, 10, 13)]  # Stuck in the city for ever otherwise.
+
+
 def test_refused_scout_moves_set_a_frontier_aside_only_for_a_while():
     scout = unit_info(unit_id=3, unit_index=3, x=10, y=12, **SCOUT)
     only = lq.StrategicMapData([lq.FogBoundary("Alpha", 10, 10, [-1, -1, -1, 4, -1, -1])], [])

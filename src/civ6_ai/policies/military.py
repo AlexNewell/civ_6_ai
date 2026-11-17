@@ -1608,12 +1608,20 @@ class MilitaryPolicy:
                 continue
             if self.threat_map is not None:
                 self.threat_map.see_tiles(t.turn, tiles)  # What we read keeps the map true.
+            mapped = (
+                {(c.x, c.y) for c in self.threat_map.camps()}
+                if self.threat_map is not None
+                else set()
+            )
             for tile in tiles:
                 if tile.improvement == CAMP_IMPROVEMENT:
                     # A fogged tile shows the live state, which may hold a camp that spawned since
                     # the player last looked. Only the session's first scan stands for the player's
                     # own map; after that a camp must be seen to be learned (and is then kept).
-                    if tile.visible or self._camp_baseline:
+                    if tile.visible or (
+                        self._camp_baseline
+                        and (self.threat_map is None or (tile.x, tile.y) in mapped)
+                    ):
                         self._camps.setdefault((tile.x, tile.y), t.turn)
                 elif tile.visible:
                     self._camps.pop((tile.x, tile.y), None)

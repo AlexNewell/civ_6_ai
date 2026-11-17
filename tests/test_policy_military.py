@@ -1641,3 +1641,34 @@ def test_a_muster_tile_the_game_refuses_is_remembered_and_the_next_one_tried():
     tried = {(o[2], o[3]) for o in game.orders("move") if o[1] in (0, 1)}
     assert len(tried) > 1  # It did not stop at the first refused tile.
     assert policy._muster_bad
+
+
+def test_a_fogged_camp_the_threat_map_never_took_is_not_learned():
+    from civ6_ai.threat_map import ThreatMap
+
+    fogged = tile(x=14, y=10, improvement="IMPROVEMENT_BARBARIAN_CAMP", visibility="revealed")
+    game = camp_game(strong_pair(), [barbarian(x=15, y=10, cs=5)], camp=fogged)
+    policy = MilitaryPolicy()
+    policy.threat_map = ThreatMap()  # No baseline read: the camp spawned out of sight.
+    run(policy, game)
+    assert not camp_orders(policy)
+    assert (14, 10) not in policy._camps
+
+
+def test_a_recon_entry_for_a_dead_or_overdue_unit_is_dropped_each_turn():
+    policy = MilitaryPolicy()
+    policy._recon[99] = ((22, 10), 20)  # No such unit any more.
+    policy._recon[1] = ((22, 10), 20 - policy.settings.recon_turns - 1)  # Out too long.
+    run(policy, MilitaryGame([warrior(uid=1)], []))
+    assert policy._recon == {}
+
+
+def test_the_recon_target_across_the_map_seam_keeps_going_the_short_way():
+    policy = MilitaryPolicy()
+    width = policy.settings.map_width
+    policy._sightings[(2, 10)] = 20
+    city = types.SimpleNamespace(x=width - 2, y=10, city_id=1)
+    t = types.SimpleNamespace(cities=[city], turn=20)
+    x, y = policy._recon_target(t)
+    assert 0 <= x < width and y == 10
+    assert x < 12  # Continues east past the sighting, wrapped, not a huge negative number.

@@ -20,29 +20,48 @@ reads every player's cities, fogged ones included. Any exact per-tile number the
 to pass the same test: it may use only cities the player has seen. The in-game map does this by
 drawing only where we know of foreign cities, which is the behaviour to match.
 
-## Where the game's number lives (not yet confirmed live)
+## Where the game's number lives
 
-- The shipped UI Lua (`DLC/Expansion2/UI/Additions/LoyaltySupport.lua`, `CityBannerManager.lua`)
-  reads loyalty only per city (`GetCulturalIdentity()`, `GetLoyaltyPerTurn()`, `GetLoyaltyLevel()`).
-  It holds no per-tile pressure call.
-- The per-tile numbers are drawn by the engine's lens layer, so no script call for them was found in
-  the game's Lua. This is from searching the install, not from a live probe.
-- `execute_lua` is banned for the bot (`state/fog.py`), so a live probe would be a probe-time tool, not
-  a bot read.
+The first version of this note said no Lua call exists for the per-tile numbers. That was wrong: the
+search looked for "loyalty" and "identity", and the file that draws the numbers matches on neither.
 
-## Answers
+- The shipped UI script `DLC/Expansion2/UI/Additions/SettlerInfluenceIconManager.lua`
+  (`RealizeInfluenceTiles`, lines 95-126) gets every number it draws from one call,
+  `Map.GetContinentPlotsLoyalty()`, which returns plot index to loyalty per turn. It writes each value
+  to the tile's label and to the tooltip `LOC_SETTLER_LOYALTY_WARNING_TOOLTIP`. It draws only while the
+  settler lens layer is on; whether the call itself needs the layer or a settler is not known.
+- A community API reference lists it as UI context only, with no arguments (reported by a PR comment,
+  not checked here). The bot already sends InGame Lua (`city_tiles.py`).
+- The value is the loyalty per turn nearby cities would apply to a new city there. By the same
+  report it leaves out governors, amenities and policies, so those still need modelling.
+- `execute_lua` is banned for the bot (`state/fog.py`). A bot read would be a fixed Lua string, like
+  `city_tiles.py`, registered as a flagged read.
 
-1. **Visible while a settler is selected?** Only to the human, as the engine's lens. No bot read
-   exists. Selecting a settler would not help the bot unless the numbers are reachable from Lua.
-2. **Reachable with no settler selected?** Not found. The loyalty lens, not the settler, is the likelier
-   route, and it is also engine-drawn.
-3. **Shape of the data:** one signed number per tile, net of friendly and foreign pull.
+## Answers so far
 
-## Next step
+1. **Visible while a settler is selected?** Yes, as one UI call. Nothing in the repo reads it yet.
+2. **Reachable with no settler selected?** Unknown. This is the probe's question.
+3. **Shape of the data:** one signed number per plot, the net pull of nearby cities.
 
-A probe run, off by default, in the style of `probes.py`: with a settler selected and then not, save a
-screenshot of the map and, from a Lua session, try the candidate calls on a plot
-(`Players[i]:GetCulturalIdentity()`, `CityManager`, `Game.GetLoyalty*`) and log what exists. If one
-returns the per-tile value, add it to `state/reader.py` behind the fog rule above and compare it with
-`loyalty_rate`. If none does, the answer is to keep the estimate and calibrate it against screenshots
-of the map.
+## The probe (built, not yet run)
+
+`src/civ6_ai/loyalty_probe.py` and `scripts/probe_loyalty_map.py` run the call from the InGame context
+and report, without changing anything in the game:
+
+- whether the call exists and works from our connection;
+- plots returned, which continents they sit on (a multi-continent map answers what "continent" covers),
+  and how many are not revealed to us;
+- the value range, and whether it stops at 20 (the screenshot behind issue 239 shows -22);
+- settlers owned and whether the settler lens is on, so runs with and without a settler compare;
+- call time.
+
+It has been tested only against a fake game. A person runs it by hand on a game they own: with a
+settler, with the lens on, with no settler, and on a map with more than one continent. A missing plot
+must be read as unknown, not zero.
+
+## If it works: fairness
+
+Keep revealed plots only, read only while we own or plan a settler, register the read as flagged in
+`state/fog.py`, and never work back from the values to locate cities we have not seen. Compare the
+values with `loyalty_rate` before using them. If the call does not work, keep the estimate and
+calibrate it against screenshots of the map.

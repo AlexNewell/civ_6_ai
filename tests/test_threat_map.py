@@ -271,3 +271,13 @@ def test_a_camps_strength_is_the_strongest_barbarian_land_unit_seen():
     assert m.strength_of(m.camps()[0]) == 36.0
     m.see_threats(3, [hostile("UNIT_GALLEY", x=50, y=50, cs=60)])  # A ship doesn't count.
     assert m.strength_of(m.camps()[0]) == 36.0
+
+
+def test_a_citys_cover_reaches_across_the_map_seam():
+    from civ6_ai.state.reader import build_city
+
+    m = ThreatMap(ThreatMapSettings(map_width=74))
+    city = build_city(city_info(x=0, y=10, defense_strength=12, garrison_hp=200), (), set(), 74)
+    m.see_own(1, [], [city])
+    assert m.cover_at(73, 10) > 0 and m.cover_at(1, 10) > 0
+    assert m.cover_at(-1, 10) == 0  # Nothing is stored under an out-of-range x.

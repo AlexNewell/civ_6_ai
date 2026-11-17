@@ -307,7 +307,7 @@ class ThreatMap:
                 for x in range(ally.x - radius - 1, ally.x + radius + 2):
                     d = hex_distance(x, y, ally.x, ally.y, s.map_width)
                     if d <= radius:
-                        field_[x, y] = ally.strength * (1 - d / (radius + 1))
+                        field_[self._wrap(x), y] = ally.strength * (1 - d / (radius + 1))
         else:
             moves, naval, rng = self._unit_profile(ally.unit_type)
             turns = self.terrain.reach(ally.x, ally.y, moves, naval, s.own_horizon_turns, rng)
@@ -335,7 +335,7 @@ class ThreatMap:
             for tx in range(x - s.fog_radius - 1, x + s.fog_radius + 2):
                 if hex_distance(x, y, tx, ty, s.map_width) <= s.fog_radius:
                     total += 1
-                    unseen += self.terrain.get(tx, ty) is None
+                    unseen += self.terrain.get(self._wrap(tx), ty) is None
         return s.fog_penalty * unseen / total if total else 0.0
 
     def net_at(self, x: int, y: int, turn: int | None = None) -> float:
@@ -368,11 +368,16 @@ class ThreatMap:
         near = (t for t in tiles if hex_distance(x, y, t[0], t[1], width) <= radius)
         return max((self.threat_at(tx, ty, turn) for tx, ty in near), default=0.0)
 
+    def _wrap(self, x: int) -> int:
+        """An x as the map stores it, wrapped east-west so tiles across the seam match."""
+        width = self.settings.map_width
+        return x % width if width else x
+
     def _tiles_around(self, source: Source) -> list[tuple[int, int]]:
         reach = self._reach(source)
         width = self.settings.map_width
         return [
-            (x, y)
+            (self._wrap(x), y)
             for y in range(source.y - reach, source.y + reach + 1)
             for x in range(source.x - reach - 1, source.x + reach + 2)
             if hex_distance(x, y, source.x, source.y, width) <= reach

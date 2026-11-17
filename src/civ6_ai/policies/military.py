@@ -372,6 +372,7 @@ class _Turn:
     acted: set[int] = field(default_factory=set)
     calls: dict[int, int] = field(default_factory=dict)
     dead: set[tuple[int, int]] = field(default_factory=set)
+    killed: set[tuple[int, int]] = field(default_factory=set)  # Kills an attack reply reported.
     hp: dict[int, float] = field(default_factory=dict)
     target_hp: dict[tuple[int, int], float] = field(default_factory=dict)
     at_city: dict[tuple[int, int], int] = field(default_factory=dict)
@@ -481,12 +482,16 @@ class MilitaryPolicy:
         line = {
             "turn": t.turn,
             "combat_units": len(t.mine),
-            "spare": sum(1 for u in t.mine if self._spare(t, u)),
+            "spare": sum(
+                1
+                for u in t.mine
+                if self._spare(t, u) and u.hp >= s.weights.heal_below * u.max_hp
+            ),
             "barb_visible": len(barbs),
             "barb_near": len(near),
             "attacks_barb": len(on_barb),
             "attacks_other": len(landed) - len(on_barb),
-            "kills_barb": len(t.dead & barb_tiles),
+            "kills_barb": len(t.killed & barb_tiles),
             "camp_orders": sum(1 for d in mine if d.action == "camp" and "refused" not in d.reason),
         }
         log.info("military_offense %s", json.dumps(line, sort_keys=True))
@@ -688,6 +693,8 @@ class MilitaryPolicy:
         killed = "killed" in result.lower() or "eliminated" in result.lower()
         dealt = _DAMAGE_DEALT.search(result)
         hp_now = t.target_hp.get(where, hp)
+        if killed:
+            t.killed.add(where)
         t.target_hp[where] = 0 if killed else hp_now - (int(dealt[1]) if dealt else fallback)
         if killed or t.target_hp[where] <= 0:
             t.dead.add(where)

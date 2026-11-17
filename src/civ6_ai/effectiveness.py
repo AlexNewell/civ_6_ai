@@ -813,7 +813,8 @@ def offense_checks(run: RunLogs) -> list[Check]:
         if last < first or not window:
             out.append(_no_data("offense", f"{phase}: attacks", "see rule", "phase not reached"))
             continue
-        turns = min(last, final) - first + 1
+        # Count from the first turn the line exists, so a resumed or older log is not diluted.
+        turns = min(last, final) - max(first, min(d["turn"] for d in window)) + 1
         barb = sum(d["attacks_barb"] for d in window)
         other = sum(d["attacks_other"] for d in window)
         out.append(

@@ -1113,8 +1113,6 @@ class SettlingPolicy:
                 for cx, cy in reserved
             ):
                 rejected = "reserved by another settler"
-            elif not escorted and danger.near(site.x, site.y, s.threat_radius):
-                rejected = HOSTILE_NEAR_SITE
             elif (
                 margin < -s.loyalty_reject_margin
                 or rate < s.loyalty_reject_rate
@@ -1136,6 +1134,10 @@ class SettlingPolicy:
                         rejected = BELOW_MIN_SCORE
                 else:
                     rejected = "too far from our cities"
+            # Last, so that HOSTILE_NEAR_SITE means a hostile unit is the site's only problem:
+            # the founding shortcuts that waive it must not accept a site that fails anything else.
+            if rejected is None and not escorted and danger.near(site.x, site.y, s.threat_radius):
+                rejected = HOSTILE_NEAR_SITE
             path_threat = rejected is None and danger.on_path(
                 (settler.x, settler.y), (site.x, site.y), s.threat_radius
             )

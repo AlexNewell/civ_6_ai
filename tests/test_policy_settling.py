@@ -1804,6 +1804,18 @@ def test_a_settler_on_a_good_site_still_runs_from_three_barbarians():
     assert not [a for a in game.actions if a[0] == "found"]
 
 
+def test_a_site_that_fails_another_rule_is_not_founded_on_just_for_a_small_threat():
+    game = make_game(
+        [settler(x=14, y=10)],
+        cities=[alpha()],
+        threats=[barbarian(16, 10)],
+        sites=[site(14, 10, food=40)],
+    )
+    policy = SettlingPolicy(SettlingSettings(max_city_distance=1, far_city_distance=1))
+    run(policy, game)  # Four tiles from the only city: too far, whatever the barbarian does.
+    assert not [a for a in game.actions if a[0] == "found"]
+
+
 def test_a_settler_does_not_found_under_threat_while_at_war_with_a_civ():
     game, _ = _found_with([barbarian(16, 10)], defence=_War(at_war=True))
     assert not [a for a in game.actions if a[0] == "found"]

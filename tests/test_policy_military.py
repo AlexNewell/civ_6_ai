@@ -1015,7 +1015,7 @@ def test_a_camp_count_starts_again_after_the_camp_is_forgotten():
     game = camp_game(strong_pair(), [barbarian(x=15, y=10, cs=5)])
     policy = MilitaryPolicy()
     run(policy, game)
-    assert (14, 10) in policy._camp_turns
+    assert any(where == (14, 10) for where, _ in policy._camp_turns)
     game.data["units"] = []
     game.data["overview"] = overview(turn=20 + policy.settings.camp_idle_turns + 1, num_cities=1)
     run(policy, game)
@@ -1601,3 +1601,21 @@ def test_a_force_is_released_from_its_mission_when_the_camp_is_gone():
     game = MilitaryGame([warrior(uid=1), unit], [barbarian(x=13, y=10, cs=40)])
     run(policy, game)
     assert 3 not in policy._mission
+
+
+def test_a_force_still_walking_to_a_far_camp_is_not_cut_off_by_the_assault_limit():
+    units = [warrior(uid=1, x=2, y=10, **STRONG), warrior(uid=2, x=2, y=11, **STRONG)]
+    game = camp_game(units, [])
+    policy = MilitaryPolicy()
+    for _ in range(policy.settings.max_camp_turns + 3):  # More turns than the assault limit.
+        run(policy, game)
+    assert (14, 10) not in policy._camp_aside  # Still on its way: not set aside.
+
+
+def test_a_force_that_never_arrives_is_set_aside_after_the_travel_limit():
+    units = [warrior(uid=1, x=2, y=10, **STRONG), warrior(uid=2, x=2, y=11, **STRONG)]
+    game = camp_game(units, [])
+    policy = MilitaryPolicy()
+    for _ in range(policy.settings.camp_travel_turns + 2):
+        run(policy, game)
+    assert (14, 10) in policy._camp_aside

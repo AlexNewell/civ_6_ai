@@ -207,7 +207,8 @@ class MilitarySettings:
     camp_mission_turns: int = 6  # A unit sent at a camp keeps to it this long after the last order.
     camp_defender_radius: int = 2  # Barbarians this close to a camp defend it.
     camp_min_units: int = 2
-    max_camp_turns: int = 8  # Turns spent advancing on one camp before it is set aside.
+    max_camp_turns: int = 8  # Turns spent assaulting one camp before it is set aside.
+    camp_travel_turns: int = 20  # Turns a force may take to reach the muster point first.
     camp_retry_turns: int = 30
     camp_idle_turns: int = 10  # A camp not advanced on for this long starts its count again.
     city_strike_range: int = 2  # civ6-mcp: "city attack range is 2".
@@ -448,7 +449,7 @@ class MilitaryPolicy:
     _promotion_refused: dict[int, int] = field(default_factory=dict, init=False, repr=False)
     _promotion_asked: dict[int, int] = field(default_factory=dict, init=False, repr=False)
     # Per camp tile: turns spent advancing on it and the last of them; and when it is set aside to.
-    _camp_turns: dict[tuple[int, int], tuple[int, int]] = field(
+    _camp_turns: dict[tuple[tuple[int, int], bool], tuple[int, int]] = field(
         default_factory=dict, init=False, repr=False
     )
     _camp_aside: dict[tuple[int, int], int] = field(default_factory=dict, init=False, repr=False)
@@ -1372,15 +1373,21 @@ class MilitaryPolicy:
         force = [u for u in spare if hex_distance(u.x, u.y, *where, s.map_width) <= s.camp_reach]
         if not camp_force_ok(force, defenders, s.weights, s.camp_min_units):
             return
-        spent = self._camp_turns.get(where, (0, t.turn))[0] + 1
-        self._camp_turns[where] = (spent, t.turn)
-        if spent > s.max_camp_turns:
-            self._camp_aside[where] = t.turn + s.camp_retry_turns
-            self._camp_turns.pop(where)
-            return
-        occupied = any((b.x, b.y) == where for b in t.threats if b.hostile)
         muster = s.camp_muster_radius
         gathered = sum(1 for u in force if hex_distance(u.x, u.y, *where, s.map_width) <= muster)
+        # Two limits. The walk to the muster point has its own, longer one (Run 18: a far camp's
+        # force took eight turns to arrive, which used up the assault's limit before anyone was
+        # there, and 4-9 spare units then sat idle for twenty turns). The assault keeps its own.
+        key = (where, gathered >= s.camp_min_units)
+        limit = s.max_camp_turns if key[1] else s.camp_travel_turns
+        spent = self._camp_turns.get(key, (0, t.turn))[0] + 1
+        self._camp_turns[key] = (spent, t.turn)
+        if spent > limit:
+            self._camp_aside[where] = t.turn + s.camp_retry_turns
+            self._camp_turns.pop((where, True), None)
+            self._camp_turns.pop((where, False), None)
+            return
+        occupied = any((b.x, b.y) == where for b in t.threats if b.hostile)
         for unit in sorted(force, key=lambda u: u.unit_id):
             self._mission[unit.unit_id] = (where, t.turn)
             if not self._available(t, unit, "move"):

@@ -237,3 +237,34 @@ def test_fog_is_a_mild_threat_beside_unseen_ground_near_our_cities():
     m.see_own(1, [], [city])
     assert 0 < m.fog_at(3, 10) < m.settings.fog_penalty  # Row 10 is known; rows around are not.
     assert m.fog_at(40, 40) == 0  # Far from any city of ours.
+
+
+def test_a_stronger_unit_gives_more_cover_than_a_weaker_one():
+    m = ThreatMap(ThreatMapSettings(map_width=None))
+    m.see_own(1, [_own(10, 10, "UNIT_WARRIOR", cs=8)], [])
+    warrior = m.cover_at(10, 10)
+    m.see_own(1, [_own(10, 10, "UNIT_MODERN_ARMOR", cs=80)], [])
+    assert m.cover_at(10, 10) == warrior * 10  # Strength 80 against 8, with no cap.
+
+
+def test_a_citys_cover_is_its_defence_strength_and_falls_with_its_damage():
+    from civ6_ai.state.reader import build_city
+
+    m = ThreatMap(ThreatMapSettings(map_width=None))
+    whole = build_city(city_info(x=5, y=5, defense_strength=12, garrison_hp=200), (), set(), 74)
+    m.see_own(1, [], [whole])
+    full = m.cover_at(5, 5)
+    assert full == 12
+    hurt = build_city(city_info(x=5, y=5, defense_strength=12, garrison_hp=100), (), set(), 74)
+    m.see_own(1, [], [hurt])
+    assert m.cover_at(5, 5) < full
+
+
+def test_a_camps_strength_is_the_strongest_barbarian_land_unit_seen():
+    m = ThreatMap(ThreatMapSettings(map_width=None, camp_strength=15.0))
+    m.see_tiles(1, [camp()])
+    assert m.strength_of(m.camps()[0]) == 15.0  # The floor, before any barbarian is seen.
+    m.see_threats(2, [hostile("UNIT_SWORDSMAN", x=40, y=40, cs=36)])
+    assert m.strength_of(m.camps()[0]) == 36.0
+    m.see_threats(3, [hostile("UNIT_GALLEY", x=50, y=50, cs=60)])  # A ship doesn't count.
+    assert m.strength_of(m.camps()[0]) == 36.0

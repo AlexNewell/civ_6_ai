@@ -20,7 +20,6 @@ and comes with the stages that use it; a decision to use the map must not assume
 
 import json
 import logging
-import math
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -46,7 +45,9 @@ class ThreatMapSettings:
     """Bounds of the map. All overridable; none is a rule (see the issue's settings split)."""
 
     map_width: int | None = STANDARD_MAP_WIDTH
-    camp_strength: float = 25.0  # What a camp is worth as a source (it spawns units).
+    # A camp's strength is that of the strongest barbarian land unit seen so far (they spawn
+    # at the barbarians' tech, which can be far from ours); until one is seen, this floor.
+    camp_strength: float = 15.0
     camp_radius: int = 5  # Tiles over which a camp's threat fades to nothing.
     unit_radius: int = 3  # The same for a hostile unit.
     unit_memory_turns: int = 10  # A hostile unit not seen again is dropped after this many turns.
@@ -67,10 +68,7 @@ class ThreatMapSettings:
     # Our side. Cover is what our units and cities answer with; it is not threat's opposite, so
     # the two are kept as separate layers and combined by whoever decides.
     own_horizon_turns: float = 2.0  # Our unit's cover fades out over this many turns of reach.
-    city_strength: float = 20.0  # What a city of ours is worth as cover.
     city_cover_radius: int = 3  # Tiles over which a city's cover fades to nothing.
-    cover_cap: float = 40.0  # Cover saturates toward this, so overlapping defenders don't add up
-    # to a number far beyond any threat (Run 17: 150 where three cities and six units overlapped).
     # Fog is mild threat: a tile beside ground we have never seen could hold anything.
     fog_penalty: float = 3.0  # At most, on a tile whose surroundings are all unseen.
     fog_radius: int = 2  # Tiles around a tile that are looked at for unseen ground.
@@ -108,11 +106,19 @@ class Ally:
     naval: bool = False
 
 
+def _city_strength(city: City) -> float:
+    """A city's cover: its defence strength, less what damage has taken off (its ranged
+    strike is on that scale). Walls and the garrison's own stats are not counted yet."""
+    hp = city.garrison_hp / city.garrison_max_hp if city.garrison_max_hp > 0 else 1.0
+    return float(city.defense_strength) * min(1.0, hp)
+
+
 @dataclass
 class ThreatMap:
     settings: ThreatMapSettings = field(default_factory=ThreatMapSettings)
     sources: list[Source] = field(default_factory=list)
     terrain: TerrainStore | None = None
+    barbarian_peak: float = 0.0  # Strongest barbarian land unit seen this session.
     allies: list["Ally"] = field(default_factory=list)
     _last_scan: int = -10_000
     _baselined: bool = False
@@ -180,6 +186,9 @@ class ThreatMap:
             for t in threats
             if t.hostile
         ]
+        for f in fresh:
+            if f.hostile_owner == BARBARIAN_ID and not f.naval:
+                self.barbarian_peak = max(self.barbarian_peak, f.strength)
         keep = []
         for old in self.sources:
             if old.kind != UNIT:
@@ -216,7 +225,7 @@ class ThreatMap:
             )
             for u in units
             if u.is_combat
-        ] + [Ally("city", c.x, c.y, s.city_strength) for c in cities]
+        ] + [Ally("city", c.x, c.y, _city_strength(c)) for c in cities]
         self.sources = [
             src
             for src in self.sources
@@ -262,7 +271,8 @@ class ThreatMap:
     def _field(self, src: Source) -> dict[tuple[int, int], float]:
         """One source's threat on each tile it reaches, before any fade with age."""
         known = len(self.terrain) if self.terrain is not None else 0
-        key = (src.kind, src.x, src.y, src.unit_type, src.strength, src.naval, known)
+        strength = self.strength_of(src)
+        key = (src.kind, src.x, src.y, src.unit_type, strength, src.naval, known)
         if key in self._fields:
             return self._fields[key]
         width = self.settings.map_width
@@ -271,13 +281,13 @@ class ThreatMap:
             reach = self._reach(src)
             for tx, ty in self._tiles_around(src):
                 d = hex_distance(tx, ty, src.x, src.y, width)
-                field_[tx, ty] = src.strength * (1 - d / (reach + 1))
+                field_[tx, ty] = strength * (1 - d / (reach + 1))
         else:
             moves, naval, rng, horizon = self._profile(src)
             turns = self.terrain.reach(src.x, src.y, moves, naval, horizon, rng)
             for tile, t in turns.items():
                 if t <= horizon:
-                    field_[tile] = src.strength * (1 - t / (horizon + 1))
+                    field_[tile] = strength * (1 - t / (horizon + 1))
         self._fields[key] = field_
         return field_
 
@@ -307,9 +317,7 @@ class ThreatMap:
 
     def cover_at(self, x: int, y: int) -> float:
         """What our units and cities can bring to a tile, by the same turns-to-arrive measure."""
-        total = sum(self._cover_field(a).get((x, y), 0.0) for a in self.allies)
-        cap = self.settings.cover_cap
-        return cap * (1 - math.exp(-total / cap)) if total > 0 else 0.0
+        return sum(self._cover_field(a).get((x, y), 0.0) for a in self.allies)
 
     def fog_at(self, x: int, y: int) -> float:
         """A mild threat from ground never seen near the tile, only close to our cities, where
@@ -331,6 +339,12 @@ class ThreatMap:
     def net_at(self, x: int, y: int, turn: int | None = None) -> float:
         """Threat plus fog, less our cover, never below zero."""
         return max(0.0, self.threat_at(x, y, turn) + self.fog_at(x, y) - self.cover_at(x, y))
+
+    def strength_of(self, src: Source) -> float:
+        """A unit's own combat value; a camp's is the strongest barbarian unit seen."""
+        if src.kind == CAMP:
+            return max(src.strength, self.barbarian_peak)
+        return src.strength
 
     def _fade(self, src: Source, turn: int | None) -> float:
         if src.kind == UNIT and turn is not None:
@@ -403,6 +417,7 @@ class ThreatMap:
         for src in sorted(self.sources, key=lambda s: (s.kind, s.x, s.y)):
             row = asdict(src)
             row["age"] = src.age(turn)
+            row["strength"] = self.strength_of(src)
             row["city_distance"] = self.near_city(src, cities)
             rows.append(row)
         near = [

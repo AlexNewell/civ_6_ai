@@ -221,7 +221,8 @@ def draw(record: dict, pad: int, box: tuple[int, int, int, int] | None = None) -
         f"Turn {turn}.  Hex colour is the ground: blue water, grey mountain, tan hills, "
         "green woods, blue bar = river, blank = never seen.  Blue hex = our city.",
         "Red number = threat.  Grey number = fog (unseen ground nearby).  Green number = our cover "
-        "(saturates at 40).  Red border = threat plus fog left after cover, thicker is worse.",
+        "(combat strength of our units and cities).  "
+        "Red border = threat plus fog left after cover, thicker is worse.",
         "Red dot = hostile unit with its strength (hollow = remembered, not seen now).  "
         "Green dot = our combat unit.  Black X = camp.  North up, x increases to the right.",
     ]

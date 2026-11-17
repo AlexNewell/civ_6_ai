@@ -237,6 +237,7 @@ class MilitarySettings:
         "PROMOTION_ARROW_STORM",
     )
     map_width: int | None = STANDARD_MAP_WIDTH
+    map_height: int = 46  # The standard map's rows; a projected recon target stays inside them.
 
 
 # ----- odds -----
@@ -450,6 +451,7 @@ class MilitaryPolicy:
     _recon: dict[int, tuple[tuple[int, int], int]] = field(
         default_factory=dict, init=False, repr=False
     )  # Unit id to the tile it was sent to see and the turn.
+    _camp_baseline: bool = field(default=True, init=False, repr=False)
     _recon_bad: dict[tuple[int, int], int] = field(default_factory=dict, init=False, repr=False)
     _recon_started: int = field(default=-99, init=False, repr=False)
     _mission: dict[int, tuple[tuple[int, int], int]] = field(
@@ -1433,7 +1435,7 @@ class MilitaryPolicy:
         )
         goal = (
             round(city.x + (seen_x - city.x) * factor) % s.map_width,
-            max(0, round(city.y + (seen[1] - city.y) * factor)),
+            min(s.map_height - 1, max(0, round(city.y + (seen[1] - city.y) * factor))),
         )
         return goal if goal not in self._recon_bad else seen
 
@@ -1538,9 +1540,14 @@ class MilitaryPolicy:
                 continue
             for tile in tiles:
                 if tile.improvement == CAMP_IMPROVEMENT:
-                    self._camps.setdefault((tile.x, tile.y), t.turn)  # Fogged but remembered.
+                    # A fogged tile shows the live state, which may hold a camp that spawned since
+                    # the player last looked. Only the session's first scan stands for the player's
+                    # own map; after that a camp must be seen to be learned (and is then kept).
+                    if tile.visible or self._camp_baseline:
+                        self._camps.setdefault((tile.x, tile.y), t.turn)
                 elif tile.visible:
                     self._camps.pop((tile.x, tile.y), None)
+        self._camp_baseline = False
 
     def _home_distance(self, t: _Turn, where: tuple[int, int]) -> int:
         return min(

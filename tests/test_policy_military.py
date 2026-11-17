@@ -1495,3 +1495,26 @@ def test_wounded_spare_units_do_not_count_towards_a_recon_party():
     game = MilitaryGame([warrior(uid=1), *hurt, warrior(uid=20, x=10, y=10)], [])
     run(policy, game)
     assert not [d for d in policy.decisions if d.action == "recon"]
+
+
+def test_a_camp_that_spawned_in_fog_after_the_first_scan_is_not_learned():
+    fogged = tile(x=14, y=10, improvement="IMPROVEMENT_BARBARIAN_CAMP", visibility="revealed")
+    policy = MilitaryPolicy()
+    run(
+        policy,
+        camp_game(
+            strong_pair(),
+            [barbarian(x=15, y=10, cs=5)],
+            camp=tile(x=14, y=10, improvement=None, units=[]),
+        ),
+    )
+    run(policy, camp_game(strong_pair(), [barbarian(x=15, y=10, cs=5)], camp=fogged))
+    assert (14, 10) not in policy._camps
+
+
+def test_the_recon_target_stays_inside_the_map_rows():
+    policy = MilitaryPolicy()
+    policy._sightings[(10, 45)] = 20
+    city = types.SimpleNamespace(x=10, y=43, city_id=1)
+    t = types.SimpleNamespace(cities=[city], turn=20)
+    assert policy._recon_target(t)[1] <= policy.settings.map_height - 1

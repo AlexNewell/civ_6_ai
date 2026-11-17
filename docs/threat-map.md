@@ -34,9 +34,9 @@ Included: sources, the threat layer, `danger_near`, a camp scan every `scan_turn
 city (the map's own, so a camp is known whether or not enough spare units exist), a per-turn dump
 to `runs/<game>_threatmap.jsonl`, and slice metrics.
 
-Not yet: the opportunity layer, `net_value`, `path_clear` and `oldest_knowledge`. They are used
-only by later stages, and their inputs (movement costs from `get_map_area`) are settled there.
-Spread is plain tile distance for now. This is stated so no decision assumes terrain-aware reach.
+Not yet: the opportunity layer, `net_value`, `path_clear` and `oldest_knowledge`, used only by later
+stages. Spread is by movement (stage 1b): the terrain store gives walkers terrain costs and ships
+the water and the coast beside it; a tile never read is slow for a walker and closed to a ship.
 
 ## Shapes pinned for later stages (numbers are tuned on slices, not here)
 
@@ -59,10 +59,12 @@ a rule, and each can be overridden or reverted.
 
 ## Dump format
 
-One JSON line per turn: `turn`, `sources` (each with `age` and `city_distance`),
-`camps_near_city` (camps within `near_city` tiles of one of our cities), and `heat` (the hottest
-tiles as `[x, y, value]`). `scripts/slice_report.py` prints "camp-turns near a city" and the
-handler's seconds per turn.
+One JSON line per turn: `turn`; `sources` (each with `age`, `strength` and `city_distance`); 
+`camps_near_city`; `heat` (every tile with threat, as `[x, y, value]`); `cover` (our units and 
+cities, same shape); `fog` (unseen-ground penalty near our cities); `cities` and `units` 
+(where we stand); and `terrain_new` (ground learned since the last line, as `"x,y": code`).
+`scripts/slice_report.py` prints "camp-turns near a city" and the handler's seconds per turn;
+`scripts/threat_map_view.py` draws any turn.
 
 ## Example
 

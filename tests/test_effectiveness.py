@@ -728,3 +728,81 @@ def test_barbarians_near_with_no_free_unit_is_flagged():
     run = RunLogs(records=[turn(t) for t in range(1, 40)], bot=lines, has_bot_log=True)
     check = by_name(run)[("offense", "early: barbarian turns with no spare unit to answer")]
     assert check.status == FAIL
+
+
+def boosts_line(techs=None, civics=None):
+    """Each item is name: [cost, progress percent, boosted 0 or 1]."""
+    return bot(
+        "research", "research_boosts " + json.dumps({"techs": techs or {}, "civics": civics or {}})
+    )
+
+
+def done_turn(turn_no, *notices):
+    record = turn(turn_no)
+    record["detail"] = "\n".join(f"  >> {n} Now: None." for n in notices)
+    return record
+
+
+def test_boosts_without_the_line_are_no_data():
+    run = RunLogs(records=[turn(1)], bot=[], has_bot_log=True)
+    assert by_name(run)[("boosts", "boosts earned")].status == NO_DATA
+
+
+def test_boost_points_are_what_the_boost_saved_not_a_count():
+    # Mining: boosted before any progress, so it saves half of 100. Pottery: boosted at 40%, so
+    # it still adds the full half: 50 of 100. Archery: never boosted.
+    lines = [
+        boosts_line(techs={"Mining": [100, 0, 0], "Pottery": [100, 0, 0], "Archery": [100, 0, 0]}),
+        boosts_line(techs={"Mining": [100, 0, 1], "Pottery": [100, 40, 0], "Archery": [100, 5, 0]}),
+        boosts_line(techs={"Pottery": [100, 40, 1], "Archery": [100, 9, 0]}),
+    ]
+    records = [
+        done_turn(7, "Research complete: Mining!"),
+        done_turn(12, "Research complete: Archery!"),
+        done_turn(90, "Research complete: Pottery!"),
+    ]
+    checks = by_name(RunLogs(records=records, bot=lines, has_bot_log=True))
+    assert checks[("boosts", "eurekas earned")].used == 2
+    saved = checks[("boosts", "tech points saved by boosts")]
+    assert (saved.created, saved.used) == (150, 100)  # Of 150 possible (half of 300): 50 + 50.
+    assert checks[("boosts", "early: tech points saved (turns 1-75)")].used == 50
+    assert checks[("boosts", "middle: tech points saved (turns 76-90)")].used == 50
+
+
+def test_an_item_boosted_when_first_seen_counts_in_full():
+    # Not researchable yet, so no progress: seen boosted with no cost, then opened later.
+    lines = [
+        boosts_line(civics={"Craftsmanship": [0, 0, 1]}),
+        boosts_line(civics={"Craftsmanship": [60, 0, 1]}),
+    ]
+    run = RunLogs(
+        records=[done_turn(20, "Civic complete: Craftsmanship!")], bot=lines, has_bot_log=True
+    )
+    saved = by_name(run)[("boosts", "civic points saved by boosts")]
+    assert saved.used == 30
+
+
+def test_a_boost_that_came_when_almost_done_earns_little_and_warns():
+    items = {f"Tech{t}": [100, 0, 0] for t in range(6)}
+    late = {name: [100, 90, 1] for name in items}
+    nearly = {name: [100, 90, 0] for name in items}
+    lines = [boosts_line(techs=items), boosts_line(techs=nearly), boosts_line(techs=late)]
+    records = [done_turn(10 + i, f"Research complete: {n}!") for i, n in enumerate(items)]
+    run = RunLogs(records=records, bot=lines, has_bot_log=True)
+    check = by_name(run)[("boosts", "tech points saved by boosts")]
+    assert check.used == 60  # Only the 10% left to do each: 10 of 50 possible a tech.
+    assert check.status == FAIL
+
+
+def test_a_boost_on_a_still_locked_item_counts_as_earned():
+    lines = [boosts_line(techs={"Flight": [0, 0, 1]})]
+    run = RunLogs(records=[turn(1)], bot=lines, has_bot_log=True)
+    assert by_name(run)[("boosts", "eurekas earned")].used == 1
+
+
+def test_a_handful_of_finished_items_is_not_judged():
+    lines = [boosts_line(techs={"Mining": [100, 0, 0]})]
+    run = RunLogs(records=[done_turn(7, "Research complete: Mining!")], bot=lines, has_bot_log=True)
+    check = by_name(run)[("boosts", "tech points saved by boosts")]
+    assert check.status == PASS
+    assert "too few" in check.note

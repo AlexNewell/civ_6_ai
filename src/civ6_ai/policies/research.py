@@ -19,6 +19,7 @@ The score of an option is the sum of:
 Ties go to the item type in alphabetical order.
 """
 
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -139,6 +140,35 @@ async def _start_best(
     return False
 
 
+def research_snapshot(
+    options: tuple[ResearchOption, ...], locked: tuple[LockedResearch, ...]
+) -> dict[str, list[int]]:
+    """Each researchable item as `name: [cost, progress percent, boosted 0 or 1]`.
+
+    Items not yet researchable whose boost is earned come as `[0, 0, 1]`: they have no progress
+    and no cost shown yet.
+    """
+    rows = {o.name: [o.cost, o.progress_pct, int(o.boosted)] for o in options}
+    for item in locked:
+        if item.boosted and item.name not in rows:
+            rows[item.name] = [0, 0, 1]
+    return rows
+
+
+def log_boosts(research: Research) -> None:
+    """One line a turn with every tech and civic's cost, progress and boost (Run 15).
+
+    The effectiveness report reads the progress an item had when its boost was earned, so it can
+    say how many points the boost saved, not only whether there was one. The read already exists,
+    so this costs no game call.
+    """
+    line = {
+        "techs": research_snapshot(research.techs, research.locked_techs),
+        "civics": research_snapshot(research.civics, research.locked_civics),
+    }
+    log.info("research_boosts %s", json.dumps(line, sort_keys=True))
+
+
 class ResearchPolicy:
     """A turn handler that keeps a tech and a civic in progress and follows the best target."""
 
@@ -149,6 +179,7 @@ class ResearchPolicy:
 
     async def run(self, game: ResearchGame) -> None:
         research = await read_research(game)
+        log_boosts(research)
         ok_tech = await _start_best(
             choose_tech(research, self.weights), research.current_tech, game.set_research
         )

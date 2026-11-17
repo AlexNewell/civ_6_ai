@@ -591,7 +591,8 @@ class VictoryMonitor:
             ]
             if not enabled or row[0] in enabled
         ]
-        self.watch.update(assess(overview.turn, progress.players, rows, overview.player_id))
+        ours = self._our_religion(progress, overview.civ_name)
+        self.watch.update(assess(overview.turn, progress.players, rows, overview.player_id, ours))
         for path, rival_id, subject, value, needed in rows:
             shares = sum(value >= share * needed for share in VICTORY_WARNING_SHARES)
             if shares > self._shares_passed.get((path, subject), 0):
@@ -664,6 +665,24 @@ class VictoryMonitor:
                     (VictoryPath.RELIGIOUS, ids.get(founder), religion, count, living_majors)
                 )
         return rows
+
+    @staticmethod
+    def _our_religion(progress, our_name: str) -> int:
+        """Civs where our own religion is the majority, which `_religions` leaves out."""
+        count = 0
+        for religion in progress.religion_majority.values():
+            if religion == "none":
+                continue
+            founder = next(
+                (
+                    civ
+                    for civ, name in progress.religion_founded_names.items()
+                    if _is_same_religion(religion, name)
+                ),
+                None,
+            )
+            count += founder == our_name
+        return count
 
     def _capitals(self, progress, living_majors: int) -> list[tuple]:
         """A conqueror needs every other original capital. Eliminated civs have lost theirs."""

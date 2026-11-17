@@ -179,7 +179,9 @@ def science_rank(players: list[Any], our_id: int) -> ScienceRank | None:
     )
 
 
-def assess(turn: int, players: list[Any], rows: list[tuple], our_id: int) -> Assessment:
+def assess(
+    turn: int, players: list[Any], rows: list[tuple], our_id: int, our_religion: int = 0
+) -> Assessment:
     """Pure. `rows` are the victory monitor's (path, rival_id, name, value, needed) rows."""
     ours = next((p for p in players if p.player_id == our_id), None)
     standings: list[Standing] = []
@@ -189,7 +191,7 @@ def assess(turn: int, players: list[Any], rows: list[tuple], our_id: int) -> Ass
             standings.append(science)
     for path, mine in (
         (DIPLOMATIC, ours.diplomatic_vp if ours else 0),
-        (RELIGIOUS, 0),
+        (RELIGIOUS, our_religion),
     ):
         standing = _points_standing(path, rows, mine, {q.player_id: q.name for q in players})
         if standing:

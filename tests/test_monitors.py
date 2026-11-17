@@ -1057,3 +1057,10 @@ def test_the_victory_monitor_feeds_the_watch_without_extra_reads():
     }
     monitor.reset()
     assert watch.last is None
+
+
+def test_the_watch_counts_the_majorities_of_our_own_religion():
+    game = FakeGame()
+    game.victory.religion_majority = {"Us": "RELIGION_BUDDHISM", "Rome": "RELIGION_BUDDHISM"}
+    game.victory.religion_founded_names = {"Us": "Buddhism"}
+    assert VictoryMonitor._our_religion(game.victory, "Us") == 2

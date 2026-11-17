@@ -1342,9 +1342,7 @@ class MilitaryPolicy:
             return
         t.camp_scanned = True
         await self._scan_camps(game, t, barbarians)
-        known = set(self._camps)
-        if self.threat_map is not None:
-            known |= {(c.x, c.y) for c in self.threat_map.camps()}
+        known = self._known_camps()
         camps = [
             c
             for c in sorted(known)
@@ -1523,6 +1521,12 @@ class MilitaryPolicy:
         sent = self._mission.get(unit.unit_id)
         if sent is None or t.turn - sent[1] > s.camp_mission_turns:
             return False
+        if sent[0] not in self._known_camps():
+            # The camp is gone (taken, or seen empty). The force is no longer on a mission: it
+            # must not hold the tiles around it (Run 18: units waiting beside a taken camp blocked
+            # the settler's best site for three turns and cost the fourth city).
+            self._mission.pop(unit.unit_id, None)
+            return False
         near = hex_distance(unit.x, unit.y, *sent[0], s.map_width) <= s.camp_reach
         return near and unit.hp >= s.weights.camp_leave_hp * unit.max_hp
 
@@ -1572,6 +1576,12 @@ class MilitaryPolicy:
                 elif tile.visible:
                     self._camps.pop((tile.x, tile.y), None)
         self._camp_baseline = False
+
+    def _known_camps(self) -> set[tuple[int, int]]:
+        known = set(self._camps)
+        if self.threat_map is not None:
+            known |= {(c.x, c.y) for c in self.threat_map.camps()}
+        return known
 
     def _home_distance(self, t: _Turn, where: tuple[int, int]) -> int:
         return min(

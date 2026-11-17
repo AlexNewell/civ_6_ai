@@ -756,6 +756,7 @@ def test_a_unit_on_a_camp_mission_does_not_flee_the_guards_until_it_is_hurt():
     assert moves(MilitaryPolicy(), 100)  # No mission: it goes home.
     sent = MilitaryPolicy()
     sent._mission[3] = ((14, 10), 20)  # The game's turn in these tests is 20.
+    sent._camps[(14, 10)] = 20  # The camp it was sent at is still known.
     assert not moves(sent, 100)
     assert moves(sent, 40)  # Hurt: the mission no longer holds it.
 
@@ -1586,3 +1587,17 @@ def test_a_camp_on_the_threat_map_is_hunted_though_the_military_never_saw_it():
     policy.threat_map = tm
     run(policy, game)
     assert camp_orders(policy)
+
+
+def test_a_force_is_released_from_its_mission_when_the_camp_is_gone():
+    policy = MilitaryPolicy()
+    unit = warrior(uid=3, x=12, y=10, **STRONG)
+    policy._mission[3] = ((14, 10), 20)
+    policy._camps[(14, 10)] = 20
+    game = MilitaryGame([warrior(uid=1), unit], [barbarian(x=13, y=10, cs=40)])
+    run(policy, game)
+    assert 3 in policy._mission  # The camp stands: still on its mission.
+    del policy._camps[(14, 10)]  # Taken, or seen empty.
+    game = MilitaryGame([warrior(uid=1), unit], [barbarian(x=13, y=10, cs=40)])
+    run(policy, game)
+    assert 3 not in policy._mission

@@ -58,3 +58,6 @@ desktop.ini
 *.lnk
 .vscode/
 .idea/
+
+# Output of scripts/threat_map_view.py
+map.png

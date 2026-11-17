@@ -75,6 +75,7 @@ class ThreatMap:
     settings: ThreatMapSettings = field(default_factory=ThreatMapSettings)
     sources: list[Source] = field(default_factory=list)
     _last_scan: int = -10_000
+    _baselined: bool = False
 
     # ----- updating -----
 
@@ -84,15 +85,31 @@ class ThreatMap:
     def mark_scanned(self, turn: int) -> None:
         self._last_scan = turn
 
-    def see_tiles(self, turn: int, tiles: Iterable[Tile]) -> None:
-        """Camps from tiles read this turn. A camp on any revealed tile is kept; one is dropped
-        only when a visible tile shows no camp, since a fogged tile can't be believed gone."""
+    def take_baseline(self) -> bool:
+        """True once: for the first scan of the session."""
+        first = not self._baselined
+        self._baselined = True
+        return first
+
+    def see_tiles(self, turn: int, tiles: Iterable[Tile], baseline: bool = False) -> None:
+        """Camps from tiles read this turn.
+
+        A camp seen on a visible tile is kept until a visible tile shows no camp (a fogged tile
+        can't be believed gone). A camp on a *fogged* tile is only accepted in the `baseline`
+        read, the first one of a session: it stands for what the player's map already showed.
+        Later, a fogged camp is ignored until it is seen, because the live read of a fogged tile
+        would show a camp that spawned there since, which the player could not know (Run 17:
+        a camp spawned out of sight on turn 73 and the map knew it three turns before any unit
+        saw it).
+        """
         for tile in tiles:
             known = next(
                 (s for s in self.sources if s.kind == CAMP and (s.x, s.y) == (tile.x, tile.y)),
                 None,
             )
             if tile.improvement == CAMP_IMPROVEMENT:
+                if known is None and not (tile.visible or baseline):
+                    continue
                 if known is None:
                     seen = turn if tile.visible else None
                     self.sources.append(
@@ -252,6 +269,7 @@ class ThreatMapHandler:
         self.map.see_threats(turn, await read_threats(game))
         if self.map.due_for_scan(turn):
             self.map.mark_scanned(turn)
+            baseline = self.map.take_baseline()
             for city in cities:
                 try:
                     tiles = await read_area(game, city.x, city.y, self.settings.scan_radius)
@@ -260,7 +278,7 @@ class ThreatMapHandler:
                 except Exception:
                     log.exception("Threat map: reading the area around a city failed")
                     continue
-                self.map.see_tiles(turn, tiles)
+                self.map.see_tiles(turn, tiles, baseline)
         if self._dump is not None:
             with self._dump.open("a", encoding="utf-8") as out:
                 out.write(json.dumps(self.map.record(turn, cities, units)) + "\n")

@@ -27,7 +27,7 @@ def hostile(kind="UNIT_WARRIOR", x=10, y=10, cs=8, owner_id=63, hostile=True):
 
 def test_a_fogged_camp_is_a_source():
     m = ThreatMap()
-    m.see_tiles(52, [camp(visibility="revealed")])
+    m.see_tiles(52, [camp(visibility="revealed")], baseline=True)
     (src,) = m.camps()
     assert (src.x, src.y) == (67, 13)
     assert src.last_seen is None  # Remembered by the map, never confirmed on a visible tile.
@@ -167,3 +167,13 @@ def test_the_record_carries_our_cities_and_combat_units_for_the_picture():
     rec = m.record(5, [city], [warrior])
     assert rec["cities"] == [[64, 16, city.name]]
     assert rec["units"] == [[65, 16, "UNIT_WARRIOR"]]
+
+
+def test_a_camp_first_seen_fogged_after_the_baseline_is_not_believed():
+    """It may have spawned out of sight, which the player's map would not show."""
+    m = ThreatMap()
+    m.see_tiles(52, [], baseline=True)
+    m.see_tiles(73, [camp(x=69, y=27, visibility="revealed")])
+    assert m.camps() == []
+    m.see_tiles(76, [camp(x=69, y=27)])  # Seen: now it is real.
+    assert [(c.x, c.y) for c in m.camps()] == [(69, 27)]

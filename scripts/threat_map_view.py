@@ -57,18 +57,32 @@ def colour(value: float, top: float) -> tuple[int, int, int]:
     return (255, int(235 - 170 * t), int(150 - 130 * t))  # Pale yellow to red.
 
 
+def _font(size: int) -> ImageFont.ImageFont:
+    for name in ("arialbd.ttf", "arial.ttf", "DejaVuSans-Bold.ttf"):
+        try:
+            return ImageFont.truetype(name, size)
+        except OSError:
+            continue
+    return ImageFont.load_default(size=size)
+
+
+def _label(d: ImageDraw.ImageDraw, at: tuple[float, float], text: str, font, fill) -> None:
+    """Centred text with a pale halo, so it reads over any fill."""
+    d.text(at, text, fill=fill, font=font, anchor="mm", stroke_width=2, stroke_fill=(255, 255, 255))
+
+
 def draw(record: dict, pad: int) -> Image.Image:
     turn = record["turn"]
     m = rebuild(record)
     x0, x1, y0, y1 = window(record, pad)
-    size = 30  # Hex radius in pixels.
+    size = 44  # Hex radius in pixels.
     w, h = math.sqrt(3) * size, 1.5 * size
-    margin = 46
-    width = int(margin + (x1 - x0 + 2) * w + w / 2)
-    height = int(margin + (y1 - y0 + 1) * h + size + 40)
+    margin = 60
+    width = int(margin + (x1 - x0 + 1) * w + w)
+    height = int(margin + (y1 - y0 + 1) * h + size + 110)
     img = Image.new("RGB", (width, height), (255, 255, 255))
     d = ImageDraw.Draw(img)
-    font = ImageFont.load_default()
+    big, mid, small = _font(20), _font(17), _font(14)
 
     def centre(x: int, y: int) -> tuple[float, float]:
         return (
@@ -91,41 +105,51 @@ def draw(record: dict, pad: int) -> Image.Image:
         or 1
     )
     cities = {(c[0], c[1]): c[2] for c in record.get("cities", [])}
-    own = {(u[0], u[1]) for u in record.get("units", [])}
+    own = {(u[0], u[1]): u[2] for u in record.get("units", [])}
     hostile = {(s["x"], s["y"]): s for s in record["sources"] if s["kind"] == "unit"}
     camps = {(s["x"], s["y"]) for s in record["sources"] if s["kind"] == "camp"}
+    ink, red, green, blue = (30, 30, 30), (170, 0, 0), (0, 110, 0), (0, 0, 120)
     for y in range(y0, y1 + 1):
         for x in range(x0, x1 + 1):
             cx, cy = centre(x, y)
             value = m.threat_at(x, y, turn)
             fill = (150, 190, 245) if (x, y) in cities else colour(value, top)
-            d.polygon(hexagon(cx, cy), fill=fill, outline=(190, 190, 190))
+            d.polygon(hexagon(cx, cy), fill=fill, outline=(170, 170, 170))
+    for y in range(y0, y1 + 1):  # Second pass, so no hex paints over a neighbour's label.
+        for x in range(x0, x1 + 1):
+            cx, cy = centre(x, y)
+            value = m.threat_at(x, y, turn)
             if (x, y) in cities:
-                d.text((cx - 18, cy - 12), cities[x, y][:7], fill=(0, 0, 90), font=font)
-                d.text((cx - 12, cy + 2), "CITY 0", fill=(0, 0, 90), font=font)
-            elif value > 0:
-                d.text((cx - 6, cy + 8), f"{value:.0f}", fill=(60, 60, 60), font=font)
+                _label(d, (cx, cy - 12), cities[x, y][:9], mid, blue)
+                _label(d, (cx, cy + 12), "threat 0", small, blue)
+            elif value >= 0.5:
+                _label(d, (cx, cy + 20), f"{value:.0f}", mid, ink)
             if (x, y) in camps:
-                d.line([cx - 11, cy - 14, cx + 11, cy + 6], fill=(0, 0, 0), width=3)
-                d.line([cx - 11, cy + 6, cx + 11, cy - 14], fill=(0, 0, 0), width=3)
+                d.line([cx - 16, cy - 20, cx + 16, cy + 8], fill=(0, 0, 0), width=5)
+                d.line([cx - 16, cy + 8, cx + 16, cy - 20], fill=(0, 0, 0), width=5)
+                _label(d, (cx, cy + 20), "CAMP", mid, (0, 0, 0))
             if (x, y) in hostile:
-                d.ellipse([cx - 7, cy - 14, cx + 7, cy], fill=(200, 0, 0))
-                d.text(
-                    (cx - 9, cy - 28), hostile[x, y]["unit_type"][5:9], fill=(120, 0, 0), font=font
-                )
+                src = hostile[x, y]
+                d.ellipse([cx - 9, cy - 18, cx + 9, cy], fill=(200, 0, 0))
+                name = src["unit_type"].removeprefix("UNIT_").title()
+                _label(d, (cx, cy - 28), f"{name} {src['strength']:.0f}", small, red)
             if (x, y) in own:
-                d.ellipse([cx - 7, cy - 4, cx + 7, cy + 10], fill=(0, 150, 0))
+                d.ellipse([cx - 9, cy - 2, cx + 9, cy + 16], fill=(0, 150, 0))
+                _label(d, (cx, cy + 30), own[x, y].removeprefix("UNIT_").title()[:8], small, green)
     for x in range(x0, x1 + 1):  # x across the top (rows differ by half a tile; label row y1).
         cx, _ = centre(x, y1)
-        d.text((cx - 6, 8), str(x), fill=(0, 0, 0), font=font)
+        _label(d, (cx, 24), str(x), big, (0, 0, 0))
     for y in range(y0, y1 + 1):
         _, cy = centre(x0, y)
-        d.text((6, cy - 5), str(y), fill=(0, 0, 0), font=font)
-    legend = (
-        f"turn {turn}   blue = our city (threat 0)   green dot = our combat unit   "
-        "red dot = hostile unit   black X = barbarian camp   number = threat"
-    )
-    d.text((margin, height - 22), legend, fill=(0, 0, 0), font=font)
+        _label(d, (24, cy), str(y), big, (0, 0, 0))
+    lines = [
+        f"Turn {turn}.  Blue hex = our city (threat 0).  Green dot = our combat unit.  "
+        "Red dot = hostile unit, with its strength.",
+        "Black X = barbarian camp.  The number in a hex is its threat.  North is up; "
+        "x increases to the right.",
+    ]
+    for i, line in enumerate(lines):
+        d.text((margin, height - 80 + i * 26), line, fill=(0, 0, 0), font=mid)
     return img
 
 

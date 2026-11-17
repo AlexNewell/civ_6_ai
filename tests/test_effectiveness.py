@@ -680,3 +680,51 @@ def test_a_bought_tile_the_game_would_not_place_on_is_counted():
     run = RunLogs(records=[turn(1)], bot=lines, has_bot_log=True)
     check = next(c for c in production_checks(run) if "would not place" in c.name)
     assert check.status == FAIL
+
+
+def offense_line(turn_no, **fields):
+    row = {
+        "turn": turn_no,
+        "combat_units": 3,
+        "spare": 1,
+        "barb_visible": 0,
+        "barb_near": 0,
+        "attacks_barb": 0,
+        "attacks_other": 0,
+        "kills_barb": 0,
+        "camp_orders": 0,
+    }
+    row.update(fields)
+    return bot("military", "military_offense " + json.dumps(row))
+
+
+def test_offense_without_the_line_is_no_data():
+    run = RunLogs(records=[turn(1)], bot=[military_line("skip", "x")], has_bot_log=True)
+    assert by_name(run)[("offense", "offense by phase")].status == NO_DATA
+
+
+def test_early_barbarians_never_answered_are_flagged():
+    lines = [offense_line(t, barb_near=1) for t in range(10, 30)]
+    run = RunLogs(records=[turn(t) for t in range(1, 40)], bot=lines, has_bot_log=True)
+    checks = by_name(run)
+    check = checks[("offense", "early: barbarian turns answered by no attack or camp order")]
+    assert (check.created, check.used, check.status) == (20, 20, FAIL)
+    assert checks[("offense", "middle: attacks")].status == NO_DATA  # Not reached.
+
+
+def test_early_barbarians_answered_pass_and_count_by_phase():
+    lines = [offense_line(t, barb_near=1, attacks_barb=1, kills_barb=1) for t in range(10, 20)]
+    lines += [offense_line(t, attacks_other=2) for t in range(80, 90)]
+    run = RunLogs(records=[turn(t) for t in range(1, 100)], bot=lines, has_bot_log=True)
+    checks = by_name(run)
+    answered = checks[("offense", "early: barbarian turns answered by no attack or camp order")]
+    assert answered.status == PASS
+    assert checks[("offense", "early: attacks (turns 1-75)")].used == 10
+    assert checks[("offense", "middle: attacks (turns 76-99)")].used == 20
+
+
+def test_barbarians_near_with_no_free_unit_is_flagged():
+    lines = [offense_line(t, barb_near=1, spare=0) for t in range(10, 30)]
+    run = RunLogs(records=[turn(t) for t in range(1, 40)], bot=lines, has_bot_log=True)
+    check = by_name(run)[("offense", "early: barbarian turns with no spare unit to answer")]
+    assert check.status == FAIL

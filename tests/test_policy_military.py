@@ -770,9 +770,9 @@ def test_idle_spare_units_look_where_barbarians_were_last_seen_when_no_camp_is_k
     quiet = MilitaryGame(spare_party(), [])
     run(policy, quiet)
     sent = [d for d in policy.decisions if d.action == "recon"]
-    assert len({d.unit_id for d in sent}) == 2  # Two units, no more.
+    assert len({d.unit_id for d in sent}) == 3  # One party of three, no more.
     assert {d.target for d in sent} == {(24, 10)}  # Past the sighting, up to the 14-tile radius.
-    assert len(quiet.orders("move")) >= 2
+    assert len(quiet.orders("move")) >= 3
 
 
 def test_nobody_looks_for_a_camp_with_too_few_spare_units_or_when_one_is_known():

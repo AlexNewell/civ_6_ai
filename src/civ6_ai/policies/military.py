@@ -195,8 +195,8 @@ class MilitarySettings:
     # sat at home, because a camp is only known once a unit has seen it. With spare units idle and
     # no known camp, a small party walks to where barbarians were last seen, and what it sees is
     # scanned. 0 parties turns this off.
-    recon_units: int = 2
-    recon_min_spare: int = 3  # Spare units needed before any goes.
+    recon_units: int = 3  # Party size. It leaves together or not at all.
+    recon_min_spare: int = 4  # Spare units needed before the party goes.
     recon_radius: int = 14  # Sightings further than this from every city are ignored.
     recon_push: int = 6  # Tiles past the farthest sighting the party aims for.
     recon_turns: int = 12  # A party that has not arrived by now is called off.
@@ -451,6 +451,7 @@ class MilitaryPolicy:
         default_factory=dict, init=False, repr=False
     )  # Unit id to the tile it was sent to see and the turn.
     _recon_bad: dict[tuple[int, int], int] = field(default_factory=dict, init=False, repr=False)
+    _recon_started: int = field(default=-99, init=False, repr=False)
     _mission: dict[int, tuple[tuple[int, int], int]] = field(
         default_factory=dict, init=False, repr=False
     )  # Unit id to the camp it was sent at and the turn.
@@ -1439,6 +1440,9 @@ class MilitaryPolicy:
                 s.recon_units <= 0
                 or self._camps
                 or len(self._recon) >= s.recon_units
+                # A party leaves together on one turn. Run 15: units sent one by one met the
+                # raiders alone and three were lost.
+                or (self._recon and self._recon_started != t.turn)
                 or spare < s.recon_min_spare
                 or any(th.hostile and th.owner_id != BARBARIAN_ID for th in t.threats)
                 or self._land_threat_near(t, unit)
@@ -1459,6 +1463,8 @@ class MilitaryPolicy:
             return False
         t.acted.add(unit.unit_id)
         self._leave(t, unit)
+        if not self._recon:
+            self._recon_started = t.turn
         self._recon[unit.unit_id] = (target, turn_sent)
         self._fortified.pop(unit.unit_id, None)
         self._log(t, unit, "recon", "idle spare unit, no camp known, so looking where "

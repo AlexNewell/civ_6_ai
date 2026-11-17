@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import math
+import types
 
 import pytest
 from civ_mcp import lua as lq
@@ -1446,3 +1447,22 @@ def test_the_offense_line_counts_camp_orders(caplog):
     (row,) = offense_rows(caplog)
     assert row["camp_orders"] == 2
     assert row["attacks_barb"] == 0
+
+
+def test_a_recon_entry_for_a_dead_or_overdue_unit_is_dropped_each_turn():
+    policy = MilitaryPolicy()
+    policy._recon[99] = ((22, 10), 20)  # No such unit any more.
+    policy._recon[1] = ((22, 10), 20 - policy.settings.recon_turns - 1)  # Out too long.
+    run(policy, MilitaryGame([warrior(uid=1)], []))
+    assert policy._recon == {}
+
+
+def test_the_recon_target_across_the_map_seam_keeps_going_the_short_way():
+    policy = MilitaryPolicy()
+    width = policy.settings.map_width
+    policy._sightings[(2, 10)] = 20
+    city = types.SimpleNamespace(x=width - 2, y=10, city_id=1)
+    t = types.SimpleNamespace(cities=[city], turn=20)
+    x, y = policy._recon_target(t)
+    assert 0 <= x < width and y == 10
+    assert x < 12  # Continues east past the sighting, wrapped, not a huge negative number.

@@ -557,6 +557,11 @@ class MilitaryPolicy:
         self._fortified = {
             k: v for k, v in self._fortified.items() if k in by_id and (by_id[k].x, by_id[k].y) == v
         }
+        self._recon = {
+            k: v
+            for k, v in self._recon.items()
+            if k in by_id and turn - v[1] <= self.settings.recon_turns
+        }
         self._explorers = {
             k: (by_id[k].x, by_id[k].y)
             for k, pos in self._explorers.items()
@@ -1417,8 +1422,13 @@ class MilitaryPolicy:
             return seen
         reach = min(away + s.recon_push, s.recon_radius)
         factor = reach / away
+        # The sighting may lie across the east-west seam: use the copy of it nearest the city.
+        seen_x = min(
+            (seen[0] + shift * s.map_width for shift in (-1, 0, 1)),
+            key=lambda x: hex_distance(x, seen[1], city.x, city.y, None),
+        )
         goal = (
-            round(city.x + (seen[0] - city.x) * factor),
+            round(city.x + (seen_x - city.x) * factor) % s.map_width,
             max(0, round(city.y + (seen[1] - city.y) * factor)),
         )
         return goal if goal not in self._recon_bad else seen

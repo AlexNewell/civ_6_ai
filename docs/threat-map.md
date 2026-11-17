@@ -79,3 +79,18 @@ tiles we have never revealed: a probe on the practice save returned a 16-tile pa
 tile. It is therefore not used yet. When it is, it may be asked only about a revealed target, and an
 estimate whose waypoints include a tile missing from the terrain store is discarded in favour of the
 store's own.
+
+## Known approximations
+
+- Reach costs by the tile entered and divides by moves per turn. It is not turn-quantized, wastes no
+  leftover moves, has no zones of control, and is the same in both directions (a river costs the
+  same entering from either side).
+- Threat and cover sum strength linearly. Damage in the game rises steeply with the strength gap, so
+  two warriors are not one strong unit. `net_value` (stage 2b) is to be stated as expected health
+  lost, using the military's existing group-fight estimate, not a second combat model.
+- The baseline read accepts a fogged camp once per session. It cannot tell a saved game's fresh start
+  from a resume: on a resume it also accepts a camp that spawned out of sight before the save.
+- The fog penalty counts unseen ground near our cities. Barbarian camps only spawn on land away from
+  cities and other camps, so a map of spawn-eligible unseen land would aim recon better. That needs
+  the spawn rules confirmed from the game files; it is a stage 2b item, and `fog_penalty` stays
+  until it is measured.

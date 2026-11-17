@@ -947,13 +947,20 @@ def research_checks(run: RunLogs) -> list[Check]:
     ]
 
 
+def _boosted_names(rows: list[dict], key: str) -> set[str]:
+    """Items whose boost was earned, whether or not their cost is known yet."""
+    return {
+        name for row in rows for name, (_, _, flag) in row.get(key, {}).items() if flag
+    }
+
+
 def _boost_points(rows: list[dict], key: str) -> dict[str, tuple[int, float]]:
     """Per item: its cost and the points its boost saved, from the `research_boosts` lines.
 
-    A boost lifts an item to `BOOST_SHARE` of its cost, so it saves that share less the progress
-    the item had when the boost came. That progress is the last one seen before the item showed
-    boosted (none if it was boosted the first time it was seen, as with an item not yet open).
-    The progress is a whole percent read once a turn, so the saving is approximate.
+    A boost adds `BOOST_SHARE` of the item's cost to its progress, so it saves that share, or what
+    was left to do if less. That remainder is read from the last progress seen before the item
+    showed boosted (none if it was boosted the first time it was seen, as with an item not yet
+    open). The progress is a whole percent read once a turn, so the saving is approximate.
     """
     cost: dict[str, int] = {}
     before: dict[str, int] = {}
@@ -968,7 +975,7 @@ def _boost_points(rows: list[dict], key: str) -> dict[str, tuple[int, float]]:
     return {
         name: (
             cost[name],
-            cost[name] * max(0.0, BOOST_SHARE - before.get(name, 0) / 100)
+            cost[name] * max(0.0, min(BOOST_SHARE, 1 - before.get(name, 0) / 100))
             if name in boosted
             else 0,
         )
@@ -1014,7 +1021,7 @@ def boost_checks(run: RunLogs) -> list[Check]:
         ("Civic", "civics", "civic", "inspiration"),
     ):
         points = _boost_points(rows, key)
-        earned = sum(1 for _, saved in points.values() if saved > 0)
+        earned = len(_boosted_names(rows, key))
         mine = [(t, n) for t, k, n in finished if k == kind and n in points]
 
         out.append(

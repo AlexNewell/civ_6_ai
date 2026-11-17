@@ -750,7 +750,7 @@ def test_boosts_without_the_line_are_no_data():
 
 def test_boost_points_are_what_the_boost_saved_not_a_count():
     # Mining: boosted before any progress, so it saves half of 100. Pottery: boosted at 40%, so
-    # it saves 10 of 100. Archery: never boosted.
+    # it still adds the full half: 50 of 100. Archery: never boosted.
     lines = [
         boosts_line(techs={"Mining": [100, 0, 0], "Pottery": [100, 0, 0], "Archery": [100, 0, 0]}),
         boosts_line(techs={"Mining": [100, 0, 1], "Pottery": [100, 40, 0], "Archery": [100, 5, 0]}),
@@ -764,9 +764,9 @@ def test_boost_points_are_what_the_boost_saved_not_a_count():
     checks = by_name(RunLogs(records=records, bot=lines, has_bot_log=True))
     assert checks[("boosts", "eurekas earned")].used == 2
     saved = checks[("boosts", "tech points saved by boosts")]
-    assert (saved.created, saved.used) == (150, 60)  # Of 150 possible (half of 300): 50 + 10.
+    assert (saved.created, saved.used) == (150, 100)  # Of 150 possible (half of 300): 50 + 50.
     assert checks[("boosts", "early: tech points saved (turns 1-75)")].used == 50
-    assert checks[("boosts", "middle: tech points saved (turns 76-90)")].used == 10
+    assert checks[("boosts", "middle: tech points saved (turns 76-90)")].used == 50
 
 
 def test_an_item_boosted_when_first_seen_counts_in_full():
@@ -790,8 +790,14 @@ def test_a_boost_that_came_when_almost_done_earns_little_and_warns():
     records = [done_turn(10 + i, f"Research complete: {n}!") for i, n in enumerate(items)]
     run = RunLogs(records=records, bot=lines, has_bot_log=True)
     check = by_name(run)[("boosts", "tech points saved by boosts")]
-    assert check.used == 0
+    assert check.used == 60  # Only the 10% left to do each: 10 of 50 possible a tech.
     assert check.status == FAIL
+
+
+def test_a_boost_on_a_still_locked_item_counts_as_earned():
+    lines = [boosts_line(techs={"Flight": [0, 0, 1]})]
+    run = RunLogs(records=[turn(1)], bot=lines, has_bot_log=True)
+    assert by_name(run)[("boosts", "eurekas earned")].used == 1
 
 
 def test_a_handful_of_finished_items_is_not_judged():

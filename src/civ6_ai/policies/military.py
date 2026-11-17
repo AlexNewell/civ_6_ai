@@ -57,12 +57,14 @@ from typing import Any, Protocol
 from civ6_ai.blockers import Blocker, BlockerType, action_succeeded, move_succeeded
 from civ6_ai.policies.game_data import COMBAT_UNITS
 from civ6_ai.policies.settling import (
+    _SEA_UNITS,
     SCOUT,
     hex_line,
+    neighbours,
     spare_garrison_tiles,
     units_reserved_for_settling,
 )
-from civ6_ai.state import City, GameReads, Threat, Tile, Unit, read_area
+from civ6_ai.state import City, GameReads, Threat, Unit, read_area
 from civ6_ai.state import read_cities as _read_cities
 from civ6_ai.state import read_threats as _read_threats
 from civ6_ai.state import read_units as _read_units
@@ -152,7 +154,13 @@ class MilitaryWeights:
     heal_below: float = 0.7  # A unit under this goes to heal instead of fighting.
     min_hp_after_attack: float = 0.4  # Health left after the bad-side roll, or no attack.
     garrison_min_hp_after: float = 0.6  # The same, for the unit holding a city on its own.
-    min_damage_ratio: float = 1.5  # Damage dealt over taken, unless the attack kills.
+    # Dealt over taken for a target on our own doorstep (within `defend_radius` of a city). The
+    # unit is judged on survival alone: damage taken while a city holds it is cheap, doing nothing
+    # lets the target pillage, and the attack is one blow of a group fight. 1.0 turns it off.
+    defend_damage_ratio: float = 0.0
+    min_damage_ratio: float = (
+        1.0  # Dealt over taken, unless it kills (Run 15: 1.5 to 1.0, score 61 to 69)
+    )
     damage_variance: float = 0.2  # The game rolls damage within this fraction either way.
     assumed_defender_bonus: float = 6.0  # Strength for terrain and fortification we can't see.
     kill_bonus: float = 50.0  # Rank a kill above any amount of damage.
@@ -163,6 +171,7 @@ class MilitaryWeights:
     planned_kill_hp_after: float = 0.25
     camp_force_ratio: float = 2.0  # Our strength over theirs, to go for a camp.
     camp_min_hp: float = 0.8  # Only healthy units are sent to a camp.
+    camp_leave_hp: float = 0.5  # A unit on a camp mission goes home once under this health.
 
 
 @dataclass(frozen=True)
@@ -178,7 +187,21 @@ class MilitarySettings:
     flee_radius: int = 3  # A unit outside a city this close to a hostile unit goes home.
     camp_search_radius: int = 8  # Barbarians this close to a city start a look for a camp.
     camp_scan_radius: int = 3  # Tiles read around the nearest barbarian to find the camp.
-    camp_reach: int = 4  # How far a unit is called from to a camp.
+    camp_home_scan_radius: int = 7  # Tiles read around each city to find a camp in plain view.
+    camp_home_scan_turns: int = 3  # Turns between those reads, as they cost a call per city.
+    camp_home_radius: int = 9  # A camp further than this from every city is left alone.
+    camp_reach: int = 14  # How far a unit is called from to a camp (idle units sat 8-14 off).
+    # Run 15 practice save: a camp 8 tiles off sent raiders for 30 turns while twelve spare units
+    # sat at home, because a camp is only known once a unit has seen it. With spare units idle and
+    # no known camp, a small party walks to where barbarians were last seen, and what it sees is
+    # scanned. 0 parties turns this off.
+    recon_units: int = 3  # Party size. It leaves together or not at all.
+    recon_min_spare: int = 4  # Spare units needed before the party goes.
+    recon_radius: int = 14  # Sightings further than this from every city are ignored.
+    recon_push: int = 6  # Tiles past the farthest sighting the party aims for.
+    recon_turns: int = 12  # A party that has not arrived by now is called off.
+    recon_memory_turns: int = 25  # How long a sighting is believed.
+    camp_mission_turns: int = 6  # A unit sent at a camp keeps to it this long after the last order.
     camp_defender_radius: int = 2  # Barbarians this close to a camp defend it.
     camp_min_units: int = 2
     max_camp_turns: int = 8  # Turns spent advancing on one camp before it is set aside.
@@ -188,8 +211,16 @@ class MilitarySettings:
     fallback_tiles: int = (
         2  # Other tiles tried for a unit whose move was refused, before it fortifies.
     )
+    defend_radius: int = 3  # A target this close to one of our cities is on our doorstep.
     spare_hunt_radius: int = 3  # A hostile unit this close to a spare unit may be walked at.
     spare_leash: int = 4  # A spare unit never goes further than this from its nearest city.
+    # Run 15: a settler waited on a scout that could not leave while three spare units fortified
+    # beside unexplored land. While no hostile unit is in sight a spare unit explores (the game's
+    # own explorer), up to this many at once; the first hostile unit in sight brings it home
+    # through the usual flee step. 0 turns this off, as a map that is mostly barbarians may want.
+    spare_explorers: int = 2
+    spare_explore_until: int = 120  # Turn after which spare units stay home.
+    explore_clear_radius: int = 6  # A hostile land unit this close to a unit keeps it at home.
     max_spare_orders: int = 6  # Hunt and fortify orders for spare units in one turn.
     max_actions: int = 12  # Orders sent to the game in one turn, whatever the number of units.
     attempts_per_unit: int = 2  # Calls spent on one unit in a turn, as each refusal costs one.
@@ -206,6 +237,7 @@ class MilitarySettings:
         "PROMOTION_ARROW_STORM",
     )
     map_width: int | None = STANDARD_MAP_WIDTH
+    map_height: int = 46  # The standard map's rows; a projected recon target stays inside them.
 
 
 # ----- odds -----
@@ -235,6 +267,7 @@ def assess_attack(
     weights: MilitaryWeights,
     min_hp_after: float | None = None,
     map_width: int | None = STANDARD_MAP_WIDTH,
+    min_ratio: float | None = None,
 ) -> AttackOdds | None:
     """Judge an attack by `unit` on `target`, or None if the target has no strength to judge.
 
@@ -265,7 +298,10 @@ def assess_attack(
     floor = weights.min_hp_after_attack if min_hp_after is None else min_hp_after
     safe = hp_after >= floor * unit.max_hp
     worthwhile = (
-        sure_kill or taken == 0 or dealt * (1 - v) >= weights.min_damage_ratio * taken * (1 + v)
+        sure_kill
+        or taken == 0
+        or dealt * (1 - v)
+        >= (weights.min_damage_ratio if min_ratio is None else min_ratio) * taken * (1 + v)
     )
     rank = min(dealt, target.hp) - taken + (weights.kill_bonus if sure_kill else 0.0)
     return AttackOdds(dealt, taken, sure_kill, hp_after, safe and worthwhile, rank)
@@ -397,6 +433,9 @@ class MilitaryPolicy:
     decisions: list[MilitaryDecision] = field(default_factory=list)
     # Per unit, kept across turns and pruned each turn against the units that still exist.
     _resting: dict[int, tuple[int, int]] = field(default_factory=dict, init=False, repr=False)
+    # Units sent exploring, with where each stood when last seen. One that has not moved since is
+    # done (the game's explorer stops when nothing is left to find) and is free to be used again.
+    _explorers: dict[int, tuple[int, int]] = field(default_factory=dict, init=False, repr=False)
     _fortified: dict[int, tuple[int, int]] = field(default_factory=dict, init=False, repr=False)
     _refused: dict[tuple[int, str], int] = field(default_factory=dict, init=False, repr=False)
     _strike_refused: dict[int, int] = field(default_factory=dict, init=False, repr=False)
@@ -407,6 +446,18 @@ class MilitaryPolicy:
         default_factory=dict, init=False, repr=False
     )
     _camp_aside: dict[tuple[int, int], int] = field(default_factory=dict, init=False, repr=False)
+    _camps: dict[tuple[int, int], int] = field(default_factory=dict, init=False, repr=False)
+    _sightings: dict[tuple[int, int], int] = field(default_factory=dict, init=False, repr=False)
+    _recon: dict[int, tuple[tuple[int, int], int]] = field(
+        default_factory=dict, init=False, repr=False
+    )  # Unit id to the tile it was sent to see and the turn.
+    _camp_baseline: bool = field(default=True, init=False, repr=False)
+    _recon_bad: dict[tuple[int, int], int] = field(default_factory=dict, init=False, repr=False)
+    _recon_started: int = field(default=-99, init=False, repr=False)
+    _mission: dict[int, tuple[tuple[int, int], int]] = field(
+        default_factory=dict, init=False, repr=False
+    )  # Unit id to the camp it was sent at and the turn.
+    _camp_home_scan: int = field(default=-99, init=False, repr=False)
     # The threat state (see `defence.DefenceState`), or None to play without it.
     defence: Any = field(default=None, repr=False)
 
@@ -447,6 +498,7 @@ class MilitaryPolicy:
         await self._attack(game, t)
         await self._heal(game, t)
         await self._garrison(game, t)
+        self._note_sightings(t)
         await self._clear_camp(game, t)
         await self._spare_units(game, t)
         await self._idle(game, t)
@@ -506,6 +558,16 @@ class MilitaryPolicy:
         }
         self._fortified = {
             k: v for k, v in self._fortified.items() if k in by_id and (by_id[k].x, by_id[k].y) == v
+        }
+        self._recon = {
+            k: v
+            for k, v in self._recon.items()
+            if k in by_id and turn - v[1] <= self.settings.recon_turns
+        }
+        self._explorers = {
+            k: (by_id[k].x, by_id[k].y)
+            for k, pos in self._explorers.items()
+            if k in by_id and (by_id[k].x, by_id[k].y) != pos
         }
         self._refused = {k: v for k, v in self._refused.items() if v >= turn and k[0] in by_id}
         self._strike_refused = {k: v for k, v in self._strike_refused.items() if v >= turn}
@@ -672,6 +734,15 @@ class MilitaryPolicy:
         if not defenders:
             return None  # The scan did not show it, so there is nothing to judge it by.
         return max(defenders, key=lambda d: (d.combat_strength, d.ranged_strength))
+
+    def _doorstep_ratio(self, t: _Turn, target: Target) -> float | None:
+        """The ratio to use for a target near one of our cities, else None for the usual one."""
+        s = self.settings
+        near = any(
+            hex_distance(c.x, c.y, target.x, target.y, s.map_width) <= s.defend_radius
+            for c in t.cities
+        )
+        return s.weights.defend_damage_ratio if near else None
 
     def _live(self, t: _Turn, target: Target) -> Target:
         where = (target.x, target.y)
@@ -914,13 +985,19 @@ class MilitaryPolicy:
             if where in t.dead or defender is None:
                 continue
             live = self._live(t, target)
-            odds = assess_attack(unit, live, defender, w, floor, s.map_width)
+            odds = assess_attack(
+                unit, live, defender, w, floor, s.map_width, self._doorstep_ratio(t, target)
+            )
             if odds is None:
                 continue
-            if odds.favourable and (odds.sure_kill or not hurt):
+            # Run 15: a hurt slinger beside a city under attack sat out every turn while barbarians
+            # pillaged. A hurt unit only needs to heal rather than fight when the fight can cost
+            # it health: a shot that takes nothing back (ranged at a melee unit) is free.
+            risky = hurt and not odds.sure_kill and odds.taken > 0
+            if odds.favourable and not risky:
                 found.append((odds, live, defender))
                 continue
-            if hurt and not odds.sure_kill:
+            if risky:
                 reason = f"unit is hurt (hp {unit.hp}/{unit.max_hp}) and this is no sure kill"
             elif odds.hp_after < used * unit.max_hp:
                 reason = (
@@ -1256,30 +1333,25 @@ class MilitaryPolicy:
             and u.hp >= s.weights.camp_min_hp * u.max_hp
             and self._spare(t, u)
         ]
-        if not barbarians or len(spare) < s.camp_min_units or t.camp_scanned:
+        if len(spare) < s.camp_min_units or t.camp_scanned:
             return
         t.camp_scanned = True
-        nearest = min(barbarians, key=lambda b: (b.distance, b.x, b.y))
-        try:
-            tiles = await read_area(game, nearest.x, nearest.y, s.camp_scan_radius)
-        except ConnectionError:
-            raise
-        except Exception:
-            log.exception("Reading the area for a barbarian camp failed")
-            return
-        camps = [c for c in tiles if self._is_open_camp(c, t.turn)]
+        await self._scan_camps(game, t, barbarians)
+        camps = [
+            c
+            for c in sorted(self._camps)
+            if self._camp_aside.get(c, -1) < t.turn
+            and self._home_distance(t, c) <= s.camp_home_radius
+        ]
         if not camps:
             return
-        camp = min(camps, key=lambda c: (self._home_distance(t, c), c.x, c.y))
-        where = (camp.x, camp.y)
+        where = min(camps, key=lambda c: (self._home_distance(t, c), c))
         defenders = [
             b
             for b in barbarians
-            if hex_distance(b.x, b.y, camp.x, camp.y, s.map_width) <= s.camp_defender_radius
+            if hex_distance(b.x, b.y, *where, s.map_width) <= s.camp_defender_radius
         ]
-        force = [
-            u for u in spare if hex_distance(u.x, u.y, camp.x, camp.y, s.map_width) <= s.camp_reach
-        ]
+        force = [u for u in spare if hex_distance(u.x, u.y, *where, s.map_width) <= s.camp_reach]
         if not camp_force_ok(force, defenders, s.weights, s.camp_min_units):
             return
         spent = self._camp_turns.get(where, (0, t.turn))[0] + 1
@@ -1290,33 +1362,213 @@ class MilitaryPolicy:
             return
         occupied = any((b.x, b.y) == where for b in t.threats if b.hostile)
         for unit in sorted(force, key=lambda u: u.unit_id):
+            self._mission[unit.unit_id] = (where, t.turn)
             if not self._available(t, unit, "move"):
                 continue
-            goal = where if not occupied else self._stage_tile(unit, where)
-            if goal is None or goal == (unit.x, unit.y):
-                continue
-            result = await self._order(t, unit, "move", game.move_unit(unit.unit_index, *goal))
-            if result is not None and move_succeeded(result):
-                t.acted.add(unit.unit_id)
-                self._leave(t, unit)
-                self._log(t, unit, "camp", "odds are clearly good, advancing on the camp", where,
-                          result=result)  # fmt: skip
+            # Run 15: a move straight onto a camp three tiles off is refused (the game only allows
+            # that capture move from beside it), so walk to the tile beside it first.
+            adjacent = hex_distance(unit.x, unit.y, *where, s.map_width) <= 1
+            if adjacent and not occupied:
+                goals = [where]
+            elif adjacent:
+                continue  # In reach of the guards: the attack step takes it from here.
             else:
+                goals = self._stage_goals(t, unit, where)
+            result = None
+            out_of_orders = False
+            for goal in goals:
+                if result is not None and not self._available(t, unit, "move"):
+                    out_of_orders = True  # The retries too count against the bounds.
+                    break
+                result = await self._order(t, unit, "move", game.move_unit(unit.unit_index, *goal))
+                if result is not None and move_succeeded(result):
+                    t.acted.add(unit.unit_id)
+                    t.placed[unit.unit_id] = self._reached(result, goal)
+                    self._leave(t, unit)
+                    self._log(t, unit, "camp", "odds are clearly good, advancing on the camp",
+                              where, result=result)  # fmt: skip
+                    break
+                self._learn_full_tile(t, result)  # Another unit holds it: try the next tile.
+                if "STACKING_CONFLICT" not in (result or ""):
+                    break
+            else:
+                result = result or ""
+            if unit.unit_id not in t.acted and not out_of_orders:
                 self._refuse(t, unit, "move")
                 self._log(t, unit, "camp", "move refused", where, result=result or "")
 
-    def _is_open_camp(self, tile: Tile, turn: int) -> bool:
-        return (
-            tile.visible
-            and tile.improvement == CAMP_IMPROVEMENT
-            and self._camp_aside.get((tile.x, tile.y), -1) < turn
-        )
+    def _note_sightings(self, t: _Turn) -> None:
+        """Where barbarian land units were seen, the trail back to their camp."""
+        s = self.settings
+        for th in t.threats:
+            land = not any(w in th.unit_type for w in _SEA_UNITS)
+            if th.owner_id == BARBARIAN_ID and th.hostile and land:
+                self._sightings[th.x, th.y] = t.turn
+        self._sightings = {
+            p: seen for p, seen in self._sightings.items() if t.turn - seen <= s.recon_memory_turns
+        }
+        self._recon_bad = {p: v for p, v in self._recon_bad.items() if v >= t.turn}
 
-    def _home_distance(self, t: _Turn, tile: Tile) -> int:
+    def _recon_target(self, t: _Turn) -> tuple[int, int] | None:
+        """The farthest recent sighting that is still within reach of a city, else None."""
+        s = self.settings
+        found = [
+            (self._home_distance(t, p), seen, p)
+            for p, seen in self._sightings.items()
+            if p not in self._recon_bad and self._home_distance(t, p) <= s.recon_radius
+        ]
+        if not found:
+            return None
+        home, _, seen = max(found)
+        # Barbarians are only seen near our cities, so the camp lies further out along the same
+        # line: aim `recon_push` tiles past the sighting, where the party's own eyes will reach.
+        city = min(t.cities, key=lambda c: (hex_distance(*seen, c.x, c.y, s.map_width), c.city_id))
+        away = hex_distance(*seen, city.x, city.y, s.map_width)
+        if away <= 0:
+            return seen
+        reach = min(away + s.recon_push, s.recon_radius)
+        factor = reach / away
+        # The sighting may lie across the east-west seam: use the copy of it nearest the city.
+        seen_x = min(
+            (seen[0] + shift * s.map_width for shift in (-1, 0, 1)),
+            key=lambda x: hex_distance(x, seen[1], city.x, city.y, None),
+        )
+        goal = (
+            round(city.x + (seen_x - city.x) * factor) % s.map_width,
+            min(s.map_height - 1, max(0, round(city.y + (seen[1] - city.y) * factor))),
+        )
+        return goal if goal not in self._recon_bad else seen
+
+    async def _recon_step(self, game: MilitaryGame, t: _Turn, unit: Unit) -> bool:
+        """Send a spare unit to where barbarians come from, or keep one walking there."""
+        s = self.settings
+        sent = self._recon.get(unit.unit_id)
+        if sent is not None:
+            target, turn_sent = sent
+            if hex_distance(unit.x, unit.y, *target, s.map_width) <= 1 or (
+                t.turn - turn_sent > s.recon_turns
+            ):
+                self._recon.pop(unit.unit_id)  # Arrived and scanned, or called off.
+                return False
+        else:
+            # Only units that can go count: a wounded or already-ordered one would leave the
+            # party short and send the first alone.
+            spare = sum(
+                1
+                for u in t.mine
+                if self._spare(t, u)
+                and u.can_move
+                and u.unit_id not in t.acted
+                and u.unit_id not in self._explorers
+                and u.hp >= s.weights.heal_below * u.max_hp
+            )
+            if (
+                s.recon_units <= 0
+                or self._camps
+                or len(self._recon) >= s.recon_units
+                # A party leaves together on one turn. Run 15: units sent one by one met the
+                # raiders alone and three were lost.
+                or (self._recon and self._recon_started != t.turn)
+                or (not self._recon and spare < s.recon_min_spare)  # Joiners need no recount.
+                or any(th.hostile and th.owner_id != BARBARIAN_ID for th in t.threats)
+                or self._land_threat_near(t, unit)
+            ):
+                return False
+            target = self._recon_target(t)
+            turn_sent = t.turn
+            if target is None:
+                return False
+        if not self._available(t, unit, "spare"):
+            return False
+        t.spare_orders += 1
+        result = await self._order(t, unit, "spare", game.move_unit(unit.unit_index, *target))
+        if result is None or not move_succeeded(result):
+            self._refuse(t, unit, "spare")
+            self._recon_bad[target] = t.turn + s.camp_retry_turns
+            self._recon.pop(unit.unit_id, None)
+            return False
+        t.acted.add(unit.unit_id)
+        self._leave(t, unit)
+        if not self._recon:
+            self._recon_started = t.turn
+        self._recon[unit.unit_id] = (target, turn_sent)
+        self._fortified.pop(unit.unit_id, None)
+        self._log(t, unit, "recon", "idle spare unit, no camp known, so looking where "
+                  "barbarians were last seen", target, result=result)  # fmt: skip
+        return True
+
+    def _on_camp_mission(self, t: _Turn, unit: Unit) -> bool:
+        """A healthy unit sent at a camp lately, still near it. Run 15: a unit that had shot the
+        camp's guards for two turns fled home the moment they were within `flee_radius`."""
+        s = self.settings
+        if unit.unit_id in self._recon:
+            return unit.hp >= s.weights.camp_leave_hp * unit.max_hp
+        sent = self._mission.get(unit.unit_id)
+        if sent is None or t.turn - sent[1] > s.camp_mission_turns:
+            return False
+        near = hex_distance(unit.x, unit.y, *sent[0], s.map_width) <= s.camp_reach
+        return near and unit.hp >= s.weights.camp_leave_hp * unit.max_hp
+
+    async def _scan_camps(self, game: MilitaryGame, t: _Turn, barbarians: list[Threat]) -> None:
+        """Remember each camp seen on a visible tile, and forget one seen gone.
+
+        Run 15: the scan only looked around the nearest barbarian, a ship in a bay, while a camp
+        stood three tiles from the capital in plain view for ten turns. Now it also looks around
+        each city every `camp_home_scan_turns`. Only visible tiles are believed (a fogged tile
+        shows the live state, which the player could not know), but a camp once seen is kept
+        while it is fogged, as the player's own map would keep it.
+        """
+        s = self.settings
+        centres = []
+        land = [b for b in barbarians if not any(w in b.unit_type for w in _SEA_UNITS)]
+        if land:
+            nearest = min(land, key=lambda b: (b.distance, b.x, b.y))
+            centres.append((nearest.x, nearest.y, s.camp_scan_radius))
+        for unit in t.mine:
+            if unit.unit_id in self._recon and self._city_at(t, unit) is None:
+                centres.append((unit.x, unit.y, s.camp_scan_radius))  # What the party sees.
+        if t.turn - self._camp_home_scan >= s.camp_home_scan_turns:
+            self._camp_home_scan = t.turn
+            centres.extend((c.x, c.y, s.camp_home_scan_radius) for c in t.cities)
+            # A remembered camp beyond the city scans is looked at too, so one seen cleared goes.
+            centres.extend((*camp, 1) for camp in sorted(self._camps))
+        for x, y, radius in centres:
+            try:
+                tiles = await read_area(game, x, y, radius)
+            except ConnectionError:
+                raise
+            except Exception:
+                log.exception("Reading the area for a barbarian camp failed")
+                continue
+            for tile in tiles:
+                if tile.improvement == CAMP_IMPROVEMENT:
+                    # A fogged tile shows the live state, which may hold a camp that spawned since
+                    # the player last looked. Only the session's first scan stands for the player's
+                    # own map; after that a camp must be seen to be learned (and is then kept).
+                    if tile.visible or self._camp_baseline:
+                        self._camps.setdefault((tile.x, tile.y), t.turn)
+                elif tile.visible:
+                    self._camps.pop((tile.x, tile.y), None)
+        self._camp_baseline = False
+
+    def _home_distance(self, t: _Turn, where: tuple[int, int]) -> int:
         return min(
-            (hex_distance(tile.x, tile.y, c.x, c.y, self.settings.map_width) for c in t.cities),
+            (hex_distance(*where, c.x, c.y, self.settings.map_width) for c in t.cities),
             default=0,
         )
+
+    def _stage_goals(
+        self, t: _Turn, unit: Unit, camp: tuple[int, int], tries: int = 3
+    ) -> list[tuple[int, int]]:
+        """Free tiles beside the camp, nearest the unit first. One unit per tile: the game
+        refuses a second land unit on a tile, and every unit aimed at the same stage tile left
+        the rest standing where they were (Run 15: three units, one in position)."""
+        width = self.settings.map_width
+        taken = {self._pos(t, u) for u in t.units if u.unit_id != unit.unit_id}
+        taken |= {(th.x, th.y) for th in t.threats} | t.blocked
+        free = [p for p in neighbours(*camp, width) if p not in taken]
+        free.sort(key=lambda p: (hex_distance(unit.x, unit.y, *p, width), p))
+        return free[:tries]
 
     def _stage_tile(self, unit: Unit, camp: tuple[int, int]) -> tuple[int, int] | None:
         """The tile next to the camp on the way there, or None if already adjacent."""
@@ -1378,10 +1630,18 @@ class MilitaryPolicy:
                 continue  # Needed for the garrison, so it stays as it is.
             if self._city_at(t, unit) is None and self._exposed(t, unit):
                 continue  # Alone outside with hostile units close: the idle step runs for home.
+            if unit.unit_id in self._explorers:
+                if self._city_at(t, unit) is None:
+                    continue  # Out exploring, nothing hostile close: leave the game's explorer be.
+                self._explorers.pop(unit.unit_id, None)  # Back home, free to be sent again.
             if t.spare_orders >= s.max_spare_orders or t.actions >= s.max_actions:
                 self._log(t, unit, "skip", "spare, but the orders for this turn are used up")
                 continue
             if await self._hunt(game, t, unit):
+                continue
+            if await self._recon_step(game, t, unit):
+                continue
+            if await self._explore(game, t, unit):
                 continue
             if self._fortified.get(unit.unit_id) == (unit.x, unit.y) or (
                 self._resting.get(unit.unit_id) == (unit.x, unit.y)
@@ -1395,6 +1655,12 @@ class MilitaryPolicy:
                 continue
             t.spare_orders += 1
             result = await self._order(t, unit, "spare", game.fortify_unit(unit.unit_index))
+            if result is not None and "CANNOT_FORTIFY" in result:
+                # The game says it cannot fortify or sleep: it already holds its post (fortified
+                # or in a stack). Treat it as done, not as a refusal that sidelines the unit.
+                self._fortified[unit.unit_id] = (unit.x, unit.y)
+                self._log(t, unit, "skip", "spare, cannot fortify (already holding its post)")
+                continue
             if result is not None and action_succeeded(result):
                 t.acted.add(unit.unit_id)
                 self._fortified[unit.unit_id] = (unit.x, unit.y)
@@ -1404,8 +1670,49 @@ class MilitaryPolicy:
                 self._refuse(t, unit, "spare")
                 self._log(t, unit, "skip", "spare, fortify refused", result=result or "")
 
+    async def _explore(self, game: MilitaryGame, t: _Turn, unit: Unit) -> bool:
+        """Send a spare unit to explore while nothing hostile is in sight. True if it was sent."""
+        s = self.settings
+        automate = getattr(game, "automate_explore", None)
+        if (
+            automate is None
+            or s.spare_explorers <= 0
+            or t.turn > s.spare_explore_until
+            or self._land_threat_near(t, unit)
+            or len(self._explorers) >= s.spare_explorers
+            or not self._available(t, unit, "spare")
+        ):
+            return False
+        t.spare_orders += 1
+        result = await self._order(t, unit, "spare", automate(unit.unit_index))
+        if result is None or not action_succeeded(result):
+            self._refuse(t, unit, "spare")
+            return False
+        t.acted.add(unit.unit_id)
+        self._explorers[unit.unit_id] = (unit.x, unit.y)
+        if (unit.x, unit.y) in t.at_city:
+            t.at_city[unit.x, unit.y] -= 1  # It is leaving, so the city's count is one fewer.
+        self._fortified.pop(unit.unit_id, None)
+        self._log(t, unit, "explore", "spare unit, nothing hostile in sight, so exploring",
+                  result=result)  # fmt: skip
+        return True
+
+    def _land_threat_near(self, t: _Turn, unit: Unit) -> bool:
+        """A hostile land unit within `explore_clear_radius` of the unit. Run 15 screenshots: a
+        barbarian ship in a bay or a camp across the map kept every spare unit home for ten turns,
+        while nothing could reach the ship. Only what could reach the explorer counts."""
+        s = self.settings
+        return any(
+            th.hostile
+            and not any(word in th.unit_type for word in _SEA_UNITS)
+            and hex_distance(unit.x, unit.y, th.x, th.y, s.map_width) <= s.explore_clear_radius
+            for th in t.threats
+        )
+
     def _exposed(self, t: _Turn, unit: Unit) -> bool:
         s = self.settings
+        if self._on_camp_mission(t, unit):
+            return False  # The guards beside it are the point, not a reason to go home.
         return any(
             th.hostile and hex_distance(unit.x, unit.y, th.x, th.y, s.map_width) <= s.flee_radius
             for th in t.threats

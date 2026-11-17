@@ -89,6 +89,18 @@ def test_plays_requested_turns_and_logs_each_with_timing(tmp_path):
         assert line["handler_seconds"]["do_nothing"] >= 0
 
 
+def test_turn_shots_save_one_screenshot_per_turn_before_the_turn_ends(tmp_path):
+    from civ6_ai.screenshots import Screenshotter
+
+    game = FakeGame()
+    shots = Screenshotter(tmp_path / "shots", "g-turns", cap=100, capture=lambda: b"jpeg")
+    orchestrator = Orchestrator(game, [Recording("a")], TurnLog(tmp_path / "runs" / "game.jsonl"))
+    orchestrator.turn_shots = shots
+    asyncio.run(orchestrator.play(5))
+    assert shots.count() == 5  # Past the triage reserve of three, with no per-game limit of 20.
+    assert (tmp_path / "shots" / "g-turns_T001_end-of-turn.jpg").exists()
+
+
 def test_handlers_run_in_order_before_the_turn_ends(tmp_path):
     game = FakeGame()
     play(game, [Recording("first"), Recording("second")], 1, tmp_path)
@@ -299,6 +311,10 @@ class ScoredOverview:
     num_cities: int = 3
     total_population: int = 11
     rankings: list | None = None
+    era_name: str = "Ancient"
+    era_score: int = 9
+    era_dark_threshold: int = 5
+    era_golden_threshold: int = 14
 
 
 class ScoredGame(FakeGame):
@@ -318,3 +334,14 @@ def test_unreadable_score_is_left_empty_and_the_run_goes_on(tmp_path):
     reason, turn_log = play(FakeGame(), [], 2, tmp_path)  # Its overview has only a turn.
     assert reason is StopReason.TURN_LIMIT
     assert [r.score for r in turn_log.records] == [None, None]
+
+
+def test_turn_record_holds_the_era_score_and_thresholds(tmp_path):
+    play(ScoredGame(), [], 1, tmp_path)
+    line = json.loads((tmp_path / "runs" / "game.jsonl").read_text(encoding="utf-8"))
+    assert (line["era"], line["era_score"], line["era_dark"], line["era_golden"]) == (
+        "Ancient",
+        9,
+        5,
+        14,
+    )

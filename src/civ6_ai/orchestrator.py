@@ -110,6 +110,14 @@ def read_standing(overview: object) -> dict:
         if not _standing_warned:
             _standing_warned.append(True)
             log.warning("Could not read the score from the game overview", exc_info=True)
+    try:  # Apart from the score, so an overview without era fields keeps the rest.
+        standing["era"] = str(overview.era_name)  # type: ignore[attr-defined]
+        standing["era_score"] = int(overview.era_score)  # type: ignore[attr-defined]
+        standing["era_dark"] = int(overview.era_dark_threshold)  # type: ignore[attr-defined]
+        standing["era_golden"] = int(overview.era_golden_threshold)  # type: ignore[attr-defined]
+    except (AttributeError, TypeError, ValueError):
+        for key in ("era", "era_score", "era_dark", "era_golden"):
+            standing.pop(key, None)
     return standing
 
 
@@ -134,6 +142,12 @@ class TurnRecord:
     cities: int | None = None
     population: int | None = None
     rival_scores: dict[str, int] | None = None
+    # Era score at the start of the turn, and the thresholds for a Dark or Golden Age when the
+    # era ends (era_dark, era_golden). None when the overview didn't carry them.
+    era: str | None = None
+    era_score: int | None = None
+    era_dark: int | None = None
+    era_golden: int | None = None
 
 
 @dataclass
@@ -173,6 +187,9 @@ class Orchestrator:
         self._overview: object = None  # The newest overview `_read_turn` saw.
         self._screenshots = screenshots
         self._shot_handlers: set[str] = set()
+        # Set to a Screenshotter to save the screen after every turn's handlers, before the turn
+        # ends (for reviewing a run by eye). Its own game id and cap keep it off the triage budget.
+        self.turn_shots: Screenshotter | None = None
         self._game = game
         self._handlers = handlers
         self._log = turn_log
@@ -195,6 +212,8 @@ class Orchestrator:
         standing = read_standing(self._overview)
         seconds, errors = await self._run_handlers()
         calls = self._call_timer.take() if self._call_timer else {}
+        if self.turn_shots is not None:
+            await asyncio.to_thread(self.turn_shots.take, turn, "end-of-turn")
 
         end_turn_started = time.perf_counter()
         try:

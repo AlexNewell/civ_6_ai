@@ -468,3 +468,30 @@ Written against civ6-mcp's source at the pin, not yet run live.
 - **Fix:** `SharedReads` (src/civ6_ai/bot.py) retries a read up to 2 times, 0.3 s apart, when it raises a `ValueError` that is a field-count error whose reply has no `|` delimiter. This covers the shared reads and every plain `get_`/`list_`/`check_` read. Each retry logs one warning ("stray log line"). Other errors are not retried, and a failed read is never kept. Calls are added only on failure.
 - **Not checked live:** whether the noise clears on a second read, and whether other parsers phrase the error differently.
 
+
+## Run 15 short slices (2026-11-16): 50-turn experiments from STD_T1_01
+
+A game is deterministic from the same save and code, so one 50-turn slice (`run_game.py --load STD_T1_01 --turns 50`, then `scripts/slice_report.py <turn log>`) is a clean A/B test. The baseline repeated exactly (score 61, second city turn 32, 10 attacks) across two runs. Each row changes one thing against the row above it unless noted.
+
+| Change | Score T50 | Cities | Second city | Units lost | Barbarian attacks / kills | Ancient-era score |
+|---|---|---|---|---|---|---|
+| Baseline | 61 | 2 | T32 | 3 | 10 / 3 | 2 (Dark Age) |
+| Attack ratio 1.5 to 1.0 (kept) | 69 | 3 | T35 | 6 | 21 / 7 | 6 |
+| Attack ratio 0.7 | 61 | 2 | T32 | 6 | 17 / 7 | 6 |
+| First settler without waiting for a survey (PR 234, rejected) | 45 and 53 | 2 | T43-50 | 4 | | 8 |
+| Remember camps seen from the capital, camp force ratio 1.2 (reverted) | 61 | 2 | T35 | 3 | 21 / 6 | 6 |
+| Same, camp force ratio 1.0 (reverted) | 64 | 2 | T35 | 2 | 11 / 5 | 6 |
+| Attack ratio 1.0 and no builder before the first settler (kept) | 69 | 3 | T36 | 2 | | 6 |
+
+Findings:
+- Early barbarian pressure decides the first 50 turns. The settler or its escort loses turns on a threatened route (nine turns from finished settler to founded city), and PR 234's earlier settler was killed on turn 17.
+- Two barbarian camps stood 4 and 7 tiles from the capital. The bot never attacked one: it only saw camps while a barbarian was near and the camp tile was visible, and a remembered camp (seen turn 27) still was not destroyed with two units. Camps are worth 2-3 era points each in the game's `Moments` table, so this is still open.
+- Boosts are 40% of base cost in the game's `Boosts` table (125 of 126 rows; Near Future Governance is 90).
+- Every Ancient era ended below the Dark Age threshold of 9 (scores 2 to 8): a Dark Age at turn 41 in all slices. The cheap early era points in `Moments` are camps (2-3), natural wonders (1), pantheon (1), meeting civs (1), small and medium city sizes (1), government tier (2) and great people (1).
+- Decision time stayed under 10 s per turn.
+
+### How to read a slice (added after review)
+
+- **Horizon.** A 50-turn slice judges changes whose effect lands by about turn 35-40. A change that acts late (a second city founded at T36 pays off in yields and growth over the next 30+ turns; a builder's tile improvements compound) has not finished showing its effect at T50. `slice_report.py` prints the score and city trajectory every 10 turns and the gain over the last 10; if a gap is still widening at the end, play on from a checkpoint (`--save-at 50`, then load it with `--turns 50`) to T100 before keeping or rejecting. Screen fast at 50, confirm slow at 100.
+- **One start is one data point.** Every row above is one civilization, one map and one seed (STD_T1_01). "Kept" means kept as a default for that start, not proven in general. Re-run a kept change on a second start before treating it as more than that.
+- **Nothing is a hard rule.** Results are encoded as defaults in the policy document's weights, never as unconditional code. The attack ratio is `military.min_damage_ratio` (postures already move it: DEFEND 1.3, CONQUER 0.8). The builder hold is `production.builder_hold_turns` (0 turns it off) and applies only while a settler is wanted: a site is known, expansion is weighted, and more than one city is the target. A tall start (one city, target_cities 1, or no survey site) trains builders at once. Reverting any kept change is a policy-document edit.

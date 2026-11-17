@@ -68,6 +68,7 @@ STARVING_FOCUS_RECOVERED = 2.0  # Food per turn at which a food-focused city goe
 _TURN_SCALE = 20.0  # A build this many turns away scores half as much as an instant one.
 _URGENT_SCALE = 10.0
 _FINISHING_TURNS = 2  # A build this close to done is let finish.
+_FIRST_SETTLER_TURNS = 45  # No builders before the first settler until this turn.
 _EARLY_TURNS = 60  # Turns in which a city with no garrison should get one first.
 
 
@@ -93,6 +94,8 @@ class ProductionWeights:
     target_cities: int = 6  # Stop building settlers at this many cities.
     victory: str = "any"  # The policy document's victory target. Decides the special districts.
     army_per_city: float = 1.5  # Combat units wanted per city before military stops scoring.
+    # Turns a one-city empire holds back builders to put the first settler first. 0 turns it off.
+    builder_hold_turns: int = _FIRST_SETTLER_TURNS
 
     def __post_init__(self) -> None:
         for item in fields(self):
@@ -528,6 +531,18 @@ def _unit_score(
             if ctx.spare_jobs is not None:
                 wanted = min(wanted, ctx.spare_jobs)
         if wanted <= 0 or threatened:
+            return 0.0
+        # Run 15 (one start, one seed): a builder before the first settler delayed the second city.
+        # A default, not a rule: it holds only while a settler is really wanted (a site is known,
+        # expansion is weighted, more than one city is the goal), and `builder_hold_turns` = 0 in
+        # a policy document turns it off, for a tall start or a map with nowhere to settle.
+        if (
+            ctx.num_cities <= 1
+            and ctx.turn <= w.builder_hold_turns
+            and ctx.sites_ok
+            and w.expansion > 0
+            and w.target_cities > 1
+        ):
             return 0.0
         return (6.0 + 2.0 * min(wanted, 3) + len(city.unimproved_resources)) * w.builders
     if kind == "UNIT_TRADER":

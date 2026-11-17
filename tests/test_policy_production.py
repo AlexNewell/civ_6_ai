@@ -1039,6 +1039,24 @@ def test_builders_are_not_trained_while_one_is_idle():
     assert score_of("UNIT_BUILDER", city(), replace(MID, builders=2)) > 0.0
 
 
+def test_the_builder_hold_before_the_first_settler_is_a_default_that_can_be_lifted():
+    early = ProductionContext(turn=20, num_cities=1, builders=0, recon=1, army=2, sites_ok=True)
+    builder = next(o for o in MENU if o.item == "UNIT_BUILDER")
+
+    def builder_score(ctx, **weights):
+        return score(builder, city(), ctx, ProductionWeights(**weights))
+
+    assert builder_score(early) == 0.0
+    # Off in a document: a tall start, or a builder worth more than a late second city.
+    assert builder_score(early, builder_hold_turns=0) > 0.0
+    # Nowhere to settle, expansion off, or one city the goal: nothing to put first.
+    assert builder_score(replace(early, sites_ok=False)) > 0.0
+    assert builder_score(early, expansion=0.0) > 0.0
+    assert builder_score(early, target_cities=1) > 0.0
+    # And it ends on its own.
+    assert builder_score(replace(early, turn=46)) > 0.0
+
+
 def test_builders_are_capped_by_the_jobs_nobody_holds():
     short = replace(MID, builders=2, spare_jobs=0)
     assert score_of("UNIT_BUILDER", city(), short) == 0.0

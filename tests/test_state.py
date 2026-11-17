@@ -229,6 +229,15 @@ def test_fogged_tile_blanks_live_values():
     assert tile.foreign_units == ()
 
 
+def test_fogged_barbarian_camp_is_remembered():
+    tile = reader.build_tile(
+        fx.tile(visibility="revealed", improvement="IMPROVEMENT_BARBARIAN_CAMP")
+    )
+    assert not tile.visible
+    assert tile.improvement == "IMPROVEMENT_BARBARIAN_CAMP"
+    assert tile.owner is None
+
+
 def test_visible_tile_keeps_values_but_drops_stealth_units():
     tile = reader.build_tile(fx.tile())
     assert tile.improvement == "IMPROVEMENT_MINE"

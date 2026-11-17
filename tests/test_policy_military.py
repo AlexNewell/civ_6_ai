@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import math
+import types
 
 import pytest
 from civ_mcp import lua as lq
@@ -141,6 +142,9 @@ class MilitaryGame(FakeGame):
 
     async def city_attack(self, city_id, target_x, target_y):
         return self.did("city_attack", city_id, target_x, target_y, default=CITY_HIT)
+
+    async def automate_explore(self, unit_index):
+        return self.did("explore", unit_index, default="EXPLORING")
 
     async def heal_unit(self, unit_index):
         return self.did("heal", unit_index, default="HEALING|HP:40/100")
@@ -284,6 +288,29 @@ def test_a_ranged_unit_shoots_a_barbarian_at_the_gate():
     assert policy.decisions[-1].odds["favourable"]
 
 
+def test_a_hurt_ranged_unit_still_shoots_a_melee_unit_that_cannot_hit_back():
+    game = MilitaryGame([archer(health=45, targets=[target()]), warrior(uid=5)], [barbarian()])
+    run(MilitaryPolicy(), game)
+    assert game.orders("attack") == [("attack", 2, 11, 10)]  # Free: nothing comes back.
+    hurt_melee = MilitaryGame([warrior(health=45, targets=[target()])], [barbarian(hp=60, cs=8)])
+    run(MilitaryPolicy(), hurt_melee)
+    assert not hurt_melee.orders("attack")  # A hurt melee unit heals instead.
+
+
+def test_a_target_on_the_doorstep_is_attacked_if_the_unit_would_survive_even_at_a_poor_ratio():
+    def tried(weights, x=11):
+        game = MilitaryGame(
+            [warrior(targets=[target(x=x)]), warrior(uid=5)], [barbarian(x=x, cs=14)]
+        )
+        run(MilitaryPolicy(MilitarySettings(weights=weights)), game)
+        return bool(game.orders("attack"))
+
+    assert tried(MilitaryWeights())  # Beside the city: survival is the only test.
+    assert not tried(MilitaryWeights(defend_damage_ratio=1.0))  # The old duel rule, one setting.
+    assert not tried(MilitaryWeights(), x=16)  # Far from any city the duel rule still holds.
+    assert not tried(MilitaryWeights(min_hp_after_attack=0.99, garrison_min_hp_after=0.99))
+
+
 def test_a_losing_melee_fight_is_not_started():
     game = MilitaryGame([warrior(targets=[target()])], [barbarian(cs=20)])
     run(MilitaryPolicy(), game)
@@ -349,7 +376,10 @@ def test_the_lone_defender_of_a_city_needs_a_safer_fight_than_a_spare_one():
 
 
 def test_a_hurt_unit_goes_to_heal_instead_of_a_poor_attack():
-    game = MilitaryGame([archer(health=40, targets=[target()]), warrior(uid=5)], [barbarian()])
+    # A melee unit would take damage back, so it heals; a ranged unit's free shot is the test above.
+    game = MilitaryGame(
+        [warrior(uid=2, health=40, targets=[target()]), warrior(uid=5)], [barbarian()]
+    )
     run(MilitaryPolicy(), game)
     assert not game.orders("attack")
     assert game.orders("heal") == [("heal", 2)]
@@ -592,15 +622,56 @@ def test_two_strong_units_walk_on_a_weak_camp():
     policy = MilitaryPolicy()
     run(policy, game)
     assert {d.unit_id for d in camp_orders(policy)} == {1, 2}
-    assert game.calls.count("get_map_area") == 1
 
 
-def test_an_empty_camp_is_entered_not_staged_beside():
-    game = camp_game(strong_pair(), [barbarian(x=15, y=9, cs=5)])
+def test_an_empty_camp_is_entered_from_beside_it_and_walked_to_from_afar():
+    units = [
+        warrior(uid=1, x=13, y=10, **STRONG),
+        warrior(uid=2, x=12, y=11, **STRONG),
+        warrior(uid=3),
+    ]
+    game = camp_game(units, [barbarian(x=15, y=9, cs=5)])
     policy = MilitaryPolicy()
     run(policy, game)
-    assert {d.target for d in camp_orders(policy)} == {(14, 10)}
-    assert (("move", 1, 14, 10)) in game.orders("move")
+    assert ("move", 1, 14, 10) in game.orders("move")  # Beside it: the capture move.
+    assert ("move", 2, 13, 10) in game.orders("move")  # Two off: the tile beside it first.
+
+
+def test_units_sent_at_a_camp_take_different_tiles_beside_it():
+    units = [
+        warrior(uid=1, x=11, y=10, **STRONG),
+        warrior(uid=2, x=11, y=11, **STRONG),
+        warrior(uid=3),
+    ]
+    game = camp_game(units, [barbarian(x=14, y=10, cs=5)])
+    run(MilitaryPolicy(), game)
+    goals = [order[2:] for order in game.orders("move")]
+    assert len(goals) == 2 and goals[0] != goals[1]
+
+
+def test_a_stage_tile_the_game_says_is_full_is_replaced_by_the_next_one():
+    units = [
+        warrior(uid=1, x=11, y=10, **STRONG),
+        warrior(uid=2, x=11, y=11, **STRONG),
+        warrior(uid=3),
+    ]
+    game = camp_game(units, [barbarian(x=14, y=10, cs=5)])
+    first = None
+
+    original = game.move_unit
+
+    async def move(unit_index, x, y):
+        nonlocal first
+        if first is None:
+            first = (x, y)
+            game.actions.append(("move", unit_index, x, y))
+            return f"STACKING_CONFLICT|Friendly UNIT_SLINGER already on ({x},{y}) (unit_id=9)"
+        return await original(unit_index, x, y)
+
+    game.move_unit = move
+    run(MilitaryPolicy(), game)
+    tried = [order[2:] for order in game.orders("move")]
+    assert tried[0] == first and tried[1] != first  # Moved on to another tile, same turn.
 
 
 def test_a_camp_with_a_garrison_is_approached_to_the_adjacent_tile():
@@ -636,12 +707,12 @@ def test_no_camp_means_no_camp_order():
     assert not camp_orders(policy)
 
 
-def test_a_fogged_camp_is_not_acted_on():
+def test_a_fogged_camp_is_remembered_and_acted_on():
     fogged = tile(x=14, y=10, improvement="IMPROVEMENT_BARBARIAN_CAMP", visibility="revealed")
     game = camp_game(strong_pair(), [barbarian(x=15, y=10, cs=5)], camp=fogged)
     policy = MilitaryPolicy()
     run(policy, game)
-    assert not camp_orders(policy)
+    assert camp_orders(policy)
 
 
 def test_the_lone_garrison_does_not_leave_for_a_camp():
@@ -675,10 +746,97 @@ def test_a_camp_that_will_not_fall_is_set_aside_after_the_turn_limit():
     assert (14, 10) not in policy._camp_turns
 
 
-def test_the_camp_scan_runs_once_a_turn():
+def test_a_unit_on_a_camp_mission_does_not_flee_the_guards_until_it_is_hurt():
+    def moves(policy, hp):
+        unit = warrior(uid=3, x=12, y=10, health=hp)
+        game = MilitaryGame([warrior(uid=1), unit], [barbarian(x=13, y=10, cs=40)])
+        run(policy, game)
+        return game.orders("move")
+
+    assert moves(MilitaryPolicy(), 100)  # No mission: it goes home.
+    sent = MilitaryPolicy()
+    sent._mission[3] = ((14, 10), 20)  # The game's turn in these tests is 20.
+    assert not moves(sent, 100)
+    assert moves(sent, 40)  # Hurt: the mission no longer holds it.
+
+
+def spare_party(n=4):
+    return [warrior(uid=1)] + [warrior(uid=10 + i, x=10, y=10) for i in range(n)]
+
+
+def test_idle_spare_units_look_where_barbarians_were_last_seen_when_no_camp_is_known():
+    policy = MilitaryPolicy()
+    seen = MilitaryGame(spare_party(), [barbarian(x=22, y=10, cs=5)])
+    run(policy, seen)  # Far off: remembered, not close enough to hold anyone home.
+    quiet = MilitaryGame(spare_party(), [])
+    run(policy, quiet)
+    sent = [d for d in policy.decisions if d.action == "recon"]
+    assert len({d.unit_id for d in sent}) == 3  # One party of three, no more.
+    assert {d.target for d in sent} == {(24, 10)}  # Past the sighting, up to the 14-tile radius.
+    assert len(quiet.orders("move")) >= 3
+
+
+def test_nobody_looks_for_a_camp_with_too_few_spare_units_or_when_one_is_known():
+    few = MilitaryGame([warrior(uid=1), warrior(uid=3)], [barbarian(x=22, y=10, cs=5)])
+    policy = MilitaryPolicy()
+    run(policy, few)
+    run(policy, MilitaryGame([warrior(uid=1), warrior(uid=3)], []))
+    assert not [d for d in policy.decisions if d.action == "recon"]
+    known = MilitaryPolicy()
+    known._camps[(30, 10)] = 5
+    run(known, MilitaryGame(spare_party(), [barbarian(x=22, y=10, cs=5)]))
+    run(known, MilitaryGame(spare_party(), []))
+    assert not [d for d in known.decisions if d.action == "recon"]
+
+
+def test_a_recon_party_is_scanned_where_it_stands_and_does_not_flee():
+    policy = MilitaryPolicy()
+    policy._recon[11] = ((22, 10), 20)
+    out = warrior(uid=11, x=18, y=10)
+    game = camp_game(
+        [warrior(uid=1), out, warrior(uid=12), warrior(uid=13)], [barbarian(x=19, y=10, cs=40)]
+    )
+    run(policy, game)
+    assert game.calls.count("get_map_area") >= 1  # The party's view was read for camps.
+    assert not any(
+        order[1] == 11 and (order[2], order[3]) == (10, 10) for order in game.orders("move")
+    )
+
+
+def test_the_camp_scan_reads_around_the_barbarian_and_each_city_once_a_turn():
     game = camp_game(strong_pair(), [barbarian(x=15, y=10, cs=5), barbarian(x=15, y=11, cs=5)])
-    run(MilitaryPolicy(), game)
-    assert game.calls.count("get_map_area") == 1
+    policy = MilitaryPolicy()
+    run(policy, game)
+    assert (
+        game.calls.count("get_map_area") == 2
+    )  # One around the nearer barbarian, one at the city.
+    run(policy, game)
+    assert game.calls.count("get_map_area") == 3  # The city is read only every few turns.
+
+
+def test_a_camp_in_plain_view_is_attacked_though_the_only_barbarian_is_a_ship():
+    ship = barbarian(kind="UNIT_GALLEY", x=20, y=10, cs=5)
+    game = camp_game(strong_pair(), [ship])
+    policy = MilitaryPolicy()
+    run(policy, game)
+    assert {d.unit_id for d in camp_orders(policy)} == {1, 2}
+
+
+def test_a_camp_seen_once_is_remembered_while_it_is_fogged_and_forgotten_when_seen_gone():
+    policy = MilitaryPolicy()
+    seen = camp_game(strong_pair(), [barbarian(x=15, y=10, cs=5)])
+    run(policy, seen)
+    assert (14, 10) in policy._camps
+    fogged = camp_game(
+        strong_pair(), [barbarian(x=15, y=10, cs=5)], camp=tile(x=14, y=10, visibility="revealed")
+    )
+    run(policy, fogged)
+    assert (14, 10) in policy._camps  # A fogged tile proves nothing either way.
+    gone = camp_game(
+        strong_pair(), [barbarian(x=15, y=10, cs=5)], camp=tile(x=14, y=10, improvement=None)
+    )
+    run(policy, gone)
+    assert (14, 10) not in policy._camps
 
 
 # ----- promotions -----
@@ -1070,11 +1228,55 @@ def spare_decisions(policy, action):
 
 def test_a_spare_unit_in_a_quiet_city_fortifies_and_the_garrison_is_left_alone():
     game = MilitaryGame([warrior(uid=1), warrior(uid=3)], [])
-    policy = MilitaryPolicy()
+    policy = MilitaryPolicy(settings=MilitarySettings(spare_explorers=0))
     run(policy, game)
     # Neither leaves, so both may fortify; the floor matters only for a unit that walks away.
     assert game.orders("fortify") == [("fortify", 1), ("fortify", 3)]
     assert "spare" in spare_decisions(policy, "fortify")[0].reason
+
+
+def test_a_spare_unit_explores_while_nothing_hostile_is_in_sight():
+    game = MilitaryGame([warrior(uid=1), warrior(uid=3), warrior(uid=4)], [])
+    policy = MilitaryPolicy()
+    run(policy, game)
+    assert len(game.orders("explore")) == 2  # Up to two explorers.
+    assert game.orders("fortify") == []  # The third unit is the city's garrison.
+    assert "exploring" in spare_decisions(policy, "explore")[0].reason
+    # Out exploring with nothing hostile close, it is left to the game's explorer.
+    out = warrior(uid=3, x=14, y=10)
+    later = MilitaryGame([warrior(uid=1), out, warrior(uid=4)], [])
+    policy._explorers[3] = (13, 10)  # It was last seen elsewhere, so it is still moving.
+    run(policy, later)
+    assert all(order[1] != 3 for order in later.actions)
+
+
+def test_an_explorer_that_stopped_moving_is_free_to_be_sent_again():
+    stuck = warrior(uid=3, x=14, y=10)
+    policy = MilitaryPolicy(settings=MilitarySettings(spare_explorers=1))
+    policy._explorers[3] = (14, 10)  # Same tile as last turn: the game's explorer is done.
+    game = MilitaryGame([warrior(uid=1), stuck, warrior(uid=4)], [])
+    run(policy, game)
+    assert game.orders("explore")  # With the cap of one, a stale entry would have blocked it.
+
+
+def test_spare_units_stay_home_with_a_hostile_unit_in_sight_or_with_exploring_off():
+    seen = MilitaryGame([warrior(uid=1), warrior(uid=3)], [barbarian(x=14, y=10)])
+    run(MilitaryPolicy(), seen)
+    assert seen.orders("explore") == []
+    # A hostile unit far off, or one in a ship, could not reach an explorer: no reason to stay.
+    far = MilitaryGame([warrior(uid=1), warrior(uid=3)], [barbarian(x=25, y=10)])
+    run(MilitaryPolicy(), far)
+    assert far.orders("explore")
+    ship = MilitaryGame(
+        [warrior(uid=1), warrior(uid=3)], [barbarian(kind="UNIT_GALLEY", x=12, y=10)]
+    )
+    run(MilitaryPolicy(), ship)
+    assert ship.orders("explore")
+    off = MilitaryGame([warrior(uid=1), warrior(uid=3)], [])
+    policy = MilitaryPolicy(settings=MilitarySettings(spare_explorers=0))
+    run(policy, off)
+    assert off.orders("explore") == []
+    assert off.orders("fortify")
 
 
 def test_the_last_defender_of_a_city_is_never_given_a_spare_order():
@@ -1094,7 +1296,7 @@ def test_spare_units_never_leave_a_city_below_its_requirement_when_hunting():
 
 def test_a_fortified_spare_unit_is_not_ordered_again_and_the_idleness_is_logged():
     game = MilitaryGame([warrior(uid=1), warrior(uid=3)], [])
-    policy = MilitaryPolicy()
+    policy = MilitaryPolicy(settings=MilitarySettings(spare_explorers=0))
     run(policy, game)
     run(policy, game)
     assert game.orders("fortify") == [("fortify", 1), ("fortify", 3)]
@@ -1103,7 +1305,7 @@ def test_a_fortified_spare_unit_is_not_ordered_again_and_the_idleness_is_logged(
 
 def test_a_spare_unit_outside_a_city_fortifies_in_place():
     game = MilitaryGame([warrior(uid=1), warrior(uid=3, x=12, y=10)], [])
-    policy = MilitaryPolicy()
+    policy = MilitaryPolicy(settings=MilitarySettings(spare_explorers=0))
     run(policy, game)
     assert game.orders("fortify") == [("fortify", 3)]
 
@@ -1111,11 +1313,22 @@ def test_a_spare_unit_outside_a_city_fortifies_in_place():
 def test_a_refused_spare_fortify_is_logged_and_not_repeated_next_turn():
     game = MilitaryGame([warrior(uid=1), warrior(uid=3)], [])
     game.replies["fortify"] = "Error: cannot fortify"
-    policy = MilitaryPolicy()
+    policy = MilitaryPolicy(settings=MilitarySettings(spare_explorers=0))
     run(policy, game)
     run(policy, game)
     assert len(game.orders("fortify")) == 2  # One try for each unit, none on the second turn.
     assert any("fortify refused" in d.reason for d in policy.decisions)
+
+
+def test_a_unit_that_cannot_fortify_is_taken_as_holding_its_post():
+    game = MilitaryGame([warrior(uid=1), warrior(uid=3)], [])
+    game.replies["fortify"] = "Error: CANNOT_FORTIFY|Unit cannot fortify or sleep"
+    policy = MilitaryPolicy(settings=MilitarySettings(spare_explorers=0))
+    run(policy, game)
+    run(policy, game)
+    assert len(game.orders("fortify")) == 2  # One try each, none on the second turn.
+    assert not any("refused" in d.reason for d in policy.decisions)
+    assert any("already holding" in d.reason for d in policy.decisions)
 
 
 def test_a_settlers_escort_gets_no_spare_order():
@@ -1187,7 +1400,7 @@ def test_a_spare_unit_in_reach_of_an_enemy_unit_attacks_it_by_the_attack_step():
 def test_spare_orders_are_bounded_per_turn_and_the_rest_logged():
     units = [warrior(uid=1)] + [warrior(uid=i, x=12, y=10 + i) for i in (3, 4, 5)]
     game = MilitaryGame(units, [])
-    policy = MilitaryPolicy(MilitarySettings(max_spare_orders=1))
+    policy = MilitaryPolicy(MilitarySettings(max_spare_orders=1, spare_explorers=0))
     run(policy, game)
     assert len(game.orders("fortify")) == 1
     assert sum("used up" in d.reason for d in policy.decisions) == 2
@@ -1234,3 +1447,89 @@ def test_the_offense_line_counts_camp_orders(caplog):
     (row,) = offense_rows(caplog)
     assert row["camp_orders"] == 2
     assert row["attacks_barb"] == 0
+
+
+def test_a_recon_entry_for_a_dead_or_overdue_unit_is_dropped_each_turn():
+    policy = MilitaryPolicy()
+    policy._recon[99] = ((22, 10), 20)  # No such unit any more.
+    policy._recon[1] = ((22, 10), 20 - policy.settings.recon_turns - 1)  # Out too long.
+    run(policy, MilitaryGame([warrior(uid=1)], []))
+    assert policy._recon == {}
+
+
+def test_the_recon_target_across_the_map_seam_keeps_going_the_short_way():
+    policy = MilitaryPolicy()
+    width = policy.settings.map_width
+    policy._sightings[(2, 10)] = 20
+    city = types.SimpleNamespace(x=width - 2, y=10, city_id=1)
+    t = types.SimpleNamespace(cities=[city], turn=20)
+    x, y = policy._recon_target(t)
+    assert 0 <= x < width and y == 10
+    assert x < 12  # Continues east past the sighting, wrapped, not a huge negative number.
+
+
+def test_camp_staging_retries_stay_within_the_per_unit_order_limit():
+    units = [
+        warrior(uid=1, x=11, y=10, **STRONG),
+        warrior(uid=2, x=11, y=11, **STRONG),
+        warrior(uid=3),
+    ]
+    game = camp_game(units, [barbarian(x=14, y=10, cs=5)])
+    game.replies["move"] = STACKING
+    policy = MilitaryPolicy()
+    run(policy, game)
+    limit = policy.settings.attempts_per_unit
+    for uid in (1, 2):
+        assert len([o for o in game.orders("move") if o[1] == uid]) <= limit
+
+
+def test_wounded_spare_units_do_not_count_towards_a_recon_party():
+    policy = MilitaryPolicy()
+    hurt = [warrior(uid=10 + i, x=10, y=10, health=20) for i in range(3)]
+    run(
+        policy,
+        MilitaryGame(
+            [warrior(uid=1), *hurt, warrior(uid=20, x=10, y=10)], [barbarian(x=22, y=10, cs=5)]
+        ),
+    )
+    game = MilitaryGame([warrior(uid=1), *hurt, warrior(uid=20, x=10, y=10)], [])
+    run(policy, game)
+    assert not [d for d in policy.decisions if d.action == "recon"]
+
+
+def test_a_camp_that_spawned_in_fog_after_the_first_scan_is_not_learned():
+    fogged = tile(x=14, y=10, improvement="IMPROVEMENT_BARBARIAN_CAMP", visibility="revealed")
+    policy = MilitaryPolicy()
+    run(
+        policy,
+        camp_game(
+            strong_pair(),
+            [barbarian(x=15, y=10, cs=5)],
+            camp=tile(x=14, y=10, improvement=None, units=[]),
+        ),
+    )
+    run(policy, camp_game(strong_pair(), [barbarian(x=15, y=10, cs=5)], camp=fogged))
+    assert (14, 10) not in policy._camps
+
+
+def test_the_recon_target_stays_inside_the_map_rows():
+    policy = MilitaryPolicy()
+    policy._sightings[(10, 45)] = 20
+    city = types.SimpleNamespace(x=10, y=43, city_id=1)
+    t = types.SimpleNamespace(cities=[city], turn=20)
+    assert policy._recon_target(t)[1] <= policy.settings.map_height - 1
+
+
+def test_a_remembered_camp_is_rescanned_and_forgotten_when_seen_cleared():
+    policy = MilitaryPolicy()
+    policy._camps[(30, 10)] = 5  # Well beyond the city scan radius.
+    seen = []
+
+    async def area(cx, cy, radius=2):
+        seen.append((cx, cy))
+        return [tile(x=30, y=10, improvement=None, units=[])] if (cx, cy) == (30, 10) else []
+
+    game = MilitaryGame(strong_pair() + [warrior(uid=3)], [])
+    game.get_map_area = area
+    run(policy, game)
+    assert (30, 10) in seen and (30, 10) not in policy._camps

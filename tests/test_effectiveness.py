@@ -757,12 +757,12 @@ def test_boosts_without_the_line_are_no_data():
 
 
 def test_boost_points_are_what_the_boost_saved_not_a_count():
-    # Mining: boosted before any progress, so it saves half of 100. Pottery: boosted at 40%, so
-    # it still adds the full half: 50 of 100. Archery: never boosted.
+    # Mining: boosted before any progress, so it saves 40 of 100. Pottery: boosted at 30%, so
+    # it still adds the full 40 of 100. Archery: never boosted.
     lines = [
         boosts_line(techs={"Mining": [100, 0, 0], "Pottery": [100, 0, 0], "Archery": [100, 0, 0]}),
-        boosts_line(techs={"Mining": [100, 0, 1], "Pottery": [100, 40, 0], "Archery": [100, 5, 0]}),
-        boosts_line(techs={"Pottery": [100, 40, 1], "Archery": [100, 9, 0]}),
+        boosts_line(techs={"Mining": [100, 0, 1], "Pottery": [100, 30, 0], "Archery": [100, 5, 0]}),
+        boosts_line(techs={"Pottery": [100, 30, 1], "Archery": [100, 9, 0]}),
     ]
     records = [
         done_turn(7, "Research complete: Mining!"),
@@ -772,9 +772,9 @@ def test_boost_points_are_what_the_boost_saved_not_a_count():
     checks = by_name(RunLogs(records=records, bot=lines, has_bot_log=True))
     assert checks[("boosts", "eurekas earned")].used == 2
     saved = checks[("boosts", "tech points saved by boosts")]
-    assert (saved.created, saved.used) == (150, 100)  # Of 150 possible (half of 300): 50 + 50.
-    assert checks[("boosts", "early: tech points saved (turns 1-75)")].used == 50
-    assert checks[("boosts", "middle: tech points saved (turns 76-90)")].used == 50
+    assert (saved.created, saved.used) == (120, 80)  # Of 120 possible (40% of 300): 40 + 40.
+    assert checks[("boosts", "early: tech points saved (turns 1-75)")].used == 40
+    assert checks[("boosts", "middle: tech points saved (turns 76-90)")].used == 40
 
 
 def test_an_item_boosted_when_first_seen_counts_in_full():
@@ -787,7 +787,7 @@ def test_an_item_boosted_when_first_seen_counts_in_full():
         records=[done_turn(20, "Civic complete: Craftsmanship!")], bot=lines, has_bot_log=True
     )
     saved = by_name(run)[("boosts", "civic points saved by boosts")]
-    assert saved.used == 30
+    assert saved.used == 24
 
 
 def test_a_boost_that_came_when_almost_done_earns_little_and_warns():
@@ -814,3 +814,39 @@ def test_a_handful_of_finished_items_is_not_judged():
     check = by_name(run)[("boosts", "tech points saved by boosts")]
     assert check.status == PASS
     assert "too few" in check.note
+
+
+def era_turn(turn_no, era, score, dark=5, golden=14):
+    record = turn(turn_no)
+    record.update({"era": era, "era_score": score, "era_dark": dark, "era_golden": golden})
+    return record
+
+
+def test_era_score_without_the_fields_is_no_data():
+    run = RunLogs(records=[turn(1)], bot=[], has_bot_log=True)
+    assert by_name(run)[("era score", "eras")].status == NO_DATA
+
+
+def test_each_completed_era_is_judged_against_its_thresholds():
+    records = [
+        era_turn(1, "Ancient", 2),
+        era_turn(60, "Ancient", 15),
+        era_turn(61, "Classical", 3),
+        era_turn(120, "Classical", 8, dark=6, golden=20),
+        era_turn(121, "Medieval", 1),
+        era_turn(150, "Medieval", 4, dark=9, golden=30),
+    ]
+    checks = by_name(RunLogs(records=records, bot=[], has_bot_log=True))
+    assert "Golden Age" in checks[("era score", "Ancient (ended, turns 1-60)")].note
+    assert "Normal Age" in checks[("era score", "Classical (ended, turns 61-120)")].note
+    current = checks[("era score", "Medieval (in progress, turns 121-150)")]
+    assert (current.used, "26 short of Golden" in current.note) == (4, True)
+    assert checks[("era score", "eras that ended in a Dark Age")].status == PASS
+
+
+def test_a_dark_age_is_flagged():
+    records = [era_turn(1, "Ancient", 1), era_turn(50, "Ancient", 3), era_turn(51, "Classical", 0)]
+    check = by_name(RunLogs(records=records, bot=[], has_bot_log=True))[
+        ("era score", "eras that ended in a Dark Age")
+    ]
+    assert (check.created, check.status) == (1, FAIL)

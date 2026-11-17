@@ -73,7 +73,7 @@ MAX_FAILED_TILE_BUYS = 2  # Each is gold spent for nothing: the placement rules 
 OFFENSE_PHASES = (("early", 1, 75), ("middle", 76, 150), ("late", 151, 10_000))
 MAX_BARB_UNANSWERED_SHARE = 0.7  # Barbarians near a city, spare units, and no attack or camp order.
 MAX_BARB_NO_SPARE_SHARE = 0.5  # Barbarians near a city and no unit free to answer.
-BOOST_SHARE = 0.5  # Of an item's cost a boost supplies (check live against the logged jump).
+BOOST_SHARE = 0.4  # Of base cost, from the game's Boosts table: 125 of 126 rows are 40, one is 90.
 MIN_BOOSTED_POINT_SHARE = 0.3  # First guess, to tighten once there are baselines.
 PLANNED_STOPS = ("game_over", "turn_limit")
 
@@ -999,6 +999,74 @@ def _too_few(
     return Check(policy, name, created, used, PASS, rule, f"{note} (too few items to judge)")
 
 
+def era_checks(run: RunLogs) -> list[Check]:
+    """Era score per era, and the age (Golden, Normal or Dark) each completed era earned.
+
+    The turn log holds the era, the era score and the Dark and Golden thresholds at the start of
+    every turn. When the world era changes the game compares the player's score with the
+    thresholds: below the Dark one is a Dark Age, at or above the Golden one a Golden Age. A
+    completed era is judged on its last logged turn, so points earned on the final turn are
+    missed and the age is a close estimate. The era in progress shows what it still needs.
+    """
+    rows = [r for r in run.records if r.get("era") is not None and r.get("era_score") is not None]
+    if not rows:
+        return [_no_data("era score", "eras", "see rule", "no era score in the turn logs")]
+    rows.sort(key=lambda r: r["turn"])
+    eras: list[list[dict]] = []
+    for r in rows:
+        if eras and eras[-1][-1]["era"] == r["era"]:
+            eras[-1].append(r)
+        else:
+            eras.append([r])
+    out: list[Check] = []
+    dark_ages = 0
+    for index, group in enumerate(eras):
+        last = group[-1]
+        score, dark, golden = last["era_score"], last.get("era_dark"), last.get("era_golden")
+        span = f"turns {group[0]['turn']}-{last['turn']}"
+        if index == len(eras) - 1:
+            gap = "" if golden is None else f"{max(0, golden - score)} short of Golden, "
+            out.append(
+                _info(
+                    "era score",
+                    f"{last['era']} (in progress, {span})",
+                    score,
+                    f"{gap}Dark below {dark}, Golden at {golden}",
+                )
+            )
+            continue
+        if dark is None or golden is None:
+            age = "unknown"
+        elif score >= golden:
+            age = "Golden"
+        elif score < dark:
+            age = "Dark"
+            dark_ages += 1
+        else:
+            age = "Normal"
+        out.append(
+            _info(
+                "era score",
+                f"{last['era']} (ended, {span})",
+                score,
+                f"{age} Age: Dark below {dark}, Golden at {golden}",
+            )
+        )
+    done = len(eras) - 1
+    if done:
+        out.append(
+            _count_check(
+                "era score",
+                "eras that ended in a Dark Age",
+                dark_ages,
+                0,
+                f"none of the {done} completed eras scored below its Dark threshold",
+                "a Dark Age costs loyalty; the age is estimated from the last logged turn",
+            )
+        )
+    return out
+
+
 def boost_checks(run: RunLogs) -> list[Check]:
     """Eurekas (techs) and inspirations (civics): the share of points that came from boosts.
 
@@ -1248,6 +1316,7 @@ ALL_CHECKS = (
     settling_checks,
     research_checks,
     boost_checks,
+    era_checks,
     government_checks,
     diplomacy_checks,
     trade_checks,

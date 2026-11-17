@@ -850,3 +850,22 @@ def test_a_dark_age_is_flagged():
         ("era score", "eras that ended in a Dark Age")
     ]
     assert (check.created, check.status) == (1, FAIL)
+
+
+def _wonder_event(wonder, city_id=1, turn=95):
+    return {"kind": "wonder_completed", "turn": turn, "city_id": city_id, "wonder": wonder}
+
+
+def test_wonder_check_counts_each_wonder_once():
+    events = [_wonder_event("ORACLE"), _wonder_event("ORACLE"), _wonder_event("PYRAMIDS", 2, 120)]
+    run = RunLogs(records=[turn(1)], events=events, has_events=True)
+    check = by_name(run)[("wonders", "wonders completed")]
+    assert check.status == PASS and check.used == 2 and "ORACLE t95" in check.note
+
+
+def test_wonder_check_without_events_has_no_data():
+    run = RunLogs(records=[turn(1)], events=[], has_events=False)
+    assert by_name(run)[("wonders", "wonders completed")].status == NO_DATA
+    # Events from before the wonder event existed cannot say there were none.
+    run = RunLogs(records=[turn(1)], events=[{"kind": "war_declared"}], has_events=True)
+    assert by_name(run)[("wonders", "wonders completed")].status == NO_DATA

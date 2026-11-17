@@ -31,7 +31,9 @@ from civ6_ai.construction import (
     DistrictLost,
     ProductionRefused,
     ProductionSet,
+    WonderCompleted,
     _districts,
+    is_wonder,
 )
 from civ6_ai.monitors import CityLost, Event, EventBus, EventLog, event_from_json
 from civ6_ai.policies.districts import SPECIAL_DISTRICTS, is_planned, wants_district
@@ -90,6 +92,8 @@ class BuildLedger:
         # city id -> {(district, x, y): turn first known}
         self.districts: dict[int, dict[tuple[str, int, int], int]] = {}
         self.buildings: dict[int, set[str]] = {}
+        # city id -> {wonder: turn first known}. Wonders are also in `buildings`.
+        self.wonders: dict[int, dict[str, int]] = {}
         self.names: dict[int, str] = {}
         self.started: set[str] = set()  # Items ever set in production, as bare names.
         self.refused: dict[str, set[int]] = defaultdict(set)  # Item -> cities that refused it.
@@ -103,6 +107,7 @@ class BuildLedger:
         if isinstance(event, CityLost):
             self.districts.pop(event.city_id, None)
             self.buildings.pop(event.city_id, None)
+            self.wonders.pop(event.city_id, None)
             return
         if not isinstance(event, ConstructionEvent):
             return
@@ -116,6 +121,8 @@ class BuildLedger:
             )
         elif isinstance(event, BuildingCompleted):
             self.buildings.setdefault(event.city_id, set()).add(bare(event.building))
+        elif isinstance(event, WonderCompleted):
+            self.wonders.setdefault(event.city_id, {}).setdefault(bare(event.wonder), event.turn)
         elif isinstance(event, ProductionSet):
             self.started.add(bare(event.item))
         elif isinstance(event, ProductionRefused) and event.is_refusal:
@@ -144,6 +151,10 @@ class BuildLedger:
                 known.setdefault((bare(name), x, y), turn)
             built = self.buildings.setdefault(city.city_id, set())
             built.update(bare(b) for b in city.buildings)
+            held = self.wonders.setdefault(city.city_id, {})
+            for b in city.buildings:
+                if is_wonder(b):
+                    held.setdefault(bare(b), turn)
 
     def reconcile(
         self, cities: Iterable[Any], finished: dict[int, set[tuple[str, int, int]]] | None = None
@@ -155,6 +166,7 @@ class BuildLedger:
         for city_id in [c for c in self.districts if c not in present]:
             self.districts.pop(city_id, None)
             self.buildings.pop(city_id, None)
+            self.wonders.pop(city_id, None)
         for city in cities:
             if finished is not None:
                 standing = {(bare(n), x, y) for n, x, y in finished.get(city.city_id, set())}
@@ -166,6 +178,13 @@ class BuildLedger:
             self.buildings[city.city_id] = {b for b in self.buildings.get(city.city_id, set())} & {
                 bare(b) for b in city.buildings
             }
+            held = self.wonders.get(city.city_id, {})
+            for name in [w for w in held if w not in self.buildings[city.city_id]]:
+                del held[name]
+
+    def wonder_count(self) -> int:
+        """Wonders standing in the cities we hold."""
+        return sum(len(found) for found in self.wonders.values())
 
     def district_types(self) -> set[str]:
         return {d[0] for found in self.districts.values() for d in found}

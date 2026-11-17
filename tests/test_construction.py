@@ -13,6 +13,8 @@ from civ6_ai.construction import (
     PlacementPlan,
     ProductionRefused,
     ProductionSet,
+    WonderCompleted,
+    is_wonder,
 )
 from civ6_ai.monitors import EventBus, EventLog, event_from_json
 from civ6_ai.policies.production import CityProductionPolicy
@@ -165,6 +167,7 @@ def test_events_round_trip_through_the_events_file(tmp_path):
         DistrictCompleted(4, 1, "A", 1, 2, district="DISTRICT_CAMPUS", district_x=5, district_y=6),
         DistrictLost(4, 1, "A", 1, 2, district="DISTRICT_CAMPUS", district_x=5, district_y=6),
         BuildingCompleted(4, 1, "A", 1, 2, building="LIBRARY"),
+        WonderCompleted(4, 1, "A", 1, 2, wonder="ORACLE"),
         CityGained(4, 1, "A", 1, 2, regained=True),
         PlacementPlan(
             4,
@@ -230,3 +233,34 @@ def test_a_paused_district_is_not_reported_until_it_is_finished():
     )
     assert w.update(9, [info(districts=tile, building="DISTRICT_CAMPUS")]) == []
     assert [type(e) for e in w.update(10, [info(districts=tile)])] == [DistrictCompleted]
+
+
+def test_a_wonder_in_the_building_list_is_reported_as_a_wonder_and_a_building():
+    """Wonders arrive in the same `buildings` list (as `ORACLE` in a real run's get_cities read,
+    with the prefix stripped), so the diff that finds a building finds them."""
+    w, _ = watcher()
+    w.update(94, [info(buildings=["MONUMENT"])])
+    events = w.update(95, [info(buildings=["MONUMENT", "ORACLE", "LIBRARY"])])
+    assert [(type(e), getattr(e, "building", None) or e.wonder) for e in events] == [
+        (BuildingCompleted, "LIBRARY"),
+        (BuildingCompleted, "ORACLE"),
+        (WonderCompleted, "ORACLE"),
+    ]
+    assert events[-1].turn == 95 and events[-1].city_id == 1
+    assert w.update(96, [info(buildings=["MONUMENT", "ORACLE", "LIBRARY"])]) == []
+
+
+def test_wonder_completed_round_trips_a_real_run_line():
+    line = (
+        '{"kind": "wonder_completed", "turn": 95, "city_id": 65536, '
+        '"city_name": "Wak Kab\u2019nal", '
+        '"x": 66, "y": 25, "at": "2026-11-17T19:40:31+00:00", "wonder": "ORACLE"}'
+    )
+    event = event_from_json(line)
+    assert isinstance(event, WonderCompleted) and event.wonder == "ORACLE"
+    assert event_from_json(event.to_json()) == event
+
+
+def test_is_wonder_knows_wonders_from_ordinary_buildings():
+    assert is_wonder("ORACLE") and is_wonder("BUILDING_TAJ_MAHAL") and is_wonder("GREAT_LIBRARY")
+    assert not any(is_wonder(b) for b in ("LIBRARY", "WALLS", "MARKET", "GOV_CONQUEST"))

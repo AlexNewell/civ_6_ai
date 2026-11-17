@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from civ6_ai.monitors import Event, EventBus, register_event
+from civ6_ai.policies.game_data import WONDERS
 
 log = logging.getLogger(__name__)
 
@@ -96,6 +97,17 @@ class BuildingCompleted(ConstructionEvent):
 
 
 @dataclass(frozen=True, kw_only=True)
+class WonderCompleted(ConstructionEvent):
+    """A world wonder now stands in the city. Wonders are listed with the city's buildings in the
+    `get_cities` read (and only once complete), so this is seen in the same diff as
+    `BuildingCompleted`, which is also published for it."""
+
+    kind = "wonder_completed"
+
+    wonder: str
+
+
+@dataclass(frozen=True, kw_only=True)
 class CityGained(ConstructionEvent):
     kind = "city_gained"
 
@@ -122,6 +134,7 @@ CONSTRUCTION_EVENTS: tuple[type[ConstructionEvent], ...] = (
     DistrictCompleted,
     DistrictLost,
     BuildingCompleted,
+    WonderCompleted,
     CityGained,
     PlacementPlan,
 )
@@ -132,6 +145,11 @@ for _event_type in CONSTRUCTION_EVENTS:
 def _districts(entries: list[str]) -> set[tuple[str, int, int]]:
     found = (_TILE_ITEM.fullmatch(entry) for entry in entries)
     return {(m["name"], int(m["x"]), int(m["y"])) for m in found if m}
+
+
+def is_wonder(name: str) -> bool:
+    """Whether a bare or prefixed building name is a world wonder."""
+    return f"BUILDING_{_bare(name, 'BUILDING_')}" in WONDERS
 
 
 def _bare(name: str, prefix: str) -> str:
@@ -242,6 +260,8 @@ class ConstructionWatcher:
                 events.append(DistrictLost(*here, district=name, district_x=dx, district_y=dy))
             for name in sorted(buildings - before.buildings):
                 events.append(BuildingCompleted(*here, building=name))
+                if is_wonder(name):
+                    events.append(WonderCompleted(*here, wonder=name))
         self._ever.update(current)
         self._seen = current
         return events

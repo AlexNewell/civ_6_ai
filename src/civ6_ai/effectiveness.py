@@ -711,6 +711,26 @@ def production_checks(run: RunLogs) -> list[Check]:
     ]
 
 
+def wonder_checks(run: RunLogs) -> list[Check]:
+    """Wonders completed in the run, from the `wonder_completed` construction events."""
+    if not run.has_events:
+        return [_no_data("wonders", "wonders completed", "count only", "needs the events file")]
+    done = [e for e in run.events if e.get("kind") == "wonder_completed"]
+    if not done and not any(e.get("kind") == "building_completed" for e in run.events):
+        return [_no_data("wonders", "wonders completed", "count only", "no construction events")]
+    # A city seen again after a reload can repeat one, so each (city, wonder) counts once.
+    seen = {(e.get("city_id"), e.get("wonder")): e for e in done}
+    note = ", ".join(
+        f"{e.get('wonder')} t{e.get('turn')}" for e in sorted(seen.values(), key=_event_turn)[:6]
+    )
+    return [_info("wonders", "wonders completed", len(seen), note)]
+
+
+def _event_turn(event: dict) -> int:
+    turn = event.get("turn")
+    return turn if isinstance(turn, int) else 0
+
+
 def builder_checks(run: RunLogs) -> list[Check]:
     decisions = _decisions(run, "policies.builder", "builder_decision")
     if not decisions:
@@ -1310,6 +1330,7 @@ ALL_CHECKS = (
     faith_checks,
     gold_checks,
     production_checks,
+    wonder_checks,
     builder_checks,
     military_checks,
     offense_checks,

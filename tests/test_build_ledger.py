@@ -17,6 +17,7 @@ from civ6_ai.construction import (
     DistrictLost,
     ProductionRefused,
     ProductionSet,
+    WonderCompleted,
 )
 from civ6_ai.monitors import CityLost, EventBus, EventLog
 
@@ -301,3 +302,16 @@ def test_a_unique_district_counts_as_its_base_district():
     assert "no THEATER" in subjects and "never started" not in next(
         g.detail for g in find_gaps(ledger, 60, "any", [city()]) if g.subject == "no THEATER"
     )
+
+
+def test_ledger_counts_wonders_from_events_observation_and_losses():
+    ledger = BuildLedger()
+    ledger.apply(WonderCompleted(95, 1, "City1", 10, 10, wonder="ORACLE"))
+    ledger.apply(WonderCompleted(95, 1, "City1", 10, 10, wonder="ORACLE"))
+    assert ledger.wonder_count() == 1
+    ledger.observe(96, [city(2, buildings=["MARKET", "GREAT_LIBRARY"])])
+    assert ledger.wonder_count() == 2 and ledger.wonders[2] == {"GREAT_LIBRARY": 96}
+    ledger.reconcile([city(1, buildings=[]), city(2, buildings=["GREAT_LIBRARY"])])
+    assert ledger.wonder_count() == 1  # City 1 no longer shows the Oracle.
+    ledger.apply(CityLost(97, 2, "City2", 10, 10))
+    assert ledger.wonder_count() == 0

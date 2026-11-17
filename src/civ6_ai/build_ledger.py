@@ -163,7 +163,7 @@ class BuildLedger:
         complete read, because a loss between sessions left no event to say so."""
         cities = list(cities)
         present = {c.city_id for c in cities}
-        for city_id in [c for c in self.districts if c not in present]:
+        for city_id in [c for c in {*self.districts, *self.wonders} if c not in present]:
             self.districts.pop(city_id, None)
             self.buildings.pop(city_id, None)
             self.wonders.pop(city_id, None)

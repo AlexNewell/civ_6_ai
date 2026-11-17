@@ -315,3 +315,10 @@ def test_ledger_counts_wonders_from_events_observation_and_losses():
     assert ledger.wonder_count() == 1  # City 1 no longer shows the Oracle.
     ledger.apply(CityLost(97, 2, "City2", 10, 10))
     assert ledger.wonder_count() == 0
+
+
+def test_reconcile_drops_wonders_of_a_city_with_no_district_history():
+    ledger = BuildLedger()
+    ledger.apply(WonderCompleted(95, 7, "City7", 10, 10, wonder="ORACLE"))
+    ledger.reconcile([city(1)])
+    assert ledger.wonder_count() == 0

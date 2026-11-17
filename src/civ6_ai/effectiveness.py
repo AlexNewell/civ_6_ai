@@ -15,6 +15,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from civ6_ai.construction import is_wonder
 from civ6_ai.metrics.costs import STAMPED_LOG
 
 PASS, FAIL, NO_DATA = "pass", "FAIL", "no data"
@@ -715,13 +716,22 @@ def wonder_checks(run: RunLogs) -> list[Check]:
     """Wonders completed in the run, from the `wonder_completed` construction events."""
     if not run.has_events:
         return [_no_data("wonders", "wonders completed", "count only", "needs the events file")]
-    done = [e for e in run.events if e.get("kind") == "wonder_completed"]
-    if not done and not any(e.get("kind") == "building_completed" for e in run.events):
+    # Runs from before `wonder_completed` recorded wonders only as `building_completed`, so both
+    # count. A city seen again after a reload can repeat one, so each (city, wonder) counts once.
+    seen: dict = {}
+    for e in run.events:
+        if e.get("kind") == "wonder_completed":
+            name = e.get("wonder")
+        elif e.get("kind") == "building_completed" and is_wonder(str(e.get("building", ""))):
+            name = e.get("building")
+        else:
+            continue
+        seen.setdefault((e.get("city_id"), str(name).removeprefix("BUILDING_")), e)
+    if not seen and not any(e.get("kind") == "building_completed" for e in run.events):
         return [_no_data("wonders", "wonders completed", "count only", "no construction events")]
-    # A city seen again after a reload can repeat one, so each (city, wonder) counts once.
-    seen = {(e.get("city_id"), e.get("wonder")): e for e in done}
     note = ", ".join(
-        f"{e.get('wonder')} t{e.get('turn')}" for e in sorted(seen.values(), key=_event_turn)[:6]
+        f"{k[1]} t{e.get('turn')}"
+        for k, e in sorted(seen.items(), key=lambda kv: _event_turn(kv[1]))[:6]
     )
     return [_info("wonders", "wonders completed", len(seen), note)]
 

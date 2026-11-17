@@ -866,6 +866,14 @@ def test_wonder_check_counts_each_wonder_once():
 def test_wonder_check_without_events_has_no_data():
     run = RunLogs(records=[turn(1)], events=[], has_events=False)
     assert by_name(run)[("wonders", "wonders completed")].status == NO_DATA
-    # Events from before the wonder event existed cannot say there were none.
     run = RunLogs(records=[turn(1)], events=[{"kind": "war_declared"}], has_events=True)
     assert by_name(run)[("wonders", "wonders completed")].status == NO_DATA
+
+
+def test_wonder_check_counts_legacy_building_events_without_double_counting():
+    legacy = {"kind": "building_completed", "turn": 88, "city_id": 131073, "building": "ORACLE"}
+    plain = {"kind": "building_completed", "turn": 89, "city_id": 131073, "building": "LIBRARY"}
+    events = [legacy, plain, _wonder_event("ORACLE", 131073, 88), _wonder_event("PYRAMIDS", 2)]
+    run = RunLogs(records=[turn(1)], events=events, has_events=True)
+    check = by_name(run)[("wonders", "wonders completed")]
+    assert check.used == 2 and "ORACLE t88" in check.note

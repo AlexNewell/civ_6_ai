@@ -190,7 +190,7 @@ class MilitarySettings:
     camp_home_scan_radius: int = 7  # Tiles read around each city to find a camp in plain view.
     camp_home_scan_turns: int = 3  # Turns between those reads, as they cost a call per city.
     camp_home_radius: int = 9  # A camp further than this from every city is left alone.
-    camp_reach: int = 6  # How far a unit is called from to a camp.
+    camp_reach: int = 14  # How far a unit is called from to a camp (idle units sat 8-14 off).
     # Run 15 practice save: a camp 8 tiles off sent raiders for 30 turns while twelve spare units
     # sat at home, because a camp is only known once a unit has seen it. With spare units idle and
     # no known camp, a small party walks to where barbarians were last seen, and what it sees is
@@ -1513,11 +1513,9 @@ class MilitaryPolicy:
                 log.exception("Reading the area for a barbarian camp failed")
                 continue
             for tile in tiles:
-                if not tile.visible:
-                    continue
                 if tile.improvement == CAMP_IMPROVEMENT:
-                    self._camps.setdefault((tile.x, tile.y), t.turn)
-                else:
+                    self._camps.setdefault((tile.x, tile.y), t.turn)  # Fogged but remembered.
+                elif tile.visible:
                     self._camps.pop((tile.x, tile.y), None)
 
     def _home_distance(self, t: _Turn, where: tuple[int, int]) -> int:

@@ -133,7 +133,8 @@ READ_AUDIT = {
     "get_map_area": ReadAudit(
         Verdict.FILTERED,
         "Only reports revealed tiles, but a fogged tile returns live values, not what the player "
-        "last saw. Owner, improvement, district and route are blanked on fogged tiles. Feature "
+        "last saw. Owner, improvement, district and route are blanked on fogged tiles, except a "
+        "barbarian camp, which the map keeps drawing once shown. Feature "
         "and resource stay, so a change in the fog can still show. Stealth units are removed, "
         "because their distance from the player isn't known here.",
         ("owner_id", "owner_name", "improvement", "district", "route_type", "movement_cost"),

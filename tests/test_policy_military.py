@@ -706,12 +706,12 @@ def test_no_camp_means_no_camp_order():
     assert not camp_orders(policy)
 
 
-def test_a_fogged_camp_is_not_acted_on():
+def test_a_fogged_camp_is_remembered_and_acted_on():
     fogged = tile(x=14, y=10, improvement="IMPROVEMENT_BARBARIAN_CAMP", visibility="revealed")
     game = camp_game(strong_pair(), [barbarian(x=15, y=10, cs=5)], camp=fogged)
     policy = MilitaryPolicy()
     run(policy, game)
-    assert not camp_orders(policy)
+    assert camp_orders(policy)
 
 
 def test_the_lone_garrison_does_not_leave_for_a_camp():

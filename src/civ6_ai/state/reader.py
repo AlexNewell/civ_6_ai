@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Sized
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Protocol
 
 from civ6_ai.state.fog import BARBARIAN_ID, is_hidden_stealth_unit
@@ -590,6 +590,9 @@ def _stealth_units() -> frozenset[str]:
     return STEALTH_UNITS
 
 
+_BARBARIAN_CAMP = "IMPROVEMENT_BARBARIAN_CAMP"
+
+
 def build_tile(info: lq.TileInfo) -> Tile:
     visible = info.visibility == "visible"
     tile = Tile(
@@ -606,9 +609,11 @@ def build_tile(info: lq.TileInfo) -> Tile:
         own_units=tuple(info.own_units or ()),
     )
     if not visible:
+        if info.improvement == _BARBARIAN_CAMP:
+            # The game keeps drawing a camp it has shown us, so the player still knows it is there.
+            # The live read can't say what we last saw; a camp is the one improvement kept.
+            return replace(tile, improvement=info.improvement)
         return tile
-    from dataclasses import replace
-
     return replace(
         tile,
         owner_id=info.owner_id,

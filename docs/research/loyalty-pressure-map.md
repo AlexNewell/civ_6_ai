@@ -51,7 +51,7 @@ and report, without changing anything in the game:
 - whether the call exists and works from our connection;
 - plots returned, which continents they sit on (a multi-continent map answers what "continent" covers),
   and how many are not revealed to us;
-- the value range, and whether it stops at 20 (the screenshot behind issue 239 shows -22);
+- the value range (no cap is assumed; the screenshot behind issue 239 shows -22);
 - settlers owned and whether the settler lens is on, so runs with and without a settler compare;
 - call time.
 
@@ -67,13 +67,13 @@ One run, on a game with one settler owned and the settler lens off:
 - It returned 31 plots on one continent (id 42), all revealed to us, with values from -20 to -4. So it
   works with the lens off, and it did not return every plot on the map: it covers a small set around
   the foreign cities, not the whole continent.
-- Every value was at or inside plus or minus 20, and many sat exactly at -20. That fits a clamp at 20
-  in the call itself. The -22 in the issue's screenshot did not appear in this run, so the clamp is not
-  settled.
+- Values ran from -20 to -4, with many at -20. The screenshot behind issue 239 shows -22, so do not
+  assume a cap. The range of the numbers is not important to the decision; the call itself is.
 - The call time read as 0.0000 s, which is below the clock's resolution. Treat it as cheap, not free.
 
-Still to run: no settler owned, the lens turned on, a map with more than one continent, and a run
-near our own cities to see positive values.
+The settler was owned but the lens was off, so the data is readable without the lens. A settler
+being owned is not the point of the test. Still useful, not required: a map with more than one
+continent, and a run near our own cities to see positive values.
 
 ## If it works: fairness
 

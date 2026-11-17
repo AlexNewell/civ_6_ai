@@ -32,7 +32,6 @@ def test_parses_a_full_reply():
     assert probe.plots[0] == (10, 12, -22.0, True)
     assert probe.plots[2][3] is False
     assert probe.seconds == 0.012
-    assert probe.clamps_at_20 is False  # -22 is past 20, so no clamp at 20.
 
 
 def test_a_reply_without_its_end_marker_is_an_error():
@@ -44,7 +43,6 @@ def test_a_missing_function_or_a_failed_call_is_reported():
     assert probe.exists == "nil"
     assert probe.error == "attempt to call"
     assert probe.count == 0
-    assert probe.clamps_at_20 is None
     assert "ERROR" in summarise(probe)
 
 
@@ -55,7 +53,7 @@ def test_malformed_lines_are_skipped():
 
 def test_summary_mentions_the_questions_the_note_asks():
     text = summarise(parse_loyalty_probe(GOOD))
-    for needle in ("settlers owned: 1", "3 plots", "1 not revealed", "clamped at 20", "continents"):
+    for needle in ("settlers owned: 1", "3 plots", "1 not revealed", "continents"):
         assert needle in text
 
 

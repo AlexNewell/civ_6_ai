@@ -10,7 +10,7 @@ decide whether the bot may use it. It answers the open questions of the research
 
 - does the call exist and work from our connection?
 - how many plots come back, which continents do they sit on, and are all of them revealed to us?
-- what range do the values span, and do they clamp at 20?
+- what range do the values span (no cap is assumed)?
 - does it work with no settler owned, and with the settler lens off?
 - how long does it take?
 
@@ -92,13 +92,6 @@ class LoyaltyProbe:
     continents: dict[int, int] = field(default_factory=dict)
     plots: list[tuple[int, int, float, bool]] = field(default_factory=list)  # x, y, value, revealed
 
-    @property
-    def clamps_at_20(self) -> bool | None:
-        """True if no value passes 20 in size, which a clamp would explain. None with no data."""
-        if self.low is None or self.high is None:
-            return None
-        return max(abs(self.low), abs(self.high)) <= 20
-
 
 def _number(text: str) -> float | None:
     try:
@@ -156,9 +149,7 @@ def summarise(probe: LoyaltyProbe) -> str:
             f"{probe.count} plots, values {probe.low} to {probe.high}, "
             f"{probe.unrevealed} not revealed to us, in {probe.seconds:.4f} s"
         )
-        lines.append(
-            f"clamped at 20: {probe.clamps_at_20}; continents (id: plots): {probe.continents}"
-        )
+        lines.append(f"continents (id: plots): {probe.continents}")
     elif not probe.error:
         lines.append(f"no plots returned, in {probe.seconds:.4f} s")
     return "\n".join(lines)

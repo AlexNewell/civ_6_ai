@@ -6,6 +6,7 @@ The text of the leaders' words and of the resolutions is invented, because no ga
 import asyncio
 import re
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 from civ_mcp import lua as lq
@@ -983,3 +984,41 @@ def test_a_statement_session_that_stays_open_is_exited_not_left_blocking():
     assert run(DiplomacyPolicy().respond(game)) is True
     assert game.sessions == []
     assert game.answers()[-1] == ("respond", KHMER, "EXIT")
+
+
+# --- Victory threats (issue 188) ----------------------------------------------------------------
+
+
+def test_a_flagged_rival_below_the_strip_threshold_is_voted_down():
+    context = VoteContext(ME, 40, (0, 10, 30, 60, 100, 150), strip=(), threats=(EGYPT,))
+    vote = choose_vote(dv_resolution(), context, W)
+    assert vote == Vote(2, 2, 1 + 1)  # Option B, Egypt's index, the second vote costs 10 favor.
+
+
+def test_the_most_advanced_threat_is_named_first():
+    context = VoteContext(ME, 40, (0, 10, 30, 60, 100, 150), strip=((ROME, 9),), threats=(EGYPT,))
+    assert choose_vote(dv_resolution(), context, W).target_index == 2
+
+
+def test_a_threat_that_is_not_a_target_falls_back_to_the_strip_rule():
+    context = VoteContext(ME, 40, (0, 10, 30, 60, 100, 150), ((ROME, 6),), threats=(9,))
+    assert choose_vote(dv_resolution(), context, W) == Vote(2, 1, 2)
+
+
+def test_a_threat_is_never_voted_for():
+    # A resolution that adds points names us, never the threat, even when it is a target.
+    plus = dv_resolution(effect_b="Nothing happens")
+    context = VoteContext(ME, 40, (0, 10, 30, 60, 100, 150), threats=(ROME,))
+    assert choose_vote(plus, context, W) == Vote(1, 0, 1)
+
+
+def test_the_voter_reads_threats_from_the_watch():
+    policy = DiplomacyPolicy(threats=lambda: (EGYPT, 77))
+    game = Game(civs=[civ(ROME), civ(EGYPT)])
+    context = run(policy._vote_context(game, SimpleNamespace(favor=10, favor_costs=(0, 10))))
+    assert context.threats == (EGYPT,)  # 77 was never met.
+
+
+def test_a_flagged_rival_close_to_winning_keeps_the_urgent_votes():
+    context = VoteContext(ME, 400, (0, 10, 30, 60, 100, 150), ((ROME, 15),), threats=(ROME,))
+    assert choose_vote(dv_resolution(), context, W) == Vote(2, 1, W.urgent_votes)

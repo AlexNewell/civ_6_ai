@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import ClassVar, Protocol
 
 from civ6_ai.state.reader import IncompleteRead, check_cities_complete
+from civ6_ai.victory_threat import VictoryWatch, assess
 
 log = logging.getLogger(__name__)
 
@@ -555,10 +556,12 @@ class VictoryMonitor:
     name = "victory"
     period = VICTORY_PERIOD
 
-    def __init__(self) -> None:
+    def __init__(self, watch: VictoryWatch | None = None) -> None:
+        self.watch = watch if watch is not None else VictoryWatch()
         self.reset()
 
     def reset(self) -> None:
+        self.watch.reset()
         self._shares_passed: dict[tuple[VictoryPath, str], int] = {}
         self._most_majors = 0
         self._majors = 0  # Living majors, once two reads in a row agree.
@@ -579,13 +582,18 @@ class VictoryMonitor:
 
         enabled = progress.enabled_victories  # Empty means all of them.
         events: list[Event] = []
-        for path, rival_id, subject, value, needed in [
-            *self._points(progress, overview.player_id),
-            *self._religions(progress, overview.civ_name, living_majors),
-            *self._capitals(progress, living_majors),
-        ]:
-            if enabled and path not in enabled:
-                continue
+        rows = [
+            row
+            for row in [
+                *self._points(progress, overview.player_id),
+                *self._religions(progress, overview.civ_name, living_majors),
+                *self._capitals(progress, living_majors),
+            ]
+            if not enabled or row[0] in enabled
+        ]
+        ours = self._our_religion(progress, overview.civ_name)
+        self.watch.update(assess(overview.turn, progress.players, rows, overview.player_id, ours))
+        for path, rival_id, subject, value, needed in rows:
             shares = sum(value >= share * needed for share in VICTORY_WARNING_SHARES)
             if shares > self._shares_passed.get((path, subject), 0):
                 events.append(
@@ -657,6 +665,24 @@ class VictoryMonitor:
                     (VictoryPath.RELIGIOUS, ids.get(founder), religion, count, living_majors)
                 )
         return rows
+
+    @staticmethod
+    def _our_religion(progress, our_name: str) -> int:
+        """Civs where our own religion is the majority, which `_religions` leaves out."""
+        count = 0
+        for religion in progress.religion_majority.values():
+            if religion == "none":
+                continue
+            founder = next(
+                (
+                    civ
+                    for civ, name in progress.religion_founded_names.items()
+                    if _is_same_religion(religion, name)
+                ),
+                None,
+            )
+            count += founder == our_name
+        return count
 
     def _capitals(self, progress, living_majors: int) -> list[tuple]:
         """A conqueror needs every other original capital. Eliminated civs have lost theirs."""

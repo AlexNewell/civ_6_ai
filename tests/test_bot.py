@@ -113,6 +113,7 @@ def test_one_turn_runs_handlers_in_order_and_acts(tmp_path):
         "monitors",
         "construction_watch",
         "expansion_log",
+        "victory_threat",
         "diplomacy",
         "wars",
         "trade_offers",

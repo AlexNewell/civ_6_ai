@@ -1550,7 +1550,8 @@ class SettlingPolicy:
             self._founded.add(settler.unit_id)
             city_tiles.append(goal)
             return True
-        self._failed_sites.add(goal)
+        # Not blacklisted: the step may have used the moves founding needs (the terrain cost is
+        # an estimate), so the next turn tries from the site, and a real failure there is noted.
         record("found_failed", "stepped onto the site but founding failed", goal, found)
         return True  # It moved; nothing more to do with it this turn.
 

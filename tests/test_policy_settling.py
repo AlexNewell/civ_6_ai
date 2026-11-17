@@ -1887,3 +1887,11 @@ def test_a_settler_does_not_step_and_found_with_a_larger_threat_near():
     game, policy = _step_game({}, [barbarian(16, 10), barbarian(16, 11), barbarian(15, 9)])
     run(policy, game)
     assert ("found", 7) not in game.actions
+
+
+def test_a_founding_that_fails_right_after_the_step_does_not_blacklist_the_site():
+    game, policy = _step_game({}, [barbarian(16, 10)])
+    game.failing = {"found"}
+    run(policy, game)
+    assert [a[0] for a in game.actions] == ["move", "found"]
+    assert (14, 10) not in policy._failed_sites

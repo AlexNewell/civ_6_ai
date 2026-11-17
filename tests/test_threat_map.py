@@ -281,3 +281,9 @@ def test_a_citys_cover_reaches_across_the_map_seam():
     m.see_own(1, [], [city])
     assert m.cover_at(73, 10) > 0 and m.cover_at(1, 10) > 0
     assert m.cover_at(-1, 10) == 0  # Nothing is stored under an out-of-range x.
+
+
+def test_a_destroyer_is_classed_as_a_ship():
+    m = ThreatMap(ThreatMapSettings(map_width=None))
+    m.see_threats(5, [hostile(kind="UNIT_DESTROYER", x=10, y=10)])
+    assert [s.naval for s in m.sources if s.kind == UNIT] == [True]

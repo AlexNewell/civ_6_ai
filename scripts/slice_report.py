@@ -49,7 +49,7 @@ if dump.exists():
         for s in m["sources"]
         if s["kind"] == "camp"
     }
-    near_turns = sum(1 for m in maps if m["camps_near_city"] > 0)
+    near_turns = sum(m["camps_near_city"] for m in maps)  # One per camp per turn.
     print(
         f"  threat map: {len(maps)} turns dumped, camps ever known {len(camps)}, "
         f"camp-turns near a city {near_turns}, camps known at the end "

@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from civ6_ai.policies.game_data import COMBAT_UNITS
+from civ6_ai.policies.settling import _SEA_UNITS as _POLICY_SEA_UNITS
 from civ6_ai.state import read_cities, read_threats, read_units
 from civ6_ai.state.models import City, Threat, Tile, Unit
 from civ6_ai.state.reader import STANDARD_MAP_WIDTH, hex_distance, read_area
@@ -37,7 +38,11 @@ BARBARIAN_ID = 63
 CAMP_IMPROVEMENT = "IMPROVEMENT_BARBARIAN_CAMP"
 CAMP = "camp"
 UNIT = "unit"
-_SEA_UNITS = ("GALLEY", "QUADRIREME", "CARAVEL", "FRIGATE", "IRONCLAD", "TRIREME", "GALLEASS")
+_SEA_UNITS = (
+    *_POLICY_SEA_UNITS,
+    "TRIREME",
+    "GALLEASS",
+)  # Every ship the policies know, plus the older names this map met first.
 
 
 @dataclass(frozen=True)

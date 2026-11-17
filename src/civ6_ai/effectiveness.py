@@ -949,9 +949,7 @@ def research_checks(run: RunLogs) -> list[Check]:
 
 def _boosted_names(rows: list[dict], key: str) -> set[str]:
     """Items whose boost was earned, whether or not their cost is known yet."""
-    return {
-        name for row in rows for name, (_, _, flag) in row.get(key, {}).items() if flag
-    }
+    return {name for row in rows for name, (_, _, flag) in row.get(key, {}).items() if flag}
 
 
 def _boost_points(rows: list[dict], key: str) -> dict[str, tuple[int, float]]:

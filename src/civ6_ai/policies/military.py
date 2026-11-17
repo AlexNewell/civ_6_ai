@@ -198,6 +198,7 @@ class MilitarySettings:
     recon_units: int = 2
     recon_min_spare: int = 3  # Spare units needed before any goes.
     recon_radius: int = 14  # Sightings further than this from every city are ignored.
+    recon_push: int = 6  # Tiles past the farthest sighting the party aims for.
     recon_turns: int = 12  # A party that has not arrived by now is called off.
     recon_memory_turns: int = 25  # How long a sighting is believed.
     camp_mission_turns: int = 6  # A unit sent at a camp keeps to it this long after the last order.
@@ -1404,7 +1405,22 @@ class MilitaryPolicy:
             for p, seen in self._sightings.items()
             if p not in self._recon_bad and self._home_distance(t, p) <= s.recon_radius
         ]
-        return max(found)[2] if found else None
+        if not found:
+            return None
+        home, _, seen = max(found)
+        # Barbarians are only seen near our cities, so the camp lies further out along the same
+        # line: aim `recon_push` tiles past the sighting, where the party's own eyes will reach.
+        city = min(t.cities, key=lambda c: (hex_distance(*seen, c.x, c.y, s.map_width), c.city_id))
+        away = hex_distance(*seen, city.x, city.y, s.map_width)
+        if away <= 0:
+            return seen
+        reach = min(away + s.recon_push, s.recon_radius)
+        factor = reach / away
+        goal = (
+            round(city.x + (seen[0] - city.x) * factor),
+            max(0, round(city.y + (seen[1] - city.y) * factor)),
+        )
+        return goal if goal not in self._recon_bad else seen
 
     async def _recon_step(self, game: MilitaryGame, t: _Turn, unit: Unit) -> bool:
         """Send a spare unit to where barbarians come from, or keep one walking there."""

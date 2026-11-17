@@ -1619,3 +1619,25 @@ def test_a_force_that_never_arrives_is_set_aside_after_the_travel_limit():
     for _ in range(policy.settings.camp_travel_turns + 2):
         run(policy, game)
     assert (14, 10) in policy._camp_aside
+
+
+def test_a_unit_marching_on_a_camp_is_not_sent_exploring_when_only_it_is_free_to_move():
+    marching = warrior(uid=1, x=2, y=10, **STRONG)
+    game = camp_game([marching], [])
+    policy = MilitaryPolicy()
+    policy._mission[1] = ((14, 10), 20)  # Sent this turn (the tests' turn is 20).
+    policy._camps[(14, 10)] = 20
+    run(policy, game)
+    assert not game.orders("explore")
+    assert not game.orders("fortify")
+
+
+def test_a_muster_tile_the_game_refuses_is_remembered_and_the_next_one_tried():
+    units = [warrior(uid=1, x=2, y=10, **STRONG), warrior(uid=2, x=2, y=11, **STRONG)]
+    game = camp_game(units, [])
+    game.replies["move"] = "MOVING_TO|0,0|BLOCKED (impassable terrain)"
+    policy = MilitaryPolicy()
+    run(policy, game)
+    tried = {(o[2], o[3]) for o in game.orders("move") if o[1] in (0, 1)}
+    assert len(tried) > 1  # It did not stop at the first refused tile.
+    assert policy._muster_bad

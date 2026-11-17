@@ -22,10 +22,46 @@ from civ6_ai.threat_map import Source, ThreatMap, ThreatMapSettings
 
 
 def load(path: Path, turn: int | None) -> dict:
+    """The record for `turn` (the last by default), with the ground learned up to then added as
+    `_ground`: {(x, y): code}."""
     rows = [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines() if x.strip()]
-    if turn is None:
-        return rows[-1]
-    return next(r for r in rows if r["turn"] == turn)
+    record = rows[-1] if turn is None else next(r for r in rows if r["turn"] == turn)
+    ground: dict[tuple[int, int], str] = {}
+    for row in rows:
+        if row["turn"] > record["turn"]:
+            break
+        for key, code in row.get("terrain_new", {}).items():
+            x, y = key.split(",")
+            ground[int(x), int(y)] = code
+    record["_ground"] = ground
+    return record
+
+
+def threat_lookup(record: dict):
+    """A function (x, y) -> threat for the record. A dump with the full heat list (newer ones) is
+    read as it is; an older dump keeps only the hottest tiles, so its sources are spread again."""
+    if "terrain_new" in record:
+        heat = {(x, y): v for x, y, v in record["heat"]}
+        return lambda x, y: heat.get((x, y), 0.0)
+    m = rebuild(record)
+    return lambda x, y: m.threat_at(x, y, record["turn"])
+
+
+GROUND_COLOURS = {
+    "w": (172, 207, 236),
+    "m": (150, 150, 150),
+    "h": (208, 188, 142),
+    "f": (176, 208, 152),
+    "j": (128, 184, 128),
+    "s": (170, 192, 172),
+    "g": (236, 241, 226),
+}
+
+
+def ground_colour(code: str | None) -> tuple[int, int, int]:
+    if code is None:
+        return (246, 246, 246)  # Never read.
+    return GROUND_COLOURS.get(code[0], (236, 241, 226))
 
 
 def rebuild(record: dict) -> ThreatMap:
@@ -78,7 +114,8 @@ def _label(d: ImageDraw.ImageDraw, at: tuple[float, float], text: str, font, fil
 
 def draw(record: dict, pad: int, box: tuple[int, int, int, int] | None = None) -> Image.Image:
     turn = record["turn"]
-    m = rebuild(record)
+    value_at = threat_lookup(record)
+    ground = record.get("_ground", {})
     x0, x1, y0, y1 = window(record, pad, box)
     size = 44  # Hex radius in pixels.
     w, h = math.sqrt(3) * size, 1.5 * size
@@ -104,7 +141,7 @@ def draw(record: dict, pad: int, box: tuple[int, int, int, int] | None = None) -
 
     top = (
         max(
-            (m.threat_at(x, y, turn) for x in range(x0, x1 + 1) for y in range(y0, y1 + 1)),
+            (value_at(x, y) for x in range(x0, x1 + 1) for y in range(y0, y1 + 1)),
             default=1,
         )
         or 1
@@ -117,13 +154,22 @@ def draw(record: dict, pad: int, box: tuple[int, int, int, int] | None = None) -
     for y in range(y0, y1 + 1):
         for x in range(x0, x1 + 1):
             cx, cy = centre(x, y)
-            value = m.threat_at(x, y, turn)
-            fill = (150, 190, 245) if (x, y) in cities else colour(value, top)
-            d.polygon(hexagon(cx, cy), fill=fill, outline=(170, 170, 170))
+            value = value_at(x, y)
+            base = ground_colour(ground.get((x, y)))
+            mix = min(0.85, 0.85 * value / top) if value >= 0.5 else 0.0
+            heat_rgb = (255, 70, 40)
+            fill = tuple(int(b + (h - b) * mix) for b, h in zip(base, heat_rgb, strict=True))
+            if (x, y) in cities:
+                fill = (120, 160, 235)
+            d.polygon(hexagon(cx, cy), fill=fill, outline=(150, 150, 150))
+            if ground.get((x, y), "g").endswith("r"):  # A river: a blue bar across the hex.
+                d.line(
+                    [cx - size * 0.6, cy + 6, cx + size * 0.6, cy - 6], fill=(60, 110, 200), width=4
+                )
     for y in range(y0, y1 + 1):  # Second pass, so no hex paints over a neighbour's label.
         for x in range(x0, x1 + 1):
             cx, cy = centre(x, y)
-            value = m.threat_at(x, y, turn)
+            value = value_at(x, y)
             if (x, y) in cities:
                 _label(d, (cx, cy - 12), cities[x, y][:9], mid, blue)
                 _label(d, (cx, cy + 12), "threat 0", small, blue)
@@ -150,8 +196,9 @@ def draw(record: dict, pad: int, box: tuple[int, int, int, int] | None = None) -
     lines = [
         f"Turn {turn}.  Blue hex = our city (threat 0).  Green dot = our combat unit.  "
         "Red dot = hostile unit, with its strength.",
-        "Black X = barbarian camp.  The number in a hex is its threat.  North is up; "
-        "x increases to the right.",
+        "Black X = barbarian camp.  The number in a hex is its threat; hex colour is the ground "
+        "(blue water, grey mountain, tan hills, green woods).  "
+        "North is up; x increases to the right.",
     ]
     for i, line in enumerate(lines):
         d.text((margin, height - 80 + i * 26), line, fill=(0, 0, 0), font=mid)
@@ -159,9 +206,8 @@ def draw(record: dict, pad: int, box: tuple[int, int, int, int] | None = None) -
 
 
 def ascii_map(record: dict, pad: int, box: tuple[int, int, int, int] | None = None) -> str:
-    m = rebuild(record)
+    value_at = threat_lookup(record)
     x0, x1, y0, y1 = window(record, pad, box)
-    turn = record["turn"]
     cities = {(c[0], c[1]) for c in record.get("cities", [])}
     camps = {(s["x"], s["y"]) for s in record["sources"] if s["kind"] == "camp"}
     hostile = {(s["x"], s["y"]) for s in record["sources"] if s["kind"] == "unit"}
@@ -179,7 +225,7 @@ def ascii_map(record: dict, pad: int, box: tuple[int, int, int, int] | None = No
             elif (x, y) in own:
                 cells.append("  u ")
             else:
-                v = m.threat_at(x, y, turn)
+                v = value_at(x, y)
                 cells.append(f"{v:>3.0f} " if v > 0 else "  . ")
         lines.append(f"{y:>3}  " + ("  " if y % 2 else "") + "".join(cells))
     lines.append("C city (0)  X camp  h hostile unit  u our unit  number = threat  . = none")

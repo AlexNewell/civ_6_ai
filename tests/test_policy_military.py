@@ -759,6 +759,49 @@ def test_a_unit_on_a_camp_mission_does_not_flee_the_guards_until_it_is_hurt():
     assert moves(sent, 40)  # Hurt: the mission no longer holds it.
 
 
+def spare_party(n=4):
+    return [warrior(uid=1)] + [warrior(uid=10 + i, x=10, y=10) for i in range(n)]
+
+
+def test_idle_spare_units_look_where_barbarians_were_last_seen_when_no_camp_is_known():
+    policy = MilitaryPolicy()
+    seen = MilitaryGame(spare_party(), [barbarian(x=22, y=10, cs=5)])
+    run(policy, seen)  # Far off: remembered, not close enough to hold anyone home.
+    quiet = MilitaryGame(spare_party(), [])
+    run(policy, quiet)
+    sent = [d for d in policy.decisions if d.action == "recon"]
+    assert len({d.unit_id for d in sent}) == 2  # Two units, no more.
+    assert {d.target for d in sent} == {(22, 10)}
+    assert len(quiet.orders("move")) >= 2
+
+
+def test_nobody_looks_for_a_camp_with_too_few_spare_units_or_when_one_is_known():
+    few = MilitaryGame([warrior(uid=1), warrior(uid=3)], [barbarian(x=22, y=10, cs=5)])
+    policy = MilitaryPolicy()
+    run(policy, few)
+    run(policy, MilitaryGame([warrior(uid=1), warrior(uid=3)], []))
+    assert not [d for d in policy.decisions if d.action == "recon"]
+    known = MilitaryPolicy()
+    known._camps[(30, 10)] = 5
+    run(known, MilitaryGame(spare_party(), [barbarian(x=22, y=10, cs=5)]))
+    run(known, MilitaryGame(spare_party(), []))
+    assert not [d for d in known.decisions if d.action == "recon"]
+
+
+def test_a_recon_party_is_scanned_where_it_stands_and_does_not_flee():
+    policy = MilitaryPolicy()
+    policy._recon[11] = ((22, 10), 20)
+    out = warrior(uid=11, x=18, y=10)
+    game = camp_game(
+        [warrior(uid=1), out, warrior(uid=12), warrior(uid=13)], [barbarian(x=19, y=10, cs=40)]
+    )
+    run(policy, game)
+    assert game.calls.count("get_map_area") >= 1  # The party's view was read for camps.
+    assert not any(
+        order[1] == 11 and (order[2], order[3]) == (10, 10) for order in game.orders("move")
+    )
+
+
 def test_the_camp_scan_reads_around_the_barbarian_and_each_city_once_a_turn():
     game = camp_game(strong_pair(), [barbarian(x=15, y=10, cs=5), barbarian(x=15, y=11, cs=5)])
     policy = MilitaryPolicy()

@@ -191,6 +191,15 @@ class MilitarySettings:
     camp_home_scan_turns: int = 3  # Turns between those reads, as they cost a call per city.
     camp_home_radius: int = 9  # A camp further than this from every city is left alone.
     camp_reach: int = 6  # How far a unit is called from to a camp.
+    # Run 15 practice save: a camp 8 tiles off sent raiders for 30 turns while twelve spare units
+    # sat at home, because a camp is only known once a unit has seen it. With spare units idle and
+    # no known camp, a small party walks to where barbarians were last seen, and what it sees is
+    # scanned. 0 parties turns this off.
+    recon_units: int = 2
+    recon_min_spare: int = 3  # Spare units needed before any goes.
+    recon_radius: int = 14  # Sightings further than this from every city are ignored.
+    recon_turns: int = 12  # A party that has not arrived by now is called off.
+    recon_memory_turns: int = 25  # How long a sighting is believed.
     camp_mission_turns: int = 6  # A unit sent at a camp keeps to it this long after the last order.
     camp_defender_radius: int = 2  # Barbarians this close to a camp defend it.
     camp_min_units: int = 2
@@ -436,6 +445,11 @@ class MilitaryPolicy:
     )
     _camp_aside: dict[tuple[int, int], int] = field(default_factory=dict, init=False, repr=False)
     _camps: dict[tuple[int, int], int] = field(default_factory=dict, init=False, repr=False)
+    _sightings: dict[tuple[int, int], int] = field(default_factory=dict, init=False, repr=False)
+    _recon: dict[int, tuple[tuple[int, int], int]] = field(
+        default_factory=dict, init=False, repr=False
+    )  # Unit id to the tile it was sent to see and the turn.
+    _recon_bad: dict[tuple[int, int], int] = field(default_factory=dict, init=False, repr=False)
     _mission: dict[int, tuple[tuple[int, int], int]] = field(
         default_factory=dict, init=False, repr=False
     )  # Unit id to the camp it was sent at and the turn.
@@ -480,6 +494,7 @@ class MilitaryPolicy:
         await self._attack(game, t)
         await self._heal(game, t)
         await self._garrison(game, t)
+        self._note_sightings(t)
         await self._clear_camp(game, t)
         await self._spare_units(game, t)
         await self._idle(game, t)
@@ -1369,10 +1384,77 @@ class MilitaryPolicy:
                 self._refuse(t, unit, "move")
                 self._log(t, unit, "camp", "move refused", where, result=result or "")
 
+    def _note_sightings(self, t: _Turn) -> None:
+        """Where barbarian land units were seen, the trail back to their camp."""
+        s = self.settings
+        for th in t.threats:
+            land = not any(w in th.unit_type for w in _SEA_UNITS)
+            if th.owner_id == BARBARIAN_ID and th.hostile and land:
+                self._sightings[th.x, th.y] = t.turn
+        self._sightings = {
+            p: seen for p, seen in self._sightings.items() if t.turn - seen <= s.recon_memory_turns
+        }
+        self._recon_bad = {p: v for p, v in self._recon_bad.items() if v >= t.turn}
+
+    def _recon_target(self, t: _Turn) -> tuple[int, int] | None:
+        """The farthest recent sighting that is still within reach of a city, else None."""
+        s = self.settings
+        found = [
+            (self._home_distance(t, p), seen, p)
+            for p, seen in self._sightings.items()
+            if p not in self._recon_bad and self._home_distance(t, p) <= s.recon_radius
+        ]
+        return max(found)[2] if found else None
+
+    async def _recon_step(self, game: MilitaryGame, t: _Turn, unit: Unit) -> bool:
+        """Send a spare unit to where barbarians come from, or keep one walking there."""
+        s = self.settings
+        sent = self._recon.get(unit.unit_id)
+        if sent is not None:
+            target, turn_sent = sent
+            if hex_distance(unit.x, unit.y, *target, s.map_width) <= 1 or (
+                t.turn - turn_sent > s.recon_turns
+            ):
+                self._recon.pop(unit.unit_id)  # Arrived and scanned, or called off.
+                return False
+        else:
+            spare = sum(1 for u in t.mine if self._spare(t, u))
+            if (
+                s.recon_units <= 0
+                or self._camps
+                or len(self._recon) >= s.recon_units
+                or spare < s.recon_min_spare
+                or any(th.hostile and th.owner_id != BARBARIAN_ID for th in t.threats)
+                or self._land_threat_near(t, unit)
+            ):
+                return False
+            target = self._recon_target(t)
+            turn_sent = t.turn
+            if target is None:
+                return False
+        if not self._available(t, unit, "spare"):
+            return False
+        t.spare_orders += 1
+        result = await self._order(t, unit, "spare", game.move_unit(unit.unit_index, *target))
+        if result is None or not move_succeeded(result):
+            self._refuse(t, unit, "spare")
+            self._recon_bad[target] = t.turn + s.camp_retry_turns
+            self._recon.pop(unit.unit_id, None)
+            return False
+        t.acted.add(unit.unit_id)
+        self._leave(t, unit)
+        self._recon[unit.unit_id] = (target, turn_sent)
+        self._fortified.pop(unit.unit_id, None)
+        self._log(t, unit, "recon", "idle spare unit, no camp known, so looking where "
+                  "barbarians were last seen", target, result=result)  # fmt: skip
+        return True
+
     def _on_camp_mission(self, t: _Turn, unit: Unit) -> bool:
         """A healthy unit sent at a camp lately, still near it. Run 15: a unit that had shot the
         camp's guards for two turns fled home the moment they were within `flee_radius`."""
         s = self.settings
+        if unit.unit_id in self._recon:
+            return unit.hp >= s.weights.camp_leave_hp * unit.max_hp
         sent = self._mission.get(unit.unit_id)
         if sent is None or t.turn - sent[1] > s.camp_mission_turns:
             return False
@@ -1394,6 +1476,9 @@ class MilitaryPolicy:
         if land:
             nearest = min(land, key=lambda b: (b.distance, b.x, b.y))
             centres.append((nearest.x, nearest.y, s.camp_scan_radius))
+        for unit in t.mine:
+            if unit.unit_id in self._recon and self._city_at(t, unit) is None:
+                centres.append((unit.x, unit.y, s.camp_scan_radius))  # What the party sees.
         if t.turn - self._camp_home_scan >= s.camp_home_scan_turns:
             self._camp_home_scan = t.turn
             centres.extend((c.x, c.y, s.camp_home_scan_radius) for c in t.cities)
@@ -1500,6 +1585,8 @@ class MilitaryPolicy:
                 self._log(t, unit, "skip", "spare, but the orders for this turn are used up")
                 continue
             if await self._hunt(game, t, unit):
+                continue
+            if await self._recon_step(game, t, unit):
                 continue
             if await self._explore(game, t, unit):
                 continue

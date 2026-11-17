@@ -2,15 +2,27 @@
 
 Research for issue 181. At turn 100 every full run scored 114 to 179 against CivBench's 239 (frontier model) and 254 (built-in AI). This page reads the turn, event, settle and bot logs of finished runs to see where the first 100 turns went. It uses logs only: no game and no model calls. All runs are one start (STD_T1_01, Maya, same map and seed), so every number is one start's evidence.
 
-Run names follow `docs/score-history.csv`. "Slices" are the 50-turn experiments of 16 and 17 November (`docs/live-checks.md`, "Run 15 short slices"). They ran on newer code that is not yet on main. The turn 52 and turn 71 slice sessions resume from checkpoints of earlier slices.
+Run names follow `docs/score-history.csv`. "Slices" are the 50-turn experiments of 16 and 17 November (`docs/live-checks.md`, "Run 15 short slices"). They ran on newer code that is not yet on main. The turn 52 and turn 71 slice sessions resume from checkpoints of earlier slices. Tables list runs oldest first, as in `docs/score-history.csv`; the recency table below says which to trust.
+
+## How to read the runs (recency)
+
+The bot changed a lot between Run 8 and Run 14, so an old run says less about where it stands now. Weight the evidence like this:
+
+| Tier | Runs | Code state | Use |
+|---|---|---|---|
+| Current | Run 14 (15 Nov), Run 13 (14 to 15 Nov), and the slices of 16 and 17 Nov | Run 13 ran with the escort rules (PRs 211, 216) and the safe-site gate (209), then got the escorted survey (220) and loyalty fixes (221, 222) mid-run. Run 14 added PRs 225 to 228 and got PR 229 (stall fix) live when stopped at turn 53, so its turn 65 to 75 waiting came after that fix. The slices run newer code not yet on main | Where the bot stands now |
+| Older | Runs 10, 11 and 12 (14 Nov) | Run 12 ran in one session at the Run 11 fixes (PRs 207, 209, 210), before the escort fixes (211 onward); its escort failure is what PR 211 addressed | Trend only; shows problems that later PRs targeted |
+| Historical | Runs 7 to 9 (12 to 14 Nov) | Before loyalty-aware settling, defence and the faith and gold outlets (PRs 190, 191, 200) | Context; do not rank fixes on them alone |
+
+Each finding below names the runs it rests on and whether the current tier still shows it.
 
 ## Short answer
 
-1. **Half the gap exists by turn 50, and it is not the city count.** Our score at turn 50 was 44 to 57 in Runs 7 to 14 against CivBench's 98 (LLM) and 86 (AI). Cities were 1 to 2 at turn 50 and 3 to 5 at turn 100 (Runs 11 to 13) against CivBench's 2.0 and 4.0 (LLM) and 2.4 and 4.6 (AI). The count is about par. What lags is what each city does.
-2. **The first settler dies to barbarians on turn 20.** A barbarian camp stands 2 to 3 tiles north of the capital on this map. In Runs 8, 9, 10 and 11 the first settler (finished turn 15) was killed on turn 20, with its escort Slinger killed on turn 19. The second city then came on turn 38 to 57 instead of turn 21.
-3. **Science buildings come late.** The first campus district (Observatory) finished on turn 79 in Run 12 and not at all by turn 100 in Runs 8 to 11 (Run 7 had one on turn 32, and Run 13 one on turn 27 in an early session that was then stopped, then the next on turn 77). No library before turn 83 in any run. We completed 9 to 13 techs by turn 100 against CivBench's 26 (LLM) and 21 (AI). Our science was about 5 a turn at turn 50 and 10 at turns 70 to 85, against 28 (LLM) and 48 (AI) at turn 100.
-4. **A third of early production went to soldiers.** Military was 29 to 44% of city-turns before turn 100 in Runs 7, 10, 11 and 12 (25% in Run 8). Districts and buildings together were 11 to 25%. Many soldiers died: 1 to 3 Slingers were killed before turn 50 in nearly every run.
-5. **Newer code already closes most of the gap.** Slices that founded the second city on turn 21 had 71 to 79 points on turn 50 and 3 cities by turn 42 to 49. Resumed from a turn 52 checkpoint, three slices reached 203, 208 and 213 on turn 100 with 4 cities and 20 to 21 citizens, above the 180 to 186 mean of the rivals met. That is a stitched path (the first 50 and the last 50 turns were different sessions), so only a full run can confirm it.
+1. **The gap is there by turn 50 and the full runs have not closed it.** Turn-50 score was 45, 55 and 44 in Runs 12, 13 and 14 (49 to 56 in Runs 7 to 11) against CivBench's 98 (LLM) and 86 (AI). Cities at turn 100 were 4 (Run 12) and 3 (Runs 13 and 14) against 4.0 and 4.6. Still shown by the newest full run (Run 14). The slices reached 71 to 79 on turn 50, so the newer code does move it.
+2. **The second city is late, but the cause changed.** Runs 8 to 11 lost the first settler to a camp north of the capital on turn 20 and founded on turn 38 to 57 (historical and older tier). In Runs 13 and 14 (current tier) the second city came on turn 49 and 76 with the settler waiting 25 and 26 turns (22 in Run 12, before the escort fixes) (hold, flee, no_site, escort_gather). Two settlers were still killed before turn 100 (Run 12 turn 40, Run 14 turn 26), but none on turn 20: that kill is not shown by any run after Run 11. Waiting and refused sites are the current cause. The slices founded on turn 21.
+3. **Science buildings are late, though less than first read.** Observatory on turn 53 and Library on turn 68 in Run 14; Library on turn 83 in Run 13 (current tier); Observatory on turn 79 in Run 12 (older tier). Runs 8 to 11 had no campus by turn 100. We completed 9 to 13 techs by turn 100 (Runs 7 to 13) against 26 (LLM) and 21 (AI); the slices had 9 techs by turn 50. Still shown, in a milder form than the older runs suggested.
+4. **Military takes a large share of production, mostly in older runs.** 29 to 44% of city-turns in Runs 7, 10, 11 and 12; 18% in Run 13 (turns 29 to 100); 34% in the 50-turn slice that scored well. The high figures come from the older tier, so it is the weakest lever.
+5. **Newer code closes most of the gap, but only in slices.** Slices resumed from the turn 52 and 71 checkpoints reached 203, 208 and 213 on turn 100 with 4 cities, above the 180 to 186 mean of the rivals met. That is a stitched path (two sessions), so only a full run can confirm it.
 
 ## Score and cities by turn
 
@@ -81,6 +93,7 @@ First finished turn by turn 100, from `building_completed` and `district_complet
 | Run 11 | none | none | 72 | 92 |
 | Run 12 | 79 | none | | |
 | Run 13 | 27 (next 77) | 83 | 96 | 89 |
+| Run 14 | 53 | 68 | | |
 | Slice, found turn 21 | 29 | 50 | | |
 
 Runs 8 to 12 built walls (turn 40 to 89), most of them before any science building. Run 7 had its campus early.
@@ -100,19 +113,21 @@ The score formula is not in this repo. A fit of score against population, cities
 
 ## Ranked fixes
 
-The order is by expected effect on turn-100 score. Each target is meant to be read off the next full run's logs.
+Ordered by expected effect on turn-100 score, resting first on the current tier. Targets are meant to be read off the next full run's logs.
 
-| # | Change | Why (source) | Target |
-|---|---|---|---|
-| 1 | **Keep the first settler alive and founding by turn 21**: deal with the camp north of the capital before the settler leaves, and let the settler go when the escort cannot stack | Runs 8 to 11: settler killed turn 20, second city turn 38 to 57. Newer slices: second city turn 21, score 71 to 79 against 44 to 55 at turn 50 | Second city by turn 25, third by 45, no settler killed before turn 100, score at turn 50 of 75 or more |
-| 2 | **Merge the newer early-game code and confirm it in one full run** (attack ratio 1.0, no builder before the first settler, camp memory and clearing, threat-map settling) | The 203 to 213 at turn 100 comes from stitched slices, not one game | Score at turn 100 of 200 or more; stretch 239 (the CivBench LLM median); at or above the met rivals' mean |
-| 3 | **Science buildings by turn 35 and 55**: Observatory first, then Library, ahead of walls and the Commercial Hub | No campus by turn 100 in Runs 8 to 11 and turn 79 in Run 12; no library before turn 83; science 5 to 10 a turn against 28 to 48 | Campus by turn 35, library by turn 55, 15 or more techs by turn 100 (now 9 to 13), science 20 a turn or more on turn 100 |
-| 4 | **Cap settler waiting**: after 3 turns of `hold`, `flee` or `no_site`, go on a safe route alone or found at the best acceptable tile | Runs 12 to 14: 22 to 26 waiting turns | At most 5 waiting turns before turn 100, 4 cities by turn 75 (Runs 11 to 13 had 3 to 4) |
-| 5 | **Trim military to a mission or a known threat**: lower confidence, since the early slice that scored well also spent 34% | 29 to 44% of city-turns in Runs 7, 10, 11, 12; 1 to 3 Slingers lost before turn 50 | At most 25% of city-turns before turn 100, at most 2 military units lost before turn 50 |
-| 6 | **Earn era points on purpose**: camps (2 to 3 each), natural wonders, pantheon, meeting civs, first government | Dark Age from turn 41 in every slice; era score 35 to 38 against 56 for a Golden Age on turn 100 | Ancient era score of 9 or more, Classical score above the Golden Age threshold |
-| 7 | **Earlier government**: reach Political Philosophy by turn 40 | Classical Republic on turn 63 to 64, with Early Empire and State Workforce researched first | New government by turn 50. Unquantified; the slot gain is small before turn 100 |
+| # | Change | Rests on | Still shown by newer runs? | Target |
+|---|---|---|---|---|
+| 1 | **Merge the newer early-game code and confirm it in one full 100-turn run** (attack ratio 1.0, no builder before the first settler, camp memory and clearing, threat-map settling) | Run 14 (T50 44, T100 121, second city 76) against slices (T50 71 to 79, second city 21, T100 203 to 213 stitched) | Yes: the newest full run is still at the old level | Score at turn 100 of 200 or more; stretch 239 (CivBench LLM); at or above the met rivals' mean |
+| 2 | **Cap settler waiting**: after 3 turns of `hold`, `flee` or `no_site`, go on a safe route alone or found at the best acceptable tile; let the settler go when the escort cannot stack | Runs 13 and 14: 25 and 26 waiting turns, second city on turn 49 and 76 (Run 12, older: 22 turns, turn 57); Run 14 had a long `no_site` stretch around turns 65 to 75 | Yes, in both runs with the escort fixes (13, 14). Replaces the old fix 1 (settler killed turn 20, Runs 8 to 11 only) | Second city by turn 25, third by 45, at most 5 waiting turns before turn 100, 4 cities by turn 75 |
+| 3 | **Science buildings by turn 35 and 55**: Observatory first, then Library, ahead of walls and the Commercial Hub | Run 14 (Observatory 53, Library 68), Run 13 (Library 83), Run 12 (Observatory 79, older tier); Runs 8 to 11 had none | Yes, but milder than first read: Run 14's Library came before turn 83. The slices had the Observatory on turn 29 and the Library on turn 50, so it is reachable | Campus by turn 35, library by turn 55, 15 or more techs by turn 100 (now 9 to 13), science 20 a turn or more on turn 100 |
+| 4 | **Earn era points on purpose**: camps (2 to 3 each), natural wonders, pantheon, meeting civs, first government | Slices only (era score is logged since 16 Nov): Dark Age from turn 41, era score 35 to 38 against 56 for a Golden Age on turn 100 | Not measured in full runs | Ancient era score of 9 or more, Classical score above the Golden Age threshold |
+| 5 | **Trim military to a mission or a known threat** (low confidence: the slice that scored well also spent 34%) | Runs 7, 10, 11, 12 (29 to 44%) | Partly: Run 13 was at 18%; the high figures are from the older tier | At most 25% of city-turns before turn 100, at most 2 military units lost before turn 50 |
+| 6 | **Keep the first settler alive** (clear the camp north of the capital before the settler leaves) | Runs 8 to 11: killed turn 20, escort Slinger on turn 19 | No kill on turn 20 since Run 11; later kills (Run 12 turn 40, Run 14 turn 26) need their own look. PRs 211 and 216 and the slices' camp clearing address it | No settler killed before turn 100 |
+| 7 | **Earlier government**: Political Philosophy by turn 40 | Runs 11 and 12: Classical Republic on turn 63 to 64 | Not checked in Runs 13 and 14. Unquantified; small before turn 100 | New government by turn 50 |
 
-Items 1 to 3 are most of what separates the 114 to 179 runs from the 203 to 213 slices. Items 4 to 7 are smaller and not yet separated from them.
+What changed from the first ranking: the turn-20 settler kill (old fix 1) drops to 6 because only Runs 8 to 11 show it; settler waiting (old 4) rises to 2 because Runs 13 and 14, which have the escort fixes, still show it; merge-and-confirm (old 2) is first because the newest full run still sits at the old level; science buildings stay at 3 but the "no library before turn 83" claim is corrected by Run 14.
+
+Merged PRs that changed early-game behaviour between runs (not exhaustive): 209 and 210 (safe-site gate, science; Run 12), 211 and 216 (escorts; after Run 12), 220 (escorted survey; Run 13), 221, 222 and 228 (loyalty tests; Runs 13 to 14), 229 (stall fix; applied live in Run 14 at turn 53) and 230 (unseen-rival size; after Run 14).
 
 ## What this does not show
 

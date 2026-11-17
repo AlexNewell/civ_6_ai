@@ -11,6 +11,8 @@ import json
 import sys
 from pathlib import Path
 
+from civ6_ai.metrics.civbench_gap import compare_lines, load_baselines
+from civ6_ai.metrics.history import merge_logs
 from civ6_ai.metrics.report import DEFAULT_RESAMPLES, DEFAULT_SEED, compare, format_report
 
 
@@ -27,12 +29,30 @@ def load_scores(paths: list[Path]) -> list[dict]:
     return scores
 
 
+def gap_section(label_a: str, logs_a: list[Path], label_b: str, logs_b: list[Path]) -> str:
+    """The score-gap table for the runs whose turn logs were given, newest log first."""
+
+    def runs(paths: list[Path]) -> list[tuple[str, list[dict]]]:
+        newest_first = sorted(paths, key=lambda p: p.stat().st_mtime, reverse=True)
+        return [(p.stem, merge_logs([p])) for p in newest_first]
+
+    given = ((label_a, logs_a), (label_b, logs_b))
+    sets = [(label, runs(paths)) for label, paths in given if paths]
+    return "\n".join(compare_lines(sets, load_baselines()))
+
+
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--label-a", required=True, help="name of the first (reference) set")
     parser.add_argument("--a", type=Path, nargs="+", required=True, help="score files of set A")
     parser.add_argument("--label-b", required=True, help="name of the second set")
     parser.add_argument("--b", type=Path, nargs="+", required=True, help="score files of set B")
+    parser.add_argument(
+        "--logs-a", type=Path, nargs="*", default=[], help="turn logs of set A, one per run"
+    )
+    parser.add_argument(
+        "--logs-b", type=Path, nargs="*", default=[], help="turn logs of set B, one per run"
+    )
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED, help="bootstrap seed")
     parser.add_argument("--resamples", type=int, default=DEFAULT_RESAMPLES)
     parser.add_argument("--json", action="store_true", help="print JSON instead of text")
@@ -54,10 +74,16 @@ def main(argv: list[str] | None = None) -> int:
             seed=args.seed,
             resamples=args.resamples,
         )
+        gap = gap_section(args.label_a, args.logs_a, args.label_b, args.logs_b)
     except (ValueError, OSError) as error:
         print(f"FAILED: {error}", file=sys.stderr)
         return 1
-    report = json.dumps(comparison, indent=2) if args.json else format_report(comparison)
+    if args.json:
+        if gap:
+            comparison["score_gap"] = gap.splitlines()
+        report = json.dumps(comparison, indent=2)
+    else:
+        report = format_report(comparison) + (f"\n\n{gap}" if gap else "")
     if args.out:
         args.out.write_text(report + "\n", encoding="utf-8")
     else:

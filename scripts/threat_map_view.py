@@ -182,11 +182,11 @@ def draw(record: dict, pad: int, box: tuple[int, int, int, int] | None = None) -
             if (x, y) in hostile:
                 src = hostile[x, y]
                 d.ellipse([cx - 9, cy - 18, cx + 9, cy], fill=(200, 0, 0))
-                name = src["unit_type"].removeprefix("UNIT_").title()
+                name = src["unit_type"].rsplit("_", 1)[-1].title()
                 _label(d, (cx, cy - 28), f"{name} {src['strength']:.0f}", small, red)
             if (x, y) in own:
                 d.ellipse([cx - 9, cy - 2, cx + 9, cy + 16], fill=(0, 150, 0))
-                _label(d, (cx, cy + 30), own[x, y].removeprefix("UNIT_").title()[:8], small, green)
+                _label(d, (cx, cy + 30), own[x, y].rsplit("_", 1)[-1].title()[:9], small, green)
     for x in range(x0, x1 + 1):  # x across the top (rows differ by half a tile; label row y1).
         cx, _ = centre(x, y1)
         _label(d, (cx, 24), str(x), big, (0, 0, 0))

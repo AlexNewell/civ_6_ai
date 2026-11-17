@@ -27,7 +27,9 @@ from civ6_ai.effectiveness import end_of_run_lines
 from civ6_ai.fastcalls import fix_units_query, narrow_popup_scan, shorten_call_waits
 from civ6_ai.game_speed import fix_overview_speed
 from civ6_ai.gp_advisor import fix_gp_advisor
+from civ6_ai.metrics.civbench_gap import gap_lines, load_baselines
 from civ6_ai.metrics.costs import game_id_for_new_session, game_id_of_log
+from civ6_ai.metrics.history import merge_logs
 from civ6_ai.metrics.speed import summarise as summarise_speed
 from civ6_ai.monitors import EventBus, EventLog
 from civ6_ai.orchestrator import StopReason, TurnLog, TurnRecord
@@ -291,6 +293,11 @@ async def run(
                 print(line)
         except Exception as exc:  # A summary must never turn a finished run into a crash.
             print(f"Policy effectiveness: not available ({exc!r})")
+        try:
+            for line in gap_lines(merge_logs([turn_log.path]), load_baselines()):
+                print(line)
+        except Exception as exc:  # Likewise: the gap table is a report, not part of the run.
+            print(f"Score gap: not available ({exc!r})")
         if reason != StopReason.TURN_LIMIT:
             print(f"Last result: {records[-1].detail}")
     print(f"Log: {turn_log.path.relative_to(ROOT)}")

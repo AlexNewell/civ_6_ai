@@ -118,7 +118,7 @@ def test_a_religion_row_is_a_standing_when_it_names_a_rival():
     players = [p(0, "Us"), p(1, "Rome")]
     rows = [(RELIGIOUS, 1, "RELIGION_SHINTO", 3, 5), (RELIGIOUS, None, "RELIGION_X", 4, 5)]
     s = by_path(assess(1, players, rows, US))[RELIGIOUS]
-    assert (s.rival, s.flag, s.detail) == ("Rome", "near+lead", "RELIGION_SHINTO")
+    assert (s.rival, s.flag, s.detail) == ("Rome", "near", "RELIGION_SHINTO")
 
 
 def test_science_rank_counts_us_among_the_met_civs():

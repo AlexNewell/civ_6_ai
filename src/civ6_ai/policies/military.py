@@ -483,9 +483,7 @@ class MilitaryPolicy:
             "turn": t.turn,
             "combat_units": len(t.mine),
             "spare": sum(
-                1
-                for u in t.mine
-                if self._spare(t, u) and u.hp >= s.weights.heal_below * u.max_hp
+                1 for u in t.mine if self._spare(t, u) and u.hp >= s.weights.heal_below * u.max_hp
             ),
             "barb_visible": len(barbs),
             "barb_near": len(near),

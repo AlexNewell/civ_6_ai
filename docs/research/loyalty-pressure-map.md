@@ -59,6 +59,22 @@ It has been tested only against a fake game. A person runs it by hand on a game 
 settler, with the lens on, with no settler, and on a map with more than one continent. A missing plot
 must be read as unknown, not zero.
 
+## First live run
+
+One run, on a game with one settler owned and the settler lens off:
+
+- The call exists and works from our connection (`function`, no error).
+- It returned 31 plots on one continent (id 42), all revealed to us, with values from -20 to -4. So it
+  works with the lens off, and it did not return every plot on the map: it covers a small set around
+  the foreign cities, not the whole continent.
+- Every value was at or inside plus or minus 20, and many sat exactly at -20. That fits a clamp at 20
+  in the call itself. The -22 in the issue's screenshot did not appear in this run, so the clamp is not
+  settled.
+- The call time read as 0.0000 s, which is below the clock's resolution. Treat it as cheap, not free.
+
+Still to run: no settler owned, the lens turned on, a map with more than one continent, and a run
+near our own cities to see positive values.
+
 ## If it works: fairness
 
 Keep revealed plots only, read only while we own or plan a settler, register the read as flagged in

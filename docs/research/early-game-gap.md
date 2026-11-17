@@ -8,7 +8,7 @@ Run names follow `docs/score-history.csv`. "Slices" are the 50-turn experiments 
 
 1. **Half the gap exists by turn 50, and it is not the city count.** Our score at turn 50 was 44 to 57 in Runs 7 to 14 against CivBench's 98 (LLM) and 86 (AI). Cities were 1 to 2 at turn 50 and 3 to 5 at turn 100 (Runs 11 to 13) against CivBench's 2.0 and 4.0 (LLM) and 2.4 and 4.6 (AI). The count is about par. What lags is what each city does.
 2. **The first settler dies to barbarians on turn 20.** A barbarian camp stands 2 to 3 tiles north of the capital on this map. In Runs 8, 9, 10 and 11 the first settler (finished turn 15) was killed on turn 20, with its escort Slinger killed on turn 19. The second city then came on turn 38 to 57 instead of turn 21.
-3. **No science building before turn 72.** The first campus district (Observatory) finished on turn 77 to 79 in Runs 12 and 13 and not at all by turn 100 in Runs 8 to 11. No library before turn 83 in any run. We completed 9 to 13 techs by turn 100 against CivBench's 26 (LLM) and 21 (AI). Our science was about 5 a turn at turn 50 and 10 at turns 70 to 85, against 28 (LLM) and 48 (AI) at turn 100.
+3. **Science buildings come late.** The first campus district (Observatory) finished on turn 79 in Run 12 and not at all by turn 100 in Runs 8 to 11 (Run 7 had one on turn 32, and Run 13 one on turn 27 in an early session that was then stopped, then the next on turn 77). No library before turn 83 in any run. We completed 9 to 13 techs by turn 100 against CivBench's 26 (LLM) and 21 (AI). Our science was about 5 a turn at turn 50 and 10 at turns 70 to 85, against 28 (LLM) and 48 (AI) at turn 100.
 4. **A third of early production went to soldiers.** Military was 29 to 44% of city-turns before turn 100 in Runs 7, 10, 11 and 12 (25% in Run 8). Districts and buildings together were 11 to 25%. Many soldiers died: 1 to 3 Slingers were killed before turn 50 in nearly every run.
 5. **Newer code already closes most of the gap.** Slices that founded the second city on turn 21 had 71 to 79 points on turn 50 and 3 cities by turn 42 to 49. Resumed from a turn 52 checkpoint, three slices reached 203, 208 and 213 on turn 100 with 4 cities and 20 to 21 citizens, above the 180 to 186 mean of the rivals met. That is a stitched path (the first 50 and the last 50 turns were different sessions), so only a full run can confirm it.
 
@@ -80,7 +80,7 @@ First finished turn by turn 100, from `building_completed` and `district_complet
 | Run 10 | none | none | 86 | 94 |
 | Run 11 | none | none | 72 | 92 |
 | Run 12 | 79 | none | | |
-| Run 13 | 77 | 83 | 96 | 89 |
+| Run 13 | 27 (next 77) | 83 | 96 | 89 |
 | Slice, found turn 21 | 29 | 50 | | |
 
 Runs 8 to 12 built walls (turn 40 to 89), most of them before any science building. Run 7 had its campus early.
@@ -106,7 +106,7 @@ The order is by expected effect on turn-100 score. Each target is meant to be re
 |---|---|---|---|
 | 1 | **Keep the first settler alive and founding by turn 21**: deal with the camp north of the capital before the settler leaves, and let the settler go when the escort cannot stack | Runs 8 to 11: settler killed turn 20, second city turn 38 to 57. Newer slices: second city turn 21, score 71 to 79 against 44 to 55 at turn 50 | Second city by turn 25, third by 45, no settler killed before turn 100, score at turn 50 of 75 or more |
 | 2 | **Merge the newer early-game code and confirm it in one full run** (attack ratio 1.0, no builder before the first settler, camp memory and clearing, threat-map settling) | The 203 to 213 at turn 100 comes from stitched slices, not one game | Score at turn 100 of 200 or more; stretch 239 (the CivBench LLM median); at or above the met rivals' mean |
-| 3 | **Science buildings by turn 35 and 55**: Observatory first, then Library, ahead of walls and the Commercial Hub | No campus before turn 77 in Runs 8 to 13; no library before turn 83; science 5 to 10 a turn against 28 to 48 | Campus by turn 35, library by turn 55, 15 or more techs by turn 100 (now 9 to 13), science 20 a turn or more on turn 100 |
+| 3 | **Science buildings by turn 35 and 55**: Observatory first, then Library, ahead of walls and the Commercial Hub | No campus by turn 100 in Runs 8 to 11 and turn 79 in Run 12; no library before turn 83; science 5 to 10 a turn against 28 to 48 | Campus by turn 35, library by turn 55, 15 or more techs by turn 100 (now 9 to 13), science 20 a turn or more on turn 100 |
 | 4 | **Cap settler waiting**: after 3 turns of `hold`, `flee` or `no_site`, go on a safe route alone or found at the best acceptable tile | Runs 12 to 14: 22 to 26 waiting turns | At most 5 waiting turns before turn 100, 4 cities by turn 75 (Runs 11 to 13 had 3 to 4) |
 | 5 | **Trim military to a mission or a known threat**: lower confidence, since the early slice that scored well also spent 34% | 29 to 44% of city-turns in Runs 7, 10, 11, 12; 1 to 3 Slingers lost before turn 50 | At most 25% of city-turns before turn 100, at most 2 military units lost before turn 50 |
 | 6 | **Earn era points on purpose**: camps (2 to 3 each), natural wonders, pantheon, meeting civs, first government | Dark Age from turn 41 in every slice; era score 35 to 38 against 56 for a Golden Age on turn 100 | Ancient era score of 9 or more, Classical score above the Golden Age threshold |

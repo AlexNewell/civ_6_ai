@@ -182,6 +182,7 @@ async def play_game(
             ledger=ledger,
             event_log=event_log,
             probes=probes,
+            threat_map_dump=ROOT / "runs" / f"{name}_{stamp}_threatmap.jsonl",
         )
         if shots_every_turn:
             # No cap: a run reviewed by eye wants every turn. Kept apart from the triage shots.

@@ -84,6 +84,7 @@ from civ6_ai.screenshots import Screenshotter
 from civ6_ai.state.reader import IncompleteRead, check_cities_complete
 from civ6_ai.strategy.apply import PolicyDocumentHandler
 from civ6_ai.strategy.tasks import TaskDB, TaskHandler
+from civ6_ai.threat_map import ThreatMapHandler
 
 SETTLING_LOGGER = "civ6_ai.policies.settling"
 _DECISION_PREFIX = "settle_decision "
@@ -262,6 +263,7 @@ def build_orchestrator(
     ledger: BuildLedger | None = None,
     event_log: EventLog | None = None,
     probes: Any = None,
+    threat_map_dump: Path | None = None,
 ) -> Orchestrator:
     """Wire the handlers to a game. `game` is civ6-mcp's `GameState`, or a fake with its reads.
 
@@ -278,6 +280,7 @@ def build_orchestrator(
     is fed from `bus`, and a gap line is logged each turn. `event_log` is flushed at the end of each
     turn, since it buffers its writes.
     `probes` is a `ProbeShots` (see `probes`), subscribed to `bus` and run before the events flush.
+    `threat_map_dump` is a file the threat map appends one line per turn to (see `threat_map`).
     """
     defence = DefenceState()  # Which cities are threatened this turn, shared by three policies.
     expansion = ExpansionState()  # Settling fills it. Production and the log line read it.
@@ -336,6 +339,7 @@ def build_orchestrator(
         diplomacy,
         WarPolicy(state_path=wars_state),
         *([TradeOfferPolicy(diplomacy.weights)] if trade_offers else []),
+        ThreatMapHandler(dump=threat_map_dump),  # Nothing reads it yet (issue 238, stage 1).
         DefencePolicy(defence),  # Before settling: its war flag gates a garrison leaving.
         SettlingPolicy(expansion=expansion, defence=defence),
         LoyaltyResponse(bus),

@@ -38,6 +38,25 @@ print("  cities by turn: " + " ".join(f"T{t}={by_turn[t].get('cities')}" for t i
 tail = [r.get("score") for r in rows[-11:] if r.get("score") is not None]
 if len(tail) >= 2:
     print(f"  score gain over the last {len(tail) - 1} turns: {tail[-1] - tail[0]:+}")
+# The threat map's dump (issue 238). "Camp-turns near a city" counts turns a known camp stood
+# within `near_city` tiles of one of our cities: a camp left standing is the failure it measures.
+dump = path.with_name(f"{path.stem}_threatmap.jsonl")
+if dump.exists():
+    maps = [json.loads(x) for x in dump.read_text(encoding="utf-8").splitlines() if x.strip()]
+    camps = {
+        (s["x"], s["y"]): m["turn"]
+        for m in reversed(maps)
+        for s in m["sources"]
+        if s["kind"] == "camp"
+    }
+    near_turns = sum(1 for m in maps if m["camps_near_city"] > 0)
+    print(
+        f"  threat map: {len(maps)} turns dumped, camps ever known {len(camps)}, "
+        f"camp-turns near a city {near_turns}, camps known at the end "
+        f"{len([s for s in maps[-1]['sources'] if s['kind'] == 'camp'])}"
+    )
+    seconds = [r.get("handler_seconds", {}).get("threat_map", 0.0) for r in rows]
+    print(f"  threat map handler: {sum(seconds) / len(seconds):.2f} s per turn on average")
 for c in run_checks(load_run([path])):
     if c.policy in ("offense", "boosts", "era score"):
         print(f"  {c.status:7} {c.name}: {c.figures()} {c.note[:110]}")

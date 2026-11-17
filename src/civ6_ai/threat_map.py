@@ -25,8 +25,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from civ6_ai.state import read_cities, read_threats
-from civ6_ai.state.models import City, Threat, Tile
+from civ6_ai.state import read_cities, read_threats, read_units
+from civ6_ai.state.models import City, Threat, Tile, Unit
 from civ6_ai.state.reader import STANDARD_MAP_WIDTH, hex_distance, read_area
 
 log = logging.getLogger(__name__)
@@ -202,7 +202,9 @@ class ThreatMap:
         ranked = sorted(seen.items(), key=lambda kv: (-kv[1], kv[0]))
         return [[x, y, round(v, 1)] for (x, y), v in ranked[: self.settings.heat_tiles]]
 
-    def record(self, turn: int, cities: Iterable[City]) -> dict[str, Any]:
+    def record(
+        self, turn: int, cities: Iterable[City], units: Iterable[Unit] = ()
+    ) -> dict[str, Any]:
         cities = list(cities)
         rows = []
         for src in sorted(self.sources, key=lambda s: (s.kind, s.x, s.y)):
@@ -221,6 +223,10 @@ class ThreatMap:
             "sources": rows,
             "camps_near_city": len(near),
             "heat": self.heat(turn),
+            # Where we stand, so a picture of the map can show our cities (no threat there) and
+            # units. [x, y, name] and [x, y, unit_type].
+            "cities": [[c.x, c.y, c.name] for c in cities],
+            "units": [[u.x, u.y, u.unit_type] for u in units if u.is_combat],
         }
 
 
@@ -242,6 +248,7 @@ class ThreatMapHandler:
     async def run(self, game: Any) -> None:
         turn = (await game.get_game_overview()).turn
         cities = await read_cities(game, self.settings.map_width)
+        units = await read_units(game, self.settings.map_width)
         self.map.see_threats(turn, await read_threats(game))
         if self.map.due_for_scan(turn):
             self.map.mark_scanned(turn)
@@ -256,4 +263,4 @@ class ThreatMapHandler:
                 self.map.see_tiles(turn, tiles)
         if self._dump is not None:
             with self._dump.open("a", encoding="utf-8") as out:
-                out.write(json.dumps(self.map.record(turn, cities)) + "\n")
+                out.write(json.dumps(self.map.record(turn, cities, units)) + "\n")

@@ -155,3 +155,15 @@ def test_the_handler_scans_on_its_interval_not_every_turn():
 def test_nothing_in_the_policies_reads_the_map_yet():
     for path in (SRC / "policies").glob("*.py"):
         assert "threat_map" not in path.read_text(encoding="utf-8"), path.name
+
+
+def test_the_record_carries_our_cities_and_combat_units_for_the_picture():
+    from civ6_ai.state.reader import build_city, build_unit
+    from fixtures.civ_state import unit_info
+
+    m = ThreatMap()
+    city = build_city(city_info(x=64, y=16), (), set(), 74)
+    warrior = build_unit(unit_info(x=65, y=16, unit_type="UNIT_WARRIOR", combat_strength=8), 74)
+    rec = m.record(5, [city], [warrior])
+    assert rec["cities"] == [[64, 16, city.name]]
+    assert rec["units"] == [[65, 16, "UNIT_WARRIOR"]]

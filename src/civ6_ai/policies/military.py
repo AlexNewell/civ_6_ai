@@ -1530,6 +1530,8 @@ class MilitaryPolicy:
         if t.turn - self._camp_home_scan >= s.camp_home_scan_turns:
             self._camp_home_scan = t.turn
             centres.extend((c.x, c.y, s.camp_home_scan_radius) for c in t.cities)
+            # A remembered camp beyond the city scans is looked at too, so one seen cleared goes.
+            centres.extend((*camp, 1) for camp in sorted(self._camps))
         for x, y, radius in centres:
             try:
                 tiles = await read_area(game, x, y, radius)

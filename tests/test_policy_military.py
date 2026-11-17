@@ -1518,3 +1518,18 @@ def test_the_recon_target_stays_inside_the_map_rows():
     city = types.SimpleNamespace(x=10, y=43, city_id=1)
     t = types.SimpleNamespace(cities=[city], turn=20)
     assert policy._recon_target(t)[1] <= policy.settings.map_height - 1
+
+
+def test_a_remembered_camp_is_rescanned_and_forgotten_when_seen_cleared():
+    policy = MilitaryPolicy()
+    policy._camps[(30, 10)] = 5  # Well beyond the city scan radius.
+    seen = []
+
+    async def area(cx, cy, radius=2):
+        seen.append((cx, cy))
+        return [tile(x=30, y=10, improvement=None, units=[])] if (cx, cy) == (30, 10) else []
+
+    game = MilitaryGame(strong_pair() + [warrior(uid=3)], [])
+    game.get_map_area = area
+    run(policy, game)
+    assert (30, 10) in seen and (30, 10) not in policy._camps

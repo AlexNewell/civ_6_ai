@@ -60,6 +60,7 @@ from civ6_ai.policies.settling import (
     _SEA_UNITS,
     SCOUT,
     hex_line,
+    neighbours,
     spare_garrison_tiles,
     units_reserved_for_settling,
 )
@@ -1343,16 +1344,28 @@ class MilitaryPolicy:
             # Run 15: a move straight onto a camp three tiles off is refused (the game only allows
             # that capture move from beside it), so walk to the tile beside it first.
             adjacent = hex_distance(unit.x, unit.y, *where, s.map_width) <= 1
-            goal = where if (adjacent and not occupied) else self._stage_tile(unit, where)
-            if goal is None or goal == (unit.x, unit.y):
-                continue
-            result = await self._order(t, unit, "move", game.move_unit(unit.unit_index, *goal))
-            if result is not None and move_succeeded(result):
-                t.acted.add(unit.unit_id)
-                self._leave(t, unit)
-                self._log(t, unit, "camp", "odds are clearly good, advancing on the camp", where,
-                          result=result)  # fmt: skip
+            if adjacent and not occupied:
+                goals = [where]
+            elif adjacent:
+                continue  # In reach of the guards: the attack step takes it from here.
             else:
+                goals = self._stage_goals(t, unit, where)
+            result = None
+            for goal in goals:
+                result = await self._order(t, unit, "move", game.move_unit(unit.unit_index, *goal))
+                if result is not None and move_succeeded(result):
+                    t.acted.add(unit.unit_id)
+                    t.placed[unit.unit_id] = self._reached(result, goal)
+                    self._leave(t, unit)
+                    self._log(t, unit, "camp", "odds are clearly good, advancing on the camp",
+                              where, result=result)  # fmt: skip
+                    break
+                self._learn_full_tile(t, result)  # Another unit holds it: try the next tile.
+                if "STACKING_CONFLICT" not in (result or ""):
+                    break
+            else:
+                result = result or ""
+            if unit.unit_id not in t.acted:
                 self._refuse(t, unit, "move")
                 self._log(t, unit, "camp", "move refused", where, result=result or "")
 
@@ -1405,6 +1418,19 @@ class MilitaryPolicy:
             (hex_distance(*where, c.x, c.y, self.settings.map_width) for c in t.cities),
             default=0,
         )
+
+    def _stage_goals(
+        self, t: _Turn, unit: Unit, camp: tuple[int, int], tries: int = 3
+    ) -> list[tuple[int, int]]:
+        """Free tiles beside the camp, nearest the unit first. One unit per tile: the game
+        refuses a second land unit on a tile, and every unit aimed at the same stage tile left
+        the rest standing where they were (Run 15: three units, one in position)."""
+        width = self.settings.map_width
+        taken = {self._pos(t, u) for u in t.units if u.unit_id != unit.unit_id}
+        taken |= {(th.x, th.y) for th in t.threats} | t.blocked
+        free = [p for p in neighbours(*camp, width) if p not in taken]
+        free.sort(key=lambda p: (hex_distance(unit.x, unit.y, *p, width), p))
+        return free[:tries]
 
     def _stage_tile(self, unit: Unit, camp: tuple[int, int]) -> tuple[int, int] | None:
         """The tile next to the camp on the way there, or None if already adjacent."""

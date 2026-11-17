@@ -636,6 +636,43 @@ def test_an_empty_camp_is_entered_from_beside_it_and_walked_to_from_afar():
     assert ("move", 2, 13, 10) in game.orders("move")  # Two off: the tile beside it first.
 
 
+def test_units_sent_at_a_camp_take_different_tiles_beside_it():
+    units = [
+        warrior(uid=1, x=11, y=10, **STRONG),
+        warrior(uid=2, x=11, y=11, **STRONG),
+        warrior(uid=3),
+    ]
+    game = camp_game(units, [barbarian(x=14, y=10, cs=5)])
+    run(MilitaryPolicy(), game)
+    goals = [order[2:] for order in game.orders("move")]
+    assert len(goals) == 2 and goals[0] != goals[1]
+
+
+def test_a_stage_tile_the_game_says_is_full_is_replaced_by_the_next_one():
+    units = [
+        warrior(uid=1, x=11, y=10, **STRONG),
+        warrior(uid=2, x=11, y=11, **STRONG),
+        warrior(uid=3),
+    ]
+    game = camp_game(units, [barbarian(x=14, y=10, cs=5)])
+    first = None
+
+    original = game.move_unit
+
+    async def move(unit_index, x, y):
+        nonlocal first
+        if first is None:
+            first = (x, y)
+            game.actions.append(("move", unit_index, x, y))
+            return f"STACKING_CONFLICT|Friendly UNIT_SLINGER already on ({x},{y}) (unit_id=9)"
+        return await original(unit_index, x, y)
+
+    game.move_unit = move
+    run(MilitaryPolicy(), game)
+    tried = [order[2:] for order in game.orders("move")]
+    assert tried[0] == first and tried[1] != first  # Moved on to another tile, same turn.
+
+
 def test_a_camp_with_a_garrison_is_approached_to_the_adjacent_tile():
     units = [
         warrior(uid=1, x=11, y=10, **STRONG),

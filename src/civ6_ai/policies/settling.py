@@ -121,6 +121,16 @@ class SettlingSettings:
     garrison_max_hostiles: int = 2
     garrison_min_strength: int = 20
     garrison_total_ratio: float = 2.0
+    # A settler standing on a good site founds the city at once, with a hostile unit near,
+    # when the threat is small: the city can't be taken in a turn, it is usually safe from
+    # one or two barbarians, and running costs the momentum of the early game. At most
+    # `found_max_hostiles` hostile land units within `found_threat_radius`, none siege, each
+    # no stronger than `found_max_strength` and together at most `found_max_total`. Never
+    # while we are at war with a civ. More than that, and the settler still runs.
+    found_threat_radius: int = 4
+    found_max_hostiles: int = 2
+    found_max_strength: int = 20
+    found_max_total: int = 30
     # Bounds on waiting and retrying, so nothing stalls for good.
     no_site_disband_turns: int = 20  # A settler with no site this many turns in a row is disbanded.
     max_move_failures: int = 3  # Refused moves to one site before it is set aside.
@@ -446,6 +456,34 @@ def garrison_may_leave(
     return total <= s.garrison_total_ratio * ceiling
 
 
+def found_under_threat_ok(
+    site: tuple[int, int],
+    threats: Iterable[Threat],
+    at_war: bool,
+    settings: SettlingSettings | None = None,
+    map_width: int | None = STANDARD_MAP_WIDTH,
+) -> bool:
+    """True when a settler on `site` may found its city now though hostile units are near:
+    few, weak and not siege (see `found_threat_radius` in the settings)."""
+    if at_war:
+        return False
+    s = settings or SettlingSettings()
+    near = [
+        t
+        for t in threats
+        if t.hostile and hex_distance(*site, t.x, t.y, map_width) <= s.found_threat_radius
+    ]
+    if len(near) > s.found_max_hostiles:
+        return False
+    total = 0.0
+    for t in near:
+        strength, siege = _strength(t)
+        if siege or strength > s.found_max_strength:
+            return False
+        total += strength
+    return total <= s.found_max_total
+
+
 def spare_garrison_tiles(
     cities: Iterable[City],
     threats: Iterable[Threat],
@@ -643,6 +681,9 @@ class SettlingPolicy:
     # leaves). `_lone_ok` is this turn's cities whose last defender may leave; `_stripped` maps a
     # city tile whose last defender left with a settler to that escort's id.
     defence: Any = field(default=None, repr=False)
+    # The terrain store (issue 238), set by the bot's wiring: it says what a step costs, so a
+    # settler one tile off a good site can step on and found in the same turn.
+    terrain: Any = field(default=None, repr=False)
     _lone_ok: frozenset = field(default_factory=frozenset, init=False, repr=False)
     _stripped: dict[tuple[int, int], int] = field(default_factory=dict, init=False, repr=False)
     _automated: dict[int, int] = field(default_factory=dict, init=False, repr=False)
@@ -1072,8 +1113,6 @@ class SettlingPolicy:
                 for cx, cy in reserved
             ):
                 rejected = "reserved by another settler"
-            elif not escorted and danger.near(site.x, site.y, s.threat_radius):
-                rejected = HOSTILE_NEAR_SITE
             elif (
                 margin < -s.loyalty_reject_margin
                 or rate < s.loyalty_reject_rate
@@ -1095,6 +1134,10 @@ class SettlingPolicy:
                         rejected = BELOW_MIN_SCORE
                 else:
                     rejected = "too far from our cities"
+            # Last, so that HOSTILE_NEAR_SITE means a hostile unit is the site's only problem:
+            # the founding shortcuts that waive it must not accept a site that fails anything else.
+            if rejected is None and not escorted and danger.near(site.x, site.y, s.threat_radius):
+                rejected = HOSTILE_NEAR_SITE
             path_threat = rejected is None and danger.on_path(
                 (settler.x, settler.y), (site.x, site.y), s.threat_radius
             )
@@ -1210,7 +1253,28 @@ class SettlingPolicy:
 
         if escorted and self._stripped and await self._recall(game, settler, units, record):
             return
-        threatened = danger.near(settler.x, settler.y, s.flee_radius)
+        at_war = self.defence.at_war if self.defence is not None else False
+        hostile_only_here = here is not None and all(
+            c.rejected in (None, HOSTILE_NEAR_SITE)
+            for c in candidates
+            if (c.x, c.y) == (settler.x, settler.y)
+        )
+        # On a good site with only a small threat near: found now, don't run (the user's
+        # critique of Run 18: the city is safe from one or two barbarians, and a settler
+        # that runs loses the turns).
+        found_now_ok = hostile_only_here and found_under_threat_ok(
+            (settler.x, settler.y), danger.threats, at_war, s, s.map_width
+        )
+        step_target = (
+            None
+            if found_now_ok
+            else self._step_and_found_target(settler, candidates, danger, at_war)
+        )
+        if step_target is not None and await self._step_and_found(
+            game, settler, step_target, city_tiles, record
+        ):
+            return
+        threatened = danger.near(settler.x, settler.y, s.flee_radius) and not found_now_ok
         # Live (Run 12): an escorted settler stepped out, then fled back to the city next turn
         # and the pair repeated it. A settler with its escort on the tile goes on instead.
         if (
@@ -1244,6 +1308,8 @@ class SettlingPolicy:
             c.rejected is None for c in candidates if (c.x, c.y) == (settler.x, settler.y)
         ):
             found_here, reason = True, "standing on an acceptable site"
+        elif here is not None and found_now_ok:
+            found_here, reason = True, "standing on a good site, the threat near is small"
         if found_here and (settler.x, settler.y) in self._failed_sites:
             record(
                 "found_skipped",
@@ -1445,6 +1511,49 @@ class SettlingPolicy:
         self._no_site_turns.pop(settler.unit_id, None)
         self._founded.add(settler.unit_id)  # Gone, so not on the map.
         return True
+
+    def _step_and_found_target(self, settler, candidates, danger, at_war):
+        """The site one tile away that the settler can step onto and still have a move left
+        to found on, when only a small threat is near it. None if there is none (or no terrain
+        store, or the step's cost is unknown: an unknown tile counts as slow)."""
+        s = self.settings
+        if self.terrain is None:
+            return None
+        for c in candidates:
+            if c.rejected != HOSTILE_NEAR_SITE:
+                continue  # No hostile near: the usual route (step now, found next turn).
+            if hex_distance(settler.x, settler.y, c.x, c.y, s.map_width) != 1:
+                continue
+            cost = self.terrain.step_cost(c.x, c.y, naval=False)
+            if cost is None or settler.moves - cost <= 0:
+                continue  # Blocked, or the step would use up the moves it needs to found.
+            if found_under_threat_ok((c.x, c.y), danger.threats, at_war, s, s.map_width):
+                return c
+        return None
+
+    async def _step_and_found(self, game, settler, target, city_tiles, record) -> bool:
+        goal = (target.x, target.y)
+        result = await game.move_unit(settler.unit_index, *goal)
+        if not move_succeeded(result) or f"now_at:{goal[0]},{goal[1]}" not in result:
+            record(
+                "move", "stepping onto the site to found it, but it did not arrive", goal, result
+            )
+            return False
+        found = await game.found_city(settler.unit_index)
+        if action_succeeded(found):
+            record(
+                "found", "stepped onto the site and founded, the threat near is small", goal, found
+            )
+            self._site_claims.pop(settler.unit_id, None)
+            self._holds.pop(settler.unit_id, None)
+            self._no_site_turns.pop(settler.unit_id, None)
+            self._founded.add(settler.unit_id)
+            city_tiles.append(goal)
+            return True
+        # Not blacklisted: the step may have used the moves founding needs (the terrain cost is
+        # an estimate), so the next turn tries from the site, and a real failure there is noted.
+        record("found_failed", "stepped onto the site but founding failed", goal, found)
+        return True  # It moved; nothing more to do with it this turn.
 
     async def _flee(self, game, settler, city_tiles, record) -> bool:
         s = self.settings

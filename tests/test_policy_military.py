@@ -24,7 +24,7 @@ from civ6_ai.policies.military import (
 from civ6_ai.policies.settling import units_reserved_for_settling
 from civ6_ai.state import read_cities, read_threats, read_units
 from civ6_ai.state.models import Target, Threat
-from civ6_ai.state.reader import build_unit
+from civ6_ai.state.reader import build_tile, build_unit, hex_distance
 from fixtures.civ_state import (
     BARBARIANS,
     ROME,
@@ -756,6 +756,7 @@ def test_a_unit_on_a_camp_mission_does_not_flee_the_guards_until_it_is_hurt():
     assert moves(MilitaryPolicy(), 100)  # No mission: it goes home.
     sent = MilitaryPolicy()
     sent._mission[3] = ((14, 10), 20)  # The game's turn in these tests is 20.
+    sent._camps[(14, 10)] = 20  # The camp it was sent at is still known.
     assert not moves(sent, 100)
     assert moves(sent, 40)  # Hurt: the mission no longer holds it.
 
@@ -811,7 +812,8 @@ def test_the_camp_scan_reads_around_the_barbarian_and_each_city_once_a_turn():
         game.calls.count("get_map_area") == 2
     )  # One around the nearer barbarian, one at the city.
     run(policy, game)
-    assert game.calls.count("get_map_area") == 3  # The city is read only every few turns.
+    # The city is read only every few turns; the camp we are marching on is read to see it gone.
+    assert game.calls.count("get_map_area") == 4
 
 
 def test_a_camp_in_plain_view_is_attacked_though_the_only_barbarian_is_a_ship():
@@ -1013,7 +1015,7 @@ def test_a_camp_count_starts_again_after_the_camp_is_forgotten():
     game = camp_game(strong_pair(), [barbarian(x=15, y=10, cs=5)])
     policy = MilitaryPolicy()
     run(policy, game)
-    assert (14, 10) in policy._camp_turns
+    assert any(where == (14, 10) for where, _ in policy._camp_turns)
     game.data["units"] = []
     game.data["overview"] = overview(turn=20 + policy.settings.camp_idle_turns + 1, num_cities=1)
     run(policy, game)
@@ -1533,3 +1535,121 @@ def test_a_remembered_camp_is_rescanned_and_forgotten_when_seen_cleared():
     game.get_map_area = area
     run(policy, game)
     assert (30, 10) in seen and (30, 10) not in policy._camps
+
+
+def test_a_far_force_gathers_before_any_unit_goes_in():
+    units = [warrior(uid=1, x=2, y=10, **STRONG), warrior(uid=2, x=2, y=11, **STRONG)]
+    game = camp_game(
+        units, [], camp=tile(x=14, y=10, improvement="IMPROVEMENT_BARBARIAN_CAMP", units=[])
+    )
+    policy = MilitaryPolicy()
+    run(policy, game)
+    goals = [(o[2], o[3]) for o in game.orders("move")]
+    assert goals and all(
+        hex_distance(*g, 14, 10, 74) <= policy.settings.camp_muster_radius for g in goals
+    )
+    assert not any(g == (14, 10) for g in goals)
+
+
+def test_the_first_to_arrive_waits_for_the_rest_of_the_force():
+    near = warrior(uid=1, x=12, y=10, **STRONG)  # Within the muster radius, alone.
+    far = warrior(uid=2, x=4, y=10, **STRONG)
+    game = camp_game([near, far], [])
+    policy = MilitaryPolicy()
+    run(policy, game)
+    assert not any(o[1] == near.unit_index for o in game.orders("move"))
+    assert any("waiting" in d.reason for d in policy.decisions if d.unit_id == 1)
+
+
+def test_a_camp_on_the_threat_map_is_hunted_though_the_military_never_saw_it():
+    from civ6_ai.threat_map import ThreatMap
+
+    tm = ThreatMap()
+    tm.see_tiles(
+        52,
+        [
+            build_tile(
+                tile(
+                    x=14,
+                    y=10,
+                    improvement="IMPROVEMENT_BARBARIAN_CAMP",
+                    visibility="revealed",
+                    units=[],
+                )
+            )
+        ],
+        baseline=True,
+    )
+    game = camp_game(
+        strong_pair(), [], camp=tile(x=14, y=10, improvement=None, units=[], visibility="revealed")
+    )
+    policy = MilitaryPolicy()
+    policy.threat_map = tm
+    run(policy, game)
+    assert camp_orders(policy)
+
+
+def test_a_force_is_released_from_its_mission_when_the_camp_is_gone():
+    policy = MilitaryPolicy()
+    unit = warrior(uid=3, x=12, y=10, **STRONG)
+    policy._mission[3] = ((14, 10), 20)
+    policy._camps[(14, 10)] = 20
+    game = MilitaryGame([warrior(uid=1), unit], [barbarian(x=13, y=10, cs=40)])
+    run(policy, game)
+    assert 3 in policy._mission  # The camp stands: still on its mission.
+    del policy._camps[(14, 10)]  # Taken, or seen empty.
+    game = MilitaryGame([warrior(uid=1), unit], [barbarian(x=13, y=10, cs=40)])
+    run(policy, game)
+    assert 3 not in policy._mission
+
+
+def test_a_force_still_walking_to_a_far_camp_is_not_cut_off_by_the_assault_limit():
+    units = [warrior(uid=1, x=2, y=10, **STRONG), warrior(uid=2, x=2, y=11, **STRONG)]
+    game = camp_game(units, [])
+    policy = MilitaryPolicy()
+    for _ in range(policy.settings.max_camp_turns + 3):  # More turns than the assault limit.
+        run(policy, game)
+    assert (14, 10) not in policy._camp_aside  # Still on its way: not set aside.
+
+
+def test_a_force_that_never_arrives_is_set_aside_after_the_travel_limit():
+    units = [warrior(uid=1, x=2, y=10, **STRONG), warrior(uid=2, x=2, y=11, **STRONG)]
+    game = camp_game(units, [])
+    policy = MilitaryPolicy()
+    for _ in range(policy.settings.camp_travel_turns + 2):
+        run(policy, game)
+    assert (14, 10) in policy._camp_aside
+
+
+def test_a_unit_marching_on_a_camp_is_not_sent_exploring_when_only_it_is_free_to_move():
+    marching = warrior(uid=1, x=2, y=10, **STRONG)
+    game = camp_game([marching], [])
+    policy = MilitaryPolicy()
+    policy._mission[1] = ((14, 10), 20)  # Sent this turn (the tests' turn is 20).
+    policy._camps[(14, 10)] = 20
+    run(policy, game)
+    assert not game.orders("explore")
+    assert not game.orders("fortify")
+
+
+def test_a_muster_tile_the_game_refuses_is_remembered_and_the_next_one_tried():
+    units = [warrior(uid=1, x=2, y=10, **STRONG), warrior(uid=2, x=2, y=11, **STRONG)]
+    game = camp_game(units, [])
+    game.replies["move"] = "MOVING_TO|0,0|BLOCKED (impassable terrain)"
+    policy = MilitaryPolicy()
+    run(policy, game)
+    tried = {(o[2], o[3]) for o in game.orders("move") if o[1] in (0, 1)}
+    assert len(tried) > 1  # It did not stop at the first refused tile.
+    assert policy._muster_bad
+
+
+def test_a_fogged_camp_the_threat_map_never_took_is_not_learned():
+    from civ6_ai.threat_map import ThreatMap
+
+    fogged = tile(x=14, y=10, improvement="IMPROVEMENT_BARBARIAN_CAMP", visibility="revealed")
+    game = camp_game(strong_pair(), [barbarian(x=15, y=10, cs=5)], camp=fogged)
+    policy = MilitaryPolicy()
+    policy.threat_map = ThreatMap()  # No baseline read: the camp spawned out of sight.
+    run(policy, game)
+    assert not camp_orders(policy)
+    assert (14, 10) not in policy._camps

@@ -84,6 +84,7 @@ from civ6_ai.screenshots import Screenshotter
 from civ6_ai.state.reader import IncompleteRead, check_cities_complete
 from civ6_ai.strategy.apply import PolicyDocumentHandler
 from civ6_ai.strategy.tasks import TaskDB, TaskHandler
+from civ6_ai.threat_map import ThreatMapHandler
 
 SETTLING_LOGGER = "civ6_ai.policies.settling"
 _DECISION_PREFIX = "settle_decision "
@@ -262,6 +263,8 @@ def build_orchestrator(
     ledger: BuildLedger | None = None,
     event_log: EventLog | None = None,
     probes: Any = None,
+    threat_map_dump: Path | None = None,
+    use_threat_map: bool = True,
 ) -> Orchestrator:
     """Wire the handlers to a game. `game` is civ6-mcp's `GameState`, or a fake with its reads.
 
@@ -278,6 +281,9 @@ def build_orchestrator(
     is fed from `bus`, and a gap line is logged each turn. `event_log` is flushed at the end of each
     turn, since it buffers its writes.
     `probes` is a `ProbeShots` (see `probes`), subscribed to `bus` and run before the events flush.
+    `threat_map_dump` is a file the threat map appends one line per turn to (see `threat_map`).
+    `use_threat_map=False` keeps the map and its dump but leaves the policies not reading it,
+    for running the same save with and without it.
     """
     defence = DefenceState()  # Which cities are threatened this turn, shared by three policies.
     expansion = ExpansionState()  # Settling fills it. Production and the log line read it.
@@ -288,6 +294,11 @@ def build_orchestrator(
     government = GovernmentPolicy()  # One instance, so handler and blockers share its bounds.
     secondary = SecondaryPolicy()
     military = MilitaryPolicy(defence=defence)
+    settling = SettlingPolicy(expansion=expansion, defence=defence)
+    threat_map_handler = ThreatMapHandler(dump=threat_map_dump)
+    settling.terrain = threat_map_handler.terrain  # What a step costs (issue 238).
+    if use_threat_map:
+        military.threat_map = threat_map_handler.map
     diplomacy = DiplomacyPolicy()
     research_policy = research.ResearchPolicy()
     gold = GoldPolicy(defence=defence, plans=production.planner.book, builder_demand=builder_demand)
@@ -336,8 +347,9 @@ def build_orchestrator(
         diplomacy,
         WarPolicy(state_path=wars_state),
         *([TradeOfferPolicy(diplomacy.weights)] if trade_offers else []),
+        threat_map_handler,  # Issue 238: military reads its camps (stage 2a).
         DefencePolicy(defence),  # Before settling: its war flag gates a garrison leaving.
-        SettlingPolicy(expansion=expansion, defence=defence),
+        settling,
         LoyaltyResponse(bus),
         military,
         research_policy,

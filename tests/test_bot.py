@@ -116,6 +116,7 @@ def test_one_turn_runs_handlers_in_order_and_acts(tmp_path):
         "diplomacy",
         "wars",
         "trade_offers",
+        "threat_map",
         "defence",
         "settling",
         "loyalty_response",

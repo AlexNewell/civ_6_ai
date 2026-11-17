@@ -620,7 +620,7 @@ def test_an_escorted_settler_founds_though_a_hostile_unit_shadows_it():
     # barbarians sat three tiles away, so every site read "hostile unit near the site".
     escort = unit_info(unit_id=9, unit_index=9, x=14, y=10)
     sites = [site(14, 10, food=40)]
-    barbs = [barbarian(17, 10)]
+    barbs = [barbarian(17, 10), barbarian(17, 11), barbarian(16, 9)]  # Too many to found alone.
     alone = make_game([settler(x=14)], cities=[alpha()], threats=barbs, sites=sites)
     run(SettlingPolicy(), alone)
     assert not [a for a in alone.actions if a[0] == "found"]
@@ -1772,3 +1772,126 @@ def test_run_14_el_mirador_reads_below_the_floor_once_the_unseen_city_is_sized_r
     (c,) = _fog_policy((60, 29), own, rivals, fog)
     assert c.robust_rate < SettlingSettings().loyalty_reject_safe
     assert c.loyalty_penalty > 0
+
+
+# ----- founding with a small threat near (the settler does not run from one barbarian) -----
+
+
+def _found_with(threats, defence=None):
+    game = make_game(
+        [settler(x=14, y=10)], cities=[alpha()], threats=threats, sites=[site(14, 10, food=40)]
+    )
+    policy = SettlingPolicy(defence=defence)
+    run(policy, game)
+    return game, policy
+
+
+def test_a_settler_on_a_good_site_founds_with_one_weak_barbarian_near():
+    game, policy = _found_with([barbarian(16, 10)])
+    assert ("found", 7) in game.actions
+    assert policy.decisions[-1].reason.startswith("standing on a good site")
+
+
+def test_a_settler_on_a_good_site_still_runs_from_a_strong_barbarian():
+    strong = threat_info(x=16, y=10, owner_id=BARBARIANS, unit_type="UNIT_SWORDSMAN")
+    game, policy = _found_with([strong])
+    assert not [a for a in game.actions if a[0] == "found"]
+    assert policy.decisions[-1].action == "flee"
+
+
+def test_a_settler_on_a_good_site_still_runs_from_three_barbarians():
+    game, _ = _found_with([barbarian(16, 10), barbarian(16, 11), barbarian(15, 9)])
+    assert not [a for a in game.actions if a[0] == "found"]
+
+
+def test_a_site_that_fails_another_rule_is_not_founded_on_just_for_a_small_threat():
+    game = make_game(
+        [settler(x=14, y=10)],
+        cities=[alpha()],
+        threats=[barbarian(16, 10)],
+        sites=[site(14, 10, food=40)],
+    )
+    policy = SettlingPolicy(SettlingSettings(max_city_distance=1, far_city_distance=1))
+    run(policy, game)  # Four tiles from the only city: too far, whatever the barbarian does.
+    assert not [a for a in game.actions if a[0] == "found"]
+
+
+def test_a_settler_does_not_found_under_threat_while_at_war_with_a_civ():
+    game, _ = _found_with([barbarian(16, 10)], defence=_War(at_war=True))
+    assert not [a for a in game.actions if a[0] == "found"]
+
+
+def test_a_settler_off_the_site_still_runs_from_a_close_barbarian():
+    game = make_game(
+        [settler(x=13, y=10)],
+        cities=[alpha()],
+        threats=[barbarian(15, 10)],
+        sites=[site(16, 10, food=40)],
+    )
+    policy = SettlingPolicy()
+    run(policy, game)
+    assert policy.decisions[0].action == "flee"
+
+
+# ----- stepping onto a good site and founding in the same turn -----
+
+
+def _step_game(ground, threats, settler_moves=2.0):
+    from civ6_ai.state.reader import build_tile
+    from civ6_ai.terrain import TerrainStore
+    from fixtures.civ_state import tile
+
+    game = make_game(
+        [settler(x=13, y=10, moves_remaining=settler_moves)],
+        cities=[alpha()],
+        threats=threats,
+        sites=[site(14, 10, food=40)],
+    )
+
+    async def arrives(unit_index, x, y):
+        game.actions.append(("move", unit_index, x, y))
+        return f"MOVING_TO|{x},{y}|from:13,10|now_at:{x},{y}"
+
+    game.move_unit = arrives
+    policy = SettlingPolicy()
+    store = TerrainStore(map_width=74)
+    if ground is not None:
+        store.learn(
+            [build_tile(tile(x=14, y=10, improvement=None, units=[], is_river=False, **ground))]
+        )
+    policy.terrain = store
+    return game, policy
+
+
+def test_a_settler_one_step_from_a_good_site_steps_on_and_founds_with_a_small_threat_near():
+    game, policy = _step_game({}, [barbarian(16, 10)])  # Flat ground: one move left to found.
+    run(policy, game)
+    assert game.actions == [("move", 7, 14, 10), ("found", 7)]
+    assert policy.decisions[-1].reason.startswith("stepped onto the site")
+
+
+def test_a_settler_does_not_step_onto_hills_it_could_not_found_on_the_same_turn():
+    game, policy = _step_game({"is_hills": True}, [barbarian(16, 10)])  # Hills cost both moves.
+    run(policy, game)
+    assert ("found", 7) not in game.actions
+    assert ("move", 7, 14, 10) not in game.actions  # It does not walk into the barbarian's reach.
+
+
+def test_a_settler_does_not_step_onto_a_tile_whose_cost_is_unknown():
+    game, policy = _step_game(None, [barbarian(16, 10)])
+    run(policy, game)
+    assert ("found", 7) not in game.actions
+
+
+def test_a_settler_does_not_step_and_found_with_a_larger_threat_near():
+    game, policy = _step_game({}, [barbarian(16, 10), barbarian(16, 11), barbarian(15, 9)])
+    run(policy, game)
+    assert ("found", 7) not in game.actions
+
+
+def test_a_founding_that_fails_right_after_the_step_does_not_blacklist_the_site():
+    game, policy = _step_game({}, [barbarian(16, 10)])
+    game.failing = {"found"}
+    run(policy, game)
+    assert [a[0] for a in game.actions] == ["move", "found"]
+    assert (14, 10) not in policy._failed_sites

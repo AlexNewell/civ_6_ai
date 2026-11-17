@@ -38,6 +38,45 @@ print("  cities by turn: " + " ".join(f"T{t}={by_turn[t].get('cities')}" for t i
 tail = [r.get("score") for r in rows[-11:] if r.get("score") is not None]
 if len(tail) >= 2:
     print(f"  score gain over the last {len(tail) - 1} turns: {tail[-1] - tail[0]:+}")
+# The threat map's dump (issue 238). "Camp-turns near a city" counts turns a known camp stood
+# within `near_city` tiles of one of our cities: a camp left standing is the failure it measures.
+dump = path.with_name(f"{path.stem}_threatmap.jsonl")
+if dump.exists():
+    maps = [json.loads(x) for x in dump.read_text(encoding="utf-8").splitlines() if x.strip()]
+    camps = {
+        (s["x"], s["y"]): m["turn"]
+        for m in reversed(maps)
+        for s in m["sources"]
+        if s["kind"] == "camp"
+    }
+    near_turns = sum(m["camps_near_city"] for m in maps)  # One per camp per turn.
+    print(
+        f"  threat map: {len(maps)} turns dumped, camps ever known {len(camps)}, "
+        f"camp-turns near a city {near_turns}, camps known at the end "
+        f"{len([s for s in maps[-1]['sources'] if s['kind'] == 'camp'])}"
+    )
+    seconds = [r.get("handler_seconds", {}).get("threat_map", 0.0) for r in rows]
+    print(f"  threat map handler: {sum(seconds) / len(seconds):.2f} s per turn on average")
+# Did the military use the map? Counted from its offense lines (issue 238). A run that scores the
+# same as before has to be read with this: it may simply never have used the map.
+bot_log = path.with_name(f"{path.stem}_bot.log")
+if bot_log.exists():
+    offense = []
+    for line in bot_log.read_text(encoding="utf-8", errors="replace").splitlines():
+        if "military_offense " in line:
+            offense.append(json.loads(line.split("military_offense ", 1)[1]))
+    if offense:
+        uses = [o.get("map_use", {}) for o in offense]
+        print(
+            f"  map use: map {'ON' if offense[-1].get('map_on') else 'off'}; "
+            f"turns with a camp known only through the map "
+            f"{sum(1 for u in uses if u.get('camps_only_in_map'))}, "
+            f"turns the target came from the map "
+            f"{sum(u.get('target_from_map', 0) for u in uses)}, "
+            f"muster moves {sum(u.get('muster_moves', 0) for u in uses)}, "
+            f"waits {sum(u.get('muster_waits', 0) for u in uses)}, "
+            f"missions released {sum(u.get('missions_released', 0) for u in uses)}"
+        )
 for c in run_checks(load_run([path])):
     if c.policy in ("offense", "boosts", "era score"):
         print(f"  {c.status:7} {c.name}: {c.figures()} {c.note[:110]}")

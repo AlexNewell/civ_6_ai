@@ -127,6 +127,8 @@ def draw(record: dict, pad: int, box: tuple[int, int, int, int] | None = None) -
     def danger_at(x: int, y: int) -> float:
         return threat_at(x, y) + fog_at(x, y)  # Threat plus the mild penalty for unseen ground.
 
+    border_floor = 4.0  # Net danger below this (fog alone is at most 3) draws no border.
+
     ground = record.get("_ground", {})
     x0, x1, y0, y1 = window(record, pad, box)
     size = 44  # Hex radius in pixels.
@@ -169,7 +171,9 @@ def draw(record: dict, pad: int, box: tuple[int, int, int, int] | None = None) -
             net = max(0.0, danger_at(x, y) - cover_at(x, y))
             fill = (120, 160, 235) if (x, y) in cities else ground_colour(ground.get((x, y)))
             d.polygon(hexagon(cx, cy), fill=fill, outline=(150, 150, 150))
-            if net >= 0.5:  # Net danger is a red border, thicker the worse; the fill stays ground.
+            if (
+                net >= border_floor
+            ):  # Net danger is a red border, thicker the worse; the fill stays ground.
                 width_px = max(2, min(9, int(2 + 7 * net / top)))
                 d.line([*hexagon(cx, cy), hexagon(cx, cy)[0]], fill=(215, 40, 30), width=width_px)
             if ground.get((x, y), "g").endswith("r"):  # A river: a blue bar across the hex.
@@ -179,13 +183,15 @@ def draw(record: dict, pad: int, box: tuple[int, int, int, int] | None = None) -
     for y in range(y0, y1 + 1):  # Second pass, so no hex paints over a neighbour's label.
         for x in range(x0, x1 + 1):
             cx, cy = centre(x, y)
-            danger, cover = danger_at(x, y), cover_at(x, y)
+            cover = cover_at(x, y)
             if (x, y) in cities:
                 _label(d, (cx, cy - 12), cities[x, y][:9], mid, blue)
                 _label(d, (cx, cy + 12), "threat 0", small, blue)
             else:
-                if danger >= 0.5:  # Red number: threat plus fog, upper right of the hex.
-                    _label(d, (cx + 20, cy - 12), f"{danger:.0f}", mid, red)
+                if (hot := threat_at(x, y)) >= 0.5:  # Red number: threat, upper right.
+                    _label(d, (cx + 20, cy - 12), f"{hot:.0f}", mid, red)
+                if (haze := fog_at(x, y)) >= 1.0:  # Grey number: fog, upper left.
+                    _label(d, (cx - 20, cy - 12), f"{haze:.0f}", small, (120, 120, 120))
                 if cover >= 0.5:  # Green number: our cover, lower left.
                     _label(d, (cx - 20, cy + 20), f"{cover:.0f}", mid, green)
             if (x, y) in camps:
@@ -214,8 +220,8 @@ def draw(record: dict, pad: int, box: tuple[int, int, int, int] | None = None) -
     lines = [
         f"Turn {turn}.  Hex colour is the ground: blue water, grey mountain, tan hills, "
         "green woods, blue bar = river, blank = never seen.  Blue hex = our city.",
-        "Red number = threat (plus a little for unseen ground nearby).  Green number = our cover.  "
-        "Red border = danger left after cover, thicker is worse.",
+        "Red number = threat.  Grey number = fog (unseen ground nearby).  Green number = our cover "
+        "(saturates at 40).  Red border = threat plus fog left after cover, thicker is worse.",
         "Red dot = hostile unit with its strength (hollow = remembered, not seen now).  "
         "Green dot = our combat unit.  Black X = camp.  North up, x increases to the right.",
     ]

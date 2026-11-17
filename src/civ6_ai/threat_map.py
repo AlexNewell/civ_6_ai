@@ -20,6 +20,7 @@ and comes with the stages that use it; a decision to use the map must not assume
 
 import json
 import logging
+import math
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -68,6 +69,8 @@ class ThreatMapSettings:
     own_horizon_turns: float = 2.0  # Our unit's cover fades out over this many turns of reach.
     city_strength: float = 20.0  # What a city of ours is worth as cover.
     city_cover_radius: int = 3  # Tiles over which a city's cover fades to nothing.
+    cover_cap: float = 40.0  # Cover saturates toward this, so overlapping defenders don't add up
+    # to a number far beyond any threat (Run 17: 150 where three cities and six units overlapped).
     # Fog is mild threat: a tile beside ground we have never seen could hold anything.
     fog_penalty: float = 3.0  # At most, on a tile whose surroundings are all unseen.
     fog_radius: int = 2  # Tiles around a tile that are looked at for unseen ground.
@@ -304,7 +307,9 @@ class ThreatMap:
 
     def cover_at(self, x: int, y: int) -> float:
         """What our units and cities can bring to a tile, by the same turns-to-arrive measure."""
-        return sum(self._cover_field(a).get((x, y), 0.0) for a in self.allies)
+        total = sum(self._cover_field(a).get((x, y), 0.0) for a in self.allies)
+        cap = self.settings.cover_cap
+        return cap * (1 - math.exp(-total / cap)) if total > 0 else 0.0
 
     def fog_at(self, x: int, y: int) -> float:
         """A mild threat from ground never seen near the tile, only close to our cities, where

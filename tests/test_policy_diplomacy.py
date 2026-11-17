@@ -1017,3 +1017,8 @@ def test_the_voter_reads_threats_from_the_watch():
     game = Game(civs=[civ(ROME), civ(EGYPT)])
     context = run(policy._vote_context(game, SimpleNamespace(favor=10, favor_costs=(0, 10))))
     assert context.threats == (EGYPT,)  # 77 was never met.
+
+
+def test_a_flagged_rival_close_to_winning_keeps_the_urgent_votes():
+    context = VoteContext(ME, 400, (0, 10, 30, 60, 100, 150), ((ROME, 15),), threats=(ROME,))
+    assert choose_vote(dv_resolution(), context, W) == Vote(2, 1, W.urgent_votes)

@@ -440,6 +440,13 @@ def strip_votes_for(points: int, weights: DiplomacyWeights) -> int:
     return weights.urgent_votes if points >= weights.urgent_vp else weights.strip_votes
 
 
+def _threat_votes(rival: int, context: VoteContext, weights: DiplomacyWeights) -> int:
+    """A flagged rival gets at least `threat_votes`, and more if its points already ask for more."""
+    points = dict(context.strip).get(rival)
+    wanted = strip_votes_for(points, weights) if points is not None else 0
+    return max(weights.threat_votes, wanted)
+
+
 def choose_vote(resolution: Any, context: VoteContext, weights: DiplomacyWeights) -> Vote | None:
     """The vote for one resolution, or None to leave it unvoted. Pure.
 
@@ -452,7 +459,7 @@ def choose_vote(resolution: Any, context: VoteContext, weights: DiplomacyWeights
             for rival in context.threats:
                 if rival in targets and rival != context.my_id:
                     votes = affordable_votes(
-                        weights.threat_votes,
+                        _threat_votes(rival, context, weights),
                         context.favor,
                         context.favor_costs,
                         weights.favor_reserve,
@@ -946,7 +953,9 @@ class DiplomacyPolicy:
 
     async def _register_voter(self, game: DiplomacyGame, status: Any) -> bool:
         context = await self._vote_context(game, status)
-        strip = tuple((rival, self.weights.threat_votes) for rival in context.threats) + tuple(
+        strip = tuple(
+            (rival, _threat_votes(rival, context, self.weights)) for rival in context.threats
+        ) + tuple(
             (rival, strip_votes_for(points, self.weights))
             for rival, points in context.strip
             if rival not in context.threats

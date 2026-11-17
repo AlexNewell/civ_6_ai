@@ -237,13 +237,12 @@ class VictoryThreatLog:
     def __init__(self, watch: VictoryWatch) -> None:
         self._watch = watch
         self._flagged: tuple[int, ...] = ()
-        self._last_turn: int | None = None
 
     async def run(self, game: _OverviewGame) -> None:
         turn = (await game.get_game_overview()).turn
-        if self._last_turn is not None and turn < self._last_turn:
-            self._watch.reset()  # A save was loaded, so the old reading is of another game.
-        self._last_turn = turn
+        last = self._watch.last
+        if last is not None and last.turn > turn:
+            self._watch.reset()  # A reading from a later turn is from another game.
         read = self._watch.last
         log.info(format_line(turn, read))
         ids = read.threat_ids if read else ()

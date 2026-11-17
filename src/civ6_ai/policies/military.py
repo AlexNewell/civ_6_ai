@@ -1489,6 +1489,12 @@ class MilitaryPolicy:
                 continue
             t.spare_orders += 1
             result = await self._order(t, unit, "spare", game.fortify_unit(unit.unit_index))
+            if result is not None and "CANNOT_FORTIFY" in result:
+                # The game says it cannot fortify or sleep: it already holds its post (fortified
+                # or in a stack). Treat it as done, not as a refusal that sidelines the unit.
+                self._fortified[unit.unit_id] = (unit.x, unit.y)
+                self._log(t, unit, "skip", "spare, cannot fortify (already holding its post)")
+                continue
             if result is not None and action_succeeded(result):
                 t.acted.add(unit.unit_id)
                 self._fortified[unit.unit_id] = (unit.x, unit.y)

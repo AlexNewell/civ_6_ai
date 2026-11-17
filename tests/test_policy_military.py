@@ -1239,6 +1239,17 @@ def test_a_refused_spare_fortify_is_logged_and_not_repeated_next_turn():
     assert any("fortify refused" in d.reason for d in policy.decisions)
 
 
+def test_a_unit_that_cannot_fortify_is_taken_as_holding_its_post():
+    game = MilitaryGame([warrior(uid=1), warrior(uid=3)], [])
+    game.replies["fortify"] = "Error: CANNOT_FORTIFY|Unit cannot fortify or sleep"
+    policy = MilitaryPolicy(settings=MilitarySettings(spare_explorers=0))
+    run(policy, game)
+    run(policy, game)
+    assert len(game.orders("fortify")) == 2  # One try each, none on the second turn.
+    assert not any("refused" in d.reason for d in policy.decisions)
+    assert any("already holding" in d.reason for d in policy.decisions)
+
+
 def test_a_settlers_escort_gets_no_spare_order():
     units = [settler(uid=8, x=13, y=10), warrior(uid=1, x=13, y=10), warrior(uid=2)]
     game = MilitaryGame(units, [])

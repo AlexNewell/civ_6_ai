@@ -140,6 +140,7 @@ class DiplomacyWeights:
     strip_votes: int = 2
     urgent_vp: int = 12  # From here a rival is close to 20, so more favor is spent.
     urgent_votes: int = 4
+    threat_votes: int = 2  # Against a rival the victory watch flags, whatever its points.
     self_votes: int = 1
     favor_reserve: int = 0  # Favor never spent.
     # Other resolutions to vote on: (type without WC_RES_, option 1 or 2, votes). Target 0, and
@@ -392,6 +393,9 @@ class VoteContext:
     favor: int
     favor_costs: tuple[int, ...]  # Cumulative: costs[n - 1] is the favor for n votes.
     strip: tuple[tuple[int, int], ...] = ()
+    # Rivals flagged by the victory watch (issue 188), most advanced first. A vote that takes
+    # points away names the first of them that is a target, ahead of the `strip` rule.
+    threats: tuple[int, ...] = ()
 
 
 def _targets(resolution: Any) -> list[int | None]:
@@ -445,6 +449,15 @@ def choose_vote(resolution: Any, context: VoteContext, weights: DiplomacyWeights
     targets = _targets(resolution)
     if is_diplomatic_victory(resolution):
         if _text_says(_REMOVES, resolution.effect_b):
+            for rival in context.threats:
+                if rival in targets and rival != context.my_id:
+                    votes = affordable_votes(
+                        weights.threat_votes,
+                        context.favor,
+                        context.favor_costs,
+                        weights.favor_reserve,
+                    )
+                    return Vote(2, targets.index(rival), votes)
             for rival, points in context.strip:
                 if rival in targets and points >= weights.strip_from_vp:
                     votes = affordable_votes(
@@ -638,8 +651,13 @@ class DiplomacyPolicy:
 
     name = "diplomacy"
 
-    def __init__(self, weights: DiplomacyWeights | None = None) -> None:
+    def __init__(
+        self,
+        weights: DiplomacyWeights | None = None,
+        threats: Callable[[], tuple[int, ...]] | None = None,
+    ) -> None:
         self.weights = weights or DiplomacyWeights()
+        self._threats = threats or (lambda: ())
         self._state = _TurnState()
         self._counterparts: dict[int, Counterpart] = {}
         self._denounced_at: dict[int, int] = {}
@@ -897,6 +915,7 @@ class DiplomacyPolicy:
     async def _vote_context(self, game: DiplomacyGame, status: Any) -> VoteContext:
         """Favor, vote costs and the met rivals worth voting down."""
         strip: tuple[tuple[int, int], ...] = ()
+        met: set[int] = set()
         try:
             met = {civ.player_id for civ in await game.get_diplomacy() if civ.has_met}
             progress = (await game.get_victory_progress()).players
@@ -911,7 +930,12 @@ class DiplomacyPolicy:
             raise
         except Exception:
             log.warning("Reading rivals' Diplomatic Victory Points failed", exc_info=True)
-        return VoteContext(self._my_id, status.favor, tuple(status.favor_costs), strip)
+        try:
+            threats = tuple(rival for rival in self._threats() if rival in met)
+        except Exception:
+            log.warning("Reading the victory threats failed", exc_info=True)
+            threats = ()
+        return VoteContext(self._my_id, status.favor, tuple(status.favor_costs), strip, threats)
 
     async def queue_voter(self, game: DiplomacyGame, blocker: Blocker) -> bool:
         """Register the voter before `end_turn`. If a session is open already, vote in it."""
@@ -922,8 +946,10 @@ class DiplomacyPolicy:
 
     async def _register_voter(self, game: DiplomacyGame, status: Any) -> bool:
         context = await self._vote_context(game, status)
-        strip = tuple(
-            (rival, strip_votes_for(points, self.weights)) for rival, points in context.strip
+        strip = tuple((rival, self.weights.threat_votes) for rival in context.threats) + tuple(
+            (rival, strip_votes_for(points, self.weights))
+            for rival, points in context.strip
+            if rival not in context.threats
         )
         output = await game.execute_lua(build_voter_lua(strip, self.weights), "ingame")
         if "OK:WC_VOTER_REGISTERED" not in output:
@@ -963,10 +989,11 @@ class DiplomacyPolicy:
         failed = False
         log.info(
             "congress: session open, favor %s, %s resolution(s), rivals voted down %s, "
-            "voter registered=%s",
+            "victory threats %s, voter registered=%s",
             favor,
             len(status.resolutions),
             [rival for rival, _ in context.strip] or "none",
+            list(context.threats) or "none",
             registered,
         )
         try:
@@ -976,7 +1003,9 @@ class DiplomacyPolicy:
                     continue
                 vote = choose_vote(
                     resolution,
-                    VoteContext(context.my_id, favor, context.favor_costs, context.strip),
+                    VoteContext(
+                        context.my_id, favor, context.favor_costs, context.strip, context.threats
+                    ),
                     self.weights,
                 )
                 if vote is None:

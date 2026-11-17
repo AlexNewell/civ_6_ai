@@ -85,6 +85,7 @@ from civ6_ai.state.reader import IncompleteRead, check_cities_complete
 from civ6_ai.strategy.apply import PolicyDocumentHandler
 from civ6_ai.strategy.tasks import TaskDB, TaskHandler
 from civ6_ai.threat_map import ThreatMapHandler
+from civ6_ai.victory_threat import VictoryThreatLog, VictoryWatch
 
 SETTLING_LOGGER = "civ6_ai.policies.settling"
 _DECISION_PREFIX = "settle_decision "
@@ -299,7 +300,8 @@ def build_orchestrator(
     settling.terrain = threat_map_handler.terrain  # What a step costs (issue 238).
     if use_threat_map:
         military.threat_map = threat_map_handler.map
-    diplomacy = DiplomacyPolicy()
+    victory_watch = VictoryWatch()
+    diplomacy = DiplomacyPolicy(threats=victory_watch.threat_ids)
     research_policy = research.ResearchPolicy()
     gold = GoldPolicy(defence=defence, plans=production.planner.book, builder_demand=builder_demand)
     tables = [
@@ -322,7 +324,9 @@ def build_orchestrator(
     if probes is not None:
         probes.subscribe(bus)
     handlers: list[Handler] = [
-        Monitors(bus, [ThreatMonitor(threat_state), ResourceMonitor(), VictoryMonitor()]),
+        Monitors(
+            bus, [ThreatMonitor(threat_state), ResourceMonitor(), VictoryMonitor(victory_watch)]
+        ),
         *(
             [
                 PolicyDocumentHandler(
@@ -344,6 +348,7 @@ def build_orchestrator(
         ),
         watcher,
         ExpansionLog(expansion),
+        VictoryThreatLog(victory_watch),
         diplomacy,
         WarPolicy(state_path=wars_state),
         *([TradeOfferPolicy(diplomacy.weights)] if trade_offers else []),

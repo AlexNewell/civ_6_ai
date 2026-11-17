@@ -40,6 +40,7 @@ from civ6_ai.monitors import (
     event_from_json,
 )
 from civ6_ai.orchestrator import Orchestrator, StopReason, TurnLog
+from civ6_ai.victory_threat import VictoryWatch
 
 US = 0
 ROME = 1
@@ -1038,3 +1039,21 @@ def test_a_hidden_submarine_beside_a_lost_city_is_not_its_taker():
     sub.x, sub.y = 66, 24
     (event,) = lose(game, ThreatMonitor(), CAPITAL, diplomacy_reply(False), [sub])
     assert (event.taker_id, event.cause) == (None, "unknown")
+
+
+def test_the_victory_monitor_feeds_the_watch_without_extra_reads():
+    game = FakeGame()
+    game.victory.players[1].diplomatic_vp = 12
+    watch = VictoryWatch()
+    monitor = VictoryMonitor(watch)
+    before = len(game.reads)
+    check(monitor, game)
+    assert watch.threat_ids() == (ROME,)
+    assert watch.last.turn == 1
+    assert {name for _, name in game.reads[before:]} <= {
+        "get_game_overview",
+        "get_victory_progress",
+        "get_diplomacy",
+    }
+    monitor.reset()
+    assert watch.last is None

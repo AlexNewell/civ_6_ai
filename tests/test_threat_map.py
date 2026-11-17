@@ -177,3 +177,63 @@ def test_a_camp_first_seen_fogged_after_the_baseline_is_not_believed():
     assert m.camps() == []
     m.see_tiles(76, [camp(x=69, y=27)])  # Seen: now it is real.
     assert [(c.x, c.y) for c in m.camps()] == [(69, 27)]
+
+
+def _own(x, y, kind="UNIT_WARRIOR", cs=20):
+    from civ6_ai.state.reader import build_unit
+    from fixtures.civ_state import unit_info
+
+    return build_unit(unit_info(x=x, y=y, unit_type=kind, combat_strength=cs), 74)
+
+
+def test_a_remembered_unit_is_dropped_when_one_of_ours_stands_on_its_tile():
+    m = ThreatMap(ThreatMapSettings(map_width=None))
+    m.see_threats(57, [hostile("UNIT_SCOUT", x=65, y=22, cs=10)])
+    m.see_threats(58, [])  # Not seen now: remembered.
+    m.see_own(58, [_own(60, 20)], [])
+    assert len(m.sources) == 1
+    m.see_own(61, [_own(65, 22)], [])  # Ours stands there: it is gone.
+    assert m.sources == []
+
+
+def test_a_unit_seen_this_turn_is_not_dropped_by_ours_beside_it():
+    m = ThreatMap(ThreatMapSettings(map_width=None))
+    m.see_threats(60, [hostile(x=10, y=10)])
+    m.see_own(60, [_own(10, 11)], [])
+    assert len(m.sources) == 1
+
+
+def test_our_cities_and_units_give_cover_and_it_falls_off_with_distance():
+    from civ6_ai.state.reader import build_city
+
+    m = ThreatMap(ThreatMapSettings(map_width=None))
+    city = build_city(city_info(x=20, y=20), (), set(), 74)
+    m.see_own(1, [_own(22, 20)], [city])
+    assert m.cover_at(20, 20) > m.cover_at(22, 20) * 0 and m.cover_at(21, 20) > 0
+    assert m.cover_at(21, 20) > m.cover_at(23, 20) > 0
+    assert m.cover_at(30, 20) == 0
+
+
+def test_net_threat_is_threat_less_cover_and_never_negative():
+    from civ6_ai.state.reader import build_city
+
+    m = ThreatMap(ThreatMapSettings(map_width=None))
+    m.see_threats(1, [hostile(x=10, y=10, cs=10)])
+    far = m.net_at(10, 10, 1)
+    city = build_city(city_info(x=10, y=11), (), set(), 74)
+    m.see_own(1, [], [city])
+    assert m.net_at(10, 10, 1) < far
+    assert m.net_at(30, 30, 1) == 0
+
+
+def test_fog_is_a_mild_threat_beside_unseen_ground_near_our_cities():
+    from civ6_ai.state.reader import build_city
+    from civ6_ai.terrain import TerrainStore
+
+    terrain = TerrainStore(map_width=None)
+    terrain.learn([build_tile(tile(x=x, y=10, improvement=None, units=[])) for x in range(0, 8)])
+    m = ThreatMap(ThreatMapSettings(map_width=None), terrain=terrain)
+    city = build_city(city_info(x=3, y=10), (), set(), 74)
+    m.see_own(1, [], [city])
+    assert 0 < m.fog_at(3, 10) < m.settings.fog_penalty  # Row 10 is known; rows around are not.
+    assert m.fog_at(40, 40) == 0  # Far from any city of ours.

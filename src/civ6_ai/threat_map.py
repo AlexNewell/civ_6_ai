@@ -63,6 +63,16 @@ class ThreatMapSettings:
     ship_moves: float = 3.0
     ranged_reach: int = 2  # Tiles a ranged unit shoots from where it stands.
     melee_reach: int = 1  # And a melee unit strikes.
+    # Our side. Cover is what our units and cities answer with; it is not threat's opposite, so
+    # the two are kept as separate layers and combined by whoever decides.
+    own_horizon_turns: float = 2.0  # Our unit's cover fades out over this many turns of reach.
+    city_strength: float = 20.0  # What a city of ours is worth as cover.
+    city_cover_radius: int = 3  # Tiles over which a city's cover fades to nothing.
+    # Fog is mild threat: a tile beside ground we have never seen could hold anything.
+    fog_penalty: float = 3.0  # At most, on a tile whose surroundings are all unseen.
+    fog_radius: int = 2  # Tiles around a tile that are looked at for unseen ground.
+    fog_range: int = 10  # Fog is counted this close to a city of ours (further it is just far).
+    vision: int = 1  # A source this close to one of ours, and not seen, is no longer there.
     read_radius: int = 6  # Tiles of terrain read around a source that has none yet.
     read_retry_turns: int = 10  # Turns before an area that revealed nothing new is read again.
 
@@ -84,10 +94,23 @@ class Source:
 
 
 @dataclass
+class Ally:
+    """One of ours that gives cover: a combat unit, or a city."""
+
+    kind: str  # "unit" or "city"
+    x: int
+    y: int
+    strength: float
+    unit_type: str = ""
+    naval: bool = False
+
+
+@dataclass
 class ThreatMap:
     settings: ThreatMapSettings = field(default_factory=ThreatMapSettings)
     sources: list[Source] = field(default_factory=list)
     terrain: TerrainStore | None = None
+    allies: list["Ally"] = field(default_factory=list)
     _last_scan: int = -10_000
     _baselined: bool = False
     _fields: dict[tuple, dict[tuple[int, int], float]] = field(default_factory=dict)
@@ -170,6 +193,40 @@ class ThreatMap:
                 keep.append(old)
         self.sources = keep + fresh
 
+    def see_own(self, turn: int, units: Iterable[Unit], cities: Iterable[City]) -> None:
+        """Our side for this turn: it gives cover, and it can show a remembered unit is gone.
+
+        A hostile unit we are not seeing now, remembered from an earlier turn, is dropped when one
+        of ours stands on or beside its tile: we would see it, so it has moved on (Run 17: a
+        barbarian scout last seen on turn 57 was drawn for ten turns, with our unit standing on it
+        from turn 61).
+        """
+        s = self.settings
+        self.allies = [
+            Ally(
+                "unit",
+                u.x,
+                u.y,
+                float(max(u.combat_strength, u.ranged_strength)) * (u.hp / max(u.max_hp, 1)),
+                u.unit_type,
+                any(w in u.unit_type for w in _SEA_UNITS),
+            )
+            for u in units
+            if u.is_combat
+        ] + [Ally("city", c.x, c.y, s.city_strength) for c in cities]
+        self.sources = [
+            src
+            for src in self.sources
+            if not (
+                src.kind == UNIT
+                and src.last_seen != turn
+                and any(
+                    hex_distance(a.x, a.y, src.x, src.y, s.map_width) <= s.vision
+                    for a in self.allies
+                )
+            )
+        ]
+
     # ----- queries -----
 
     def _reach(self, source: Source) -> int:
@@ -182,15 +239,22 @@ class ThreatMap:
             return s.land_moves, False, s.melee_reach, s.camp_horizon_turns
         if src.naval:
             return s.ship_moves, True, 0, s.unit_horizon_turns
-        stats = COMBAT_UNITS.get(src.unit_type)
+        return (*self._unit_profile(src.unit_type), s.unit_horizon_turns)
+
+    def _unit_profile(self, unit_type: str) -> tuple[float, bool, int]:
+        """(moves per turn, naval, shooting reach) for a unit of this type."""
+        s = self.settings
+        if any(w in unit_type for w in _SEA_UNITS):
+            return s.ship_moves, True, 0
+        stats = COMBAT_UNITS.get(unit_type)
         klass = stats[4] if stats else ""
         moves = s.land_moves
-        if klass in ("LIGHT_CAVALRY", "HEAVY_CAVALRY") or "HORSE" in src.unit_type:
+        if klass in ("LIGHT_CAVALRY", "HEAVY_CAVALRY") or "HORSE" in unit_type:
             moves = s.cavalry_moves
-        elif klass == "RECON" or "SCOUT" in src.unit_type:
+        elif klass == "RECON" or "SCOUT" in unit_type:
             moves = s.scout_moves
         ranged = (stats is not None and stats[1] > 0) or klass in ("RANGED", "SIEGE")
-        return moves, False, s.ranged_reach if ranged else s.melee_reach, s.unit_horizon_turns
+        return moves, False, s.ranged_reach if ranged else s.melee_reach
 
     def _field(self, src: Source) -> dict[tuple[int, int], float]:
         """One source's threat on each tile it reaches, before any fade with age."""
@@ -213,6 +277,55 @@ class ThreatMap:
                     field_[tile] = src.strength * (1 - t / (horizon + 1))
         self._fields[key] = field_
         return field_
+
+    def _cover_field(self, ally: Ally) -> dict[tuple[int, int], float]:
+        s = self.settings
+        key = ("cover", ally.kind, ally.x, ally.y, ally.strength, ally.unit_type)
+        known = len(self.terrain) if self.terrain is not None else 0
+        key = (*key, known)
+        if key in self._fields:
+            return self._fields[key]
+        field_: dict[tuple[int, int], float] = {}
+        if ally.kind == "city" or self.terrain is None:
+            radius = s.city_cover_radius if ally.kind == "city" else s.melee_reach + 1
+            for y in range(ally.y - radius, ally.y + radius + 1):
+                for x in range(ally.x - radius - 1, ally.x + radius + 2):
+                    d = hex_distance(x, y, ally.x, ally.y, s.map_width)
+                    if d <= radius:
+                        field_[x, y] = ally.strength * (1 - d / (radius + 1))
+        else:
+            moves, naval, rng = self._unit_profile(ally.unit_type)
+            turns = self.terrain.reach(ally.x, ally.y, moves, naval, s.own_horizon_turns, rng)
+            for tile, t in turns.items():
+                if t <= s.own_horizon_turns:
+                    field_[tile] = ally.strength * (1 - t / (s.own_horizon_turns + 1))
+        self._fields[key] = field_
+        return field_
+
+    def cover_at(self, x: int, y: int) -> float:
+        """What our units and cities can bring to a tile, by the same turns-to-arrive measure."""
+        return sum(self._cover_field(a).get((x, y), 0.0) for a in self.allies)
+
+    def fog_at(self, x: int, y: int) -> float:
+        """A mild threat from ground never seen near the tile, only close to our cities, where
+        not knowing what stands next door matters. Zero with no terrain store."""
+        s = self.settings
+        if self.terrain is None or not any(
+            a.kind == "city" and hex_distance(x, y, a.x, a.y, s.map_width) <= s.fog_range
+            for a in self.allies
+        ):
+            return 0.0
+        total = unseen = 0
+        for ty in range(y - s.fog_radius, y + s.fog_radius + 1):
+            for tx in range(x - s.fog_radius - 1, x + s.fog_radius + 2):
+                if hex_distance(x, y, tx, ty, s.map_width) <= s.fog_radius:
+                    total += 1
+                    unseen += self.terrain.get(tx, ty) is None
+        return s.fog_penalty * unseen / total if total else 0.0
+
+    def net_at(self, x: int, y: int, turn: int | None = None) -> float:
+        """Threat plus fog, less our cover, never below zero."""
+        return max(0.0, self.threat_at(x, y, turn) + self.fog_at(x, y) - self.cover_at(x, y))
 
     def _fade(self, src: Source, turn: int | None) -> float:
         if src.kind == UNIT and turn is not None:
@@ -261,10 +374,26 @@ class ThreatMap:
         ranked = sorted(values.items(), key=lambda kv: (-kv[1], kv[0]))
         return [[x, y, round(v, 1)] for (x, y), v in ranked if v >= self.settings.heat_floor]
 
+    def layer(self, tiles: Iterable[tuple[int, int]], value) -> list[list[float]]:
+        out = [(x, y, value(x, y)) for x, y in tiles]
+        return [[x, y, round(v, 1)] for x, y, v in out if v >= self.settings.heat_floor]
+
     def record(
         self, turn: int, cities: Iterable[City], units: Iterable[Unit] = ()
     ) -> dict[str, Any]:
         cities = list(cities)
+        units = list(units)
+        if not self.allies:
+            self.see_own(turn, units, cities)
+        s = self.settings
+        near_cities = [
+            (x, y)
+            for c in cities
+            for y in range(c.y - s.fog_range, c.y + s.fog_range + 1)
+            for x in range(c.x - s.fog_range - 1, c.x + s.fog_range + 2)
+            if hex_distance(x, y, c.x, c.y, s.map_width) <= s.fog_range
+        ]
+        covered = {t for a in self.allies for t in self._cover_field(a)}
         rows = []
         for src in sorted(self.sources, key=lambda s: (s.kind, s.x, s.y)):
             row = asdict(src)
@@ -282,6 +411,8 @@ class ThreatMap:
             "sources": rows,
             "camps_near_city": len(near),
             "heat": self.heat(turn),
+            "cover": self.layer(sorted(covered), self.cover_at),
+            "fog": self.layer(sorted(set(near_cities)), self.fog_at),
             # Where we stand, so a picture of the map can show our cities (no threat there) and
             # units. [x, y, name] and [x, y, unit_type].
             "cities": [[c.x, c.y, c.name] for c in cities],
@@ -319,6 +450,7 @@ class ThreatMapHandler:
         cities = await read_cities(game, self.settings.map_width)
         units = await read_units(game, self.settings.map_width)
         self.map.see_threats(turn, await read_threats(game))
+        self.map.see_own(turn, units, cities)
         if self.map.due_for_scan(turn):
             self.map.mark_scanned(turn)
             baseline = self.map.take_baseline()

@@ -289,8 +289,9 @@ def city_losses(events: list[dict]) -> CityLosses:
 
     A loss is a loyalty loss when the event's `cause` says so (monitor from issue 177 on), or the
     same city had a `city_loyalty_warning` up to LOYALTY_LOOKBACK_TURNS before it.
-    A loss "came back" when a later `city_gained` event names the same city id (the monitor logs the gain from issue 156 on;
-    older logs never carry one, so they count every loss as permanent). A lost event with no city id is counted as lost for good.
+    A loss "came back" when a later `city_gained` event names the same city id (the monitor
+    logs the gain from issue 156 on; older logs never carry one, so they count every loss as
+    permanent). A lost event with no city id is counted as lost for good.
     """
     warned: dict[object, list[int]] = {}
     for e in events:

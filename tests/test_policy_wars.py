@@ -103,10 +103,13 @@ def test_city_state_inherits_suzerain_war_and_logs_changes(caplog):
     assert policy.wars()[KANDY].via == SUMERIA
     # Germany, a rival at peace with us, takes Kandy: early warning, and Kandy leaves the war.
     game.states = [state(suzerain=GERMANY)]
-    play(policy, game, 12)
+    for turn in range(12, 16):
+        play(policy, game, turn)
     lines = texts(caplog)
     assert any("war with city-state Kandy" in t and "via suzerain Sumeria" in t for t in lines)
-    assert any("changed from Sumeria (1) to Germany (2). Early warning" in t for t in lines)
+    assert any(
+        "changed from Sumeria (1) to Germany (2)" in t and "Early warning" in t for t in lines
+    )
     assert any("war with Kandy (20) ended" in t for t in lines)
     assert not policy.at_war_with(KANDY)
 
@@ -118,8 +121,10 @@ def test_rival_at_war_becoming_suzerain_is_flagged_strongly(caplog):
     play(policy, game, 10)
     game.states = [state(suzerain=SUMERIA)]
     play(policy, game, 11)
+    assert policy.at_war_with(KANDY)  # The war follows the suzerain at once.
+    for turn in range(12, 15):
+        play(policy, game, turn)
     assert any("rival at war with us is now its suzerain" in t for t in texts(caplog))
-    assert policy.at_war_with(KANDY)
 
 
 def test_no_offer_before_min_war_age_then_one_per_five_turns():
@@ -312,3 +317,94 @@ def test_envoy_tokens_are_logged_from_the_city_state_read(caplog):
     game.get_city_states = tokens_read
     play(WarPolicy(), game, 50)
     assert "envoy_tokens turn 50: 2 available" in texts(caplog)
+
+
+def suzerain_lines(caplog):
+    return [t for t in texts(caplog) if "suzerain changed" in t]
+
+
+def test_a_suzerain_that_flips_back_within_a_few_turns_is_not_logged(caplog):
+    caplog.set_level(logging.INFO, LOGGER)
+    policy = WarPolicy()
+    game = Game([civ()], [state(suzerain=-1)])
+    play(policy, game, 70)
+    for turn, boss in [(72, GERMANY), (73, GERMANY), (74, -1), (80, GERMANY), (81, -1)]:
+        game.states = [state(suzerain=boss)]
+        play(policy, game, turn)
+    assert suzerain_lines(caplog) == []
+
+
+def test_a_suzerain_change_that_lasts_is_logged_once_with_its_start(caplog):
+    caplog.set_level(logging.INFO, LOGGER)
+    policy = WarPolicy()
+    game = Game([civ()], [state(suzerain=-1)])
+    play(policy, game, 70)
+    game.states = [state(suzerain=GERMANY)]
+    for turn in range(72, 90):
+        play(policy, game, turn)
+    lines = suzerain_lines(caplog)
+    assert len(lines) == 1
+    assert "turn 75:" in lines[0] and "held since turn 72" in lines[0]
+    assert "from none to player (2)" in lines[0] and "Early warning" in lines[0]
+
+
+def test_a_pending_suzerain_change_survives_a_restart(tmp_path, caplog):
+    path = tmp_path / "wars.json"
+    first = WarPolicy(state_path=path)
+    play(first, Game([civ()], [state(suzerain=-1)]), 70)
+    play(first, Game([civ()], [state(suzerain=GERMANY)]), 72)
+
+    caplog.set_level(logging.INFO, LOGGER)
+    restarted = WarPolicy(state_path=path)
+    play(restarted, Game([civ()], [state(suzerain=GERMANY)]), 73)
+    assert suzerain_lines(caplog) == []
+    play(restarted, Game([civ()], [state(suzerain=GERMANY)]), 75)
+    assert len(suzerain_lines(caplog)) == 1
+
+
+def test_a_war_first_seen_after_a_gap_is_flagged_and_offered_peace_at_once(tmp_path, caplog):
+    path = tmp_path / "wars.json"
+    play(WarPolicy(state_path=path), Game([civ(war=False)]), 20)
+
+    caplog.set_level(logging.INFO, logger=LOGGER)
+    restarted = WarPolicy(state_path=path)
+    game = Game([civ(war=True)])
+    play(restarted, game, 30)
+    war = restarted.wars()[SUMERIA]
+    assert war.started == 30 and war.late
+    assert any("declared while the bot was down" in t for t in texts(caplog))
+    assert game.calls == [(30, SUMERIA)]  # Its age is unknown, so the age rule is skipped.
+    # The flag is kept across another restart.
+    again = WarPolicy(state_path=path)
+    play(again, Game([civ(war=True)]), 31)
+    assert again.wars()[SUMERIA].late
+
+
+def test_a_war_seen_on_the_very_next_turn_after_a_restart_is_not_flagged(tmp_path):
+    path = tmp_path / "wars.json"
+    play(WarPolicy(state_path=path), Game([civ(war=False)]), 20)
+    restarted = WarPolicy(state_path=path)
+    play(restarted, Game([civ(war=True)]), 21)
+    assert not restarted.wars()[SUMERIA].late
+
+
+def test_a_war_that_ends_right_after_a_refused_offer_is_logged_as_late_acceptance(caplog):
+    """Run 4, turn 233 to 234: the game answers a peace offer a little after the check."""
+    caplog.set_level(logging.INFO, LOGGER)
+    policy = WarPolicy()
+    game = Game([civ(war=True)], answers={SUMERIA: "REJECTED|Sumeria rejected your peace offer"})
+    play(policy, game, 233)
+    game.civs = [civ(war=False)]
+    play(policy, game, 234)
+    assert any("ended" in t and "after our peace offer on turn 233" in t for t in texts(caplog))
+    assert not policy.at_war_with(SUMERIA)
+
+
+def test_a_war_that_ends_long_after_a_refused_offer_is_not_credited_to_it(caplog):
+    caplog.set_level(logging.INFO, LOGGER)
+    policy = WarPolicy()
+    game = Game([civ(war=True)])
+    play(policy, game, 233)
+    game.civs = [civ(war=False)]
+    play(policy, game, 240)
+    assert not any("after our peace offer" in t for t in texts(caplog))

@@ -10,7 +10,7 @@ The bot changed a lot between Run 8 and Run 14, so an old run says less about wh
 
 | Tier | Runs | Code state | Use |
 |---|---|---|---|
-| Current | Run 14 (15 Nov), Run 13 (14 to 15 Nov), and the slices of 16 and 17 Nov | Run 13 ran with the escort rules (PRs 211, 216) and the safe-site gate (209), then got the escorted survey (220) and loyalty fixes (221, 222) mid-run. Run 14 added PRs 225 to 228. The slices run newer code not yet on main | Where the bot stands now |
+| Current | Run 14 (15 Nov), Run 13 (14 to 15 Nov), and the slices of 16 and 17 Nov | Run 13 ran with the escort rules (PRs 211, 216) and the safe-site gate (209), then got the escorted survey (220) and loyalty fixes (221, 222) mid-run. Run 14 added PRs 225 to 228 and got PR 229 (stall fix) live when stopped at turn 53, so its turn 65 to 75 waiting came after that fix. The slices run newer code not yet on main | Where the bot stands now |
 | Older | Runs 10, 11 and 12 (14 Nov) | Run 12 ran in one session at the Run 11 fixes (PRs 207, 209, 210), before the escort fixes (211 onward); its escort failure is what PR 211 addressed | Trend only; shows problems that later PRs targeted |
 | Historical | Runs 7 to 9 (12 to 14 Nov) | Before loyalty-aware settling, defence and the faith and gold outlets (PRs 190, 191, 200) | Context; do not rank fixes on them alone |
 
@@ -127,7 +127,7 @@ Ordered by expected effect on turn-100 score, resting first on the current tier.
 
 What changed from the first ranking: the turn-20 settler kill (old fix 1) drops to 6 because only Runs 8 to 11 show it; settler waiting (old 4) rises to 2 because Runs 13 and 14, which have the escort fixes, still show it; merge-and-confirm (old 2) is first because the newest full run still sits at the old level; science buildings stay at 3 but the "no library before turn 83" claim is corrected by Run 14.
 
-Merged PRs that changed early-game behaviour between runs (not exhaustive): 209 and 210 (safe-site gate, science; Run 12), 211 and 216 (escorts; after Run 12), 220 (escorted survey; Run 13), 221, 222 and 228 (loyalty tests; Runs 13 to 14), 229 and 230 (stall and unseen-rival fixes; after Run 14).
+Merged PRs that changed early-game behaviour between runs (not exhaustive): 209 and 210 (safe-site gate, science; Run 12), 211 and 216 (escorts; after Run 12), 220 (escorted survey; Run 13), 221, 222 and 228 (loyalty tests; Runs 13 to 14), 229 (stall fix; applied live in Run 14 at turn 53) and 230 (unseen-rival size; after Run 14).
 
 ## What this does not show
 

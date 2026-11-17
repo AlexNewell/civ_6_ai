@@ -133,8 +133,7 @@ local pdip = Players[me]:GetDiplomacy()
 local cities, foreign, unmet, readable, pressures = 0, 0, 0, 0, 0
 for _, pl in ipairs(Game.GetPlayers()) do
     for _, c in pl:GetCities():Members() do
-        local plot = Map.GetPlotIndex(c:GetX(), c:GetY())
-        if vis:IsRevealed(plot) then
+        if vis:IsRevealed(c:GetX(), c:GetY()) then
             cities = cities + 1
             if pl:GetID() ~= me then
                 foreign = foreign + 1
@@ -165,7 +164,7 @@ local pdip = Players[me]:GetDiplomacy()
 local cities, foreign, readable, unmet, withpressure = 0, 0, 0, 0, 0
 for _, pl in ipairs(Game.GetPlayers()) do
     for _, c in pl:GetCities():Members() do
-        if vis:IsRevealed(Map.GetPlotIndex(c:GetX(), c:GetY())) then
+        if vis:IsRevealed(c:GetX(), c:GetY()) then
             cities = cities + 1
             if pl:GetID() ~= me then
                 foreign = foreign + 1
@@ -231,7 +230,7 @@ for _, pl in ipairs(Game.GetPlayers()) do
     local ok, gov = pcall(function() return pl:GetCulture():GetCurrentGovernment() end)
     if ok then govreadable = govreadable + 1; if not met then unmetgov = unmetgov + 1 end end
     for _, c in pl:GetCities():Members() do
-        if vis:IsRevealed(Map.GetPlotIndex(c:GetX(), c:GetY())) then
+        if vis:IsRevealed(c:GetX(), c:GetY()) then
             cities = cities + 1
             if not met then unmetcities = unmetcities + 1 end
             plots = plots + table.count(Map.GetCityPlots():GetPurchasedPlots(c))

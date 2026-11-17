@@ -96,3 +96,9 @@ def test_runs_in_the_ingame_context():
     probe = asyncio.run(run_lens_probe(FakeGame(), "appeal"))
     assert calls == [(PROBES["appeal"], "ingame")]
     assert probe.buckets["charming"].count == 40
+
+
+def test_reveal_checks_take_x_and_y_not_a_plot_index():
+    for lua in PROBES.values():
+        assert "IsRevealed(Map.GetPlotIndex" not in lua
+        assert "IsRevealed(plot)" not in lua

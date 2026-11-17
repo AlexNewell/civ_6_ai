@@ -74,11 +74,16 @@ Turn 53 of the camp practice save, drawn by `scripts/threat_map_view.py`. Hex co
 
 ## The game's pathfinder
 
-`get_pathing_estimate` (the game's own `GetMoveToPath`) is exact for our units, but it answers for
-tiles we have never revealed: a probe on the practice save returned a 16-tile path to an unrevealed
-tile. It is therefore not used yet. When it is, it may be asked only about a revealed target, and an
-estimate whose waypoints include a tile missing from the terrain store is discarded in favour of the
-store's own.
+`get_pathing_estimate` (the game's own `GetMoveToPath`) is exact for our units on ground we have
+seen. A probe on the practice save (waypoints read against the true terrain) found that it plans
+**blind** through unrevealed tiles: its routes cross unrevealed mountains and ocean that a walker
+could not enter, so it is not leaking the terrain there, and its longer-than-straight routes come
+from obstacles on the revealed part.
+
+It does leak a little: a path whose last tile cannot be reached returns no path, so asking about an
+unrevealed tile can say whether that tile is reachable land. Rules for using it: ask only about a
+revealed target, and discard an estimate whose waypoints cross a tile missing from the terrain
+store (those stretches are guesses).
 
 ## Known approximations
 

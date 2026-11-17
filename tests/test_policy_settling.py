@@ -1819,3 +1819,59 @@ def test_a_settler_off_the_site_still_runs_from_a_close_barbarian():
     policy = SettlingPolicy()
     run(policy, game)
     assert policy.decisions[0].action == "flee"
+
+
+# ----- stepping onto a good site and founding in the same turn -----
+
+
+def _step_game(ground, threats, settler_moves=2.0):
+    from civ6_ai.state.reader import build_tile
+    from civ6_ai.terrain import TerrainStore
+    from fixtures.civ_state import tile
+
+    game = make_game(
+        [settler(x=13, y=10, moves_remaining=settler_moves)],
+        cities=[alpha()],
+        threats=threats,
+        sites=[site(14, 10, food=40)],
+    )
+
+    async def arrives(unit_index, x, y):
+        game.actions.append(("move", unit_index, x, y))
+        return f"MOVING_TO|{x},{y}|from:13,10|now_at:{x},{y}"
+
+    game.move_unit = arrives
+    policy = SettlingPolicy()
+    store = TerrainStore(map_width=74)
+    if ground is not None:
+        store.learn(
+            [build_tile(tile(x=14, y=10, improvement=None, units=[], is_river=False, **ground))]
+        )
+    policy.terrain = store
+    return game, policy
+
+
+def test_a_settler_one_step_from_a_good_site_steps_on_and_founds_with_a_small_threat_near():
+    game, policy = _step_game({}, [barbarian(16, 10)])  # Flat ground: one move left to found.
+    run(policy, game)
+    assert game.actions == [("move", 7, 14, 10), ("found", 7)]
+    assert policy.decisions[-1].reason.startswith("stepped onto the site")
+
+
+def test_a_settler_does_not_step_onto_hills_it_could_not_found_on_the_same_turn():
+    game, policy = _step_game({"is_hills": True}, [barbarian(16, 10)])  # Hills cost both moves.
+    run(policy, game)
+    assert ("found", 7) not in game.actions
+    assert ("move", 7, 14, 10) not in game.actions  # It does not walk into the barbarian's reach.
+
+
+def test_a_settler_does_not_step_onto_a_tile_whose_cost_is_unknown():
+    game, policy = _step_game(None, [barbarian(16, 10)])
+    run(policy, game)
+    assert ("found", 7) not in game.actions
+
+
+def test_a_settler_does_not_step_and_found_with_a_larger_threat_near():
+    game, policy = _step_game({}, [barbarian(16, 10), barbarian(16, 11), barbarian(15, 9)])
+    run(policy, game)
+    assert ("found", 7) not in game.actions

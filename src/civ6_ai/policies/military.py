@@ -1373,7 +1373,11 @@ class MilitaryPolicy:
             else:
                 goals = self._stage_goals(t, unit, where)
             result = None
+            out_of_orders = False
             for goal in goals:
+                if result is not None and not self._available(t, unit, "move"):
+                    out_of_orders = True  # The retries too count against the bounds.
+                    break
                 result = await self._order(t, unit, "move", game.move_unit(unit.unit_index, *goal))
                 if result is not None and move_succeeded(result):
                     t.acted.add(unit.unit_id)
@@ -1387,7 +1391,7 @@ class MilitaryPolicy:
                     break
             else:
                 result = result or ""
-            if unit.unit_id not in t.acted:
+            if unit.unit_id not in t.acted and not out_of_orders:
                 self._refuse(t, unit, "move")
                 self._log(t, unit, "camp", "move refused", where, result=result or "")
 
@@ -1445,7 +1449,17 @@ class MilitaryPolicy:
                 self._recon.pop(unit.unit_id)  # Arrived and scanned, or called off.
                 return False
         else:
-            spare = sum(1 for u in t.mine if self._spare(t, u))
+            # Only units that can go count: a wounded or already-ordered one would leave the
+            # party short and send the first alone.
+            spare = sum(
+                1
+                for u in t.mine
+                if self._spare(t, u)
+                and u.can_move
+                and u.unit_id not in t.acted
+                and u.unit_id not in self._explorers
+                and u.hp >= s.weights.heal_below * u.max_hp
+            )
             if (
                 s.recon_units <= 0
                 or self._camps
@@ -1453,7 +1467,7 @@ class MilitaryPolicy:
                 # A party leaves together on one turn. Run 15: units sent one by one met the
                 # raiders alone and three were lost.
                 or (self._recon and self._recon_started != t.turn)
-                or spare < s.recon_min_spare
+                or (not self._recon and spare < s.recon_min_spare)  # Joiners need no recount.
                 or any(th.hostile and th.owner_id != BARBARIAN_ID for th in t.threats)
                 or self._land_threat_near(t, unit)
             ):

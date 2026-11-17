@@ -1466,3 +1466,32 @@ def test_the_recon_target_across_the_map_seam_keeps_going_the_short_way():
     x, y = policy._recon_target(t)
     assert 0 <= x < width and y == 10
     assert x < 12  # Continues east past the sighting, wrapped, not a huge negative number.
+
+
+def test_camp_staging_retries_stay_within_the_per_unit_order_limit():
+    units = [
+        warrior(uid=1, x=11, y=10, **STRONG),
+        warrior(uid=2, x=11, y=11, **STRONG),
+        warrior(uid=3),
+    ]
+    game = camp_game(units, [barbarian(x=14, y=10, cs=5)])
+    game.replies["move"] = STACKING
+    policy = MilitaryPolicy()
+    run(policy, game)
+    limit = policy.settings.attempts_per_unit
+    for uid in (1, 2):
+        assert len([o for o in game.orders("move") if o[1] == uid]) <= limit
+
+
+def test_wounded_spare_units_do_not_count_towards_a_recon_party():
+    policy = MilitaryPolicy()
+    hurt = [warrior(uid=10 + i, x=10, y=10, health=20) for i in range(3)]
+    run(
+        policy,
+        MilitaryGame(
+            [warrior(uid=1), *hurt, warrior(uid=20, x=10, y=10)], [barbarian(x=22, y=10, cs=5)]
+        ),
+    )
+    game = MilitaryGame([warrior(uid=1), *hurt, warrior(uid=20, x=10, y=10)], [])
+    run(policy, game)
+    assert not [d for d in policy.decisions if d.action == "recon"]

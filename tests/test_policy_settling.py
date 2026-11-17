@@ -620,7 +620,7 @@ def test_an_escorted_settler_founds_though_a_hostile_unit_shadows_it():
     # barbarians sat three tiles away, so every site read "hostile unit near the site".
     escort = unit_info(unit_id=9, unit_index=9, x=14, y=10)
     sites = [site(14, 10, food=40)]
-    barbs = [barbarian(17, 10)]
+    barbs = [barbarian(17, 10), barbarian(17, 11), barbarian(16, 9)]  # Too many to found alone.
     alone = make_game([settler(x=14)], cities=[alpha()], threats=barbs, sites=sites)
     run(SettlingPolicy(), alone)
     assert not [a for a in alone.actions if a[0] == "found"]
@@ -1772,3 +1772,50 @@ def test_run_14_el_mirador_reads_below_the_floor_once_the_unseen_city_is_sized_r
     (c,) = _fog_policy((60, 29), own, rivals, fog)
     assert c.robust_rate < SettlingSettings().loyalty_reject_safe
     assert c.loyalty_penalty > 0
+
+
+# ----- founding with a small threat near (the settler does not run from one barbarian) -----
+
+
+def _found_with(threats, defence=None):
+    game = make_game(
+        [settler(x=14, y=10)], cities=[alpha()], threats=threats, sites=[site(14, 10, food=40)]
+    )
+    policy = SettlingPolicy(defence=defence)
+    run(policy, game)
+    return game, policy
+
+
+def test_a_settler_on_a_good_site_founds_with_one_weak_barbarian_near():
+    game, policy = _found_with([barbarian(16, 10)])
+    assert ("found", 7) in game.actions
+    assert policy.decisions[-1].reason.startswith("standing on a good site")
+
+
+def test_a_settler_on_a_good_site_still_runs_from_a_strong_barbarian():
+    strong = threat_info(x=16, y=10, owner_id=BARBARIANS, unit_type="UNIT_SWORDSMAN")
+    game, policy = _found_with([strong])
+    assert not [a for a in game.actions if a[0] == "found"]
+    assert policy.decisions[-1].action == "flee"
+
+
+def test_a_settler_on_a_good_site_still_runs_from_three_barbarians():
+    game, _ = _found_with([barbarian(16, 10), barbarian(16, 11), barbarian(15, 9)])
+    assert not [a for a in game.actions if a[0] == "found"]
+
+
+def test_a_settler_does_not_found_under_threat_while_at_war_with_a_civ():
+    game, _ = _found_with([barbarian(16, 10)], defence=_War(at_war=True))
+    assert not [a for a in game.actions if a[0] == "found"]
+
+
+def test_a_settler_off_the_site_still_runs_from_a_close_barbarian():
+    game = make_game(
+        [settler(x=13, y=10)],
+        cities=[alpha()],
+        threats=[barbarian(15, 10)],
+        sites=[site(16, 10, food=40)],
+    )
+    policy = SettlingPolicy()
+    run(policy, game)
+    assert policy.decisions[0].action == "flee"

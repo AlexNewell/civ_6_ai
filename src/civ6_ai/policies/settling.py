@@ -121,6 +121,16 @@ class SettlingSettings:
     garrison_max_hostiles: int = 2
     garrison_min_strength: int = 20
     garrison_total_ratio: float = 2.0
+    # A settler standing on a good site founds the city at once, with a hostile unit near,
+    # when the threat is small: the city can't be taken in a turn, it is usually safe from
+    # one or two barbarians, and running costs the momentum of the early game. At most
+    # `found_max_hostiles` hostile land units within `found_threat_radius`, none siege, each
+    # no stronger than `found_max_strength` and together at most `found_max_total`. Never
+    # while we are at war with a civ. More than that, and the settler still runs.
+    found_threat_radius: int = 4
+    found_max_hostiles: int = 2
+    found_max_strength: int = 20
+    found_max_total: int = 30
     # Bounds on waiting and retrying, so nothing stalls for good.
     no_site_disband_turns: int = 20  # A settler with no site this many turns in a row is disbanded.
     max_move_failures: int = 3  # Refused moves to one site before it is set aside.
@@ -444,6 +454,34 @@ def garrison_may_leave(
             return False
         total += strength
     return total <= s.garrison_total_ratio * ceiling
+
+
+def found_under_threat_ok(
+    site: tuple[int, int],
+    threats: Iterable[Threat],
+    at_war: bool,
+    settings: SettlingSettings | None = None,
+    map_width: int | None = STANDARD_MAP_WIDTH,
+) -> bool:
+    """True when a settler on `site` may found its city now though hostile units are near:
+    few, weak and not siege (see `found_threat_radius` in the settings)."""
+    if at_war:
+        return False
+    s = settings or SettlingSettings()
+    near = [
+        t
+        for t in threats
+        if t.hostile and hex_distance(*site, t.x, t.y, map_width) <= s.found_threat_radius
+    ]
+    if len(near) > s.found_max_hostiles:
+        return False
+    total = 0.0
+    for t in near:
+        strength, siege = _strength(t)
+        if siege or strength > s.found_max_strength:
+            return False
+        total += strength
+    return total <= s.found_max_total
 
 
 def spare_garrison_tiles(
@@ -1210,7 +1248,19 @@ class SettlingPolicy:
 
         if escorted and self._stripped and await self._recall(game, settler, units, record):
             return
-        threatened = danger.near(settler.x, settler.y, s.flee_radius)
+        at_war = self.defence.at_war if self.defence is not None else False
+        hostile_only_here = here is not None and all(
+            c.rejected in (None, HOSTILE_NEAR_SITE)
+            for c in candidates
+            if (c.x, c.y) == (settler.x, settler.y)
+        )
+        # On a good site with only a small threat near: found now, don't run (the user's
+        # critique of Run 18: the city is safe from one or two barbarians, and a settler
+        # that runs loses the turns).
+        found_now_ok = hostile_only_here and found_under_threat_ok(
+            (settler.x, settler.y), danger.threats, at_war, s, s.map_width
+        )
+        threatened = danger.near(settler.x, settler.y, s.flee_radius) and not found_now_ok
         # Live (Run 12): an escorted settler stepped out, then fled back to the city next turn
         # and the pair repeated it. A settler with its escort on the tile goes on instead.
         if (
@@ -1244,6 +1294,8 @@ class SettlingPolicy:
             c.rejected is None for c in candidates if (c.x, c.y) == (settler.x, settler.y)
         ):
             found_here, reason = True, "standing on an acceptable site"
+        elif here is not None and found_now_ok:
+            found_here, reason = True, "standing on a good site, the threat near is small"
         if found_here and (settler.x, settler.y) in self._failed_sites:
             record(
                 "found_skipped",

@@ -277,7 +277,7 @@ class ThreatMap:
 
     def _field(self, src: Source) -> dict[tuple[int, int], float]:
         """One source's threat on each tile it reaches, before any fade with age."""
-        known = len(self.terrain) if self.terrain is not None else 0
+        known = self.terrain.revision if self.terrain is not None else 0
         strength = self.strength_of(src)
         key = (src.kind, src.x, src.y, src.unit_type, strength, src.naval, known)
         if key in self._fields:
@@ -301,7 +301,7 @@ class ThreatMap:
     def _cover_field(self, ally: Ally) -> dict[tuple[int, int], float]:
         s = self.settings
         key = ("cover", ally.kind, ally.x, ally.y, ally.strength, ally.unit_type)
-        known = len(self.terrain) if self.terrain is not None else 0
+        known = self.terrain.revision if self.terrain is not None else 0
         key = (*key, known)
         if key in self._fields:
             return self._fields[key]
@@ -418,7 +418,7 @@ class ThreatMap:
             self.see_own(turn, units, cities)
         s = self.settings
         near_cities = [
-            (x, y)
+            (self._wrap(x), y)
             for c in cities
             for y in range(c.y - s.fog_range, c.y + s.fog_range + 1)
             for x in range(c.x - s.fog_range - 1, c.x + s.fog_range + 2)

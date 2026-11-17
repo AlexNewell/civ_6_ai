@@ -78,6 +78,7 @@ class TerrainStore:
     _ground: dict[tuple[int, int], Ground] = field(default_factory=dict)
     _tried: dict[tuple[int, int], int] = field(default_factory=dict)
     _fresh: dict[tuple[int, int], str] = field(default_factory=dict)
+    revision: int = 0  # Goes up whenever any remembered ground is added or changed.
 
     # ----- learning -----
 
@@ -90,6 +91,7 @@ class TerrainStore:
                 if (t.x, t.y) not in self._ground:
                     new += 1
                 self._ground[t.x, t.y] = ground
+                self.revision += 1
                 self._fresh[t.x, t.y] = ground.code
         return new
 

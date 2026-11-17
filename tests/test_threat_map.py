@@ -287,3 +287,24 @@ def test_a_destroyer_is_classed_as_a_ship():
     m = ThreatMap(ThreatMapSettings(map_width=None))
     m.see_threats(5, [hostile(kind="UNIT_DESTROYER", x=10, y=10)])
     assert [s.naval for s in m.sources if s.kind == UNIT] == [True]
+
+
+def test_changed_ground_invalidates_the_cached_reach_and_the_fog_dump_wraps():
+    from civ6_ai.state.reader import build_city
+    from civ6_ai.terrain import TerrainStore
+
+    store = TerrainStore(map_width=74)
+    flat = build_tile(tile(x=10, y=10, terrain="TERRAIN_GRASS", feature=None, units=[]))
+    store.learn([flat])
+    before = store.revision
+    store.learn(
+        [build_tile(tile(x=10, y=10, terrain="TERRAIN_GRASS", feature="FEATURE_FOREST", units=[]))]
+    )
+    assert store.revision > before  # Same tile count, but the ground changed.
+    m = ThreatMap(ThreatMapSettings(map_width=74))
+    m.terrain = store
+    city = build_city(city_info(x=0, y=10, defense_strength=12, garrison_hp=200), (), set(), 74)
+    rec = m.record(5, [city])
+    fog = rec["fog"]
+    assert fog and all(0 <= x < 74 for x, _, _ in fog)
+    assert any(x == 73 for x, _, _ in fog)

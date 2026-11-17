@@ -56,7 +56,14 @@ from civ6_ai.build_ledger import BuildLedger, BuildTracker, EventFlush
 from civ6_ai.call_timer import CallTimer
 from civ6_ai.construction import ConstructionWatcher
 from civ6_ai.defeat import is_defeated
-from civ6_ai.monitors import EventBus, EventLog, Monitors
+from civ6_ai.monitors import (
+    EventBus,
+    EventLog,
+    Monitors,
+    ResourceMonitor,
+    ThreatMonitor,
+    VictoryMonitor,
+)
 from civ6_ai.orchestrator import Handler, Orchestrator, TurnLog
 from civ6_ai.policies import research
 from civ6_ai.policies.builder import BuilderDemand, BuilderPolicy
@@ -250,6 +257,7 @@ def build_orchestrator(
     screenshots: Screenshotter | None = None,
     policy_document: Path | None = None,
     wars_state: Path | None = None,
+    threat_state: Path | None = None,
     task_db: Path | TaskDB | None = None,
     ledger: BuildLedger | None = None,
     event_log: EventLog | None = None,
@@ -303,7 +311,7 @@ def build_orchestrator(
     if probes is not None:
         probes.subscribe(bus)
     handlers: list[Handler] = [
-        Monitors(bus),
+        Monitors(bus, [ThreatMonitor(threat_state), ResourceMonitor(), VictoryMonitor()]),
         *(
             [
                 PolicyDocumentHandler(

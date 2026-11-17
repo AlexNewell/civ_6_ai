@@ -420,6 +420,9 @@ class _Turn:
     blocked: set[tuple[int, int]] = field(default_factory=set)  # Tiles the game said are full.
     en_route: dict[int, int] = field(default_factory=dict)  # City id to cover units still walking.
     spare_orders: int = 0
+    # What the threat map changed this turn (issue 238), for the offense line and the slice
+    # report: camps known only through the map, whether the target came from it, and so on.
+    map_use: dict[str, int] = field(default_factory=dict)
     fired: set[int] = field(default_factory=set)  # Cities that have used their strike.
     struck: set[tuple[int, int]] = field(default_factory=set)  # Targets a city has hit.
     attacked: set[tuple[int, int]] = field(default_factory=set)  # Targets any attack landed on.
@@ -459,6 +462,7 @@ class MilitaryPolicy:
     _recon_started: int = field(default=-99, init=False, repr=False)
     # The shared threat map (issue 238), set by the bot's wiring; camps come from it too.
     threat_map: Any = field(default=None, init=False, repr=False)
+    _released: int = field(default=0, init=False, repr=False)
     _mission: dict[int, tuple[tuple[int, int], int]] = field(
         default_factory=dict, init=False, repr=False
     )  # Unit id to the camp it was sent at and the turn.
@@ -548,7 +552,10 @@ class MilitaryPolicy:
             "attacks_other": len(landed) - len(on_barb),
             "kills_barb": len(t.killed & barb_tiles),
             "camp_orders": sum(1 for d in mine if d.action == "camp" and "refused" not in d.reason),
+            "map_use": {**t.map_use, "missions_released": self._released},
+            "map_on": self.threat_map is not None,
         }
+        self._released = 0
         log.info("military_offense %s", json.dumps(line, sort_keys=True))
 
     # ----- bookkeeping -----
@@ -1343,6 +1350,9 @@ class MilitaryPolicy:
         t.camp_scanned = True
         await self._scan_camps(game, t, barbarians)
         known = self._known_camps()
+        own = set(self._camps)
+        if self.threat_map is not None:
+            t.map_use["camps_only_in_map"] = len(known - own)
         camps = [
             c
             for c in sorted(known)
@@ -1352,6 +1362,8 @@ class MilitaryPolicy:
         if not camps:
             return
         where = min(camps, key=lambda c: (self._home_distance(t, c), c))
+        if where not in own:
+            t.map_use["target_from_map"] = 1  # The map alone put this camp on the list.
         defenders = [
             b
             for b in barbarians
@@ -1376,6 +1388,7 @@ class MilitaryPolicy:
             far = hex_distance(unit.x, unit.y, *where, s.map_width) > muster
             if not far and gathered < s.camp_min_units:
                 t.acted.add(unit.unit_id)  # Waiting for the rest; not idle, not spare.
+                t.map_use["muster_waits"] = t.map_use.get("muster_waits", 0) + 1
                 self._log(t, unit, "camp", "waiting for the rest of the force", where)
                 continue
             # Run 15: a move straight onto a camp three tiles off is refused (the game only allows
@@ -1387,6 +1400,7 @@ class MilitaryPolicy:
                 continue  # In reach of the guards: the attack step takes it from here.
             elif far:
                 goals = self._muster_goals(t, unit, where)
+                t.map_use["muster_moves"] = t.map_use.get("muster_moves", 0) + 1
             else:
                 goals = self._stage_goals(t, unit, where)
             result = None
@@ -1526,6 +1540,7 @@ class MilitaryPolicy:
             # must not hold the tiles around it (Run 18: units waiting beside a taken camp blocked
             # the settler's best site for three turns and cost the fourth city).
             self._mission.pop(unit.unit_id, None)
+            self._released += 1  # Reported on the next offense line.
             return False
         near = hex_distance(unit.x, unit.y, *sent[0], s.map_width) <= s.camp_reach
         return near and unit.hp >= s.weights.camp_leave_hp * unit.max_hp

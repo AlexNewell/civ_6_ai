@@ -264,6 +264,7 @@ def build_orchestrator(
     event_log: EventLog | None = None,
     probes: Any = None,
     threat_map_dump: Path | None = None,
+    use_threat_map: bool = True,
 ) -> Orchestrator:
     """Wire the handlers to a game. `game` is civ6-mcp's `GameState`, or a fake with its reads.
 
@@ -281,6 +282,8 @@ def build_orchestrator(
     turn, since it buffers its writes.
     `probes` is a `ProbeShots` (see `probes`), subscribed to `bus` and run before the events flush.
     `threat_map_dump` is a file the threat map appends one line per turn to (see `threat_map`).
+    `use_threat_map=False` keeps the map and its dump but leaves the policies not reading it,
+    for running the same save with and without it.
     """
     defence = DefenceState()  # Which cities are threatened this turn, shared by three policies.
     expansion = ExpansionState()  # Settling fills it. Production and the log line read it.
@@ -292,7 +295,8 @@ def build_orchestrator(
     secondary = SecondaryPolicy()
     military = MilitaryPolicy(defence=defence)
     threat_map_handler = ThreatMapHandler(dump=threat_map_dump)
-    military.threat_map = threat_map_handler.map
+    if use_threat_map:
+        military.threat_map = threat_map_handler.map
     diplomacy = DiplomacyPolicy()
     research_policy = research.ResearchPolicy()
     gold = GoldPolicy(defence=defence, plans=production.planner.book, builder_demand=builder_demand)

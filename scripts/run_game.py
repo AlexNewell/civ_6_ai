@@ -89,6 +89,7 @@ async def play_game(
     probe_overlay: bool = False,
     save_at: Sequence[int] = (),
     shots_every_turn: bool = False,
+    use_threat_map: bool = True,
 ) -> GameRun | None:
     """Play `turns` turns in the open game. None if it is not a standard save (or `expect_save`).
 
@@ -183,6 +184,7 @@ async def play_game(
             event_log=event_log,
             probes=probes,
             threat_map_dump=ROOT / "runs" / f"{name}_{stamp}_threatmap.jsonl",
+            use_threat_map=use_threat_map,
         )
         if shots_every_turn:
             # No cap: a run reviewed by eye wants every turn. Kept apart from the triage shots.
@@ -251,6 +253,7 @@ async def run(
     load: str | None = None,
     save_at: Sequence[int] = (),
     shots_every_turn: bool = False,
+    use_threat_map: bool = True,
 ) -> int:
     if load:
         try:
@@ -265,6 +268,7 @@ async def run(
         probe_overlay=overlay,
         save_at=save_at,
         shots_every_turn=shots_every_turn,
+        use_threat_map=use_threat_map,
     )
     if played is None:
         return 1
@@ -326,6 +330,11 @@ def main() -> int:
         action="store_true",
         help="save a screenshot after each turn's actions, before ending it, with no count cap",
     )
+    parser.add_argument(
+        "--no-threat-map",
+        action="store_true",
+        help="keep the threat map's dump but leave the policies not reading it (a control run)",
+    )
     args = parser.parse_args()
     try:
         kinds = parse_kinds(args.probe)
@@ -333,7 +342,15 @@ def main() -> int:
     except ValueError as error:
         parser.error(str(error))
     return asyncio.run(
-        run(args.turns, kinds, args.probe_overlay, args.load, save_at, args.shots_every_turn)
+        run(
+            args.turns,
+            kinds,
+            args.probe_overlay,
+            args.load,
+            save_at,
+            args.shots_every_turn,
+            not args.no_threat_map,
+        )
     )
 
 

@@ -98,7 +98,12 @@ def compare_lines(
         for name, records in runs:
             entries = gaps(records, baselines)
             if not entries:
-                lines.append(f"{label:<14}{name:<22}  (ended before turn {GAP_TURNS[0]})")
+                why = (
+                    f"ended before turn {GAP_TURNS[0]}"
+                    if records[-1]["turn"] < GAP_TURNS[0]
+                    else "no score recorded near the checkpoints"
+                )
+                lines.append(f"{label:<14}{name:<22}  ({why})")
             lines += [
                 f"{label:<14}{name:<22}{e['turn']:>5}{e['score']:>7}"
                 f"{_signed(e['to_leader']):>8}{_signed(e['to_llm']):>9}{_signed(e['to_ai']):>8}"

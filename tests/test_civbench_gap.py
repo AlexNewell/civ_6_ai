@@ -110,3 +110,12 @@ def test_compare_runs_cli_orders_logs_newest_first(tmp_path, capsys):
     assert code == 0
     assert out.index("new_run") < out.index("old_run")
     assert Path(BASELINES_DOC).exists()
+
+
+def test_unscored_long_run_is_not_called_short():
+    records = [
+        {"turn": t, "handler_errors": {}, "total_seconds": 1.0, "stop_reason": None}
+        for t in range(1, 251)
+    ]
+    text = "\n".join(compare_lines([("s", [("old", records)])], BASE))
+    assert "no score recorded" in text and "ended before" not in text

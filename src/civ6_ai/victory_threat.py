@@ -151,7 +151,9 @@ def _points_standing(
     _, rival_id, subject, value, needed = max(mine, key=lambda row: row[3])
     name = names.get(rival_id, subject)
     detail = "" if name == subject else subject
-    others = max([ours, *(row[3] for row in mine if row[1] != rival_id)])
+    # Rows with no rival (an unmatched religion) can't be a target, but they still lead over it.
+    on_path = [row for row in rows if row[0] == path]
+    others = max([ours, *(row[3] for row in on_path if row[1] != rival_id)])
     margin = value - others
     flags = []
     if needed > 0 and value >= NEAR_SHARE * needed:

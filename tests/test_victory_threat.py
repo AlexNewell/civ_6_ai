@@ -190,3 +190,9 @@ def test_our_own_religion_counts_against_a_rivals_religious_lead():
     rows = [(RELIGIOUS, 1, "RELIGION_SHINTO", 3, 8)]
     assert by_path(assess(1, players, rows, US, our_religion=0))[RELIGIOUS].flag == "lead"
     assert by_path(assess(1, players, rows, US, our_religion=5))[RELIGIOUS].flag == ""
+
+
+def test_an_unidentified_religion_still_counts_against_a_rivals_lead():
+    players = [p(0, "Us"), p(1, "Rome")]
+    rows = [(RELIGIOUS, 1, "RELIGION_SHINTO", 3, 8), (RELIGIOUS, None, "RELIGION_X", 5, 8)]
+    assert by_path(assess(1, players, rows, US))[RELIGIOUS].flag == ""

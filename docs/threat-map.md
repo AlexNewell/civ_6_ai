@@ -63,3 +63,9 @@ One JSON line per turn: `turn`, `sources` (each with `age` and `city_distance`),
 `camps_near_city` (camps within `near_city` tiles of one of our cities), and `heat` (the hottest
 tiles as `[x, y, value]`). `scripts/slice_report.py` prints "camp-turns near a city" and the
 handler's seconds per turn.
+
+## Example
+
+![A turn of the practice save: ground, our cities and units, two camps, threat, fog and cover](images/threat-map-example.png)
+
+Turn 53 of the camp practice save, drawn by `scripts/threat_map_view.py`. Hex colour is the ground. Red numbers are threat, grey numbers are fog, green numbers are our cover (the combat strength of our units and the defence strength of our cities). A red border marks danger left after cover. The black X marks are two remembered camps, 4 and 5 tiles from our nearest cities.

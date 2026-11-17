@@ -291,6 +291,8 @@ def build_orchestrator(
     government = GovernmentPolicy()  # One instance, so handler and blockers share its bounds.
     secondary = SecondaryPolicy()
     military = MilitaryPolicy(defence=defence)
+    threat_map_handler = ThreatMapHandler(dump=threat_map_dump)
+    military.threat_map = threat_map_handler.map
     diplomacy = DiplomacyPolicy()
     research_policy = research.ResearchPolicy()
     gold = GoldPolicy(defence=defence, plans=production.planner.book, builder_demand=builder_demand)
@@ -339,7 +341,7 @@ def build_orchestrator(
         diplomacy,
         WarPolicy(state_path=wars_state),
         *([TradeOfferPolicy(diplomacy.weights)] if trade_offers else []),
-        ThreatMapHandler(dump=threat_map_dump),  # Nothing reads it yet (issue 238, stage 1).
+        threat_map_handler,  # Issue 238: military reads its camps (stage 2a).
         DefencePolicy(defence),  # Before settling: its war flag gates a garrison leaving.
         SettlingPolicy(expansion=expansion, defence=defence),
         LoyaltyResponse(bus),

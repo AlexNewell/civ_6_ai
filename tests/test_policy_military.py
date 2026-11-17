@@ -24,7 +24,7 @@ from civ6_ai.policies.military import (
 from civ6_ai.policies.settling import units_reserved_for_settling
 from civ6_ai.state import read_cities, read_threats, read_units
 from civ6_ai.state.models import Target, Threat
-from civ6_ai.state.reader import build_unit
+from civ6_ai.state.reader import build_tile, build_unit, hex_distance
 from fixtures.civ_state import (
     BARBARIANS,
     ROME,
@@ -811,7 +811,8 @@ def test_the_camp_scan_reads_around_the_barbarian_and_each_city_once_a_turn():
         game.calls.count("get_map_area") == 2
     )  # One around the nearer barbarian, one at the city.
     run(policy, game)
-    assert game.calls.count("get_map_area") == 3  # The city is read only every few turns.
+    # The city is read only every few turns; the camp we are marching on is read to see it gone.
+    assert game.calls.count("get_map_area") == 4
 
 
 def test_a_camp_in_plain_view_is_attacked_though_the_only_barbarian_is_a_ship():
@@ -1533,3 +1534,55 @@ def test_a_remembered_camp_is_rescanned_and_forgotten_when_seen_cleared():
     game.get_map_area = area
     run(policy, game)
     assert (30, 10) in seen and (30, 10) not in policy._camps
+
+
+def test_a_far_force_gathers_before_any_unit_goes_in():
+    units = [warrior(uid=1, x=2, y=10, **STRONG), warrior(uid=2, x=2, y=11, **STRONG)]
+    game = camp_game(
+        units, [], camp=tile(x=14, y=10, improvement="IMPROVEMENT_BARBARIAN_CAMP", units=[])
+    )
+    policy = MilitaryPolicy()
+    run(policy, game)
+    goals = [(o[2], o[3]) for o in game.orders("move")]
+    assert goals and all(
+        hex_distance(*g, 14, 10, 74) <= policy.settings.camp_muster_radius for g in goals
+    )
+    assert not any(g == (14, 10) for g in goals)
+
+
+def test_the_first_to_arrive_waits_for_the_rest_of_the_force():
+    near = warrior(uid=1, x=12, y=10, **STRONG)  # Within the muster radius, alone.
+    far = warrior(uid=2, x=4, y=10, **STRONG)
+    game = camp_game([near, far], [])
+    policy = MilitaryPolicy()
+    run(policy, game)
+    assert not any(o[1] == near.unit_index for o in game.orders("move"))
+    assert any("waiting" in d.reason for d in policy.decisions if d.unit_id == 1)
+
+
+def test_a_camp_on_the_threat_map_is_hunted_though_the_military_never_saw_it():
+    from civ6_ai.threat_map import ThreatMap
+
+    tm = ThreatMap()
+    tm.see_tiles(
+        52,
+        [
+            build_tile(
+                tile(
+                    x=14,
+                    y=10,
+                    improvement="IMPROVEMENT_BARBARIAN_CAMP",
+                    visibility="revealed",
+                    units=[],
+                )
+            )
+        ],
+        baseline=True,
+    )
+    game = camp_game(
+        strong_pair(), [], camp=tile(x=14, y=10, improvement=None, units=[], visibility="revealed")
+    )
+    policy = MilitaryPolicy()
+    policy.threat_map = tm
+    run(policy, game)
+    assert camp_orders(policy)

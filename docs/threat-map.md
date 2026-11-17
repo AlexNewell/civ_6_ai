@@ -71,3 +71,11 @@ cities, same shape); `fog` (unseen-ground penalty near our cities); `cities` and
 ![A turn of the practice save: ground, our cities and units, two camps, threat, fog and cover](images/threat-map-example.png)
 
 Turn 53 of the camp practice save, drawn by `scripts/threat_map_view.py`. Hex colour is the ground. Red numbers are threat, grey numbers are fog, green numbers are our cover (the combat strength of our units and the defence strength of our cities). A red border marks danger left after cover. The black X marks are two remembered camps, 4 and 5 tiles from our nearest cities.
+
+## The game's pathfinder
+
+`get_pathing_estimate` (the game's own `GetMoveToPath`) is exact for our units, but it answers for
+tiles we have never revealed: a probe on the practice save returned a 16-tile path to an unrevealed
+tile. It is therefore not used yet. When it is, it may be asked only about a revealed target, and an
+estimate whose waypoints include a tile missing from the terrain store is discarded in favour of the
+store's own.

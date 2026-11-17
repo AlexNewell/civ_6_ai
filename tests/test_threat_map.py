@@ -152,9 +152,12 @@ def test_the_handler_scans_on_its_interval_not_every_turn():
     assert len(reads) == 1
 
 
-def test_nothing_in_the_policies_reads_the_map_yet():
+def test_only_the_military_policy_reads_the_map_so_far():
+    """Stage 2a (issue 238). Each later stage adds its policy here, one at a time."""
+    allowed = {"military.py"}
     for path in (SRC / "policies").glob("*.py"):
-        assert "threat_map" not in path.read_text(encoding="utf-8"), path.name
+        if path.name not in allowed:
+            assert "threat_map" not in path.read_text(encoding="utf-8"), path.name
 
 
 def test_the_record_carries_our_cities_and_combat_units_for_the_picture():

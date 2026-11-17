@@ -53,6 +53,8 @@ class ThreatMapSettings:
     unit_memory_turns: int = 10  # A hostile unit not seen again is dropped after this many turns.
     resight_radius: int = 3  # A new sighting this close replaces an older one of the same kind.
     scan_radius: int = 7  # Tiles read around each city for camps.
+    baseline_radius: int = 14  # The first read of a session looks this far around each city,
+    # to take in every camp the saved game's map already shows.
     scan_turns: int = 3  # Turns between those reads (a call per city).
     near_city: int = 9  # A source this close to a city counts as near it in the metrics.
     heat_floor: float = 0.5  # Threat below this is left out of the dump.
@@ -476,7 +478,10 @@ class ThreatMapHandler:
             baseline = self.map.take_baseline()
             for city in cities:
                 try:
-                    tiles = await read_area(game, city.x, city.y, self.settings.scan_radius)
+                    radius = (
+                        self.settings.baseline_radius if baseline else self.settings.scan_radius
+                    )
+                    tiles = await read_area(game, city.x, city.y, radius)
                 except ConnectionError:
                     raise
                 except Exception:

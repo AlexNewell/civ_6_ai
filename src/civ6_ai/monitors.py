@@ -432,7 +432,12 @@ class ThreatMonitor:
                 taker = (civ.player_id, civ.civ_name)
                 break
         near = sorted(
-            (unit for unit in scan if _distance(unit.x, unit.y, known.x, known.y) <= TAKER_RADIUS),
+            (
+                unit
+                for unit in scan
+                if unit.unit_type not in STEALTH_UNITS
+                and _distance(unit.x, unit.y, known.x, known.y) <= TAKER_RADIUS
+            ),
             key=lambda unit: _distance(unit.x, unit.y, known.x, known.y),
         )
         hostile = [unit for unit in near if self._is_hostile(unit)]

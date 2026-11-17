@@ -1030,3 +1030,11 @@ def test_the_restart_carries_the_loyalty_the_loss_is_judged_by(tmp_path):
     game.turn = 133
     (event,) = check(ThreatMonitor(path), game)
     assert event.cause == "loyalty"
+
+
+def test_a_hidden_submarine_beside_a_lost_city_is_not_its_taker():
+    game = FakeGame()
+    sub = unit(SUMERIA, "Sumeria", distance=1, unit_type="UNIT_SUBMARINE")
+    sub.x, sub.y = 66, 24
+    (event,) = lose(game, ThreatMonitor(), CAPITAL, diplomacy_reply(False), [sub])
+    assert (event.taker_id, event.cause) == (None, "unknown")

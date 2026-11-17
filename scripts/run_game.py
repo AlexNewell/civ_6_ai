@@ -177,6 +177,7 @@ async def play_game(
             trade_offers=TRADE_OFFERS,
             screenshots=shots,
             wars_state=ROOT / "runs" / f"{name}_wars.json",  # Same for every restart of this game.
+            threat_state=ROOT / "runs" / f"{name}_threat.json",  # Likewise, for the city set.
             ledger=ledger,
             event_log=event_log,
             probes=probes,

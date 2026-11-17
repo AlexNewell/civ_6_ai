@@ -428,6 +428,14 @@ def test_cities_lost_separates_flips_that_came_back_and_loyalty_losses():
     assert "1 came back" in check.note and "1 after a loyalty warning" in check.note
 
 
+def test_a_loss_the_monitor_calls_a_loyalty_loss_counts_without_a_warning():
+    events = [
+        {"kind": "city_lost", "turn": 133, "city_id": 4, "cause": "loyalty", "taker_id": 5},
+        {"kind": "city_lost", "turn": 135, "city_id": 1, "cause": "capture", "taker_id": 5},
+    ]
+    assert city_losses(events).loyalty == 1
+
+
 def test_cities_lost_passes_when_every_loss_came_back():
     events = [
         {"kind": "city_lost", "turn": 5, "city_id": 3},

@@ -4,7 +4,7 @@ Research for issue 147. Every run since Run 3 has lost cities (the effectiveness
 
 Sources and limits:
 
-- The event log has `city_lost` and `city_loyalty_warning` only. It names no taker, no cause and no return. Takers and causes below are read from the threat notices in the turn log (`THREAT: <civ> UNIT_...`), the war tracker lines, and where a city's name later appears in production lines.
+- The event log (until issue 177) had `city_lost` and `city_loyalty_warning` only. It named no taker, no cause and no return. Takers and causes below are read from the threat notices in the turn log (`THREAT: <civ> UNIT_...`), the war tracker lines, and where a city's name later appears in production lines.
 - Garrison counts come from `military_decision` lines. A unit that got no decision that turn is not counted, so units-in-city is a lower bound.
 - The bot never declares war (there is no declare call in `src/`). Every war below was declared by an AI.
 
@@ -25,10 +25,27 @@ What the logs show:
 
 - Turn 129: Sumeria's war first seen. Turn 133 to 135: Knights and Coursers (CS 50 and 54) and a Man-at-Arms (CS 62) next to the city. The score drops from 250 to 186 between turns 134 and 135.
 - The capital's name is absent from production, gold and builder lines from turn 135 to turn 238, 100 turns. Other cities appear every few turns in the same lines.
-- The settle log shows a city founded at (67,36) on turn 238, and the turn-240 notice reads `New city founded: Wak Kab'nal!`. A founded city takes the first free name, so the original capital's name was free. The production lines for "Wak Kab'nal" after turn 240 are that new city's (its Stock Exchange on turn 295 and Neighborhood on turn 300 are plausible for a city 55 to 60 turns old).
+- The settle log shows a city founded at (67,36) on turn 238. The bot log names it Palenque from that turn (`Palenque builds UNIT_WARRIOR`, governor placed there), and the turn-240 notice reads `New city founded: Wak Kab'nal!` for a second city. A founded city takes the first free name, so the original capital's name was free. The production lines for "Wak Kab'nal" after turn 240 are that second city's (its Stock Exchange on turn 295 and Neighborhood on turn 300 are plausible for a city 55 to 60 turns old). See "Why Run 6 counted 1 city and the game said 2" below.
 - The same pattern shows in Run 6 session 1. Uxmal (64,22) was lost on turn 87, then the settle log founds a city on the same tile (64,22) on turn 101. A city cannot be founded on a tile with a city, so Uxmal was destroyed, not held by the enemy. It came back as "Tikal" (id 196609).
 
 So the logs say the capital was permanently lost, and the later production lines are a name being reused. This does not prove the capital never flipped back; no `get_cities` output is logged with ids to settle it. When the first `city_gained` event lands (issue 156), a rerun of the check settles it directly.
+
+## Why Run 6 counted 1 city and the game said 2
+
+Adding up Run 6's own records gives one city at the end, but the game (and the settle log's `cities` field, which is the length of `get_cities`) said 2 from turn 273 to the end at turn 331. Counted from the logs of both sessions:
+
+| Session | Founded (settle log, `FOUNDED|x,y`) | Lost (`city_lost`) |
+|---|---|---|
+| 20261112T052854Z (turns to 102) | capital T1, Uxmal T29, Tikal T101 | Uxmal T87 |
+| 20261112T134816Z (turns 102 to 331) | Chichen Itza T122, Yaxchilan T152, Palenque T238 | capital T135, Tikal T244, Chichen Itza T247, Yaxchilan T273 |
+| Total | 6 | 5 |
+
+6 founded less 5 lost is 1, so one city has no founding event. The logs point at it:
+
+- The turn-240 notice reads `New city founded: Wak Kab'nal!`. The bot's only founding that late was turn 238, and the bot log already calls that city Palenque on turn 238. So the turn-240 city is a second, separate one.
+- The settle log shows 3 cities on turn 262 (after Tikal and Chichen Itza fell, with Yaxchilan and Palenque left) and 2 from turn 273 (Yaxchilan fell). The events alone give 2 and then 1, so the game held one city more than the events say, from turn 240 on. Production lines for "Wak Kab'nal" run from turn 241 to the end.
+
+So the monitor's picture was short by one city that came from a path the bot does not log. The settle log only records a founding the bot itself orders (`found` with `FOUNDED|`). A city that arrives another way (a founding by a settler that policy did not drive, or a city that returns after being lost) has no founded event, and until `city_gained` (issue 156, and 168) the monitor logged no gain at all. The records cannot say which of the two it was: no city id is logged for it, and the capital's id 65536 is not seen again. A rerun with `city_gained` events, which carry the id and a `regained` flag, would settle it. The practical rule is that founded and lost events alone cannot give a city count, and the game's `get_cities` length is the number to trust. The effectiveness check now counts permanent losses from `city_lost` less matched `city_gained` events, not from founded events.
 
 ## Per-city table
 
@@ -103,8 +120,18 @@ Two sites account for 9 of the 11 captures: Uxmal and its replacement Tikal at (
 
 The monitor still has two gaps this check cannot close:
 
-- It never reports a gain (`monitors.py` compares the previous and current city id sets and emits `CityLost` only). Issue 156's `city_gained` fixes this.
-- Its baseline is empty after a restart (`self._cities = None`), so a city lost while the bot is down, as in a hang or a reload, is never logged. The count is a lower bound.
+- (Fixed by issues 156 and 168.) It never reported a gain. `city_gained` now comes from the construction watcher.
+- (Fixed by issue 177.) Its baseline was empty after a restart, so a city lost while the bot was down was never logged. The monitor now keeps its city set in `runs/<name>_threat.json` and reads it back, unless the file is from a later turn.
+
+## What `city_lost` now records (issue 177)
+
+`city_lost` has three more fields: `taker_id` (null when unknown), `taker_name`, and `cause`. They come from reads the monitor already makes on the same check, with no new game call:
+
+- Taker: the met civ whose `ECITY` lines in `get_diplomacy` include the lost city's tile (the civ now holds the city). If none does, the owner of the nearest hostile unit within 3 tiles in `get_threat_scan`. `get_diplomacy` also lists cities we cannot see, so the monitor reads only the tile of the city we just lost, which we already know.
+- Cause: `loyalty` when the last read had loyalty plus its per-turn change, over the turns since, at or below zero (Run 5 Palenque, turn 126: 80 at -20 a turn, lost on turn 133). Else `capture` when the taker is at war with us or a hostile unit stands within 3 tiles. Else `unknown`. A razed city, as Run 6's Uxmal, shows no city on its tile, so it takes its taker from the enemy unit beside it, or stays unknown.
+- Neither field says whether a city was destroyed or taken whole. The game reply has no such marker; only a later `city_gained` or a city on the tile would.
+
+The effectiveness check counts a `cause` of `loyalty` as a loyalty loss, as well as a recent warning. Logs from before issue 177 have no cause, and are counted by the warning rule as before.
 
 ## Suggested fixes and targets
 
@@ -116,6 +143,7 @@ These are proposed issues. None has been created.
 4. **Loyalty-aware settling and response.** Add a loyalty term to the site score: reject sites more than 8 tiles from the capital that are within 6 tiles of a rival city, and prefer sites that raise our own loyalty. Respond to `city_loyalty_warning` with the available tools (a governor, an amenity or a garrison, or stop expanding there). Target: 0 loyalty losses per run (today 4 in 4 runs); no city warned within 15 turns of founding.
 5. **Defend the (64,22) site or skip it.** It fell to Sumeria before turn 90 in three of four runs. Either garrison it with two units and walls before turn 70 (the first Sumerian war falls between turns 68 and 84), or found it later. Target: the (64,22) city is held past turn 100 in 3 of 3 runs (it fell before turn 90 in 3 of 4 runs).
 6. **Record what happened to a city.** Extend `CityLost` with the new owner and a cause (captured, destroyed, loyalty, unknown) from the tile owner after the loss, and add `city_gained`. Persist the monitor's city set across a restart. Target: every `city_lost` carries a cause and a taker; a restart does not hide a loss.
+   *Done in issue 177:* `city_lost` now carries `taker_id`, `taker_name` and `cause` (see below), and the city set persists across a restart.
 7. **Pre-war signals.** A denounce plus rival units inside our borders (Mapuche's Line Infantry stood 4 tiles from Tikal on turns 216 to 243) is the cue for fix 1, ahead of the declaration. Target: defenders raised before the declaration in Mapuche's case, 25 turns earlier.
 
 ## Evidence index

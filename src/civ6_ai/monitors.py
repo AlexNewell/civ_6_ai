@@ -12,7 +12,8 @@ limits are set here, field by field. Each read is used only for:
 - `get_empire_resources`: our own stockpiles.
 - `get_diplomacy`: met civs' war state with us, and the count of living majors, which the game
   shows as unmet entries. Not `num_cities` or `visible_cities`, which cover hidden cities and give
-  live stats, nor `military_strength`.
+  live stats, nor `military_strength`. One exception: to name who took a lost city, the tile of
+  that city (which we owned, so we know it) is looked up in `visible_cities`. No other tile is read.
 - `get_threat_scan`: units on visible tiles, minus `STEALTH_UNITS`.
 
 civ6-mcp reads that time out return the lines received so far, with no error and no marker, so a
@@ -45,6 +46,7 @@ VICTORY_PERIOD = 5
 BARBARIAN_ID = 63
 THREAT_RADIUS = 4  # Tiles from our nearest city or unit.
 ABSENT_CHECKS = 3  # A hostile owner is forgotten after this many checks without it nearby.
+TAKER_RADIUS = 3  # A hostile unit this near a lost city's tile is taken to have taken it.
 THREAT_UNITS = 3  # Fewer than this is a job for the military policy, not the strategist.
 # GameCore's scan checks the tile, not the unit, so it also reports units the player can't see.
 # These are the units tagged CLASS_STEALTH in the game's Units data, base game and Gathering Storm.
@@ -100,6 +102,12 @@ class CityLost(Event):
     city_name: str
     x: int
     y: int
+    # Who has the city now, and why it left us. Older logs have neither, so both have defaults.
+    # `cause` is "loyalty" (the last read had it flipping within a turn or two), "capture" (an enemy
+    # holds it or stands beside it) or "unknown". A taker of None means no read shows who.
+    taker_id: int | None = None
+    taker_name: str = ""
+    cause: str = "unknown"
 
 
 @dataclass(frozen=True)
@@ -281,16 +289,42 @@ class Monitor(Protocol):
         ...
 
 
+@dataclass(frozen=True)
+class _KnownCity:
+    """What the last read of one of our cities said, kept to explain it if it goes."""
+
+    name: str
+    x: int
+    y: int
+    loyalty: float
+    loyalty_per_turn: float
+    turn: int
+
+
+def _distance(x1: int, y1: int, x2: int, y2: int) -> int:
+    """Tiles between two tiles, roughly (offset rows, so a slight overestimate)."""
+    dy = abs(y1 - y2)
+    return dy + max(abs(x1 - x2) - dy // 2, 0)
+
+
 class ThreatMonitor:
+    """Watches wars, lost cities, falling loyalty and hostile units.
+
+    With a `state_path`, the city set is also kept in that JSON file, so a restart of the same game
+    still sees a city lost while the bot was down. A file from a later turn (another game or an
+    earlier save) is ignored, as the war tracker does.
+    """
+
     name = "threat"
     period = THREAT_PERIOD
 
-    def __init__(self) -> None:
+    def __init__(self, state_path: Path | None = None) -> None:
+        self.state_path = state_path
         self.reset()
 
     def reset(self) -> None:
         self._at_war: dict[int, bool] = {}
-        self._cities: dict[int, tuple[str, int, int]] | None = None
+        self._cities: dict[int, _KnownCity] | None = None
         self._disloyal: set[int] = set()
         self._hostile_owners: dict[int, int] = {}  # Owner to checks since it was last near.
 
@@ -301,12 +335,52 @@ class ThreatMonitor:
         check_cities_complete(cities, overview)
 
         turn = overview.turn
-        return [
+        if self._cities is None:
+            self._cities = self._load(turn)
+        events = [
             *self._wars(turn, civs),
-            *self._lost_cities(turn, cities),
+            *self._lost_cities(turn, cities, civs, scan),
             *self._loyalty(turn, cities),
             *self._hostile_units(turn, scan),
         ]
+        self._save(turn)
+        return events
+
+    def _load(self, turn: int) -> dict[int, _KnownCity] | None:
+        """The city set of an earlier run of this game, or None if there is none to trust."""
+        if self.state_path is None:
+            return None
+        try:
+            saved = json.loads(self.state_path.read_text(encoding="utf-8"))
+            if saved["turn"] > turn:
+                log.info(
+                    "threat: saved cities are from turn %s, after %s, so not used",
+                    saved["turn"],
+                    turn,
+                )
+                return None
+            return {int(cid): _KnownCity(**city) for cid, city in saved["cities"].items()}
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError, KeyError, TypeError):
+            log.warning("threat: could not read %s, starting without it", self.state_path)
+            return None
+
+    def _save(self, turn: int) -> None:
+        """Write the city set. A failure only costs the restart check."""
+        if self.state_path is None or self._cities is None:
+            return
+        saved = {
+            "turn": turn,
+            "cities": {str(cid): asdict(city) for cid, city in self._cities.items()},
+        }
+        try:
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            temp = self.state_path.with_name(self.state_path.name + ".tmp")
+            temp.write_text(json.dumps(saved, sort_keys=True), encoding="utf-8")
+            temp.replace(self.state_path)
+        except OSError:
+            log.warning("threat: could not save %s", self.state_path, exc_info=True)
 
     def _wars(self, turn: int, civs: list) -> list[Event]:
         """Fire when a civ we've seen goes to war with us, including at first contact.
@@ -326,15 +400,53 @@ class ThreatMonitor:
             self._at_war[civ.player_id] = civ.is_at_war
         return events
 
-    def _lost_cities(self, turn: int, cities: list) -> list[Event]:
-        current = {city.city_id: (city.name, city.x, city.y) for city in cities}
+    def _lost_cities(self, turn: int, cities: list, civs: list, scan: list) -> list[Event]:
+        current = {
+            city.city_id: _KnownCity(
+                city.name, city.x, city.y, city.loyalty, city.loyalty_per_turn, turn
+            )
+            for city in cities
+        }
         previous = self._cities if self._cities is not None else current
         self._cities = current
         return [
-            CityLost(turn, city_id, name, x, y)
-            for city_id, (name, x, y) in previous.items()
+            self._explain(turn, city_id, known, civs, scan)
+            for city_id, known in previous.items()
             if city_id not in current
         ]
+
+    def _explain(
+        self, turn: int, city_id: int, known: _KnownCity, civs: list, scan: list
+    ) -> CityLost:
+        """A `CityLost` with its taker and cause, from reads this check already made.
+
+        The taker is the met civ whose visible cities (`get_diplomacy`) include the city's tile,
+        else the owner of a hostile unit within `TAKER_RADIUS` of it (`get_threat_scan`). The cause
+        is loyalty when the last read had the loyalty reaching zero by now, a capture when the
+        taker is at war with us or a hostile unit stands beside the tile, else unknown. A razed
+        city leaves no city on its tile, so it falls to the unit, or to unknown.
+        """
+        taker: tuple[int, str] | None = None
+        for civ in civs:
+            if any((vc.x, vc.y) == (known.x, known.y) for vc in civ.visible_cities):
+                taker = (civ.player_id, civ.civ_name)
+                break
+        near = sorted(
+            (unit for unit in scan if _distance(unit.x, unit.y, known.x, known.y) <= TAKER_RADIUS),
+            key=lambda unit: _distance(unit.x, unit.y, known.x, known.y),
+        )
+        hostile = [unit for unit in near if self._is_hostile(unit)]
+        if taker is None and hostile:
+            taker = (hostile[0].owner_id, hostile[0].owner_name)
+        gap = max(turn - known.turn, 1)
+        if known.loyalty_per_turn < 0 and known.loyalty + known.loyalty_per_turn * gap <= 0:
+            cause = "loyalty"
+        elif hostile or (taker is not None and self._at_war.get(taker[0], False)):
+            cause = "capture"
+        else:
+            cause = "unknown"
+        taker_id, taker_name = taker if taker is not None else (None, "")
+        return CityLost(turn, city_id, known.name, known.x, known.y, taker_id, taker_name, cause)
 
     def _loyalty(self, turn: int, cities: list) -> list[Event]:
         falling = [

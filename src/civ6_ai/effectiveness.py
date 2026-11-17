@@ -287,9 +287,9 @@ class CityLosses:
 def city_losses(events: list[dict]) -> CityLosses:
     """Count `city_lost` events, separating cities that came back and loyalty losses.
 
-    A loss is a loyalty loss when the same city had a `city_loyalty_warning` up to
-    LOYALTY_LOOKBACK_TURNS before it. A loss "came back" when a later `city_gained` event names the
-    same city id (the monitor logs the gain from issue 156 on; older logs never carry one, so they
+    A loss is a loyalty loss when the event's `cause` says so (monitor from issue 177 on), or the
+    same city had a `city_loyalty_warning` up to LOYALTY_LOOKBACK_TURNS before it.
+    A loss "came back" when a later `city_gained` event names the same city id (the monitor logs the gain from issue 156 on; older logs never carry one, so they
     count every loss as permanent). A lost event with no city id is counted as lost for good.
     """
     warned: dict[object, list[int]] = {}
@@ -302,7 +302,9 @@ def city_losses(events: list[dict]) -> CityLosses:
             continue
         lost += 1
         city, turn = e.get("city_id"), int(e.get("turn", 0))
-        if any(0 <= turn - t <= LOYALTY_LOOKBACK_TURNS for t in warned.get(city, [])):
+        if e.get("cause") == "loyalty" or any(
+            0 <= turn - t <= LOYALTY_LOOKBACK_TURNS for t in warned.get(city, [])
+        ):
             loyalty += 1
         if city is not None and any(
             g.get("kind") == "city_gained"

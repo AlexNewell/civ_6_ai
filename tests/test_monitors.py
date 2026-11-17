@@ -840,3 +840,193 @@ def test_event_log_appends_one_json_line_per_event(tmp_path):
     log.flush()  # Nothing more to write, and no repeat.
     lines = path.read_text(encoding="utf-8").splitlines()
     assert [json.loads(line)["kind"] for line in lines] == ["war_declared", "city_lost"]
+
+
+# ----- who took a lost city, and why -----
+# Values below are from Run 5 and Run 6 event logs (city ids, tiles, turns, loyalty figures, the
+# Sumerian war of turn 129). The diplomacy reply is built in the civ6-mcp line format and parsed by
+# its own parser, so a change to the `ECITY` line shows up here.
+
+SUMERIA = 5
+CAPITAL = (65536, "Wak Kab\u2019nal", 66, 25)  # Run 6, lost on turn 135.
+PALENQUE = (393221, "Palenque", 66, 15)  # Run 5, warned on turn 126 at 80 and -20 per turn.
+
+
+def real_city(spec, loyalty=100.0, loyalty_per_turn=0.0):
+    city_id, name, x, y = spec
+    found = city(city_id, name, loyalty, loyalty_per_turn)
+    found.x, found.y = x, y
+    return found
+
+
+def diplomacy_reply(at_war, ecity_lines=()):
+    """Parsed `get_diplomacy` lines: Sumeria (met, `at_war`), with the given `ECITY` lines."""
+    from civ_mcp.lua import parse_diplomacy_response
+
+    war = "1" if at_war else "0"
+    lines = [f"CIV|{SUMERIA}|Sumeria|Gilgamesh|1|{war}|NEUTRAL|0|2|0|0|0|0", *ecity_lines]
+    return parse_diplomacy_response(lines)
+
+
+def lose(game, monitor, spec, civs, threats=()):
+    """The monitor sees the city on one turn and not on the next, as in the logs."""
+    game.cities = [real_city(spec, 100.0, 0.0)]
+    game.civs = civs
+    check(monitor, game)
+    game.cities = []
+    game.threats = list(threats)
+    return check(monitor, game)
+
+
+def test_a_captured_city_names_the_civ_that_now_holds_it_and_says_capture():
+    game = FakeGame()
+    monitor = ThreatMonitor()
+    game.turn = 134
+    ecity = f"ECITY|{SUMERIA}|Wak Kab\u2019nal|66,25|3|45.0|-2.0|0|18"
+    game.cities = [real_city(CAPITAL)]
+    game.civs = diplomacy_reply(True)
+    check(monitor, game)
+    game.cities = []
+    game.civs = diplomacy_reply(True, [ecity])
+    (event,) = check(monitor, game)
+    assert event == CityLost(
+        135,
+        65536,
+        "Wak Kab\u2019nal",
+        66,
+        25,
+        taker_id=SUMERIA,
+        taker_name="Sumeria",
+        cause="capture",
+    )
+
+
+def test_a_lost_city_with_nothing_beside_it_and_no_war_is_unknown():
+    game = FakeGame()
+    (event,) = lose(game, ThreatMonitor(), CAPITAL, diplomacy_reply(False))
+    assert (event.taker_id, event.taker_name, event.cause) == (None, "", "unknown")
+
+
+def test_a_razed_city_takes_its_taker_from_the_enemy_unit_beside_it():
+    # Run 6 Uxmal: no city left on the tile, a Sumerian War Cart one tile away, at war.
+    game = FakeGame()
+    spec = (131073, "Uxmal", 64, 22)
+    cart = unit(SUMERIA, "Sumeria", distance=1, unit_type="UNIT_SUMERIAN_WAR_CART")
+    cart.x, cart.y = 65, 22
+    monitor = ThreatMonitor()
+    game.cities = [real_city(spec)]
+    game.civs = diplomacy_reply(False)
+    check(monitor, game)
+    game.civs = diplomacy_reply(True)
+    check(monitor, game)
+    game.cities, game.threats = [], [cart]
+    (event,) = check(monitor, game)
+    assert (event.taker_id, event.taker_name, event.cause) == (SUMERIA, "Sumeria", "capture")
+
+
+def test_a_unit_far_from_the_city_does_not_name_a_taker():
+    game = FakeGame()
+    far = unit(SUMERIA, "Sumeria", distance=1)
+    far.x, far.y = 66, 30  # Five rows from the capital.
+    (event,) = lose(game, ThreatMonitor(), CAPITAL, diplomacy_reply(True), [far])
+    assert event.taker_id is None
+
+
+def test_a_loyalty_flip_is_a_loyalty_loss_even_with_an_enemy_unit_near():
+    # Run 5 Palenque: warned at 80, -20 a turn on turn 126, lost on turn 133. The last read, a
+    # turn before, had 20 left at -20.
+    game = FakeGame()
+    monitor = ThreatMonitor()
+    game.turn = 132
+    game.cities = [real_city(PALENQUE, 20.0, -20.0)]
+    game.civs = diplomacy_reply(True)
+    check(monitor, game)
+    game.cities = []
+    ecity = f"ECITY|{SUMERIA}|Palenque|66,15|2|60.0|10.0|0|12"
+    game.civs = diplomacy_reply(True, [ecity])
+    (event,) = check(monitor, game)
+    assert (event.turn, event.city_id, event.taker_id, event.cause) == (
+        133,
+        393221,
+        SUMERIA,
+        "loyalty",
+    )
+
+
+def test_a_city_that_was_falling_slowly_is_not_called_a_loyalty_loss():
+    # Run 6 Yaxchilan: -9.3 a turn at 89.7 on turn 153; it held, and was captured on turn 273.
+    game = FakeGame()
+    spec = (327680, "Yaxchilan", 63, 31)
+    monitor = ThreatMonitor()
+    game.cities = [real_city(spec, 89.7, -9.3)]
+    game.civs = diplomacy_reply(True)
+    check(monitor, game)
+    game.cities = []
+    ecity = f"ECITY|{SUMERIA}|Yaxchilan|63,31|3|60.0|0.0|0|18"
+    game.civs = diplomacy_reply(True, [ecity])
+    (event,) = check(monitor, game)
+    assert event.cause == "capture"
+
+
+def test_the_event_round_trips_through_the_log_and_old_lines_still_read():
+    from civ6_ai.monitors import event_from_json
+
+    event = CityLost(135, 65536, "Wak Kab\u2019nal", 66, 25, SUMERIA, "Sumeria", "capture")
+    assert event_from_json(event.to_json()) == event
+    old = '{"kind": "city_lost", "turn": 135, "city_id": 65536, "city_name": "X", "x": 66, "y": 25}'
+    assert event_from_json(old) == CityLost(135, 65536, "X", 66, 25)
+
+
+# ----- the city set across a restart -----
+
+
+def test_a_city_lost_while_the_bot_was_down_is_reported_on_the_next_session(tmp_path):
+    path = tmp_path / "threat.json"
+    game = FakeGame()
+    game.turn = 50
+    first = ThreatMonitor(path)
+    assert check(first, game) == []
+    assert path.exists()
+
+    # A new process: a new monitor, the colony gone, and some turns passed.
+    del game.cities[1]
+    game.turn = 53
+    events = check(ThreatMonitor(path), game)
+    assert [(e.kind, e.city_id, e.turn) for e in events] == [("city_lost", 2, 53)]
+
+
+def test_without_a_file_the_first_read_after_a_restart_is_only_a_baseline(tmp_path):
+    game = FakeGame()
+    del game.cities[1]
+    assert check(ThreatMonitor(tmp_path / "none.json"), game) == []
+
+
+def test_a_saved_set_from_a_later_turn_is_ignored(tmp_path):
+    path = tmp_path / "threat.json"
+    game = FakeGame()
+    game.turn = 80
+    check(ThreatMonitor(path), game)
+    del game.cities[1]
+    game.turn = 40  # An earlier save was loaded.
+    assert check(ThreatMonitor(path), game) == []
+
+
+def test_a_damaged_state_file_is_ignored(tmp_path):
+    path = tmp_path / "threat.json"
+    path.write_text("{not json", encoding="utf-8")
+    game = FakeGame()
+    monitor = ThreatMonitor(path)
+    assert check(monitor, game) == []
+    assert json.loads(path.read_text(encoding="utf-8"))["cities"]  # Rewritten whole.
+
+
+def test_the_restart_carries_the_loyalty_the_loss_is_judged_by(tmp_path):
+    path = tmp_path / "threat.json"
+    game = FakeGame()
+    game.turn = 130
+    game.cities = [real_city(PALENQUE, 40.0, -20.0)]
+    check(ThreatMonitor(path), game)
+    game.cities = []
+    game.turn = 133
+    (event,) = check(ThreatMonitor(path), game)
+    assert event.cause == "loyalty"

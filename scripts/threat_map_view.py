@@ -42,7 +42,12 @@ def rebuild(record: dict) -> ThreatMap:
     return m
 
 
-def window(record: dict, pad: int) -> tuple[int, int, int, int]:
+def window(
+    record: dict, pad: int, box: tuple[int, int, int, int] | None = None
+) -> tuple[int, int, int, int]:
+    """The tiles drawn: `box` (x0, x1, y0, y1) if given, else everything on the dump plus `pad`."""
+    if box is not None:
+        return box
     points = [(s["x"], s["y"]) for s in record["sources"]]
     points += [(c[0], c[1]) for c in record.get("cities", [])]
     points += [(u[0], u[1]) for u in record.get("units", [])]
@@ -71,10 +76,10 @@ def _label(d: ImageDraw.ImageDraw, at: tuple[float, float], text: str, font, fil
     d.text(at, text, fill=fill, font=font, anchor="mm", stroke_width=2, stroke_fill=(255, 255, 255))
 
 
-def draw(record: dict, pad: int) -> Image.Image:
+def draw(record: dict, pad: int, box: tuple[int, int, int, int] | None = None) -> Image.Image:
     turn = record["turn"]
     m = rebuild(record)
-    x0, x1, y0, y1 = window(record, pad)
+    x0, x1, y0, y1 = window(record, pad, box)
     size = 44  # Hex radius in pixels.
     w, h = math.sqrt(3) * size, 1.5 * size
     margin = 60
@@ -153,9 +158,9 @@ def draw(record: dict, pad: int) -> Image.Image:
     return img
 
 
-def ascii_map(record: dict, pad: int) -> str:
+def ascii_map(record: dict, pad: int, box: tuple[int, int, int, int] | None = None) -> str:
     m = rebuild(record)
-    x0, x1, y0, y1 = window(record, pad)
+    x0, x1, y0, y1 = window(record, pad, box)
     turn = record["turn"]
     cities = {(c[0], c[1]) for c in record.get("cities", [])}
     camps = {(s["x"], s["y"]) for s in record["sources"] if s["kind"] == "camp"}
@@ -187,13 +192,22 @@ def main() -> None:
     parser.add_argument("--turn", type=int)
     parser.add_argument("--pad", type=int, default=5, help="tiles of margin around what matters")
     parser.add_argument("--out", type=Path)
+    parser.add_argument(
+        "--box", help="x0,x1,y0,y1: draw exactly these tiles instead of fitting the dump"
+    )
     args = parser.parse_args()
     record = load(args.dump, args.turn)
+    box = tuple(int(v) for v in args.box.split(",")) if args.box else None
+    if not record.get("cities"):
+        print(
+            "warning: this dump has no cities or units (written before they were recorded), so "
+            "the window fits only the sources. Use --box x0,x1,y0,y1 to draw a wider area."
+        )
     if args.out:
-        draw(record, args.pad).save(args.out)
+        draw(record, args.pad, box).save(args.out)
         print(f"wrote {args.out}")
     else:
-        print(ascii_map(record, args.pad))
+        print(ascii_map(record, args.pad, box))
 
 
 if __name__ == "__main__":

@@ -36,6 +36,7 @@ Furthermore, wherever possible, this project will explore locally hosting miniat
 - [Offline work beside a live game](docs/offline-work.md)
 - [Research notes](docs/research/reducing-frontier-model-cost.md)
 - [Review: Airbnb's fine-tuned vs frontier classifier benchmark](docs/research/airbnb-llm-classifier-benchmark.md)
+- [Research: reading game state from the engine, not the screen](docs/research/game-state-perception.md)
 - [Third-party notices](THIRD_PARTY_NOTICES.md)
 
 ## Requirements

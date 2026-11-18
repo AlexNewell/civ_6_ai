@@ -3,6 +3,8 @@ import json
 import logging
 from types import SimpleNamespace
 
+import pytest
+
 from civ6_ai.metrics.civbench_gap import gaps
 from civ6_ai.metrics.history import points
 from civ6_ai.orchestrator import DoNothing, Orchestrator, TurnLog
@@ -133,10 +135,8 @@ def test_failed_overview_read_clears_the_holder():
 
     holder = RankingsHolder()
     asyncio.run(WorldRankingsLog(LuaGame(REPLY), holder).run(Game()))
-    try:
+    with pytest.raises(RuntimeError):
         asyncio.run(WorldRankingsLog(LuaGame(REPLY), holder).run(BrokenGame()))
-    except RuntimeError:
-        pass
     assert holder.last is None
 
 

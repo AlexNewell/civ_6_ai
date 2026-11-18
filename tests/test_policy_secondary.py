@@ -943,3 +943,67 @@ def test_unsafe_trader_is_not_a_fallback_candidate():
     assert rank_production(city, [trader_option()], ctx) == []
     safe = ProductionContext(turn=120, num_cities=3, trade_capacity=2)
     assert len(rank_production(city, [trader_option()], safe)) == 1
+
+
+# ----- route danger over a route's lifetime (issue 276) -----
+
+
+class _CoveredMap:
+    """A map where our cover cancels every net threat but a camp's reach still shows."""
+
+    def __init__(self, inner, camps_on=True):
+        self.inner = inner
+        self.settings = inner.settings
+        self.camps_on = camps_on
+
+    def net_at(self, x, y, turn=None):
+        return 0.0
+
+    def camps_reaching(self, x, y):
+        return self.inner.camps_reaching(x, y) if self.camps_on else []
+
+
+def test_a_camp_reach_counts_even_when_cover_cancels_the_net_threat():
+    from civ6_ai.policies.secondary import route_check
+
+    covered = _CoveredMap(camp_map(x=15, y=10))
+    danger, camps = route_check(covered, 10, 10, 20, 10, 50)
+    assert danger > SecondaryWeights().route_danger_max
+    assert camps == [(15, 10)]
+    assert route_check(covered, 10, 30, 10, 36, 50) == (0.0, [])
+
+
+def test_a_quiet_reading_does_not_clear_a_route_inside_the_recent_window():
+    inner = camp_map(x=15, y=10)
+    covered = _CoveredMap(inner)
+    policy = SecondaryPolicy()
+    policy.map = covered
+    game = trade_game([trader()], dests={5: [dest("Far", x=20)]})
+    run(policy, game)
+    assert acted(game, "route") == []
+    covered.camps_on = False  # The camp drops out of view; the danger is still remembered.
+    policy._trade_wait.clear()
+    game2 = trade_game([trader()], dests={5: [dest("Far", x=20)]})
+    asyncio.run(policy._trade(game2, 52))
+    assert acted(game2, "route") == []
+    policy._trade_wait.clear()
+    game3 = trade_game([trader()], dests={5: [dest("Far", x=20)]})
+    asyncio.run(policy._trade(game3, 56))  # Past route_danger_turns of the last reading.
+    assert len(acted(game3, "route")) == 1
+
+
+def test_a_held_trader_log_names_the_camp(caplog):
+    policy = SecondaryPolicy()
+    policy.map = _CoveredMap(camp_map(x=15, y=10))
+    game = trade_game([trader()], dests={5: [dest("Far", x=20)]})
+    with caplog.at_level("INFO", logger="civ6_ai.policies.secondary"):
+        run(policy, game)
+    held = next(r.getMessage() for r in caplog.records if "held" in r.getMessage())
+    assert "camp at (15,10)" in held
+
+
+def test_camps_reaching_lists_the_camp_and_skips_far_tiles():
+    m = camp_map(x=15, y=10)
+    near = m.camps_reaching(16, 10)
+    assert [(c.x, c.y) for c, _ in near] == [(15, 10)] and near[0][1] > 0
+    assert m.camps_reaching(15, 40) == []

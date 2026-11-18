@@ -53,6 +53,8 @@ PHANTOM_PUSH = 2.0
 
 SETTLER = "UNIT_SETTLER"
 SCOUT = "UNIT_SCOUT"
+# Decisions that leave a settler waiting with nowhere to go this turn (issue 283).
+_HELD_ACTIONS = frozenset({"hold", "no_site"})
 
 # Fog rays follow civ6-mcp's strategic map query, which steps along these offsets from a city.
 _FOG_RAYS = ((0, -1), (1, -1), (1, 1), (0, 1), (-1, 1), (-1, -1))
@@ -710,6 +712,7 @@ class SettlingPolicy:
     # Settlers that founded a city this turn (so they are no longer on the map), and how many turns
     # in a row each has found no site.
     _founded: set[int] = field(default_factory=set, init=False, repr=False)
+    _held_now: set[int] = field(default_factory=set, init=False, repr=False)
     _no_site_turns: dict[int, int] = field(default_factory=dict, init=False, repr=False)
     _rival_cities: list[tuple[int, int, int]] = field(default_factory=list, init=False, repr=False)
     # Every rival city seen on a visible tile, by tile, with its last seen population. The game
@@ -742,6 +745,8 @@ class SettlingPolicy:
         settlers = [u for u in units if u.unit_type == SETTLER and u.can_move]
         scouts = [u for u in units if u.unit_type == SCOUT and u.can_move]
         self._founded = set()
+        self._held_now = set()
+        self.expansion.held_settlers = 0
         self._scout_alive = any(u.unit_type == SCOUT for u in units)
         self._fog_can = getattr(game, "execute_lua", None) is not None
         # Run 8: the count stayed at 1 from the turn a settler founded its city to the end of the
@@ -801,6 +806,7 @@ class SettlingPolicy:
                     turn,
                     claimed,
                 )
+        self.expansion.held_settlers = len(self._held_now)
         self._survey(settlers, units, exploration, city_tiles, danger, turn)
         for rank, scout in enumerate(sorted(scouts, key=lambda u: u.unit_id)):
             look = self._look_points[rank % len(self._look_points)] if self._look_points else None
@@ -1232,6 +1238,8 @@ class SettlingPolicy:
             ]
 
         def record(action: str, reason: str, target=None, result: str = "") -> None:
+            if action in _HELD_ACTIONS:
+                self._held_now.add(settler.unit_id)
             self._record(
                 SettleDecision(
                     turn=turn,

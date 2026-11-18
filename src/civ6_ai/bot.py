@@ -308,7 +308,12 @@ def build_orchestrator(
     rankings = RankingsHolder()  # Every living civ's score (issue 256).
     diplomacy = DiplomacyPolicy(threats=victory_watch.threat_ids)
     research_policy = research.ResearchPolicy()
-    gold = GoldPolicy(defence=defence, plans=production.planner.book, builder_demand=builder_demand)
+    gold = GoldPolicy(
+        defence=defence,
+        plans=production.planner.book,
+        builder_demand=builder_demand,
+        expansion=production.expansion,
+    )
     tables = [
         production.blocker_policies(),
         research.blocker_policies(),

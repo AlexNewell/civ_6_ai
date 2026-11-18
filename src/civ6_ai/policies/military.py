@@ -1100,9 +1100,20 @@ class MilitaryPolicy:
                 if civ.guarded:
                     self._skip_recapture(t, civ, "a soldier stands on the tile with it")
                     continue
-            result = await self._order(
-                t, unit, "recapture", game.move_unit(unit.unit_index, *where)
-            )
+            goal = where
+            if marching:
+                # Stop on a tile this turn's walk reaches, and only if it is safe: the target
+                # being safe says nothing of the way there.
+                line = hex_line((unit.x, unit.y), where, s.map_width)
+                goal = line[min(max(1, int(unit.moves)), len(line)) - 1]
+                stop = self.threat_map.threat_at(goal[0], goal[1], t.turn)
+                if stop > s.recapture_threat:
+                    self._skip_recapture(
+                        t, civ, "the march would stop in a threatened tile",
+                        stop=list(goal), threat=round(stop, 1),
+                    )  # fmt: skip
+                    continue
+            result = await self._order(t, unit, "recapture", game.move_unit(unit.unit_index, *goal))
             if result is not None and move_succeeded(result):
                 self._leave(t, unit)
                 t.acted.add(unit.unit_id)

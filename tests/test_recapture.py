@@ -200,7 +200,7 @@ def test_a_civilian_a_few_turns_away_is_marched_on():
     policy, game = setup(pair(), seen_map(far), civ=far)
     game.replies["move"] = "MOVING_TO|15,10|from:11,9|now_at:12,10"
     run(policy, game)
-    assert ("move", 2, 15, 10) in game.orders("move")
+    assert ("move", 2, 13, 10) in game.orders("move") or ("move", 2, 13, 9) in game.orders("move")
     assert any("short of 15,10" in d.reason for d in policy.decisions)
 
 
@@ -300,3 +300,16 @@ def test_a_captor_that_walked_on_is_found_with_a_wider_reach_each_turn(caplog):
         tm.see_tiles(22, [build_tile(far)])
         run(policy, game)
     assert any(m.startswith("military_capture ") for m in caplog.messages)
+
+
+def test_a_march_that_would_stop_in_a_threatened_tile_is_not_started(caplog):
+    far = civ_tile(x=15, y=10)
+    tm = seen_map(far)
+    tm.see_tiles(
+        20, [build_tile(tile(x=11, y=7, improvement="IMPROVEMENT_BARBARIAN_CAMP", units=[]))]
+    )
+    policy, game = setup(pair(), tm, civ=far)
+    with caplog.at_level(logging.INFO):
+        run(policy, game)
+    assert not [m for m in game.orders("move") if m[2:] == (15, 10)]
+    assert any("threatened tile" in x["reason"] for x in skips(caplog))

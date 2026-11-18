@@ -302,6 +302,7 @@ def build_orchestrator(
     settling.terrain = threat_map_handler.terrain  # What a step costs (issue 238).
     if use_threat_map:
         military.threat_map = threat_map_handler.map
+        settling.threat_map = threat_map_handler.map  # Sightings gone into the fog (issue 288).
         secondary.map = threat_map_handler.map  # Routes are checked against it (issue 269).
         defence.map = threat_map_handler.map  # The same map decides who is short (issue 264).
     victory_watch = VictoryWatch()

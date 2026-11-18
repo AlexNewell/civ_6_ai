@@ -116,6 +116,13 @@ class SettlingSettings:
     flee_escorted_hostiles: int = 2  # An escort is no cover against this many hostile units near.
     escort_search_radius: int = 5
     scout_threat_radius: int = 2
+    # Issue 288: a hostile unit seen near a site and now out of sight has not gone, it is in the
+    # fog (the threat map keeps it). A site with a fogged surround (`fog_share_min`) and such a
+    # sighting within `threat_radius` of it is walked to with an escort, never alone; the
+    # sighting ages out after `recent_sighting_turns`, so a site with no escort free is waited for
+    # only while the evidence is fresh. A site near any recent sighting is also not stepped onto
+    # with no moves left to found: the settler stops one tile short and goes in next turn.
+    recent_sighting_turns: int = 6
     # A city's last defender may escort a settler when the threat near the city is limited.
     # Hostile units within `garrison_threat_radius` of the city (two turns of march) are weighed:
     # at most `garrison_max_hostiles` of them, none a siege unit, none stronger than the city's
@@ -358,6 +365,8 @@ class CandidateLog:
     safe_rate: float = 0.0  # The same after growth, fog and new-city drag.
     robust_rate: float = 0.0  # The same with an unseen rival capital at the nearest fogged tile.
     fog_share: float = 0.0  # Unrevealed share of the far-side tiles within loyalty range.
+    recent_near: bool = False  # A hostile unit, now unseen, was recently seen near the site.
+    fog_risk: bool = False  # Fogged surround and a recent sighting near: needs an escort.
 
 
 @dataclass(frozen=True)
@@ -652,6 +661,11 @@ class _Danger:
 
     threats: tuple[Threat, ...]
     map_width: int | None
+    # (x, y) of hostile units seen within the last few turns and now out of sight.
+    recent: tuple[tuple[int, int], ...] = ()
+
+    def recent_near(self, x: int, y: int, radius: int) -> bool:
+        return any(hex_distance(x, y, rx, ry, self.map_width) <= radius for rx, ry in self.recent)
 
     def near(self, x: int, y: int, radius: int) -> bool:
         return any(
@@ -701,6 +715,8 @@ class SettlingPolicy:
     # The terrain store (issue 238), set by the bot's wiring: it says what a step costs, so a
     # settler one tile off a good site can step on and found in the same turn.
     terrain: Any = field(default=None, repr=False)
+    # The threat map (issue 288): it remembers hostile units that have gone out of sight.
+    threat_map: Any = field(default=None, repr=False)
     _lone_ok: frozenset = field(default_factory=frozenset, init=False, repr=False)
     _stripped: dict[tuple[int, int], int] = field(default_factory=dict, init=False, repr=False)
     _automated: dict[int, int] = field(default_factory=dict, init=False, repr=False)
@@ -775,7 +791,7 @@ class SettlingPolicy:
                 raise
             log.warning("Survey read failed; production keeps its last survey", exc_info=True)
             return
-        danger = _Danger(threats, self.settings.map_width)
+        danger = _Danger(threats, self.settings.map_width, self._recent_sightings(turn))
         city_tiles = [(c.x, c.y) for c in cities]
         self._lone_ok = (
             spare_garrison_tiles(
@@ -811,6 +827,20 @@ class SettlingPolicy:
         for rank, scout in enumerate(sorted(scouts, key=lambda u: u.unit_id)):
             look = self._look_points[rank % len(self._look_points)] if self._look_points else None
             await self._explore(game, scout, exploration, danger, turn, look)
+
+    def _recent_sightings(self, turn: int) -> tuple[tuple[int, int], ...]:
+        """Where hostile land units were last seen in recent turns and are not in sight now."""
+        if self.threat_map is None:
+            return ()
+        window = self.settings.recent_sighting_turns
+        return tuple(
+            (src.x, src.y)
+            for src in self.threat_map.sources
+            if src.kind == "unit"
+            and not src.naval
+            and src.age(turn) is not None
+            and 1 <= src.age(turn) <= window
+        )
 
     async def _remember_rivals(
         self, game: SettlingGame, cities: Iterable[City], need_known: bool = True
@@ -1162,6 +1192,16 @@ class SettlingPolicy:
             path_threat = rejected is None and danger.on_path(
                 (settler.x, settler.y), (site.x, site.y), s.threat_radius
             )
+            # Issue 288: a camp or its units may lurk in the fog beside the site.
+            recent_near = rejected is None and danger.recent_near(
+                site.x, site.y, s.threat_radius + s.flee_mounted_extra
+            )
+            fog_risk = (
+                rejected is None
+                and fog_share >= s.fog_share_min
+                and danger.recent_near(site.x, site.y, s.threat_radius)
+            )
+            path_threat = path_threat or fog_risk
             found.append(
                 CandidateLog(
                     site.x,
@@ -1178,6 +1218,8 @@ class SettlingPolicy:
                     safe,
                     robust,
                     fog_share,
+                    recent_near,
+                    fog_risk,
                 )
             )
         found.sort(key=lambda c: (-c.net_score, c.distance, c.x, c.y))
@@ -1410,7 +1452,14 @@ class SettlingPolicy:
             # Going alone is for a route the threat read finds clear (those candidates have no
             # path_threat); otherwise wait for an escort rather than walk into the threat.
             self._holds[settler.unit_id] = holds + 1
-            record("hold", "every route passes a hostile unit and no escort is free")
+            fogged = any(c.fog_risk for c in better)
+            record(
+                "hold",
+                "a hostile unit was seen near a fogged site and no escort is free; it goes when "
+                "the sighting is stale"
+                if fogged
+                else "every route passes a hostile unit and no escort is free",
+            )
             return
         reason = "heading for the best site"
         self._site_claims[settler.unit_id] = (target.x, target.y)
@@ -1453,7 +1502,14 @@ class SettlingPolicy:
             moved = move_succeeded(result)
             record("escort_move", "route is threatened, so the escort leads", goal, result)
             return moved
-        result = await game.move_unit(settler.unit_index, *goal)
+        # Issue 288: a settler that reaches the site with no moves left spends a turn there
+        # exposed, unable to found. With a hostile seen near, it stops a tile short instead.
+        dest = goal
+        gap = hex_distance(settler.x, settler.y, *goal, s.map_width)
+        if target.recent_near and 2 <= gap <= max(1, int(settler.moves)):
+            dest = hex_line((settler.x, settler.y), goal, s.map_width)[-2]
+            reason = "a hostile unit was seen near the site, so stopping a tile short"
+        result = await game.move_unit(settler.unit_index, *dest)
         moved = move_succeeded(result)
         if moved:
             self._move_failures.pop(goal, None)
@@ -1547,7 +1603,9 @@ class SettlingPolicy:
         if self.terrain is None:
             return None
         for c in candidates:
-            if c.rejected != HOSTILE_NEAR_SITE:
+            # A hostile seen near and now unseen (issue 288) also steps on and founds at once,
+            # so the settler is never left on the site with its moves spent.
+            if c.rejected != HOSTILE_NEAR_SITE and not (c.rejected is None and c.recent_near):
                 continue  # No hostile near: the usual route (step now, found next turn).
             if hex_distance(settler.x, settler.y, c.x, c.y, s.map_width) != 1:
                 continue

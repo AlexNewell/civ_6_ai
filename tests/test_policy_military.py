@@ -2429,10 +2429,10 @@ def test_a_camp_our_unit_took_counts_as_ours_not_as_gone(caplog):
     policy = MilitaryPolicy()
     policy._mission[3] = ((14, 10), 20)
     policy._camps[(14, 10)] = 20
-    near = warrior(uid=3, x=13, y=10, **STRONG)
+    near = warrior(uid=3, x=14, y=10, **STRONG)
     with caplog.at_level(logging.INFO):
         run(policy, MilitaryGame([warrior(uid=1), near], []))
-        del policy._camps[(14, 10)]  # Taken by the unit standing beside it.
+        del policy._camps[(14, 10)]  # Taken by the unit standing on it.
         run(policy, MilitaryGame([warrior(uid=1), near], []))
     rows = offense_rows(caplog)
     assert [(r["camps_gone"], r["camps_cleared_by_us"]) for r in rows][-1] == (0, 1)
@@ -2448,4 +2448,16 @@ def test_a_camp_that_vanishes_with_no_force_sent_is_still_noticed(caplog):
         policy._camps.pop((14, 10), None)
         game2 = MilitaryGame([warrior(uid=1, x=2, y=2)], [])
         run(policy, game2)
+    assert any('"by": "other"' in r.message for r in caplog.records)
+
+
+def test_a_unit_merely_beside_a_camp_that_vanished_does_not_make_it_ours(caplog):
+    policy = MilitaryPolicy()
+    policy._mission[3] = ((14, 10), 20)
+    policy._camps[(14, 10)] = 20
+    beside = warrior(uid=3, x=13, y=10, **STRONG)
+    with caplog.at_level(logging.INFO):
+        run(policy, MilitaryGame([warrior(uid=1), beside], []))
+        del policy._camps[(14, 10)]
+        run(policy, MilitaryGame([warrior(uid=1), beside], []))
     assert any('"by": "other"' in r.message for r in caplog.records)

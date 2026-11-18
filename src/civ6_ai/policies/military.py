@@ -2315,8 +2315,19 @@ class MilitaryPolicy:
         self._camp_baseline = False
 
     def _note_gone(self, camp: tuple[int, int], t: _Turn | None = None) -> None:
-        """A camp is no longer known. Ours if a unit of ours stood on or beside its tile, else
-        someone else cleared it (issue 279). Logged once; its force is released."""
+        """A camp is no longer known. Ours if a unit of ours stood on its tile (or beside it after
+        hitting its defenders), else someone else cleared it (issue 279). Logged once; its force
+        is released."""
+        w = self.settings.map_width
+        hit = (
+            t is not None
+            and t.turn - self._camp_hit.get(camp, -999) <= self.settings.camp_loss_window
+        )
+        # Ours only if a unit of ours stands on the tile (it took it), or stands beside it after
+        # hitting its defenders lately. Being near says nothing of who cleared it.
+        ours = t is not None and any(
+            (d := hex_distance(*self._pos(t, u), *camp, w)) == 0 or (d == 1 and hit) for u in t.mine
+        )
         for kept in (self._camp_memory, self._committed, self._losses, self._camp_hit):
             kept.pop(camp, None)  # A camp that is gone leaves nothing to remember.
         for uid in [u for u, m in self._mission.items() if m[0] == camp]:
@@ -2324,9 +2335,6 @@ class MilitaryPolicy:
         if camp in self._gone_noted:
             return
         self._gone_noted.add(camp)
-        ours = t is not None and any(
-            hex_distance(*self._pos(t, u), *camp, self.settings.map_width) <= 1 for u in t.mine
-        )
         if ours:
             self._camps_ours += 1
         else:

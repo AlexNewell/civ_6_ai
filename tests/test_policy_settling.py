@@ -2086,8 +2086,7 @@ def test_escort_that_can_hold_the_stop_tile_still_leads():
 
 def test_settler_that_fled_does_not_resume_while_the_hostile_is_near_the_route():
     policy = _policy()
-    policy._fled.add(7)
-    policy._site_claims[7] = (14, 6)
+    policy._fled[7] = (14, 6)
     game = _route_game(36, [_courser(12, 11)])
     run(policy, game)
     assert not game.actions
@@ -2101,8 +2100,7 @@ def test_settler_that_fled_does_not_resume_while_the_hostile_is_near_the_route()
 
 def test_backing_off_one_route_leaves_another_site_open():
     policy = _policy()
-    policy._fled.add(7)
-    policy._site_claims[7] = (14, 6)
+    policy._fled[7] = (14, 6)
     game = make_game(
         [settler(y=14), unit_info(unit_id=9, unit_index=9, x=10, y=14, combat_strength=36)],
         cities=[alpha()],

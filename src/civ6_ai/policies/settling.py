@@ -749,8 +749,9 @@ class SettlingPolicy:
     # The threat map (issue 288): it remembers hostile units that have gone out of sight.
     threat_map: Any = field(default=None, repr=False)
     _lone_ok: frozenset = field(default_factory=frozenset, init=False, repr=False)
-    # Settlers that fled a hostile unit (issue 291): not resumed until none is near the route.
-    _fled: set = field(default_factory=set, init=False, repr=False)
+    # Settlers that fled a hostile unit (issue 291), with the site they were heading for: that
+    # route is not resumed while a hostile unit is near it.
+    _fled: dict[int, tuple[int, int]] = field(default_factory=dict, init=False, repr=False)
     _stripped: dict[tuple[int, int], int] = field(default_factory=dict, init=False, repr=False)
     _automated: dict[int, int] = field(default_factory=dict, init=False, repr=False)
     _scout_targets: dict[int, tuple[int, int]] = field(default_factory=dict, init=False, repr=False)
@@ -1396,8 +1397,8 @@ class SettlingPolicy:
             )
             return
         if settler.unit_id in self._fled:
-            claim = self._site_claims.get(settler.unit_id)
-            if claim is not None and danger.on_path((settler.x, settler.y), claim, s.threat_radius):
+            claim = self._fled[settler.unit_id]
+            if danger.on_path((settler.x, settler.y), claim, s.threat_radius):
                 # Only that route is backed off from; another site may still be taken.
                 usable = [c for c in usable if (c.x, c.y) != claim]
                 if not usable:
@@ -1408,7 +1409,7 @@ class SettlingPolicy:
                     )
                     return
             else:
-                self._fled.discard(settler.unit_id)
+                del self._fled[settler.unit_id]
 
         options = usable
         found_here = False
@@ -1448,7 +1449,7 @@ class SettlingPolicy:
             if action_succeeded(result):
                 record("found", reason, (settler.x, settler.y), result)
                 self._site_claims.pop(settler.unit_id, None)
-                self._fled.discard(settler.unit_id)
+                self._fled.pop(settler.unit_id, None)
                 self._holds.pop(settler.unit_id, None)
                 self._no_site_turns.pop(settler.unit_id, None)
                 self._founded.add(settler.unit_id)
@@ -1741,7 +1742,9 @@ class SettlingPolicy:
         for city in ordered[:2]:
             result = await game.move_unit(settler.unit_index, *city)
             if move_succeeded(result):
-                self._fled.add(settler.unit_id)
+                claim = self._site_claims.get(settler.unit_id)
+                if claim is not None:
+                    self._fled[settler.unit_id] = claim
                 record(
                     "flee",
                     f"{near} hostile unit(s) close, retreating to the nearest city",

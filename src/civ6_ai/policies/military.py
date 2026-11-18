@@ -683,7 +683,6 @@ class MilitaryPolicy:
     )
     _recaptured: int = field(default=0, init=False, repr=False)
     _captured: int = field(default=0, init=False, repr=False)
-    _lost_civilians: int = field(default=0, init=False, repr=False)
 
     def blocker_policies(self) -> Mapping[str, Any]:
         """Policies to pass to `BlockerResolver`, which takes over the promotion blocker."""
@@ -910,8 +909,7 @@ class MilitaryPolicy:
                         sort_keys=True,
                     ),
                 )
-            else:
-                self._lost_civilians += 1
+            # With none near, it may have founded a city or spent its charges, so it is not counted.
         self._own_civilians = now
 
     async def _recapture(self, game: MilitaryGame, t: _Turn) -> None:
@@ -959,13 +957,14 @@ class MilitaryPolicy:
             if result is not None and move_succeeded(result):
                 self._leave(t, unit)
                 t.acted.add(unit.unit_id)
-                t.placed[unit.unit_id] = self._reached(result, where)
-                self._recaptured += 1
-                self._log(
-                    t, unit, "recapture",
-                    f"recapture: {civ.owner} {civ.unit} at {where[0]},{where[1]}",
-                    where, result=result,
-                )  # fmt: skip
+                at = self._reached(result, where)
+                t.placed[unit.unit_id] = at
+                if at == where:
+                    self._recaptured += 1
+                    note = f"recapture: {civ.owner} {civ.unit} at {where[0]},{where[1]}"
+                else:  # Terrain cost a longer walk: the unit is on its way, nothing is taken yet.
+                    note = f"recapture: stopped at {at[0]},{at[1]} short of {where[0]},{where[1]}"
+                self._log(t, unit, "recapture", note, where, result=result)
             else:
                 self._refuse(t, unit, "recapture")
                 self._log(
@@ -1016,7 +1015,6 @@ class MilitaryPolicy:
             "camps_gone": self._camps_gone,
             "recaptures": self._recaptured,
             "civilians_captured": self._captured,
-            "civilians_lost": self._lost_civilians,
             "civilians_hostile": len(self._hostile_civilians(t)),
             "camp_orders": sum(1 for d in mine if d.action == "camp" and "refused" not in d.reason),
             "map_use": {**t.map_use, "missions_released": self._released},
@@ -1024,7 +1022,7 @@ class MilitaryPolicy:
         }
         self._released = 0
         self._camps_gone = 0
-        self._recaptured = self._captured = self._lost_civilians = 0
+        self._recaptured = self._captured = 0
         log.info("military_offense %s", json.dumps(line, sort_keys=True))
 
     # ----- bookkeeping -----

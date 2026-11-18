@@ -116,15 +116,25 @@ def test_a_settler_that_vanishes_beside_a_barbarian_settler_counts_as_captured(c
     assert any(m.startswith("military_capture") for m in caplog.messages)
     line = next(m for m in caplog.messages if m.startswith("military_offense"))
     stats = json.loads(line.split(" ", 1)[1])
-    assert stats["civilians_captured"] == 1 and stats["civilians_lost"] == 0
+    assert stats["civilians_captured"] == 1 and "civilians_lost" not in stats
 
 
-def test_a_settler_that_vanishes_with_no_hostile_civilian_near_counts_as_lost(caplog):
+def test_a_settler_that_vanishes_with_no_hostile_civilian_near_is_not_a_capture(caplog):
     policy, game = setup([warrior(uid=1), settler(uid=8, x=11, y=11)], ThreatMap())
     run(policy, game)
-    game.data["units"] = [warrior(uid=1)]
+    game.data["units"] = [warrior(uid=1)]  # It founded a city, say.
     with caplog.at_level(logging.INFO):
         run(policy, game)
     line = next(m for m in caplog.messages if m.startswith("military_offense"))
-    stats = json.loads(line.split(" ", 1)[1])
-    assert stats["civilians_captured"] == 0 and stats["civilians_lost"] == 1
+    assert json.loads(line.split(" ", 1)[1])["civilians_captured"] == 0
+    assert not any(m.startswith("military_capture") for m in caplog.messages)
+
+
+def test_a_partial_move_is_not_counted_as_a_recapture(caplog):
+    policy, game = setup(pair(), seen_map(civ_tile()))
+    game.replies["move"] = "MOVING_TO|12,10|from:11,9|now_at:11,10"
+    with caplog.at_level(logging.INFO):
+        run(policy, game)
+    line = next(m for m in caplog.messages if m.startswith("military_offense"))
+    assert json.loads(line.split(" ", 1)[1])["recaptures"] == 0
+    assert any("short of 12,10" in d.reason for d in policy.decisions)

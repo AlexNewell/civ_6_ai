@@ -26,6 +26,7 @@ log = logging.getLogger(__name__)
 _SCORE = "WR_SCORE|"
 _LEAD = "WR_LEAD|"
 _ME = "WR_ME|"
+_DONE = "WR_DONE"  # Own end marker: civ6-mcp strips its sentinel from the reply.
 
 # The victory types the Overall tab shows a leader for, with the short names used in logs.
 VICTORY_TYPES = {
@@ -74,6 +75,7 @@ for _, vt in ipairs({{{_TYPE_LIST}}}) do
         end
     end)
 end
+print("{_DONE}")
 print("{SENTINEL}")
 """
 
@@ -177,24 +179,28 @@ class WorldRankings:
 
 
 def parse_world_rankings(output: str) -> WorldRankings | None:
-    """Read the reply. None if our id or all scores are missing: a bad read is never half used."""
+    """Read the reply. None unless it is complete: a bad read is never half used."""
     our_id: int | None = None
     civs: list[CivScore] = []
     leaders: list[VictoryLeader] = []
+    done = False
     try:
         for line in output.splitlines():
             if line.startswith(_ME):
                 our_id = int(line[len(_ME) :])
             elif line.startswith(_SCORE):
                 pid, name, score = line[len(_SCORE) :].split("|")
-                if int(score) >= 0:
-                    civs.append(CivScore(int(pid), name.strip(), int(score)))
+                if int(score) < 0:
+                    return None  # A living civ whose score could not be read: not a full table.
+                civs.append(CivScore(int(pid), name.strip(), int(score)))
+            elif line.strip() == _DONE:
+                done = True
             elif line.startswith(_LEAD):
                 victory, pid, progress = line[len(_LEAD) :].split("|")
                 leaders.append(VictoryLeader(victory, int(pid), float(progress)))
     except ValueError:
         return None
-    if our_id is None or not civs:
+    if not done or our_id is None or not civs:
         return None
     civs.sort(key=lambda c: (-c.score, c.player_id))
     return WorldRankings(our_id, tuple(civs), tuple(leaders))

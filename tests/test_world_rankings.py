@@ -25,6 +25,7 @@ WR_SCORE|0|Maya|384
 WR_LEAD|VICTORY_TECHNOLOGY|-1|12
 WR_LEAD|VICTORY_CULTURE|-1|130.5
 WR_LEAD|VICTORY_RELIGIOUS|5|2
+WR_DONE
 ---END---"""
 
 
@@ -55,7 +56,7 @@ def test_unmet_leaders_are_anonymous_and_met_leaders_are_named():
 
 
 def test_we_lead_when_we_have_the_best_score():
-    r = parse_world_rankings("WR_ME|1\nWR_SCORE|1|Us|300\nWR_SCORE|-1||250\n---END---")
+    r = parse_world_rankings("WR_ME|1\nWR_SCORE|1|Us|300\nWR_SCORE|-1||250\nWR_DONE")
     assert (r.rank, r.gap, r.leader_score) == (1, 50, 300)
 
 
@@ -63,7 +64,11 @@ def test_bad_replies_are_not_half_used():
     assert parse_world_rankings("(no output)") is None
     assert parse_world_rankings("WR_SCORE|-1||5\n") is None  # No id of ours.
     assert parse_world_rankings("WR_ME|0\nWR_SCORE|0|x|notanumber") is None
-    assert parse_world_rankings("WR_ME|0\nWR_SCORE|0|Us|-1") is None  # Score unreadable.
+    assert parse_world_rankings("WR_ME|0\nWR_SCORE|0|Us|-1\nWR_DONE") is None  # Unreadable.
+    # Cut off before the end marker: one score must not pass for the whole table.
+    assert parse_world_rankings("WR_ME|0\nWR_SCORE|0|Us|384\n") is None
+    unreadable = "WR_ME|0\nWR_SCORE|0|Us|384\nWR_SCORE|-1||-1\nWR_DONE"
+    assert parse_world_rankings(unreadable) is None
 
 
 class LuaGame:

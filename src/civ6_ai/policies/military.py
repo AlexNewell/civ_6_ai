@@ -930,6 +930,8 @@ class MilitaryPolicy:
         for uid, (kind, x, y) in self._own_civilians.items():
             if uid in now:
                 continue
+            if any((c.x, c.y) == (x, y) for c in t.cities):
+                continue  # A settler that founded a city where it stood was used, not taken.
             taken = [
                 c
                 for c in hostile

@@ -138,3 +138,15 @@ def test_a_partial_move_is_not_counted_as_a_recapture(caplog):
     line = next(m for m in caplog.messages if m.startswith("military_offense"))
     assert json.loads(line.split(" ", 1)[1])["recaptures"] == 0
     assert any("short of 12,10" in d.reason for d in policy.decisions)
+
+
+def test_a_settler_that_founded_a_city_is_not_a_capture_even_beside_a_hostile_civilian(caplog):
+    tm = seen_map(civ_tile(x=11, y=11))
+    policy, game = setup(
+        [warrior(uid=1, x=10, y=10), settler(uid=8, x=10, y=10)], tm, civ=civ_tile(x=11, y=11)
+    )
+    run(policy, game)  # The settler stood on (10, 10), where our city is now.
+    game.data["units"] = [warrior(uid=1, x=10, y=10)]
+    with caplog.at_level(logging.INFO):
+        run(policy, game)
+    assert not any(m.startswith("military_capture") for m in caplog.messages)

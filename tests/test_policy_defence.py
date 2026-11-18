@@ -317,7 +317,7 @@ def test_a_marked_city_building_something_else_is_switched_to_defence():
 
 
 def test_the_production_policy_switches_a_marked_city_and_notes_it():
-    state = marked(ALPHA, inside=1, beside=1)
+    state = marked(ALPHA, inside=1, beside=0)  # One defender at war: short by head count.
     game = ProductionGame(
         overview=fx.overview(num_cities=1),
         cities=[fx.city_info(currently_building="BUILDING_LIBRARY", production_turns_left=8)],
@@ -408,7 +408,7 @@ def test_a_weaker_holder_steps_aside_and_a_stronger_unit_takes_the_city_tile():
     holder = warrior(uid=1)
     newcomer = warrior(uid=2, x=11, y=10, unit_type="UNIT_MAN_AT_ARMS", combat_strength=45)
     game = MilitaryGame([holder, newcomer], [])
-    state = marked(ALPHA, inside=1, beside=1)
+    state = marked(ALPHA, inside=1, beside=0)  # One defender at war: short by head count.
     mil_run(game, state)
     ordered = moves(game)
     assert [m[0] for m in ordered] == [1, 2]

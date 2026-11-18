@@ -122,6 +122,7 @@ class ProductionContext:
     science_districts: int = 0  # Campuses (or the unique district in their place) built or begun.
     threatened: frozenset[int] = frozenset()  # Ids of cities the threat state marks (1.35).
     short: frozenset[int] = frozenset()  # Of those, the ones with fewer than two defenders.
+    mapped: frozenset[int] = frozenset()  # Of those, the ones the threat map judged (issue 264).
     wary: bool = False  # A much stronger rival at peace with us (`defence.wary_of`): walls.
     sites_ok: bool = True  # False when settling found no safe site to send a settler to.
     idle_builders: int = 0  # Builders that found no job on offer the last time they ran (1.45).
@@ -188,6 +189,7 @@ def build_context(
         trade_capacity=empire.trade_capacity,
         threatened=defence.threatened_ids if defence is not None else frozenset(),
         short=defence.short_ids if defence is not None else frozenset(),
+        mapped=defence.mapped_ids if defence is not None else frozenset(),
         wary=bool(defence is not None and defence.wary),
         districts=frozenset(_short(d.district_type) for c in cities for d in c.districts),
         science_districts=sum(
@@ -442,6 +444,8 @@ def is_pressed(city: City, ctx: ProductionContext) -> bool:
     """
     if city.city_id in ctx.short:
         return True
+    if city.city_id in ctx.mapped:
+        return False  # The map weighed what is near against what holds the city, and it holds.
     if not city.is_threatened:
         return False
     wanted = min(len(city.threats) + 1, _MAX_DEFENDERS_PER_CITY) * max(1, ctx.num_cities)
@@ -919,6 +923,13 @@ async def choose_for_city(
     placement signatures and diagnoses (see `placement`), and `planner` the chained tile buys.
     """
     ranked = rank_production(city, options, context, weights)
+    if ranked:
+        log.info(
+            "%s options%s: %s",
+            city.name,
+            " (defence only)" if only_defence else "",
+            ", ".join(f"{o.item} {score(o, city, context, weights):.1f}" for o in ranked[:3]),
+        )
     chain = PlanContext(planner, reads) if planner is not None and reads is not None else None
     if only_defence:
         if not ranked or not is_defence(ranked[0]) or score(ranked[0], city, context, weights) <= 0:
@@ -1008,9 +1019,17 @@ async def choose_for_city(
     return None
 
 
-def _should_switch(city: City, marked: frozenset[int] = frozenset()) -> bool:
-    """A threatened city is building something that isn't defence and won't finish this turn."""
-    threatened = city.is_threatened or city.city_id in marked
+def _should_switch(
+    city: City, marked: frozenset[int] = frozenset(), short: frozenset[int] | None = None
+) -> bool:
+    """A threatened city is building something that isn't defence and won't finish this turn.
+
+    With `short` (the threat state's verdict), only a city that is short switches: a covered city
+    keeps its build (issue 264: a Campus gave way to a Slinger at net threat -60).
+    """
+    threatened = (
+        city.city_id in short if short is not None else city.is_threatened or city.city_id in marked
+    )
     if not threatened or city.is_idle or city.build_turns_left <= _FINISHING_TURNS:
         return False
     current = city.building or ""
@@ -1036,6 +1055,9 @@ class CityProductionPolicy:
         self._kept: set[int] = set()  # Cities that starved again after a reset: focus stays.
         self._emit = bus.publish if bus is not None else None
         self.defence = defence  # The threat state (`defence.DefenceState`), or None.
+        # Per city, the item a defence switch replaced, to put first again once the city is no
+        # longer short (issue 264: four Campuses were abandoned and none resumed).
+        self._replaced: dict[int, str] = {}
         self.weights = weights or ProductionWeights()  # The strategist replaces this later.
         self.refusals = RefusalMemory()
         self.growth = GrowthPolicy()  # Target size and stance per city (1.47).
@@ -1079,9 +1101,11 @@ class CityProductionPolicy:
         await self._read_tiles(game, cities)
         await self._feed_starving(game, cities)
         marked = self.defence.threatened_ids if self.defence is not None else frozenset()
-        switching = [c for c in cities if _should_switch(c, marked)]
-        idle = [c for c in cities if c.is_idle]
-        if not switching and not idle:
+        short = self.defence.short_ids if self.defence is not None else None
+        switching = [c for c in cities if _should_switch(c, marked, short)]
+        resuming = [c for c in cities if self._can_resume(c, marked, short or frozenset())]
+        idle = [c for c in cities if c.is_idle and c not in resuming]
+        if not switching and not idle and not resuming:
             return []
         empire, units = await _read_empire(game), await _read_units(game)
         reads = PlacementReads(game, self.refusals.watched())
@@ -1110,9 +1134,37 @@ class CityProductionPolicy:
                 reads=reads,
             )
             if picked is not None:
+                if city.building:
+                    self._replaced[city.city_id] = city.building
                 building[city.city_id] = picked.item
                 self._note(city, f"production: switched to {picked.item}")
         context = self._context(empire, units, building.values(), cities)
+        # Then the cities with an interrupted build, once they are covered again.
+        for city in sorted(resuming, key=lambda c: c.city_id):
+            options = await _read_production(game, city.city_id)
+            wanted = self._replaced.pop(city.city_id)
+            offered = [o for o in options if o.item == wanted]
+            if not offered:
+                if city.is_idle:
+                    idle.append(city)  # No longer on offer: choose afresh.
+                continue
+            picked = await choose_for_city(
+                game,
+                city,
+                offered,
+                context,
+                self.weights,
+                memory=self.refusals,
+                emit=self._emit,
+                reads=reads,
+                planner=self.planner,
+            )
+            if picked is not None:
+                building[city.city_id] = picked.item
+                self._note(city, f"production: resumed {picked.item}")
+                context = context.after_choosing(picked.item)
+            elif city.is_idle:
+                idle.append(city)
         unfinished = []
         for city in sorted(idle, key=lambda c: (not under_threat(c, context), c.city_id)):
             options = await _read_production(game, city.city_id)
@@ -1133,6 +1185,21 @@ class CityProductionPolicy:
                 context = context.after_choosing(picked.item)
                 self._note(city, f"production: chose {picked.item}")
         return unfinished
+
+    def _can_resume(self, city: City, marked: frozenset[int], short: frozenset[int]) -> bool:
+        """A city with an interrupted build that is covered again, and so may go back to it.
+
+        An idle city is covered when it is not short. One still building the defence item that
+        replaced the build goes back only when the threat has gone altogether, and not in the
+        turns that item needs to finish, so a flickering threat does not make it change twice.
+        """
+        if city.city_id not in self._replaced or city.city_id in short:
+            return False
+        if city.is_idle:
+            return True
+        current = city.building or ""
+        emergency = defence_strength(current) > 0 or _short(current) in _DEFENSIVE_BUILDINGS
+        return emergency and city.city_id not in marked and city.build_turns_left > _FINISHING_TURNS
 
     def _plan_budget(self, empire: Empire) -> int:
         """Gold the planner may spend on a tile this turn: none while a city is threatened."""

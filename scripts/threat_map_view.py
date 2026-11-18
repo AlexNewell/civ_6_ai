@@ -2,8 +2,8 @@
 
     python scripts/threat_map_view.py runs/<game>_threatmap.jsonl [--turn N] [--pad 6] [--out f.png]
 
-Each hex shows its threat number (blank is zero). Our cities are blue with their name and sit at
-zero threat; our combat units are green dots; hostile units are red; a camp is a black X. The x
+Each hex shows its threat number (blank is zero). Our cities are blue with their name and the
+threat on their tile; our combat units are green dots; hostile units are red; a camp is a black X. The x
 labels run across the top and the y labels down the left, so any tile can be read off. Odd rows sit
 half a tile east, as in the game's coordinates. Terrain is not in the dump, so this is threat
 only: lay it beside the turn's screenshot for the ground.
@@ -186,7 +186,7 @@ def draw(record: dict, pad: int, box: tuple[int, int, int, int] | None = None) -
             cover = cover_at(x, y)
             if (x, y) in cities:
                 _label(d, (cx, cy - 12), cities[x, y][:9], mid, blue)
-                _label(d, (cx, cy + 12), "threat 0", small, blue)
+                _label(d, (cx, cy + 12), f"threat {threat_at(x, y):.0f}", small, blue)
             else:
                 if (hot := threat_at(x, y)) >= 0.5:  # Red number: threat, upper right.
                     _label(d, (cx + 20, cy - 12), f"{hot:.0f}", mid, red)
@@ -219,7 +219,8 @@ def draw(record: dict, pad: int, box: tuple[int, int, int, int] | None = None) -
         _label(d, (24, cy), str(y), big, (0, 0, 0))
     lines = [
         f"Turn {turn}.  Hex colour is the ground: blue water, grey mountain, tan hills, "
-        "green woods, blue bar = river, blank = never seen.  Blue hex = our city.",
+        "green woods, blue bar = river, blank = never seen.  "
+        "Blue hex = our city (its name, and the threat on its tile).",
         "Red number = threat.  Grey number = fog (unseen ground nearby).  Green number = our cover "
         "(combat strength of our units and cities).  "
         "Red border = threat plus fog left after cover, thicker is worse.",

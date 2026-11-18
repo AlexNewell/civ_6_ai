@@ -1333,9 +1333,16 @@ class MilitaryPolicy:
                 t.at_city[where] = 1  # En route, counted for this turn.
 
     def _publish_defence(self, t: _Turn) -> None:
-        """Hand the defender counts, as they stand after this turn's orders, to the threat state."""
+        """Hand the defender counts, as they stand after this turn's orders, to the threat state.
+
+        Hostile units killed this turn are dropped from the threat map and from each city's count
+        first, so production, which runs next, does not answer a unit that is already dead.
+        """
+        if self.threat_map is not None:
+            self.threat_map.forget_units_at(t.killed)
         if self.defence is None:
             return
+        self.defence.forget_killed(t.killed)
         for city in t.cities:
             if self._state_threatened(city):
                 self.defence.set_defenders(

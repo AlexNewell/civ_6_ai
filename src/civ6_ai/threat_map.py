@@ -25,6 +25,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from civ_mcp.lua._helpers import SENTINEL
+
 from civ6_ai.policies.game_data import COMBAT_UNITS
 from civ6_ai.policies.settling import _SEA_UNITS as _POLICY_SEA_UNITS
 from civ6_ai.state import read_cities, read_threats, read_units
@@ -75,7 +77,16 @@ class ThreatMapSettings:
     # Our side. Cover is what our units and cities answer with; it is not threat's opposite, so
     # the two are kept as separate layers and combined by whoever decides.
     own_horizon_turns: float = 2.0  # Our unit's cover fades out over this many turns of reach.
-    city_cover_radius: int = 3  # Tiles over which a city's cover fades to nothing.
+    # What walls add to a city's own strength, on the same scale (an ancient wall is about one more
+    # melee unit's worth). Measured, not exact: a setting, not a rule.
+    wall_strength: float = 10.0
+    # A city cannot strike at range without walls, so an unwalled city gives no cover beside it;
+    # with walls it covers tiles within `ranged_reach`. Our units' cover spreads as before.
+    # A city is short of defenders (issue 264) only when the force that can reach its tile
+    # out-damages the city: the damage it deals in a turn, against the tile's cover (the city's
+    # strength, walls and the garrison), must exceed the city's healing (the game's rule, read at
+    # runtime: see `read_combat_heal`) by more than this many hit points.
+    short_margin: float = 0.0
     # Fog is mild threat: a tile beside ground we have never seen could hold anything.
     fog_penalty: float = 3.0  # At most, on a tile whose surroundings are all unseen.
     fog_radius: int = 2  # Tiles around a tile that are looked at for unseen ground.
@@ -111,13 +122,94 @@ class Ally:
     strength: float
     unit_type: str = ""
     naval: bool = False
+    walls: bool = False  # A city with walls shoots at range, so it covers tiles beside it.
 
 
-def _city_strength(city: City) -> float:
-    """A city's cover: its defence strength, less what damage has taken off (its ranged
-    strike is on that scale). Walls and the garrison's own stats are not counted yet."""
+def _city_strength(city: City, wall_strength: float = 0.0) -> float:
+    """A city's cover: its defence strength plus `wall_strength` when it has walls, less what
+    damage has taken off (its ranged strike is on that scale). The garrison's own stats are not
+    counted: our units on the tile give their own cover."""
     hp = city.garrison_hp / city.garrison_max_hp if city.garrison_max_hp > 0 else 1.0
-    return float(city.defense_strength) * min(1.0, hp)
+    walls = wall_strength if city.has_walls else 0.0
+    return (float(city.defense_strength) + walls) * min(1.0, hp)
+
+
+@dataclass(frozen=True)
+class CityReading:
+    """What the map says about one city, on its own tile (a force beside it is already counted
+    by how far each source reaches).
+
+    `damage` is what the force that can reach the tile deals in a turn against the tile's cover;
+    `net` is that less the city's healing, never below zero: the city is short when it is above
+    the margin.
+    """
+
+    threat: float
+    fog: float
+    cover: float
+    damage: float
+    net: float
+
+
+# The game's own combat-healing rules (GlobalParameters). Walls do not heal for
+# `outer_defence_cooldown` turns after an attack, so during a siege only the city's own hit points
+# come back, and an attacking force makes progress only by out-damaging that.
+@dataclass(frozen=True)
+class CombatHeal:
+    city_garrison: float = 20.0  # COMBAT_HEAL_CITY_GARRISON: city hit points healed per turn.
+    outer_defences: float = (
+        10.0  # COMBAT_HEAL_CITY_OUTER_DEFENSES (1 in Base, 10 in the expansions).
+    )
+    outer_defence_cooldown: float = 3.0  # COMBAT_HEAL_OUTER_DEFENSES_COOLDOWN, in turns.
+
+
+# What is used when the read fails: the values the installed game's tables give.
+DEFAULT_COMBAT_HEAL = CombatHeal()
+_HEAL_PARAMETERS = {
+    "COMBAT_HEAL_CITY_GARRISON": "city_garrison",
+    "COMBAT_HEAL_CITY_OUTER_DEFENSES": "outer_defences",
+    "COMBAT_HEAL_OUTER_DEFENSES_COOLDOWN": "outer_defence_cooldown",
+}
+COMBAT_HEAL_LUA = f"""
+for name, _ in pairs({{{", ".join(f"{n} = true" for n in _HEAL_PARAMETERS)}}}) do
+    pcall(function()
+        local row = GameInfo.GlobalParameters[name]
+        if row ~= nil then print("HEAL|" .. name .. "|" .. tostring(row.Value)) end
+    end)
+end
+print("HEALDONE")
+print("{SENTINEL}")
+"""
+
+
+def parse_combat_heal(output: str) -> CombatHeal:
+    """Parse the read. Raises ValueError unless its `HEALDONE` line is present and it names the
+    city garrison heal. Parameters the reply leaves out keep their defaults."""
+    if "HEALDONE" not in output.split():
+        raise ValueError("combat heal read incomplete: no end marker")
+    found: dict[str, float] = {}
+    for line in output.splitlines():
+        parts = line.strip().split("|")
+        if len(parts) == 3 and parts[0] == "HEAL" and parts[1] in _HEAL_PARAMETERS:
+            try:
+                found[_HEAL_PARAMETERS[parts[1]]] = float(parts[2])
+            except ValueError:
+                continue
+    if "city_garrison" not in found:
+        raise ValueError("combat heal read has no city garrison value")
+    return CombatHeal(**{**asdict(DEFAULT_COMBAT_HEAL), **found})
+
+
+async def read_combat_heal(game: Any) -> CombatHeal:
+    """The game's healing rules, or the defaults when the read fails (logged once)."""
+    try:
+        reply = await game.execute_lua(COMBAT_HEAL_LUA, "ingame")
+        return parse_combat_heal(reply if isinstance(reply, str) else chr(10).join(reply))
+    except ConnectionError:
+        raise
+    except Exception as err:
+        log.warning("Combat heal read failed, using the defaults: %s", err)
+        return DEFAULT_COMBAT_HEAL
 
 
 @dataclass
@@ -125,6 +217,7 @@ class ThreatMap:
     settings: ThreatMapSettings = field(default_factory=ThreatMapSettings)
     sources: list[Source] = field(default_factory=list)
     terrain: TerrainStore | None = None
+    heal: CombatHeal = field(default_factory=lambda: DEFAULT_COMBAT_HEAL)  # Read once a session.
     barbarian_peak: float = 0.0  # Strongest barbarian land unit seen this session.
     allies: list["Ally"] = field(default_factory=list)
     _last_scan: int = -10_000
@@ -232,7 +325,10 @@ class ThreatMap:
             )
             for u in units
             if u.is_combat
-        ] + [Ally("city", c.x, c.y, _city_strength(c)) for c in cities]
+        ] + [
+            Ally("city", c.x, c.y, _city_strength(c, s.wall_strength), walls=c.has_walls)
+            for c in cities
+        ]
         self.sources = [
             src
             for src in self.sources
@@ -300,14 +396,19 @@ class ThreatMap:
 
     def _cover_field(self, ally: Ally) -> dict[tuple[int, int], float]:
         s = self.settings
-        key = ("cover", ally.kind, ally.x, ally.y, ally.strength, ally.unit_type)
+        key = ("cover", ally.kind, ally.x, ally.y, ally.strength, ally.unit_type, ally.walls)
         known = self.terrain.revision if self.terrain is not None else 0
         key = (*key, known)
         if key in self._fields:
             return self._fields[key]
         field_: dict[tuple[int, int], float] = {}
         if ally.kind == "city" or self.terrain is None:
-            radius = s.city_cover_radius if ally.kind == "city" else s.melee_reach + 1
+            # An unwalled city covers its own tile only: it cannot strike at range.
+            radius = (
+                (s.ranged_reach if ally.walls else 0)
+                if ally.kind == "city"
+                else (s.melee_reach + 1)
+            )
             for y in range(ally.y - radius, ally.y + radius + 1):
                 for x in range(ally.x - radius - 1, ally.x + radius + 2):
                     d = hex_distance(x, y, ally.x, ally.y, s.map_width)
@@ -346,6 +447,42 @@ class ThreatMap:
     def net_at(self, x: int, y: int, turn: int | None = None) -> float:
         """Threat plus fog, less our cover, never below zero."""
         return max(0.0, self.threat_at(x, y, turn) + self.fog_at(x, y) - self.cover_at(x, y))
+
+    def city_reading(self, x: int, y: int, turn: int | None = None) -> CityReading:
+        """The map's view of the city at (x, y), judged on its own tile (issue 264).
+
+        Each source that reaches the tile attacks once, for the damage its strength does against
+        the tile's cover, weighted by how soon it arrives (the same fade as its threat). That is
+        compared with the city's healing a turn: a couple of weak units cannot out-damage it, a
+        stack can. Neighbouring tiles are not judged: an unwalled city covers none of them.
+        """
+        from civ6_ai.policies.military import expected_damage  # Military imports this module.
+
+        cover = self.cover_at(x, y)
+        damage = 0.0
+        for src in self.sources:
+            strength = self.strength_of(src)
+            reach = self._field(src).get((x, y), 0.0)
+            if strength <= 0 or reach <= 0:
+                continue
+            arrival = (reach / strength) * self._fade(src, turn)
+            damage += expected_damage(strength, cover) * arrival
+        net = max(0.0, damage - self.heal.city_garrison)
+        return CityReading(
+            threat=self.threat_at(x, y, turn),
+            fog=self.fog_at(x, y),
+            cover=cover,
+            damage=damage,
+            net=net,
+        )
+
+    def forget_units_at(self, tiles: Iterable[tuple[int, int]]) -> int:
+        """Drop hostile unit sources standing on these tiles (they died this turn). Returns how
+        many went. A camp is not a unit and stays until a visible tile shows it gone."""
+        gone = set(tiles)
+        before = len(self.sources)
+        self.sources = [s for s in self.sources if not (s.kind == UNIT and (s.x, s.y) in gone)]
+        return before - len(self.sources)
 
     def strength_of(self, src: Source) -> float:
         """A unit's own combat value; a camp's is the strongest barbarian unit seen."""
@@ -476,9 +613,14 @@ class ThreatMapHandler:
             self.map.terrain = self.terrain
         self.settings = self.map.settings
         self._dump = dump
+        self._heal_read = False
 
     async def run(self, game: Any) -> None:
         turn = (await game.get_game_overview()).turn
+        if not self._heal_read:  # The game's rules do not change in a session: read them once.
+            self._heal_read = True
+            self.map.heal = await read_combat_heal(game)
+            log.info("Threat map: combat heal %s", self.map.heal)
         cities = await read_cities(game, self.settings.map_width)
         units = await read_units(game, self.settings.map_width)
         self.map.see_threats(turn, await read_threats(game))

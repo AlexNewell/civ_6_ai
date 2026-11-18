@@ -711,6 +711,30 @@ class ThreatMap:
         found = [(c, self._field(c).get((x, y), 0.0)) for c in self.camps()]
         return [(c, v) for c, v in found if v > 0.0]
 
+    def raw_danger_at(self, x: int, y: int, turn: int | None = None) -> float:
+        """What a civilian on this tile faces: hostile strength that can reach it, with our cover
+        NOT taken off (a Trader or Settler cannot fight back, so cover only lets us avenge it),
+        and any camp's reach (issue 287). Not reduced by fog or cover, unlike net_at."""
+        return max(
+            self.threat_at(x, y, turn),
+            max((v for _, v in self.camps_reaching(x, y)), default=0.0),
+        )
+
+    def nearest_hostile(
+        self, tiles: Iterable[tuple[int, int]], turn: int | None = None
+    ) -> tuple[Source, int] | None:
+        """The nearest remembered hostile unit to any of `tiles` and its tile distance."""
+        width = self.settings.map_width
+        tiles = list(tiles)
+        best: tuple[int, int, int, Source] | None = None
+        for src in self.sources:
+            if src.kind != UNIT or self._fade(src, turn) <= 0.0:
+                continue
+            d = min((hex_distance(src.x, src.y, tx, ty, width) for tx, ty in tiles), default=None)
+            if d is not None and (best is None or (d, src.x, src.y) < best[:3]):
+                best = (d, src.x, src.y, src)
+        return None if best is None else (best[3], best[0])
+
     def danger_near(self, x: int, y: int, radius: int, turn: int | None = None) -> float:
         """The most threat on any tile within `radius` of (x, y)."""
         width = self.settings.map_width

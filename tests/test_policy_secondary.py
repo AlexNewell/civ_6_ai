@@ -959,8 +959,15 @@ class _CoveredMap:
     def net_at(self, x, y, turn=None):
         return 0.0
 
+    def raw_danger_at(self, x, y, turn=None):
+        # Only camps show: the covered net reads zero and the camp path is under test.
+        return max((v for _, v in self.camps_reaching(x, y)), default=0.0)
+
     def camps_reaching(self, x, y):
         return self.inner.camps_reaching(x, y) if self.camps_on else []
+
+    def nearest_hostile(self, tiles, turn=None):
+        return None
 
 
 def test_a_camp_reach_counts_even_when_cover_cancels_the_net_threat():
@@ -1007,3 +1014,36 @@ def test_camps_reaching_lists_the_camp_and_skips_far_tiles():
     near = m.camps_reaching(16, 10)
     assert [(c.x, c.y) for c, _ in near] == [(15, 10)] and near[0][1] > 0
     assert m.camps_reaching(15, 40) == []
+
+
+# ----- raw civilian danger (issue 287) -----
+
+
+def courser_beside_covered_city():
+    """A barbarian Courser next to a walled city on the route, with heavy cover all round."""
+    from civ6_ai.threat_map import Ally, Source, ThreatMap
+
+    m = ThreatMap()
+    m.sources.append(Source("unit", 13, 10, 46.0, 50, 50, unit_type="UNIT_BARBARIAN_HORSE_ARCHER"))
+    m.allies.append(Ally("city", 12, 10, 400.0, walls=True))
+    return m
+
+
+def test_a_courser_beside_a_well_covered_city_does_not_read_zero():
+    from civ6_ai.policies.secondary import route_check
+
+    m = courser_beside_covered_city()
+    assert m.net_at(13, 10, 50) == 0.0  # The old reading: cover cancels the threat.
+    assert m.raw_danger_at(13, 10, 50) > SecondaryWeights().route_danger_max
+    danger, _ = route_check(m, 10, 10, 15, 10, 50)
+    assert danger > SecondaryWeights().route_danger_max
+
+
+def test_a_trader_is_held_and_the_log_names_the_hostile(caplog):
+    policy = SecondaryPolicy()
+    policy.map = courser_beside_covered_city()
+    game = trade_game([trader()], dests={5: [dest("Far", x=15)]})
+    with caplog.at_level("INFO", logger="civ6_ai.policies.secondary"):
+        run(policy, game)
+    assert acted(game, "route") == []
+    assert "held" in caplog.text and "nearest hostile UNIT_BARBARIAN_HORSE_ARCHER" in caplog.text

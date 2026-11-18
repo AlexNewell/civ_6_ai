@@ -197,12 +197,12 @@ def line_tiles(x1: int, y1: int, x2: int, y2: int, map_width: int | None) -> lis
 
 
 def route_danger(field_map: Any, x1: int, y1: int, x2: int, y2: int, turn: int) -> float:
-    """The worst net threat on the estimated path of a route, 0.0 with no map."""
+    """The worst raw civilian danger on the estimated path of a route, 0.0 with no map."""
     if field_map is None:
         return 0.0
     width = field_map.settings.map_width
     return max(
-        (field_map.net_at(x, y, turn) for x, y in line_tiles(x1, y1, x2, y2, width)),
+        (field_map.raw_danger_at(x, y, turn) for x, y in line_tiles(x1, y1, x2, y2, width)),
         default=0.0,
     )
 
@@ -211,15 +211,16 @@ def route_check(
     field_map: Any, x1: int, y1: int, x2: int, y2: int, turn: int
 ) -> tuple[float, list[tuple[int, int]]]:
     """(danger, camps) of a route's estimated path. Danger is the worst tile, where a tile is the
-    larger of its net threat and what any camp's reach brings there with our cover ignored; the
-    camps are the (x, y) of every camp whose reach touches the path (issue 276)."""
+    raw threat (hostile strength that can reach it, our cover ignored: a Trader cannot defend
+    itself, issue 287) or any camp's reach; the camps are the (x, y) of every camp whose reach
+    touches the path (issue 276)."""
     if field_map is None:
         return 0.0, []
     width = field_map.settings.map_width
     worst = 0.0
     camps: set[tuple[int, int]] = set()
     for x, y in line_tiles(x1, y1, x2, y2, width):
-        worst = max(worst, field_map.net_at(x, y, turn))
+        worst = max(worst, field_map.raw_danger_at(x, y, turn))
         for camp, value in field_map.camps_reaching(x, y):
             worst = max(worst, value)
             camps.add((camp.x, camp.y))
@@ -385,6 +386,10 @@ class SecondaryPolicy:
     _trade_wait: dict[int, int] = field(default_factory=dict, init=False, repr=False)
     # Trader id -> (x, y, on a route) last turn, to tell when one is lost.
     _traders: dict[int, tuple[int, int, bool]] = field(default_factory=dict, init=False, repr=False)
+    # Trader id -> the tiles of the route it started, to name the nearest hostile if it is lost.
+    _route_of: dict[int, list[tuple[int, int]]] = field(
+        default_factory=dict, init=False, repr=False
+    )
     traders_lost: int = field(default=0, init=False)
     _blocked_turn: int = field(default=-10_000, init=False, repr=False)
     # Route tile -> {turn: danger read there}, for the max over the last few turns.
@@ -769,15 +774,24 @@ class SecondaryPolicy:
         window = self.weights.route_danger_turns
         for tile in line_tiles(trader.x, trader.y, dest.x, dest.y, self.map.settings.map_width):
             seen = self._recent.setdefault(tile, {})
-            now = max(
-                self.map.net_at(tile[0], tile[1], turn),
-                max((v for _, v in self.map.camps_reaching(*tile)), default=0.0),
-            )
+            now = self.map.raw_danger_at(tile[0], tile[1], turn)
             seen[turn] = now
             for t in [t for t in seen if turn - t >= window]:
                 del seen[t]
             danger = max(danger, self.recent_danger(tile, turn))
         return danger, camps
+
+    def _nearest_note(self, tiles: Iterable[tuple[int, int]], turn: int) -> str:
+        """A log suffix naming the nearest hostile unit and its distance, or nothing."""
+        if self.map is None:
+            return ""
+        found = self.map.nearest_hostile(tiles, turn)
+        if found is None:
+            return ""
+        src, dist = found
+        return (
+            f", nearest hostile {src.unit_type or 'unit'} at ({src.x},{src.y}), {dist} tiles away"
+        )
 
     def _note_losses(self, status: Any, turn: int) -> None:
         """Log each trader that was there last turn and is gone now (captured or killed)."""
@@ -786,12 +800,13 @@ class SecondaryPolicy:
             if uid not in seen:
                 self.traders_lost += 1
                 log.warning(
-                    "Trader %d lost on turn %d (last at (%d,%d), %s)",
+                    "Trader %d lost on turn %d (last at (%d,%d), %s%s)",
                     uid,
                     turn,
                     x,
                     y,
                     "on a route" if on_route else "idle",
+                    self._nearest_note(self._route_of.pop(uid, None) or [(x, y)], turn),
                 )
         self._traders = {t.unit_id: (t.x, t.y, bool(t.on_route)) for t in status.traders}
 
@@ -824,12 +839,16 @@ class SecondaryPolicy:
             if ranked and not safe:
                 self._blocked_turn = turn
                 log.info(
-                    "Trader %d held: all %d routes pass danger above %.1f (least %.1f)%s",
+                    "Trader %d held: all %d routes pass raw danger above %.1f (least %.1f)%s%s",
                     trader.unit_id,
                     len(ranked),
                     limit,
                     min(dangers.values()),
                     _camp_note(c for k, v in checks.items() if dangers[k] > limit for c in v[1]),
+                    self._nearest_note(
+                        [(trader.x, trader.y)] + [(d.x, d.y) for d in ranked],
+                        turn,
+                    ),
                 )
             ranked = safe
             started = False
@@ -837,6 +856,10 @@ class SecondaryPolicy:
                 result = await game.make_trade_route(index, dest.x, dest.y)
                 if "TRADE_ROUTE_STARTED" in result:
                     used.add((trader.x, trader.y, dest.x, dest.y))
+                    if self.map is not None:
+                        self._route_of[trader.unit_id] = line_tiles(
+                            trader.x, trader.y, dest.x, dest.y, self.map.settings.map_width
+                        )
                     self._blocked_turn = -10_000
                     log.info(
                         "Trade route started: trader %d to %s (%d,%d), yield %s, danger %.1f%s",

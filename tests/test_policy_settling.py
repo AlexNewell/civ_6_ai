@@ -1666,6 +1666,9 @@ class _NoDanger:
     def on_path(self, *a):
         return False
 
+    def recent_near(self, *a):
+        return False
+
 
 def test_a_fogged_rival_side_is_marked_down_not_refused(real_safe_rate):
     # Run 14: refusing these while a scout lived stalled expansion; the scout was on automatic
@@ -1943,3 +1946,66 @@ def test_a_founding_that_fails_right_after_the_step_does_not_blacklist_the_site(
     run(policy, game)
     assert [a[0] for a in game.actions] == ["move", "found"]
     assert (14, 10) not in policy._failed_sites
+
+
+class _Sightings:
+    """A threat map stand-in: hostile units last seen at the given tiles, `age` turns ago."""
+
+    def __init__(self, *tiles, age=1):
+        from civ6_ai.threat_map import UNIT, Source
+
+        self.sources = [
+            Source(UNIT, x, y, 30.0, 1, 100 - age, unit_type="UNIT_SKIRMISHER") for x, y in tiles
+        ]
+
+
+def _sighting_policy(sighted, fog_unrevealed, escort=False, age=1, y=14, turn=100):
+    """A settler in the capital's reach, a site 4 tiles off, a Skirmisher seen 3 tiles from it."""
+    policy = SettlingPolicy(SettlingSettings(map_width=84))
+    policy.threat_map = _Sightings(*sighted, age=age)
+    policy._fog = {(14, 10): FogCount(14, 10, 100, fog_unrevealed, 6, 3, 0)}
+    units = [settler(x=10, y=10)]
+    if escort:
+        units.append(unit_info(unit_id=9, unit_index=9, x=10, y=10))
+        units.append(unit_info(unit_id=10, unit_index=10, x=10, y=10))
+    game = make_game(units, cities=[alpha()], sites=[site(14, 10, food=40)], turn=turn)
+    # The turn the threat map was last updated is `last_seen`; `run` reads the game's turn.
+    run(policy, game)
+    return policy, game
+
+
+def test_a_fogged_site_near_a_recent_sighting_is_not_walked_to_alone():
+    # Issue 288: a Skirmisher seen 3 tiles from the site, then lost in the fog, was a camp's.
+    policy, game = _sighting_policy([(14, 7)], fog_unrevealed=70)
+    decision = policy.decisions[-1]
+    assert decision.candidates[0].fog_risk
+    assert decision.action == "hold" and "fogged site" in decision.reason
+    assert not [a for a in game.actions if a[0] == "move"]
+
+
+def test_a_fogged_site_with_a_recent_sighting_takes_an_escort():
+    policy, game = _sighting_policy([(14, 7)], fog_unrevealed=70, escort=True)
+    assert policy.decisions[-1].action in ("escort_move", "escort_gather")
+
+
+def test_a_clear_or_old_or_far_sighting_does_not_hold_the_settler():
+    for kwargs in (
+        dict(sighted=[(14, 7)], fog_unrevealed=10),  # The surround is mostly seen.
+        dict(sighted=[(14, 7)], fog_unrevealed=70, age=7),  # The sighting has aged out.
+        dict(sighted=[(14, 1)], fog_unrevealed=70),  # Far from the site.
+    ):
+        policy, game = _sighting_policy(**kwargs)
+        assert not policy.decisions[-1].candidates[0].fog_risk, kwargs
+        assert any(a[0] == "move" and a[1] == 7 for a in game.actions), kwargs
+
+
+def test_a_settler_stops_a_tile_short_of_a_site_with_a_recent_sighting_beside_it():
+    # Issue 288: it would reach the site with no moves left and be captured there.
+    policy = SettlingPolicy(SettlingSettings(map_width=84))
+    policy.threat_map = _Sightings((14, 7))
+    policy._fog = {}
+    lone = settler(x=12, y=10, moves_remaining=2.0, max_moves=2.0)
+    game = make_game([lone], cities=[alpha()], sites=[site(14, 10, food=40)], turn=100)
+    run(policy, game)
+    moves = [a for a in game.actions if a[0] == "move"]
+    assert moves == [("move", 7, 13, 10)]

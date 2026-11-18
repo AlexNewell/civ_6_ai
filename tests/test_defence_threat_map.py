@@ -15,6 +15,7 @@ from civ_mcp import lua as lq
 
 from civ6_ai.policies.defence import CityThreat, DefenceState
 from civ6_ai.policies.production import CityProductionPolicy, _should_switch, is_pressed
+from civ6_ai.state.models import Threat
 from civ6_ai.state.reader import build_city, build_unit
 from civ6_ai.threat_map import (
     DEFAULT_COMBAT_HEAL,
@@ -499,3 +500,17 @@ def test_below_the_army_floor_a_military_unit_outranks_a_building_with_nothing_s
     assert low[0].category == "UNIT" and low[0].item != "UNIT_BUILDER"
     met = rank_production(city, MENU, mid(num_cities=4, army=6), ProductionWeights())
     assert met[0].item not in ("UNIT_WARRIOR", "UNIT_SWORDSMAN", "UNIT_CROSSBOWMAN")
+
+
+def test_a_blow_must_reach_the_attacker_and_a_ranged_attacker_defends_with_its_combat_strength():
+    # Our Archer stands west of the city, the enemy Archer east of it: too far apart to trade.
+    mine = [("UNIT_WARRIOR", 5, 5, 20, 0), ("UNIT_ARCHER", 3, 5, 15, 25)]
+    far = make_map((5, 5), 30.0, [("UNIT_ARCHER", 8, 5, 25, 1.0)], mine)
+    near = make_map((5, 5), 30.0, [("UNIT_ARCHER", 4, 5, 25, 1.0)], mine)
+    assert near.city_reading(5, 5, TURN).damage < far.city_reading(5, 5, TURN).damage
+    # The hostile Archer defends at its combat strength (15), not its ranged one (25).
+    assert far.sources[0].defence == 0  # Built by hand: unknown, so its attack strength stands in.
+    m = ThreatMap(ThreatMapSettings(map_width=None))
+    archer = Threat(63, "Barbarians", "UNIT_ARCHER", 6, 5, 100, 100, 15, 25, 1, True)
+    m.see_threats(TURN, [archer])
+    assert m.sources[0].defence == 15 and m.sources[0].strength == 25

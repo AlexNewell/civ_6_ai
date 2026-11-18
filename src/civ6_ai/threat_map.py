@@ -109,6 +109,7 @@ class Source:
     hostile_owner: int = BARBARIAN_ID
     naval: bool = False
     hp_frac: float = 1.0  # Hit points left over the most it can have, as last seen.
+    defence: float = 0.0  # Its combat strength when it defends; 0 when not known.
 
     def age(self, turn: int) -> int | None:
         return None if self.last_seen is None else turn - self.last_seen
@@ -314,6 +315,7 @@ class ThreatMap:
                 hostile_owner=t.owner_id,
                 naval=any(w in t.unit_type for w in _SEA_UNITS),
                 hp_frac=min(1.0, t.hp / t.max_hp) if t.max_hp > 0 else 1.0,
+                defence=float(t.combat_strength),
             )
             for t in threats
             if t.hostile
@@ -546,7 +548,8 @@ class ThreatMap:
         else:
             defender = city.strength if city is not None else 0.0
         # The attackers that arrive in time: strength, kind, hit points, and how fresh the sighting.
-        strengths: list[float] = []
+        defences: list[float] = []  # What our blows are hit against.
+        spots: list[tuple[int, int]] = []
         kinds: list[str] = []
         hit_points: list[float] = []
         base: list[float] = []
@@ -555,34 +558,38 @@ class ThreatMap:
             if when is None or when > s.attack_horizon_turns:
                 continue
             strength = self.strength_of(src)
-            strengths.append(strength)
+            defences.append(src.defence if src.defence > 0 else strength)
+            spots.append((src.x, src.y))
             kinds.append(self._attack_class(src))
             hit_points.append(max(1.0, UNIT_MAX_HP * (src.hp_frac if src.kind == UNIT else 1.0)))
             base.append(expected_damage(strength, defender) * self._fade(src, turn))
-        blows = sorted(
-            [
-                a.strength
-                for a in self.allies
-                if a.kind == "unit"
+        # Our blows: (strength, tile, tiles it strikes from). A blow can only land on an attacker
+        # it reaches: a unit's moves in a turn plus its shooting reach, the city's strike its range.
+        blows: list[tuple[float, int, int, int]] = []
+        for a in self.allies:
+            if (
+                a.kind == "unit"
                 and a is not defender_unit
                 and a.strength > 0
                 and self._cover_field(a).get((x, y), 0.0) > 0
-            ]
-            + ([city.strength] if city is not None and city.walls and city.strength > 0 else []),
-            reverse=True,
-        )
+            ):
+                moves, _naval, rng = self._unit_profile(a.unit_type)
+                blows.append((a.strength, a.x, a.y, int(moves) + rng))
+        if city is not None and city.walls and city.strength > 0:
+            blows.append((city.strength, city.x, city.y, s.ranged_reach))
+        blows.sort(reverse=True)
         # What share of each attacker is left to hit: each blow goes where it takes off the most.
         left = [1.0] * len(base)
-        for blow in blows:
+        for blow, bx, by, reach in blows:
             best, best_cut, best_gain = -1, 0.0, 0.0
-            for i, strength in enumerate(strengths):
-                if left[i] <= 0:
+            for i, (sx, sy) in enumerate(spots):
+                if left[i] <= 0 or hex_distance(bx, by, sx, sy, s.map_width) > reach:
                     continue
-                cut = min(left[i], expected_damage(blow, strength) / hit_points[i])
+                cut = min(left[i], expected_damage(blow, defences[i]) / hit_points[i])
                 if base[i] * cut > best_gain:
                     best, best_cut, best_gain = i, cut, base[i] * cut
             if best < 0:
-                break
+                continue
             left[best] -= best_cut
         heal = self.heal
         percent = {

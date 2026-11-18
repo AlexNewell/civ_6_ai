@@ -93,7 +93,9 @@ class ProductionWeights:
     wonders: float = 0.5
     target_cities: int = 6  # Stop building settlers at this many cities.
     victory: str = "any"  # The policy document's victory target. Decides the special districts.
-    army_per_city: float = 1.5  # Combat units wanted per city before military stops scoring.
+    # The army floor: combat units kept per city. Below it, military units score above an ordinary
+    # building even when no city is short; at it, military stops scoring.
+    army_per_city: float = 1.5
     # Turns a one-city empire holds back builders to put the first settler first. 0 turns it off.
     builder_hold_turns: int = _FIRST_SETTLER_TURNS
 
@@ -235,6 +237,7 @@ _UNPLANNED_WORDS = (
     "SUPPLY",
     "SIEGE_TOWER",
 )
+_ARMY_FLOOR_SCORE = 8.0  # Below the army floor: above a typical building (7 to 8), under defence.
 _UNKNOWN_UNIT_SCORE = 0.3
 _CIVILIAN_UNITS = frozenset({"UNIT_BUILDER", "UNIT_SETTLER", "UNIT_SCOUT", "UNIT_TRADER"})
 
@@ -578,7 +581,9 @@ def _unit_score(
     wanted = w.army_per_city * ctx.num_cities - ctx.army
     if wanted <= 0:
         return 0.0
-    return min(wanted, 4.0) * 1.5 * w.military + strength / 20.0
+    # Below the floor (issue 267) a unit outranks an ordinary building, so the floor is reached
+    # even when no city is short: a threat that arrives finds something to fight with.
+    return (_ARMY_FLOOR_SCORE + min(wanted, 4.0)) * w.military + strength / 20.0
 
 
 def _building_score(

@@ -391,7 +391,14 @@ class CampPlan:
 
 
 def _is_melee(unit: Unit) -> bool:
-    return unit.combat_strength > 0 and unit.ranged_strength == 0
+    """A unit that can close in and take the camp tile. Production counts the same units as melee
+    (by the unit table's class), so a Persian Immortal, with a ranged attack too, qualifies."""
+    if unit.combat_strength <= 0:
+        return False
+    stats = COMBAT_UNITS.get(unit.unit_type)
+    if stats is not None:
+        return stats[4] not in ("RANGED", "SIEGE", "RECON")
+    return unit.ranged_strength == 0
 
 
 def camp_force_ok(

@@ -2061,3 +2061,13 @@ def test_the_force_is_sent_at_the_camp_the_plan_chose_not_the_nearest():
     assert state.camp_plan.target == farther and state.camp_plan.met
     assert {d.target for d in camp_orders(policy)} == {farther}
     assert near not in {d.target for d in camp_orders(policy)}
+
+
+def test_a_unit_with_both_attacks_counts_as_melee_by_its_class():
+    from civ6_ai.policies.military import _is_melee
+
+    immortal = build_unit(
+        unit_info(unit_type="UNIT_PERSIAN_IMMORTAL", combat_strength=35, ranged_strength=25)
+    )
+    archer_ = build_unit(unit_info(unit_type="UNIT_ARCHER", combat_strength=15, ranged_strength=25))
+    assert _is_melee(immortal) and not _is_melee(archer_)

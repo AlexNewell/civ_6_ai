@@ -13,6 +13,7 @@ from typing import Protocol
 
 from civ6_ai.call_timer import CallTimer
 from civ6_ai.screenshots import Screenshotter
+from civ6_ai.world_rankings import RankingsHolder
 
 log = logging.getLogger(__name__)
 
@@ -148,6 +149,12 @@ class TurnRecord:
     era_score: int | None = None
     era_dark: int | None = None
     era_golden: int | None = None
+    # Every living major civ, met or not (issue 256), from the World Rankings read: how many are
+    # alive, the others' scores best first (anonymous: no id), our true rank and the best score.
+    players_alive: int | None = None
+    all_scores: list[int] | None = None
+    rank: int | None = None
+    leader_score: int | None = None
 
 
 @dataclass
@@ -180,7 +187,9 @@ class Orchestrator:
         defeat_check: DefeatCheck | None = None,
         call_timer: CallTimer | None = None,
         screenshots: Screenshotter | None = None,
+        rankings: RankingsHolder | None = None,
     ) -> None:
+        self._rankings = rankings
         self._call_timer = call_timer
         # The newest turn a notification has shown the game reached, for a UI that reads stale.
         self._confirmed_turn = 0
@@ -211,6 +220,8 @@ class Orchestrator:
         turn = max(await self._read_turn(), self._confirmed_turn)
         standing = read_standing(self._overview)
         seconds, errors = await self._run_handlers()
+        if self._rankings is not None and self._rankings.last is not None:
+            standing.update(self._rankings.last.fields())
         calls = self._call_timer.take() if self._call_timer else {}
         if self.turn_shots is not None:
             await asyncio.to_thread(self.turn_shots.take, turn, "end-of-turn")

@@ -52,6 +52,7 @@ import math
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, field, replace
+from types import SimpleNamespace
 from typing import Any, Protocol
 
 from civ6_ai.blockers import Blocker, BlockerType, action_succeeded, move_succeeded
@@ -203,6 +204,10 @@ class MilitarySettings:
     recapture_reach: int = 10  # Only a civilian this close to one of our cities.
     recapture_age: int = 3  # Turns a sighting stays believed (the threat map rescans every 3).
     recapture_threat: float = 4.0  # The most threat-map strength allowed on the tile stepped to.
+    recapture_march_turns: int = 3  # A civilian this many turns of walking away is marched on.
+    capture_radius: int = 4  # Tiles from where a settler was last seen that a captor may stand.
+    capture_window: int = 4  # Turns a vanished settler waits for a hostile civilian to show.
+    capture_creep: int = 2  # Tiles added to that radius for each turn a captor may have moved.
     camp_search_radius: int = 8  # Barbarians this close to a city start a look for a camp.
     camp_scan_radius: int = 3  # Tiles read around the nearest barbarian to find the camp.
     camp_home_scan_radius: int = 7  # Tiles read around each city to find a camp in plain view.
@@ -725,6 +730,10 @@ class MilitaryPolicy:
     _own_civilians: dict[int, tuple[str, int, int]] = field(
         default_factory=dict, init=False, repr=False
     )
+    # Settlers and traders that vanished and are not yet told from used: id -> (kind, x, y, turn).
+    _vanished: dict[int, tuple[str, int, int, int]] = field(
+        default_factory=dict, init=False, repr=False
+    )
     _city_count: int = field(default=0, init=False, repr=False)
     _recaptured: int = field(default=0, init=False, repr=False)
     _captured: int = field(default=0, init=False, repr=False)
@@ -892,7 +901,7 @@ class MilitaryPolicy:
 
     # ----- hostile civilians (issue 280) -----
 
-    def _hostile_civilians(self, t: _Turn) -> list[Any]:
+    def _hostile_civilians(self, t: _Turn, guarded: bool = False) -> list[Any]:
         """Hostile civilians the threat map has seen lately, nearest our cities first.
 
         Barbarians always; any other civ only once a unit of it was seen hostile (at war). The
@@ -915,6 +924,8 @@ class MilitaryPolicy:
                 continue
             if not self._is_hostile(civ.owner):
                 continue
+            if civ.guarded and not guarded:
+                continue  # A soldier stands with it: a target to fight, not to step onto.
             home = self._home_distance(t, (civ.x, civ.y))
             if home <= s.recapture_reach:
                 found.append((home, civ.x, civ.y, civ))
@@ -927,7 +938,10 @@ class MilitaryPolicy:
         """Tell a civilian of ours that was taken from one that was killed.
 
         The game reports both as "was killed". It was taken when a hostile civilian of its kind
-        now stands within three tiles of where it was last seen.
+        stands near where it was last seen. That sighting may come a turn or two after the loss
+        (live, issue 283: the tile read that shows the taken settler came a turn late, and it
+        stood under the soldier that took it), so a vanished settler is kept for a few turns and
+        looked for again each turn, with the reach widened by what its captor may have walked.
         """
         s = self.settings
         now = {
@@ -935,54 +949,104 @@ class MilitaryPolicy:
             for u in t.units
             if not u.is_combat and any(w in u.unit_type for w in _CIVILIAN_WORDS)
         }
-        hostile = self._hostile_civilians(t)
+        hostile = self._hostile_civilians(t, guarded=True)
+        founded = len(t.cities) > self._city_count
         for uid, (kind, x, y) in self._own_civilians.items():
-            if uid in now:
-                continue
-            if kind not in _CAPTURE_KINDS or len(t.cities) > self._city_count:
+            if uid in now or kind not in _CAPTURE_KINDS or founded:
                 continue  # A builder spends its charges and a settler founds: used, not taken.
+            self._vanished[uid] = (kind, x, y, t.turn)
+        for uid in [u for u in self._vanished if u in now]:
+            del self._vanished[uid]
+        for uid, (kind, x, y, lost) in list(self._vanished.items()):
+            age = t.turn - lost
+            if age > s.capture_window:
+                del self._vanished[uid]
+                log.info(
+                    "military_capture_unknown %s",
+                    json.dumps({"turn": t.turn, "unit": kind, "from": [x, y], "lost": lost}),
+                )
+                continue
+            reach = s.capture_radius + s.capture_creep * age
             taken = [
                 c
                 for c in hostile
-                if c.unit == kind.removeprefix("UNIT_")
-                and hex_distance(c.x, c.y, x, y, s.map_width) <= 3
+                if c.seen >= lost
+                and (kind.removeprefix("UNIT_") == c.unit or c.unit in kind)
+                and hex_distance(c.x, c.y, x, y, s.map_width) <= reach
             ]
-            if taken:
-                self._captured += 1
-                civ = taken[0]
-                log.info(
-                    "military_capture %s",
-                    json.dumps(
-                        {
-                            "turn": t.turn,
-                            "unit": kind,
-                            "from": [x, y],
-                            "now_at": [civ.x, civ.y],
-                            "by": civ.owner,
-                        },
-                        sort_keys=True,
-                    ),
-                )
-            # With none near, it may have founded a city or spent its charges, so it is not counted.
+            if not taken:
+                continue  # Not seen yet: it may still show on a later read.
+            del self._vanished[uid]
+            self._captured += 1
+            civ = min(taken, key=lambda c: hex_distance(c.x, c.y, x, y, s.map_width))
+            log.info(
+                "military_capture %s",
+                json.dumps(
+                    {
+                        "turn": t.turn,
+                        "lost": lost,
+                        "unit": kind,
+                        "from": [x, y],
+                        "now_at": [civ.x, civ.y],
+                        "guarded": civ.guarded,
+                        "by": civ.owner,
+                    },
+                    sort_keys=True,
+                ),
+            )
         self._own_civilians = now
         self._city_count = len(t.cities)
 
-    async def _recapture(self, game: MilitaryGame, t: _Turn) -> None:
-        """Move a combat unit onto a hostile civilian it can reach this turn, to take it back.
+    def _skip_recapture(self, t: _Turn, civ: Any, reason: str, **extra: Any) -> None:
+        """Say why a hostile civilian in sight was left alone this turn (issue 283)."""
+        log.info(
+            "military_recapture_skip %s",
+            json.dumps(
+                {
+                    "turn": t.turn,
+                    "at": [civ.x, civ.y],
+                    "owner": civ.owner,
+                    "unit": civ.unit,
+                    "reason": reason,
+                    **extra,
+                },
+                sort_keys=True,
+            ),
+        )
 
-        The unit must be spare (no city is left short by it leaving), healthy, able to walk the
-        distance this turn, and the tile must be safe on the threat map. The tile is read again
-        first, as the sighting may be a turn or two old.
+    async def _recapture(self, game: MilitaryGame, t: _Turn) -> None:
+        """Move a combat unit onto a hostile civilian it can reach, to take it back.
+
+        The unit must be spare (no city is left short by it leaving), healthy, and the tile must
+        be safe on the threat map. A civilian within a turn's walk is read again first, as the
+        sighting may be a turn or two old, then stepped onto. One a few turns of walking away
+        is marched on, the unit stopping short and going on next turn. Every civilian left alone
+        is logged with the reason.
         """
         s = self.settings
         if not s.recapture or self.threat_map is None:
             return
-        for civ in self._hostile_civilians(t):
+        terrain = getattr(self.threat_map, "terrain", None)
+        for civ in self._hostile_civilians(t, guarded=True):
             where = (civ.x, civ.y)
-            if where in t.dead or t.actions >= s.max_actions:
+            if civ.guarded:
+                self._skip_recapture(t, civ, "a soldier stands on the tile with it")
                 continue
-            if self.threat_map.threat_at(civ.x, civ.y, t.turn) > s.recapture_threat:
-                continue  # Inside a camp's or a hostile unit's reach.
+            if where in t.dead:
+                self._skip_recapture(t, civ, "a unit of ours just died there")
+                continue
+            if t.actions >= s.max_actions:
+                self._skip_recapture(t, civ, "the action limit for the turn is used")
+                continue
+            if terrain is not None and terrain.step_cost(civ.x, civ.y, naval=False) is None:
+                self._skip_recapture(t, civ, "the tile is water or impassable (needs embarking)")
+                continue
+            strength = self.threat_map.threat_at(civ.x, civ.y, t.turn)
+            if strength > s.recapture_threat:
+                self._skip_recapture(
+                    t, civ, "inside a camp's or a hostile unit's reach", threat=round(strength, 1)
+                )
+                continue
             candidates = sorted(
                 (
                     (hex_distance(u.x, u.y, civ.x, civ.y, s.map_width), u.unit_id, u)
@@ -993,21 +1057,49 @@ class MilitaryPolicy:
                 ),
                 key=lambda c: c[:2],
             )
+            if not candidates:
+                self._skip_recapture(t, civ, "no spare unit")
+                continue
             unit = next((u for d, _, u in candidates if 0 < d <= int(u.moves)), None)
+            marching = unit is None
+            if marching:
+                unit = next(
+                    (
+                        u
+                        for d, _, u in candidates
+                        if 0 < d <= max(1, int(u.moves)) * s.recapture_march_turns
+                        and not self._on_camp_mission(t, u)  # Not pulled off a camp.
+                    ),
+                    None,
+                )
             if unit is None:
+                d, _, near = candidates[0]
+                self._skip_recapture(
+                    t, civ, "out of reach", nearest=d, moves=int(near.moves),
+                    turns_allowed=s.recapture_march_turns,
+                )  # fmt: skip
                 continue
-            try:
-                area = await read_area(game, civ.x, civ.y, 0)
-            except ConnectionError:
-                raise
-            except Exception:
-                log.exception("Reading the tile of a hostile civilian failed")
-                continue
-            self.threat_map.see_tiles(t.turn, area)
-            seen = next((x for x in area if (x.x, x.y) == where and x.visible), None)
-            civ = getattr(self.threat_map, "civilians", {}).get(where) if seen else None
-            if civ is None or civ.seen != t.turn or not self._is_hostile(civ.owner):
-                continue  # Not in sight now, gone, taken back, or now a civ we are not at war with.
+            if not marching:
+                try:
+                    area = await read_area(game, civ.x, civ.y, 0)
+                except ConnectionError:
+                    raise
+                except Exception:
+                    log.exception("Reading the tile of a hostile civilian failed")
+                    self._skip_recapture(t, civ, "reading the tile failed")
+                    continue
+                self.threat_map.see_tiles(t.turn, area)
+                seen = next((x for x in area if (x.x, x.y) == where and x.visible), None)
+                civ = getattr(self.threat_map, "civilians", {}).get(where) if seen else None
+                if civ is None or civ.seen != t.turn or not self._is_hostile(civ.owner):
+                    self._skip_recapture(
+                        t, SimpleNamespace(x=where[0], y=where[1], owner="?", unit="?"),
+                        "not in sight now, gone, taken back, or no longer at war",
+                    )  # fmt: skip
+                    continue
+                if civ.guarded:
+                    self._skip_recapture(t, civ, "a soldier stands on the tile with it")
+                    continue
             result = await self._order(
                 t, unit, "recapture", game.move_unit(unit.unit_index, *where)
             )

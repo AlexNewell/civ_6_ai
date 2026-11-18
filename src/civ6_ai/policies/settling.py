@@ -110,6 +110,8 @@ class SettlingSettings:
     # Safety.
     threat_radius: int = 3  # A tile this close to a hostile unit is unsafe to stand on.
     flee_radius: int = 2  # A settler this close to a hostile unit runs.
+    flee_mounted_extra: int = 2  # A mounted hostile unit is this many tiles further a danger.
+    flee_escorted_hostiles: int = 2  # An escort is no cover against this many hostile units near.
     escort_search_radius: int = 5
     scout_threat_radius: int = 2
     # A city's last defender may escort a settler when the threat near the city is limited.
@@ -639,6 +641,9 @@ def frontier_points(
     return points
 
 
+_MOUNTED = ("HORSE", "COURSER", "KNIGHT", "CAVALRY", "CHARIOT", "CAMEL", "ELEPHANT")
+
+
 @dataclass
 class _Danger:
     """Hostile units in sight, and tests for tiles and routes near them."""
@@ -651,6 +656,16 @@ class _Danger:
             hex_distance(x, y, t.x, t.y, self.map_width) <= radius
             for t in self.threats
             if t.hostile
+        )
+
+    def count_near(self, x: int, y: int, radius: int, mounted_extra: int = 0) -> int:
+        """Hostile units that can be on the tile next turn: a mounted one reaches further."""
+        return sum(
+            1
+            for t in self.threats
+            if t.hostile
+            and hex_distance(x, y, t.x, t.y, self.map_width)
+            <= radius + (mounted_extra if any(w in t.unit_type for w in _MOUNTED) else 0)
         )
 
     def on_path(self, start: tuple[int, int], end: tuple[int, int], radius: int) -> bool:
@@ -1274,14 +1289,18 @@ class SettlingPolicy:
             game, settler, step_target, city_tiles, record
         ):
             return
-        threatened = danger.near(settler.x, settler.y, s.flee_radius) and not found_now_ok
+        near = danger.count_near(settler.x, settler.y, s.flee_radius, s.flee_mounted_extra)
+        threatened = near > 0 and not found_now_ok
         # Live (Run 12): an escorted settler stepped out, then fled back to the city next turn
-        # and the pair repeated it. A settler with its escort on the tile goes on instead.
+        # and the pair repeated it. A settler with its escort on the tile goes on instead. Live
+        # (issue 283): two settlers were taken with an escort on the tile or beside it, with two
+        # or more hostile units (cavalry among them) close; one escort is no cover against that.
+        outnumbered = near >= s.flee_escorted_hostiles
         if (
             threatened
             and city_tiles
-            and not escorted
-            and await self._flee(game, settler, city_tiles, record)
+            and (not escorted or outnumbered)
+            and await self._flee(game, settler, city_tiles, record, near)
         ):
             return
 
@@ -1555,15 +1574,27 @@ class SettlingPolicy:
         record("found_failed", "stepped onto the site but founding failed", goal, found)
         return True  # It moved; nothing more to do with it this turn.
 
-    async def _flee(self, game, settler, city_tiles, record) -> bool:
+    async def _flee(self, game, settler, city_tiles, record, near: int = 0) -> bool:
+        """Run for the nearest city, or the next nearest when the order is refused. A refusal is
+        logged (issue 283: a settler stood in the open with hostile cavalry beside it and nothing
+        said why it had not run)."""
         s = self.settings
-        nearest = min(
+        if (settler.x, settler.y) in city_tiles:
+            return False  # Already inside walls: the usual hold and escort rules apply.
+        ordered = sorted(
             city_tiles, key=lambda c: (hex_distance(settler.x, settler.y, *c, s.map_width), c)
         )
-        result = await game.move_unit(settler.unit_index, *nearest)
-        if move_succeeded(result):
-            record("flee", "hostile unit close, retreating to the nearest city", nearest, result)
-            return True
+        for city in ordered[:2]:
+            result = await game.move_unit(settler.unit_index, *city)
+            if move_succeeded(result):
+                record(
+                    "flee",
+                    f"{near} hostile unit(s) close, retreating to the nearest city",
+                    city,
+                    result,
+                )
+                return True
+            record("hold", "fleeing to a city was refused", city, result)
         return False
 
     def _record(self, decision: SettleDecision) -> None:

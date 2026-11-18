@@ -265,6 +265,7 @@ class Civilian:
     owner: str
     unit: str
     seen: int  # The turn.
+    guarded: bool = False  # A soldier stands on the tile too: not a prize to walk onto.
 
 
 @dataclass
@@ -330,9 +331,12 @@ class ThreatMap:
     def _see_civilian(self, turn: int, tile: Tile) -> None:
         """Keep a foreign civilian on a visible tile; a visible tile without one forgets it."""
         found = [c for c in map(foreign_civilian, tile.foreign_units) if c is not None]
-        if found and len(found) == len(tile.foreign_units):  # With a soldier it is not a prize.
+        if found:
+            # Kept with a soldier too (issue 283): a settler we lost stands under the unit that
+            # took it, and that is how the capture is told. Recapture leaves a guarded one.
             owner, unit = found[0]
-            self.civilians[tile.x, tile.y] = Civilian(tile.x, tile.y, owner, unit, turn)
+            guarded = len(found) < len(tile.foreign_units)
+            self.civilians[tile.x, tile.y] = Civilian(tile.x, tile.y, owner, unit, turn, guarded)
         else:
             self.civilians.pop((tile.x, tile.y), None)
 

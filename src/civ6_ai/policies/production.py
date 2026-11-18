@@ -393,7 +393,7 @@ def drop_dominated(
 
     Dominated means another offered option does the same job better, or the city already has it.
     Special districts are kept only when `wants_district` says so. Repairs are kept apart because
-    they have their own coordinates. Returns (choices, repairs).
+    a repair is a restored item, not a new one. Returns (choices, repairs).
     """
     context = context or ProductionContext(turn=0, num_cities=1)
     victory = (weights or ProductionWeights()).victory
@@ -405,7 +405,9 @@ def drop_dominated(
     seen: set[tuple[str, str]] = set()
     for option in options:
         if option.is_repair:
-            if option.category == "DISTRICT" and None not in (option.repair_x, option.repair_y):
+            # A building repair has no tile (the game offers it with no coordinates, issue 280);
+            # a district repair names its own.
+            if option.category == "BUILDING" or None not in (option.repair_x, option.repair_y):
                 repairs.append(option)
             continue
         key = (option.category, option.item)
@@ -760,12 +762,35 @@ def _district_score(
     return value
 
 
+_REPAIR_GAIN = 2.0  # A restored building pays at once and costs only a turn or two.
+
+
+def _repair_value(
+    option: ProductionChoice, city: City, ctx: ProductionContext, w: ProductionWeights
+) -> float:
+    """What a repair restores: the yields of the building (or district) it brings back."""
+    name = _short(option.item)
+    if option.category == "DISTRICT":
+        name = _base_district(option.item)
+        profile = _DISTRICT_YIELDS.get(name)
+        if profile is None:
+            return BASE_VALUE.get(name, _UNKNOWN_BUILDING) * _REPAIR_GAIN
+    elif name in _DEFENSIVE_BUILDINGS:
+        # Walls back are worth what new walls would be, and little to a city nobody threatens.
+        return _building_score(option, city, ctx, w) or _UNKNOWN_BUILDING * _REPAIR_GAIN
+    else:
+        profile = _BUILDING_YIELDS.get(name)
+        if profile is None:
+            return _UNKNOWN_BUILDING * _REPAIR_GAIN
+    return max(_yield_value(profile, w), _UNKNOWN_BUILDING) * _REPAIR_GAIN
+
+
 def score(
     option: ProductionChoice, city: City, ctx: ProductionContext, weights: ProductionWeights
 ) -> float:
     """What the option is worth to this city, discounted by how long it takes."""
     if option.is_repair:
-        value = 8.0
+        value = _repair_value(option, city, ctx, weights)
     elif option.category == "UNIT":
         value = _unit_score(option, city, ctx, weights)
     elif option.category == "DISTRICT":
@@ -794,11 +819,19 @@ def rank_production(
     weights = weights or ProductionWeights()
     options = [o for o in options if o.item != "UNIT_TRADER" or context.trade_safe]  # Issue 269.
     keep, repairs = drop_dominated(list(options), city, context, weights)
-    ranked = sorted(
+    scores = {id(o): score(o, city, context, weights) for o in (*repairs, *keep)}
+    if not under_threat(city, context):
+        # Restoring what is already ours comes before a new district (issue 280). Under threat
+        # defence still wins on its own score.
+        top = max((scores[id(o)] for o in repairs), default=0.0)
+        if top > 0:
+            for o in keep:
+                if o.category == "DISTRICT" and scores[id(o)] >= top:
+                    scores[id(o)] = top - 0.01
+    return sorted(
         [*repairs, *keep],
-        key=lambda o: (-score(o, city, context, weights), o.category, o.item, o.repair_x or 0),
+        key=lambda o: (-scores[id(o)], o.category, o.item, o.repair_x or 0),
     )
-    return ranked
 
 
 class ProductionGame(BlockerGame, Protocol):
@@ -1097,7 +1130,9 @@ async def choose_for_city(
         result = await _start(game, city, option, trace, chain)
         where = (context.turn, city.city_id, city.name, city.x, city.y)
         if not _failed(result):
-            log.info("%s builds %s", city.name, option.item)
+            log.info(
+                "%s %s %s", city.name, "repairs" if option.is_repair else "builds", option.item
+            )
             if emit is not None:
                 tile = trace.tile or (None, None)
                 emit(
@@ -1160,6 +1195,20 @@ def _should_switch(
     return not (defence_strength(current) > 0 or _short(current) in _DEFENSIVE_BUILDINGS)
 
 
+def _pillaged_items(city: City) -> list[str]:
+    """The city's pillaged buildings and districts, by short name."""
+    return [
+        *(f"district {_short(d.district_type)}" for d in city.districts if d.pillaged),
+        *(f"building {_short(b)}" for b in city.pillaged_buildings),
+    ]
+
+
+def is_repair_build(city: City) -> bool:
+    """The city is building something it has pillaged: that build is the repair."""
+    current = _short(city.building or "")
+    return any(item.endswith(" " + current) for item in _pillaged_items(city))
+
+
 class CityProductionPolicy:
     """A turn handler that gives every idle city something to build."""
 
@@ -1186,6 +1235,8 @@ class CityProductionPolicy:
         # Per city, the item a defence switch replaced, to put first again once the city is no
         # longer short (issue 264: four Campuses were abandoned and none resumed).
         self._replaced: dict[int, str] = {}
+        # Per city, what was pillaged at the last read, to log new damage and each repair.
+        self._pillaged: dict[int, frozenset[str]] = {}
         self.weights = weights or ProductionWeights()  # The strategist replaces this later.
         self.refusals = RefusalMemory()
         self.growth = GrowthPolicy()  # Target size and stance per city (1.47).
@@ -1231,10 +1282,16 @@ class CityProductionPolicy:
         await self._feed_starving(game, cities)
         marked = self.defence.threatened_ids if self.defence is not None else frozenset()
         short = self.defence.short_ids if self.defence is not None else None
+        self._log_pillaged(cities)
         switching = [c for c in cities if _should_switch(c, marked, short)]
+        repairing = [
+            c
+            for c in cities
+            if self._should_repair(c, marked, short, {s.city_id for s in switching})
+        ]
         resuming = [c for c in cities if self._can_resume(c, marked, short or frozenset())]
         idle = [c for c in cities if c.is_idle and c not in resuming]
-        if not switching and not idle and not resuming:
+        if not switching and not idle and not resuming and not repairing:
             return []
         empire, units = await _read_empire(game), await _read_units(game)
         reads = PlacementReads(game, self.refusals.watched())
@@ -1267,6 +1324,28 @@ class CityProductionPolicy:
                     self._replaced[city.city_id] = city.building
                 building[city.city_id] = picked.item
                 self._note(city, f"production: switched to {picked.item}")
+        context = self._context(empire, units, building.values(), cities)
+        # Then the cities with something pillaged, which put a repair before the long build they
+        # were on (issue 280). The build is kept to resume, as after a defence switch.
+        for city in sorted(repairing, key=lambda c: c.city_id):
+            options = [o for o in await _read_production(game, city.city_id) if o.is_repair]
+            if not options:
+                continue
+            picked = await choose_for_city(
+                game,
+                city,
+                options,
+                context,
+                self.weights,
+                memory=self.refusals,
+                emit=self._emit,
+                reads=reads,
+            )
+            if picked is not None:
+                if city.building and city.city_id not in self._replaced:
+                    self._replaced[city.city_id] = city.building
+                building[city.city_id] = picked.item
+                self._note(city, f"production: repairing {picked.item}")
         context = self._context(empire, units, building.values(), cities)
         # Then the cities with an interrupted build, once they are covered again.
         for city in sorted(resuming, key=lambda c: c.city_id):
@@ -1317,6 +1396,44 @@ class CityProductionPolicy:
                 context = context.after_choosing(picked.item)
                 self._note(city, f"production: chose {picked.item}")
         return unfinished
+
+    def _log_pillaged(self, cities: list[City]) -> None:
+        """Log what is pillaged in each city when it changes, and each item repaired."""
+        for city in cities:
+            now = frozenset(_pillaged_items(city))
+            before = self._pillaged.get(city.city_id, frozenset())
+            if now != before:
+                if now - before:
+                    log.info("%s pillaged: %s", city.name, ", ".join(sorted(now)))
+                if before - now:
+                    log.info("%s repaired: %s", city.name, ", ".join(sorted(before - now)))
+            self._pillaged[city.city_id] = now
+
+    @staticmethod
+    def _should_repair(
+        city: City,
+        marked: frozenset[int],
+        short: frozenset[int] | None,
+        switching: set[int],
+    ) -> bool:
+        """A busy city with a pillaged building or district, covered, and not about to finish."""
+        if city.is_idle or city.city_id in switching or not _pillaged_items(city):
+            return False
+        if city.build_turns_left <= _FINISHING_TURNS:
+            return False
+        threatened = (
+            city.city_id in short
+            if short is not None
+            else city.is_threatened or city.city_id in marked
+        )
+        if threatened:
+            return False
+        current = city.building or ""
+        return not (
+            defence_strength(current) > 0
+            or _short(current) in _DEFENSIVE_BUILDINGS
+            or is_repair_build(city)
+        )
 
     def _can_resume(self, city: City, marked: frozenset[int], short: frozenset[int]) -> bool:
         """A city with an interrupted build that is covered again, and so may go back to it.

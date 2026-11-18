@@ -72,6 +72,9 @@ from civ6_ai.state.fog import BARBARIAN_ID
 from civ6_ai.state.models import Target
 from civ6_ai.state.reader import STANDARD_MAP_WIDTH, hex_distance
 
+# Our civilians that an enemy may take (issue 280).
+_CIVILIAN_WORDS = ("SETTLER", "BUILDER", "TRADER", "MISSIONARY", "APOSTLE")
+
 log = logging.getLogger(__name__)
 
 # The damage rule. A fight between equals costs each side BASE_DAMAGE hit points, and each point
@@ -189,6 +192,10 @@ class MilitarySettings:
     reinforce_reach: int = 8  # The same, for a short city with hostile units at it.
     retreat_reach: int = 6  # How far a hurt or exposed unit will walk to a city.
     flee_radius: int = 3  # A unit outside a city this close to a hostile unit goes home.
+    recapture: bool = True  # Step onto a hostile civilian (issue 280).
+    recapture_reach: int = 10  # Only a civilian this close to one of our cities.
+    recapture_age: int = 3  # Turns a sighting stays believed (the threat map rescans every 3).
+    recapture_threat: float = 4.0  # The most threat-map strength allowed on the tile stepped to.
     camp_search_radius: int = 8  # Barbarians this close to a city start a look for a camp.
     camp_scan_radius: int = 3  # Tiles read around the nearest barbarian to find the camp.
     camp_home_scan_radius: int = 7  # Tiles read around each city to find a camp in plain view.
@@ -668,6 +675,15 @@ class MilitaryPolicy:
     _camp_hit: dict[tuple[int, int], int] = field(default_factory=dict, init=False, repr=False)
     # The threat state (see `defence.DefenceState`), or None to play without it.
     defence: Any = field(default=None, repr=False)
+    # Issue 280. Owners seen hostile (a civ at war), our civilians as last seen, and what the
+    # offense line reports once: civilians retaken, civilians of ours that were captured.
+    _hostile_owners: set[str] = field(default_factory=set, init=False, repr=False)
+    _own_civilians: dict[int, tuple[str, int, int]] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _recaptured: int = field(default=0, init=False, repr=False)
+    _captured: int = field(default=0, init=False, repr=False)
+    _lost_civilians: int = field(default=0, init=False, repr=False)
 
     def blocker_policies(self) -> Mapping[str, Any]:
         """Policies to pass to `BlockerResolver`, which takes over the promotion blocker."""
@@ -700,6 +716,7 @@ class MilitaryPolicy:
         mine = [u for u in mine if u.unit_id not in reserved]
         t = _Turn(turn, tuple(units), cities, threats, mine, reserved)
         self._count_defenders(t)
+        self._note_civilians(t)
         if await self._split_stacks(game, t):
             # The moved units stand elsewhere now, with targets seen from their new tiles.
             units = await _read_units(game, s.map_width)
@@ -708,6 +725,7 @@ class MilitaryPolicy:
             t.mine = [u for u in units if is_land_military(u) and u.unit_id not in t.reserved]
             self._count_defenders(t)
         await self._attack(game, t)
+        await self._recapture(game, t)
         await self._heal(game, t)
         await self._garrison(game, t)
         self._note_sightings(t)
@@ -828,6 +846,132 @@ class MilitaryPolicy:
         self._log(t, unit, "stack", "stack not split: no tile accepted the unit", where)
         return False
 
+    # ----- hostile civilians (issue 280) -----
+
+    def _hostile_civilians(self, t: _Turn) -> list[Any]:
+        """Hostile civilians the threat map has seen lately, nearest our cities first.
+
+        Barbarians always; any other civ only once a unit of it was seen hostile (at war). The
+        threat scan lists military units only, so these come from the tile reads the map already
+        makes.
+        """
+        if self.threat_map is None:
+            return []
+        self._hostile_owners |= {
+            th.owner for th in t.threats if th.hostile and th.owner_id != BARBARIAN_ID
+        }
+        s = self.settings
+        found = []
+        for civ in getattr(self.threat_map, "civilians", {}).values():
+            if t.turn - civ.seen > s.recapture_age:
+                continue
+            if not (civ.owner.startswith("Barbarian") or civ.owner in self._hostile_owners):
+                continue
+            home = self._home_distance(t, (civ.x, civ.y))
+            if home <= s.recapture_reach:
+                found.append((home, civ.x, civ.y, civ))
+        return [f[3] for f in sorted(found, key=lambda f: f[:3])]
+
+    def _note_civilians(self, t: _Turn) -> None:
+        """Tell a civilian of ours that was taken from one that was killed.
+
+        The game reports both as "was killed". It was taken when a hostile civilian of its kind
+        now stands within three tiles of where it was last seen.
+        """
+        s = self.settings
+        now = {
+            u.unit_id: (u.unit_type, u.x, u.y)
+            for u in t.units
+            if not u.is_combat and any(w in u.unit_type for w in _CIVILIAN_WORDS)
+        }
+        hostile = self._hostile_civilians(t)
+        for uid, (kind, x, y) in self._own_civilians.items():
+            if uid in now:
+                continue
+            taken = [
+                c
+                for c in hostile
+                if c.unit == kind.removeprefix("UNIT_")
+                and hex_distance(c.x, c.y, x, y, s.map_width) <= 3
+            ]
+            if taken:
+                self._captured += 1
+                civ = taken[0]
+                log.info(
+                    "military_capture %s",
+                    json.dumps(
+                        {
+                            "turn": t.turn,
+                            "unit": kind,
+                            "from": [x, y],
+                            "now_at": [civ.x, civ.y],
+                            "by": civ.owner,
+                        },
+                        sort_keys=True,
+                    ),
+                )
+            else:
+                self._lost_civilians += 1
+        self._own_civilians = now
+
+    async def _recapture(self, game: MilitaryGame, t: _Turn) -> None:
+        """Move a combat unit onto a hostile civilian it can reach this turn, to take it back.
+
+        The unit must be spare (no city is left short by it leaving), healthy, able to walk the
+        distance this turn, and the tile must be safe on the threat map. The tile is read again
+        first, as the sighting may be a turn or two old.
+        """
+        s = self.settings
+        if not s.recapture or self.threat_map is None:
+            return
+        for civ in self._hostile_civilians(t):
+            where = (civ.x, civ.y)
+            if where in t.dead or t.actions >= s.max_actions:
+                continue
+            if self.threat_map.threat_at(civ.x, civ.y, t.turn) > s.recapture_threat:
+                continue  # Inside a camp's or a hostile unit's reach.
+            candidates = sorted(
+                (
+                    (hex_distance(u.x, u.y, civ.x, civ.y, s.map_width), u.unit_id, u)
+                    for u in t.mine
+                    if self._available(t, u, "recapture")
+                    and u.hp >= s.weights.heal_below * u.max_hp
+                    and self._spare(t, u)
+                ),
+                key=lambda c: c[:2],
+            )
+            unit = next((u for d, _, u in candidates if 0 < d <= int(u.moves)), None)
+            if unit is None:
+                continue
+            try:
+                area = await read_area(game, civ.x, civ.y, 0)
+            except ConnectionError:
+                raise
+            except Exception:
+                log.exception("Reading the tile of a hostile civilian failed")
+                continue
+            self.threat_map.see_tiles(t.turn, area)
+            if where not in getattr(self.threat_map, "civilians", {}):
+                continue  # Gone, or taken back already.
+            result = await self._order(
+                t, unit, "recapture", game.move_unit(unit.unit_index, *where)
+            )
+            if result is not None and move_succeeded(result):
+                self._leave(t, unit)
+                t.acted.add(unit.unit_id)
+                t.placed[unit.unit_id] = self._reached(result, where)
+                self._recaptured += 1
+                self._log(
+                    t, unit, "recapture",
+                    f"recapture: {civ.owner} {civ.unit} at {where[0]},{where[1]}",
+                    where, result=result,
+                )  # fmt: skip
+            else:
+                self._refuse(t, unit, "recapture")
+                self._log(
+                    t, unit, "recapture", "recapture: move refused", where, result=result or ""
+                )
+
     # ----- offense summary -----
 
     def _log_offense(self, t: _Turn) -> None:
@@ -870,12 +1014,17 @@ class MilitaryPolicy:
             "attacks_other": len(landed) - len(on_barb),
             "kills_barb": len(t.killed & barb_tiles),
             "camps_gone": self._camps_gone,
+            "recaptures": self._recaptured,
+            "civilians_captured": self._captured,
+            "civilians_lost": self._lost_civilians,
+            "civilians_hostile": len(self._hostile_civilians(t)),
             "camp_orders": sum(1 for d in mine if d.action == "camp" and "refused" not in d.reason),
             "map_use": {**t.map_use, "missions_released": self._released},
             "map_on": self.threat_map is not None,
         }
         self._released = 0
         self._camps_gone = 0
+        self._recaptured = self._captured = self._lost_civilians = 0
         log.info("military_offense %s", json.dumps(line, sort_keys=True))
 
     # ----- bookkeeping -----

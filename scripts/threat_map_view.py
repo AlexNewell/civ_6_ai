@@ -3,7 +3,8 @@
     python scripts/threat_map_view.py runs/<game>_threatmap.jsonl [--turn N] [--pad 6] [--out f.png]
 
 Each hex shows its threat number (blank is zero). Our cities are blue with their name and the
-threat on their tile; our combat units are green dots; hostile units are red; a camp is a black X. The x
+threat on their tile; our combat units are green dots; hostile units are red; a camp is a
+black X. The x
 labels run across the top and the y labels down the left, so any tile can be read off. Odd rows sit
 half a tile east, as in the game's coordinates. Terrain is not in the dump, so this is threat
 only: lay it beside the turn's screenshot for the ground.

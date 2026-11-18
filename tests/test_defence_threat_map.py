@@ -1,10 +1,15 @@
-"""Short of defenders by the threat map, and resuming a build a defence switch replaced (issue 264).
+"""Short of defenders by the threat map, and resuming a build a defence switch replaced (issues
+264 and 267).
 
-The fixtures are numbers from Run 19 (STD_T1_03): each case is the city's own-tile cover and the
-hostile units the map held, as (unit type, x, y, strength). The map here spreads by tile distance.
+The fixtures are numbers from Runs 19 and 20 (STD_T1_03): the city's own strength, its garrison
+and the hostile units the map held, as (unit type, x, y, strength[, hit points over most]). Our
+units are (unit type, x, y, combat strength, ranged strength). The map here spreads by tile
+distance. Where a log did not carry a city's own strength or garrison it is a plausible value,
+noted on the case.
 """
 
 import asyncio
+import random
 
 from civ_mcp import lua as lq
 
@@ -26,40 +31,76 @@ from fixtures import civ_state as fx
 from test_policy_defence import ALPHA, ProductionGame, mid, prod_city
 
 TURN = 50
+CITY_HP = 200  # A city's hit points in the game.
 
-# City tile, cover on it, hostile units near (type, x, y, strength).
+# Each case: city tile, the city's strength, our units in or near it, hostile units near.
+# Run 19 turn 53: a 9-hit-point Scout beside the capital and a Spearman three tiles off. Held by
+# a Warrior with a Slinger beside it (the log shows the Slinger sent to (58,10) on turn 51).
+T53 = (
+    (59, 10), 24.0,
+    [("UNIT_WARRIOR", 59, 10, 20, 0), ("UNIT_SLINGER", 58, 10, 5, 15)],
+    [("UNIT_SPEARMAN", 57, 7, 25), ("UNIT_SCOUT", 59, 9, 10, 0.09), ("UNIT_WARRIOR", 55, 7, 20)],
+)  # fmt: skip
 NOT_SHORT = {
-    "t53 Constantinople": (
-        (59, 10), 85.5,
-        [("UNIT_SPEARMAN", 57, 7, 25), ("UNIT_SCOUT", 59, 9, 10), ("UNIT_WARRIOR", 55, 7, 20)],
-    ),
+    "t53 Constantinople": T53,
     "t68 Trebizond": (
-        (56, 13), 60.6,
+        (56, 13), 24.0,
+        [("UNIT_SPEARMAN", 56, 13, 25, 0), ("UNIT_ARCHER", 55, 13, 15, 25)],
         [("UNIT_BARBARIAN_HORSEMAN", 58, 12, 20), ("UNIT_BARBARIAN_HORSEMAN", 60, 8, 20),
          ("UNIT_BARBARIAN_HORSE_ARCHER", 60, 9, 15), ("UNIT_BARBARIAN_HORSE_ARCHER", 60, 10, 15)],
     ),
-    "t89 Amaseia": (
-        (55, 9), 168.0,
-        [("UNIT_BARBARIAN_HORSE_ARCHER", 57, 12, 15), ("UNIT_HORSEMAN", 58, 8, 36),
-         ("UNIT_HORSEMAN", 60, 8, 36), ("UNIT_BARBARIAN_HORSE_ARCHER", 60, 10, 15)],
+    "t106 Adrianople": (
+        (62, 12), 30.0,
+        [("UNIT_SPEARMAN", 62, 12, 25, 0), ("UNIT_ARCHER", 61, 12, 15, 25)],
+        [("UNIT_HEAVY_CHARIOT", 61, 9, 28)],
     ),
-    "t106 Adrianople": ((62, 12), 90.0, [("UNIT_HEAVY_CHARIOT", 61, 9, 28)]),
 }  # fmt: skip
-# Turn 17 in Run 19: three Warriors, two Slingers and two Scouts around a capital held by one
-# Warrior with one beside it. A real raid.
+# Turns 14 to 17 in Run 19: three Warriors, two Slingers and two Scouts around a capital held by
+# one Warrior with one beside it. A real raid.
 RAID = (
-    (59, 10), 36.6,
+    (59, 10), 24.0,
+    [("UNIT_WARRIOR", 59, 10, 20, 0), ("UNIT_WARRIOR", 60, 10, 20, 0)],
     [("UNIT_WARRIOR", 55, 11, 20), ("UNIT_WARRIOR", 57, 11, 20), ("UNIT_WARRIOR", 58, 10, 20),
      ("UNIT_SLINGER", 57, 7, 15), ("UNIT_SLINGER", 57, 10, 15),
      ("UNIT_SCOUT", 57, 12, 10), ("UNIT_SCOUT", 60, 13, 10)],
 )  # fmt: skip
+# Run 20 turn 118, Thessalonica (55,11): held by a Horseman (strength 36, as the log's combat
+# estimate shows), the city's strike at about 40, and Barbarian Man-at-Arms, a Trebuchet and a
+# Crossbowman around it. Lost soon after, with the first reading calling it not short.
+T118 = (
+    (55, 11), 40.0,
+    [("UNIT_HORSEMAN", 55, 11, 36, 0)],
+    [("UNIT_SCOUT", 53, 9, 10), ("UNIT_MAN_AT_ARMS", 54, 9, 45), ("UNIT_MAN_AT_ARMS", 54, 11, 45),
+     ("UNIT_TREBUCHET", 55, 9, 35), ("UNIT_MAN_AT_ARMS", 55, 10, 45),
+     ("UNIT_CROSSBOWMAN", 58, 8, 40), ("UNIT_MAN_AT_ARMS", 58, 9, 45)],
+)  # fmt: skip
 
 
-def make_map(tile, cover, units, walls=False):
+def make_map(tile, city_strength, units, ours=(), wall_hp=0.0, city_hp=CITY_HP):
     m = ThreatMap(ThreatMapSettings(map_width=None))
-    m.allies = [Ally("city", *tile, cover, walls=walls)]
-    for kind, x, y, strength in units:
-        m.sources.append(Source(UNIT, x, y, float(strength), TURN, TURN, unit_type=kind))
+    m.allies = [
+        Ally(
+            "city",
+            *tile,
+            city_strength,
+            walls=wall_hp > 0,
+            hp=city_hp,
+            max_hp=CITY_HP,
+            wall_hp=wall_hp,
+            wall_max_hp=wall_hp,
+        )
+    ]
+    for i, (kind, x, y, combat, ranged) in enumerate(ours):
+        top = float(max(combat, ranged))
+        m.allies.append(
+            Ally("unit", x, y, top, kind, base=top, unit_id=i + 1, defence_base=float(combat))
+        )
+    for kind, x, y, strength, *hp in units:
+        m.sources.append(
+            Source(
+                UNIT, x, y, float(strength), TURN, TURN, unit_type=kind, hp_frac=(hp or [1.0])[0]
+            )
+        )
     return m
 
 
@@ -67,21 +108,107 @@ def threat_for(m, tile, units, inside=1, beside=0):
     return CityThreat(
         ALPHA, "City", *tile, (f"hostile_units:{len(units)}",), len(units), inside, beside,
         reading=m.city_reading(*tile, TURN), margin=m.settings.short_margin,
-        hostile_tiles=tuple((x, y) for _, x, y, _ in units),
+        hostile_tiles=tuple((u[1], u[2]) for u in units),
     )  # fmt: skip
 
 
-def test_the_four_run_19_cities_are_not_short():
-    for name, (tile, cover, units) in NOT_SHORT.items():
-        found = threat_for(make_map(tile, cover, units), tile, units)
-        assert not found.short, name
+def case_map(case, wall_hp=0.0):
+    tile, strength, ours, units = case
+    return make_map(tile, strength, units, ours, wall_hp), tile, units
+
+
+def test_the_run_19_cities_are_not_short():
+    for name, case in NOT_SHORT.items():
+        m, tile, units = case_map(case)
+        found = threat_for(m, tile, units)
+        assert not found.short, (name, m.city_reading(*tile, TURN))
         # The head count alone called each of these short, as it still does with no map.
         assert found.defenders < found.wanted, name
 
 
 def test_a_real_raid_is_short():
-    tile, cover, units = RAID
-    assert threat_for(make_map(tile, cover, units), tile, units).short
+    m, tile, units = case_map(RAID)
+    assert threat_for(m, tile, units).short
+
+
+def test_run_20_thessalonica_on_turn_118_is_short_with_or_without_walls():
+    for walls in (0.0, 100.0):  # None, and Ancient Walls (100 outer hit points).
+        m, tile, units = case_map(T118, walls)
+        reading = m.city_reading(*tile, TURN)
+        assert reading.defender == 36  # The Horseman, not the sum of all our cover.
+        assert threat_for(m, tile, units).short, (walls, reading)
+
+
+def test_the_fixture_numbers_are_printed():
+    for name, case in {**dict(NOT_SHORT), "raid": RAID, "t118": T118}.items():
+        for walls in (0.0, 100.0):
+            m, tile, _ = case_map(case, walls)
+            print(name, walls, m.city_reading(*tile, TURN))
+
+
+def test_walls_take_the_blows_and_their_hit_points_do_not_heal():
+    bare = case_map(T118)[0].city_reading(55, 11, TURN)
+    walled = case_map(T118, 100.0)[0].city_reading(55, 11, TURN)
+    assert walled.net == walled.wall_damage < bare.net  # Walls take a share, melee least.
+    assert walled.turns == 100.0 / walled.wall_damage
+
+
+def test_sustained_wall_damage_over_a_few_turns_is_a_threat_though_the_city_out_heals_it():
+    # Two Trebuchets hit walls in full: 60 wall hit points go in a couple of turns.
+    units = [("UNIT_TREBUCHET", 5, 7, 35), ("UNIT_TREBUCHET", 6, 7, 35)]
+    m = make_map((5, 5), 60.0, units, [("UNIT_SPEARMAN", 5, 5, 25, 0)], wall_hp=60.0)
+    reading = m.city_reading(5, 5, TURN)
+    assert reading.damage < m.heal.city_garrison + 30  # Not a rout of the city itself.
+    assert reading.pressed()
+
+
+def test_our_units_cut_the_attack_instead_of_adding_to_the_defender():
+    units = [("UNIT_MAN_AT_ARMS", 5, 6, 45), ("UNIT_MAN_AT_ARMS", 6, 6, 45)]
+    alone = make_map((5, 5), 30.0, units, [("UNIT_WARRIOR", 5, 5, 20, 0)])
+    helped = make_map(
+        (5, 5), 30.0, units,
+        [("UNIT_WARRIOR", 5, 5, 20, 0), ("UNIT_CROSSBOWMAN", 4, 5, 30, 40)],
+    )  # fmt: skip
+    a, b = alone.city_reading(5, 5, TURN), helped.city_reading(5, 5, TURN)
+    assert a.defender == b.defender == 20
+    assert b.damage < a.damage
+
+
+def test_adding_attackers_or_raising_their_strength_never_lowers_the_damage():
+    rng = random.Random(267)
+    kinds = ["UNIT_WARRIOR", "UNIT_MAN_AT_ARMS", "UNIT_TREBUCHET", "UNIT_CROSSBOWMAN", "UNIT_SCOUT"]
+    spots = [(x, y) for x in range(3, 8) for y in range(3, 8) if (x, y) != (5, 5)]
+    for _ in range(300):
+        ours = [
+            (
+                rng.choice(["UNIT_WARRIOR", "UNIT_ARCHER", "UNIT_SPEARMAN"]),
+                *rng.choice(spots),
+                20,
+                25,
+            )
+            for _ in range(rng.randint(0, 3))
+        ] + [("UNIT_WARRIOR", 5, 5, 20, 0)]
+        walls = rng.choice([0.0, 50.0])
+        units = [
+            (rng.choice(kinds), *rng.choice(spots), float(rng.randint(5, 60)), rng.uniform(0.1, 1))
+            for _ in range(rng.randint(0, 5))
+        ]
+
+        def read(group, ours=ours, walls=walls):
+            return make_map((5, 5), 25.0, group, ours, walls).city_reading(5, 5, TURN)
+
+        base = read(units)
+        extra = (rng.choice(kinds), *rng.choice(spots), float(rng.randint(5, 60)))
+        more = read([*units, extra])
+        assert more.damage >= base.damage - 1e-9
+        assert more.wall_damage >= base.wall_damage - 1e-9
+        if units:
+            i = rng.randrange(len(units))
+            kind, x, y, strength, hp = units[i]
+            raised = [*units[:i], (kind, x, y, strength + rng.randint(1, 30), hp), *units[i + 1 :]]
+            stronger = read(raised)
+            assert stronger.damage >= base.damage - 1e-9
+            assert stronger.wall_damage >= base.wall_damage - 1e-9
 
 
 def test_without_a_map_the_head_count_decides():
@@ -99,9 +226,9 @@ def test_two_weak_units_cannot_out_damage_the_citys_healing_but_a_stack_can():
     weak = [("UNIT_SCOUT", 5, 6, 10), ("UNIT_SCOUT", 6, 6, 10)]
     stack = [("UNIT_WARRIOR", x, 6, 20) for x in (4, 5, 6)] + [("UNIT_WARRIOR", 5, 7, 20)]
     quiet = make_map((5, 5), 30.0, weak).city_reading(5, 5, TURN)
-    assert quiet.net == 0
+    assert not quiet.pressed()  # It out-damages the heal, but would take many turns.
     raid = make_map((5, 5), 30.0, stack).city_reading(5, 5, TURN)
-    assert raid.net > 0 and raid.damage > quiet.damage
+    assert raid.pressed() and raid.damage > quiet.damage
 
 
 def test_a_stronger_defence_lowers_the_damage_taken():
@@ -127,7 +254,7 @@ def test_an_unwalled_city_covers_only_its_own_tile_and_a_walled_one_two_tiles_ou
     bare, walled = covered(False), covered(True)
     assert bare.cover_at(5, 5) == 20
     assert bare.cover_at(6, 5) == 0 and bare.cover_at(7, 5) == 0
-    assert walled.cover_at(5, 5) > 20  # Walls add to the city's own strength.
+    assert walled.cover_at(5, 5) == 20  # Walls are hit points, not strength.
     assert walled.cover_at(6, 5) > 0 and walled.cover_at(7, 5) > 0
     assert walled.cover_at(8, 5) == 0
 
@@ -140,21 +267,19 @@ def test_a_units_cover_still_spreads_beside_it():
 
 
 def test_a_killed_unit_stops_counting_before_production_runs():
-    tile, cover, units = NOT_SHORT["t53 Constantinople"]
-    m = make_map(tile, cover, units)
+    m, tile, units = case_map(T53)
     state = DefenceState(map=m)
     state.reset(TURN, {ALPHA: threat_for(m, tile, units)})
     before = state.cities[ALPHA].reading.damage
-    m.forget_units_at([(59, 9)])
-    state.forget_killed([(59, 9)])
+    m.forget_units_at([(57, 7)])
+    state.forget_killed([(57, 7)])
     after = state.cities[ALPHA]
     assert after.hostile_units == len(units) - 1
     assert after.reading.damage < before
 
 
 def test_a_covered_city_keeps_its_build_and_is_not_pressed():
-    tile, cover, units = NOT_SHORT["t53 Constantinople"]
-    m = make_map(tile, cover, units)
+    m, tile, units = case_map(T53)
     state = DefenceState(map=m)
     state.reset(TURN, {ALPHA: threat_for(m, tile, units)})
     assert state.short_ids == frozenset() and state.mapped_ids == {ALPHA}
@@ -247,9 +372,22 @@ def test_a_failed_read_falls_back_to_the_games_table_values():
     assert asyncio.run(read_combat_heal(Partial())) == DEFAULT_COMBAT_HEAL
 
 
+def test_the_heal_says_where_its_values_came_from():
+    class Reads:
+        async def execute_lua(self, code, context="gamecore"):
+            return "HEAL|COMBAT_HEAL_CITY_GARRISON|20\nHEALDONE"
+
+    class NoLua:
+        async def execute_lua(self, code, context="gamecore"):
+            raise RuntimeError("no lua")
+
+    assert asyncio.run(read_combat_heal(Reads())).source == "game"
+    failed = asyncio.run(read_combat_heal(NoLua())).source
+    assert failed.startswith("fallback (") and "no lua" in failed
+
+
 def test_the_map_judges_by_the_heal_it_was_given():
-    tile, cover, units = RAID
-    m = make_map(tile, cover, units)
+    m, tile, units = case_map(RAID)
     assert m.city_reading(*tile, TURN).net > 0
     m.heal = CombatHeal(city_garrison=500.0)
     assert m.city_reading(*tile, TURN).net == 0
@@ -348,3 +486,16 @@ def test_a_resume_drops_the_cancelled_defence_unit_from_the_armys_count():
     asyncio.run(policy.run(game))
     assert game.set == [(ALPHA, "BUILDING", "BUILDING_LIBRARY")]
     assert seen[-1] == ["BUILDING_LIBRARY"]
+
+
+def test_below_the_army_floor_a_military_unit_outranks_a_building_with_nothing_short():
+    from civ6_ai.policies.production import ProductionWeights, rank_production
+    from test_policy_defence import MENU
+
+    city = prod_city()  # Garrisoned, quiet.
+    floor = ProductionWeights().army_per_city
+    assert floor == 1.5
+    low = rank_production(city, MENU, mid(num_cities=4, army=3), ProductionWeights())
+    assert low[0].category == "UNIT" and low[0].item != "UNIT_BUILDER"
+    met = rank_production(city, MENU, mid(num_cities=4, army=6), ProductionWeights())
+    assert met[0].item not in ("UNIT_WARRIOR", "UNIT_SWORDSMAN", "UNIT_CROSSBOWMAN")

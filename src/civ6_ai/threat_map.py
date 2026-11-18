@@ -21,7 +21,7 @@ and comes with the stages that use it; a decision to use the map must not assume
 import json
 import logging
 from collections.abc import Iterable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +37,7 @@ from civ6_ai.terrain import TerrainStore
 log = logging.getLogger(__name__)
 
 BARBARIAN_ID = 63
+UNIT_MAX_HP = 100.0  # COMBAT_MAX_HIT_POINTS: a unit at full health.
 CAMP_IMPROVEMENT = "IMPROVEMENT_BARBARIAN_CAMP"
 CAMP = "camp"
 UNIT = "unit"
@@ -77,15 +78,15 @@ class ThreatMapSettings:
     # Our side. Cover is what our units and cities answer with; it is not threat's opposite, so
     # the two are kept as separate layers and combined by whoever decides.
     own_horizon_turns: float = 2.0  # Our unit's cover fades out over this many turns of reach.
-    # What walls add to a city's own strength, on the same scale (an ancient wall is about one more
-    # melee unit's worth). Measured, not exact: a setting, not a rule.
-    wall_strength: float = 10.0
     # A city cannot strike at range without walls, so an unwalled city gives no cover beside it;
     # with walls it covers tiles within `ranged_reach`. Our units' cover spreads as before.
-    # A city is short of defenders (issue 264) only when the force that can reach its tile
-    # out-damages the city: the damage it deals in a turn, against the tile's cover (the city's
-    # strength, walls and the garrison), must exceed the city's healing (the game's rule, read at
-    # runtime: see `read_combat_heal`) by more than this many hit points.
+    # A city is short of defenders (issue 267) when the attackers that can reach it this turn or
+    # next (`attack_horizon_turns`) would break its walls, or empty its hit points against its
+    # healing, within `siege_turns` (about the time to build or buy a defender), and the loss
+    # rate a turn is more than `short_margin` hit points. The damage is worked out as the game
+    # resolves it: see `ThreatMap.city_reading`.
+    attack_horizon_turns: float = 2.0
+    siege_turns: float = 6.0
     short_margin: float = 0.0
     # Fog is mild threat: a tile beside ground we have never seen could hold anything.
     fog_penalty: float = 3.0  # At most, on a tile whose surroundings are all unseen.
@@ -107,6 +108,7 @@ class Source:
     unit_type: str = ""
     hostile_owner: int = BARBARIAN_ID
     naval: bool = False
+    hp_frac: float = 1.0  # Hit points left over the most it can have, as last seen.
 
     def age(self, turn: int) -> int | None:
         return None if self.last_seen is None else turn - self.last_seen
@@ -125,25 +127,35 @@ class Ally:
     base: float = 0.0  # A unit's strength at full health.
     unit_id: int = 0  # Of a unit, so a move this turn can be applied (`relocate`).
     walls: bool = False  # A city with walls shoots at range, so it covers tiles beside it.
+    # A unit's strength when it defends (its combat strength, not its ranged one), at full health.
+    defence_base: float = 0.0
+    hp_frac: float = 1.0  # A unit's hit points over its most.
+    # A city's hit points, and its walls', as the game reports them.
+    hp: float = 0.0
+    max_hp: float = 0.0
+    wall_hp: float = 0.0
+    wall_max_hp: float = 0.0
 
 
-def _city_strength(city: City, wall_strength: float = 0.0) -> float:
-    """A city's cover: its defence strength plus `wall_strength` when it has walls, less what
-    damage has taken off (its ranged strike is on that scale). The garrison's own stats are not
-    counted: our units on the tile give their own cover."""
+def _city_strength(city: City) -> float:
+    """A city's own strength as the game reports it, less what damage has taken off (its ranged
+    strike is on that scale). Walls are not added: they are hit points (`wall_hp`), not strength.
+    The garrison's own stats are not counted here: our units on the tile defend with their own."""
     hp = city.garrison_hp / city.garrison_max_hp if city.garrison_max_hp > 0 else 1.0
-    walls = wall_strength if city.has_walls else 0.0
-    return (float(city.defense_strength) + walls) * min(1.0, hp)
+    return float(city.defense_strength) * min(1.0, hp)
 
 
 @dataclass(frozen=True)
 class CityReading:
-    """What the map says about one city, on its own tile (a force beside it is already counted
-    by how far each source reaches).
+    """What the map says about one city, on its own tile.
 
-    `damage` is what the force that can reach the tile deals in a turn against the tile's cover;
-    `net` is that less the city's healing, never below zero: the city is short when it is above
-    the margin.
+    `defender` is the strength each attacker is hit against (the garrison unit's, else the
+    city's). `damage` is what the attackers that can reach the city deal in a turn to its hit
+    points once walls are down, after our units nearby have struck them; `wall_damage` is what
+    they deal to the walls. `net` is the hit points lost a turn now (walls take it first, and do
+    not heal under attack; the city's own hit points heal), never below zero. `turns` is how long
+    until the walls break, or the city falls if it has none, at that rate; the city is short when
+    `net` is above the margin and `turns` is within `horizon`.
     """
 
     threat: float
@@ -151,6 +163,13 @@ class CityReading:
     cover: float
     damage: float
     net: float
+    defender: float = 0.0
+    wall_damage: float = 0.0
+    turns: float = float("inf")
+    horizon: float = 0.0
+
+    def pressed(self, margin: float = 0.0) -> bool:
+        return self.net > margin and self.turns <= self.horizon
 
 
 # The game's own combat-healing rules (GlobalParameters). Walls do not heal for
@@ -163,6 +182,13 @@ class CombatHeal:
         10.0  # COMBAT_HEAL_CITY_OUTER_DEFENSES (1 in Base, 10 in the expansions).
     )
     outer_defence_cooldown: float = 3.0  # COMBAT_HEAL_OUTER_DEFENSES_COOLDOWN, in turns.
+    # What share of an attack's damage reaches a city's walls while they stand, by the kind of
+    # attacker: COMBAT_DEFENSE_DAMAGE_PERCENT_MELEE, _RANGED and _BOMBARD (siege).
+    wall_percent_melee: float = 15.0
+    wall_percent_ranged: float = 50.0
+    wall_percent_bombard: float = 100.0
+    # Where the values came from: "game" (read), or a fallback with its reason. Not compared.
+    source: str = field(default="table", compare=False)
 
 
 # What is used when the read fails: the values the installed game's tables give.
@@ -171,6 +197,9 @@ _HEAL_PARAMETERS = {
     "COMBAT_HEAL_CITY_GARRISON": "city_garrison",
     "COMBAT_HEAL_CITY_OUTER_DEFENSES": "outer_defences",
     "COMBAT_HEAL_OUTER_DEFENSES_COOLDOWN": "outer_defence_cooldown",
+    "COMBAT_DEFENSE_DAMAGE_PERCENT_MELEE": "wall_percent_melee",
+    "COMBAT_DEFENSE_DAMAGE_PERCENT_RANGED": "wall_percent_ranged",
+    "COMBAT_DEFENSE_DAMAGE_PERCENT_BOMBARD": "wall_percent_bombard",
 }
 COMBAT_HEAL_LUA = f"""
 for name, _ in pairs({{{", ".join(f"{n} = true" for n in _HEAL_PARAMETERS)}}}) do
@@ -199,7 +228,7 @@ def parse_combat_heal(output: str) -> CombatHeal:
                 continue
     if "city_garrison" not in found:
         raise ValueError("combat heal read has no city garrison value")
-    return CombatHeal(**{**asdict(DEFAULT_COMBAT_HEAL), **found})
+    return CombatHeal(**{**asdict(DEFAULT_COMBAT_HEAL), **found, "source": "game"})
 
 
 async def read_combat_heal(game: Any) -> CombatHeal:
@@ -211,7 +240,7 @@ async def read_combat_heal(game: Any) -> CombatHeal:
         raise
     except Exception as err:
         log.warning("Combat heal read failed, using the defaults: %s", err)
-        return DEFAULT_COMBAT_HEAL
+        return replace(DEFAULT_COMBAT_HEAL, source=f"fallback ({err})")
 
 
 @dataclass
@@ -284,6 +313,7 @@ class ThreatMap:
                 unit_type=t.unit_type,
                 hostile_owner=t.owner_id,
                 naval=any(w in t.unit_type for w in _SEA_UNITS),
+                hp_frac=min(1.0, t.hp / t.max_hp) if t.max_hp > 0 else 1.0,
             )
             for t in threats
             if t.hostile
@@ -326,11 +356,23 @@ class ThreatMap:
                 any(w in u.unit_type for w in _SEA_UNITS),
                 base=float(max(u.combat_strength, u.ranged_strength)),
                 unit_id=u.unit_id,
+                defence_base=float(u.combat_strength),
+                hp_frac=u.hp / max(u.max_hp, 1),
             )
             for u in units
             if u.is_combat
         ] + [
-            Ally("city", c.x, c.y, _city_strength(c, s.wall_strength), walls=c.has_walls)
+            Ally(
+                "city",
+                c.x,
+                c.y,
+                _city_strength(c),
+                walls=c.has_walls,
+                hp=float(c.garrison_hp),
+                max_hp=float(c.garrison_max_hp),
+                wall_hp=float(c.wall_hp),
+                wall_max_hp=float(c.wall_max_hp),
+            )
             for c in cities
         ]
         self.sources = [
@@ -452,32 +494,124 @@ class ThreatMap:
         """Threat plus fog, less our cover, never below zero."""
         return max(0.0, self.threat_at(x, y, turn) + self.fog_at(x, y) - self.cover_at(x, y))
 
-    def city_reading(self, x: int, y: int, turn: int | None = None) -> CityReading:
-        """The map's view of the city at (x, y), judged on its own tile (issue 264).
+    def _turns_to(self, src: Source, x: int, y: int) -> float | None:
+        """Turns before `src` can strike the tile, or None if it cannot within its horizon.
+        Worked back from the threat field: zero when it is already in range."""
+        strength = self.strength_of(src)
+        reach = self._field(src).get((x, y), 0.0)
+        if strength <= 0 or reach <= 0:
+            return None
+        share = min(1.0, reach / strength)
+        moves, _naval, rng, horizon = self._profile(src)
+        if self.terrain is not None:
+            return (1 - share) * (horizon + 1)
+        distance = (1 - share) * (self._reach(src) + 1)
+        return max(0.0, distance - rng) / moves
 
-        Each source that reaches the tile attacks once, for the damage its strength does against
-        the tile's cover, weighted by how soon it arrives (the same fade as its threat). That is
-        compared with the city's healing a turn: a couple of weak units cannot out-damage it, a
-        stack can. Neighbouring tiles are not judged: an unwalled city covers none of them.
+    def _attack_class(self, src: Source) -> str:
+        """ "melee", "ranged" or "siege": how much of its damage the walls take."""
+        if src.kind == CAMP:
+            return "melee"
+        stats = COMBAT_UNITS.get(src.unit_type)
+        klass = stats[4] if stats else ""
+        if klass == "SIEGE":
+            return "siege"
+        if src.naval or klass == "RANGED" or (stats is not None and stats[1] > 0):
+            return "ranged"
+        return "melee"
+
+    def city_reading(self, x: int, y: int, turn: int | None = None) -> CityReading:
+        """The map's view of the city at (x, y), judged as the game resolves an attack (issue 267).
+
+        Each source that can reach the city this turn or next hits the *defender*: the best of our
+        units standing in the city by its own strength, or the city's own strength with none.
+        The damage is the game's formula (`expected_damage`). While walls stand they take a share
+        of it by the attacker's kind (the game's COMBAT_DEFENSE_DAMAGE_PERCENT values) and the
+        city's hit points take none; they do not heal under attack. Our other units that can
+        reach the city, and the city's own strike when it has walls, each hit one attacker first,
+        taking away the share of its hit points the blow removes (all of it for a kill). They cut
+        the attack; they do not raise the defender's strength.
+
+        Neighbouring tiles are not judged: an unwalled city covers none of them.
         """
         from civ6_ai.policies.military import expected_damage  # Military imports this module.
 
+        s = self.settings
         cover = self.cover_at(x, y)
-        damage = 0.0
+        city = next((a for a in self.allies if a.kind == "city" and (a.x, a.y) == (x, y)), None)
+        here = [a for a in self.allies if a.kind == "unit" and (a.x, a.y) == (x, y) and not a.naval]
+        defender_unit = max(here, key=lambda a: a.defence_base * a.hp_frac, default=None)
+        if defender_unit is not None:
+            defender = defender_unit.defence_base * defender_unit.hp_frac
+        else:
+            defender = city.strength if city is not None else 0.0
+        # The attackers that arrive in time: strength, kind, hit points, and how fresh the sighting.
+        strengths: list[float] = []
+        kinds: list[str] = []
+        hit_points: list[float] = []
+        base: list[float] = []
         for src in self.sources:
-            strength = self.strength_of(src)
-            reach = self._field(src).get((x, y), 0.0)
-            if strength <= 0 or reach <= 0:
+            when = self._turns_to(src, x, y)
+            if when is None or when > s.attack_horizon_turns:
                 continue
-            arrival = (reach / strength) * self._fade(src, turn)
-            damage += expected_damage(strength, cover) * arrival
-        net = max(0.0, damage - self.heal.city_garrison)
+            strength = self.strength_of(src)
+            strengths.append(strength)
+            kinds.append(self._attack_class(src))
+            hit_points.append(max(1.0, UNIT_MAX_HP * (src.hp_frac if src.kind == UNIT else 1.0)))
+            base.append(expected_damage(strength, defender) * self._fade(src, turn))
+        blows = sorted(
+            [
+                a.strength
+                for a in self.allies
+                if a.kind == "unit"
+                and a is not defender_unit
+                and a.strength > 0
+                and self._cover_field(a).get((x, y), 0.0) > 0
+            ]
+            + ([city.strength] if city is not None and city.walls and city.strength > 0 else []),
+            reverse=True,
+        )
+        # What share of each attacker is left to hit: each blow goes where it takes off the most.
+        left = [1.0] * len(base)
+        for blow in blows:
+            best, best_cut, best_gain = -1, 0.0, 0.0
+            for i, strength in enumerate(strengths):
+                if left[i] <= 0:
+                    continue
+                cut = min(left[i], expected_damage(blow, strength) / hit_points[i])
+                if base[i] * cut > best_gain:
+                    best, best_cut, best_gain = i, cut, base[i] * cut
+            if best < 0:
+                break
+            left[best] -= best_cut
+        heal = self.heal
+        percent = {
+            "melee": heal.wall_percent_melee,
+            "ranged": heal.wall_percent_ranged,
+            "siege": heal.wall_percent_bombard,
+        }
+        damage = sum(b * k for b, k in zip(base, left, strict=True))
+        wall_damage = sum(
+            b * k * percent[kind] / 100.0 for kind, b, k in zip(kinds, base, left, strict=True)
+        )
+        city_hp = city.hp if city is not None else 0.0
+        wall_hp = city.wall_hp if city is not None else 0.0
+        if wall_hp > 0:
+            net = wall_damage  # Walls take it first and do not heal under attack.
+            turns = wall_hp / wall_damage if wall_damage > 0 else float("inf")
+        else:
+            net = max(0.0, damage - heal.city_garrison)
+            turns = city_hp / net if net > 0 else float("inf")
         return CityReading(
             threat=self.threat_at(x, y, turn),
             fog=self.fog_at(x, y),
             cover=cover,
             damage=damage,
             net=net,
+            defender=defender,
+            wall_damage=wall_damage,
+            turns=turns,
+            horizon=s.siege_turns,
         )
 
     def relocate(
@@ -491,7 +625,8 @@ class ThreatMap:
             if ally.unit_id in moves:
                 ally.x, ally.y = moves[ally.unit_id]
             if health and ally.unit_id in health:
-                ally.strength = ally.base * max(0.0, min(1.0, health[ally.unit_id]))
+                ally.hp_frac = max(0.0, min(1.0, health[ally.unit_id]))
+                ally.strength = ally.base * ally.hp_frac
 
     def forget_units_at(self, tiles: Iterable[tuple[int, int]]) -> int:
         """Drop hostile unit sources standing on these tiles (they died this turn). Returns how
@@ -637,7 +772,7 @@ class ThreatMapHandler:
         if not self._heal_read:  # The game's rules do not change in a session: read them once.
             self._heal_read = True
             self.map.heal = await read_combat_heal(game)
-            log.info("Threat map: combat heal %s", self.map.heal)
+            log.info("Threat map: combat heal %s source=%s", self.map.heal, self.map.heal.source)
         cities = await read_cities(game, self.settings.map_width)
         units = await read_units(game, self.settings.map_width)
         self.map.see_threats(turn, await read_threats(game))

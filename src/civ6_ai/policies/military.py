@@ -114,7 +114,6 @@ _NOT_LAND = (
 )
 _ATTACK_TAGS = ("RANGE_ATTACK", "MELEE_ATTACK", "AIR_ATTACK")
 _DAMAGE_DEALT = re.compile(r"damage dealt:~?(\d+)")
-_ENEMY_HP = re.compile(r"enemy HP:\s*(-?\d+)\s*->\s*(-?\d+)")
 _HP_AFTER = re.compile(r"your HP:\s*-?\d+\s*->\s*(-?\d+)")
 _NOW_AT = re.compile(r"now_at:(-?\d+),(-?\d+)")
 _ALREADY_ON = re.compile(r"STACKING_CONFLICT.*already on \((-?\d+),\s*(-?\d+)\)")
@@ -343,17 +342,15 @@ def attack_landed(result: str) -> bool:
 def attack_failed(unit: Unit, result: str) -> str | None:
     """Why an attack that `attack_landed` calls a success did nothing, or None if it did something.
 
-    Run 20: a ranged unit's order came back as `MELEE_ATTACK` with `enemy HP:100 -> 100/100`.
-    The unit was stacked with another military unit, and civ6-mcp fell back to a melee attack
-    that deals nothing. A ranged unit's melee reply, or any reply showing the enemy's hit points
-    unchanged, is a failure.
+    Run 20: a ranged unit's order came back as `MELEE_ATTACK`. The unit was stacked with another
+    military unit, and civ6-mcp fell back to a melee attack that deals nothing. Only that is a
+    failure here. Issue 275: civ6-mcp's reply always shows the enemy's hit points from before the
+    combat (`enemy HP:80 -> 80/100` on a hit that killed), so a melee unit's result is judged by
+    reading the target again (`_verify_melee`), never from this text.
     """
     lines = [line.strip() for line in result.splitlines()]
     if unit.ranged_strength > 0 and any(line.startswith("MELEE_ATTACK") for line in lines):
         return "a ranged unit's attack came back as MELEE_ATTACK"
-    for found in _ENEMY_HP.finditer(result):
-        if found.group(1) == found.group(2):
-            return f"the enemy's hit points did not change ({found.group(1)})"
     return None
 
 
@@ -549,6 +546,11 @@ class _Turn:
     fired: set[int] = field(default_factory=set)  # Cities that have used their strike.
     struck: set[tuple[int, int]] = field(default_factory=set)  # Targets a city has hit.
     attacked: set[tuple[int, int]] = field(default_factory=set)  # Targets any attack landed on.
+    # Targets a melee attack landed on. Its reply shows the enemy's health from before the combat,
+    # so these are read again after the attacks and judged by what is there (issue 275).
+    melee_hit: set[tuple[int, int]] = field(default_factory=set)
+    # Barbarian tiles of the threats before the re-read, so an attack on one that died still counts.
+    barb_before: set[tuple[int, int]] = field(default_factory=set)
     # Per target, the best attack turned down: its odds, the unit and the reason.
     rejected: dict[tuple[int, int], tuple[AttackOdds, Unit, str]] = field(default_factory=dict)
 
@@ -771,7 +773,7 @@ class MilitaryPolicy:
         """
         s = self.settings
         barbs = [b for b in t.threats if b.owner_id == BARBARIAN_ID and b.hostile]
-        barb_tiles = {(b.x, b.y) for b in barbs}
+        barb_tiles = {(b.x, b.y) for b in barbs} | t.barb_before
         near = [
             b
             for b in barbs
@@ -987,7 +989,39 @@ class MilitaryPolicy:
         await self._city_strikes(game, t)
         await self._group_kills(game, t)
         await self._solo_attacks(game, t)
+        await self._verify_melee(game, t)
         self._log_rejections(t)
+
+    async def _verify_melee(self, game: MilitaryGame, t: _Turn) -> None:
+        """Judge the melee attacks of this turn by one read of the threats after all of them.
+
+        The reply to a melee attack shows the enemy's health from before the combat, so a kill
+        was only ever guessed from the damage estimate. A tile with no hostile unit now is a
+        kill, and one with a unit shows its real health. The read also refreshes `t.threats` for
+        the steps that follow. One call a turn, and only on a turn with a melee attack.
+        """
+        if not t.melee_hit:
+            return
+        try:
+            threats = await _read_threats(game)
+        except ConnectionError:
+            raise
+        except Exception:
+            log.exception("Reading the threats after the melee attacks failed")
+            return
+        t.barb_before = {(b.x, b.y) for b in t.threats if b.owner_id == BARBARIAN_ID}
+        t.threats = threats
+        for where in t.melee_hit:
+            left = [th for th in threats if (th.x, th.y) == where and th.hostile]
+            if not left:
+                t.dead.add(where)
+                t.killed.add(where)
+                t.confirmed.add(where)
+            elif where not in t.confirmed:
+                # Still standing: the estimate that killed it was wrong, and what is left is real.
+                t.dead.discard(where)
+                t.killed.discard(where)
+                t.target_hp[where] = max(th.hp for th in left)
 
     def _defender_at(self, t: _Turn, where: tuple[int, int]) -> Threat | None:
         defenders = [d for d in t.threats if (d.x, d.y) == where and d.hostile]
@@ -1239,6 +1273,8 @@ class MilitaryPolicy:
             return False
         t.acted.add(unit.unit_id)
         t.attacked.add(where)
+        if unit.ranged_strength <= 0:
+            t.melee_hit.add(where)
         t.hp[unit.unit_id] = max(0.0, t.hp.get(unit.unit_id, unit.hp) - odds.taken)  # Expected.
         self._fortified.pop(unit.unit_id, None)  # Attacking ends a fortification.
         self._record_hit(t, where, result, odds.dealt, target.hp)

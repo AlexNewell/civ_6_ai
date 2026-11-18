@@ -1845,12 +1845,59 @@ def test_a_ranged_order_that_comes_back_melee_is_a_failed_attack(caplog):
     assert len(game.orders("attack")) == 1  # Not tried again this turn.
 
 
-def test_a_reply_that_leaves_the_enemy_hp_unchanged_is_a_failure():
-    unit = build_unit(archer())
-    assert attack_failed(unit, MELEE_FALLBACK)
-    assert attack_failed(build_unit(warrior()), MELEE_HIT.replace("100 -> 76", "100 -> 100"))
-    assert attack_failed(unit, RANGED_HIT) is None
+# A real melee reply (iteration 1 of the turn-100 test): the enemy health is from before the
+# combat, so it reads "58 -> 58" on a hit that took 33.
+REAL_MELEE = (
+    "MELEE_ATTACK|target:UNIT_CROSSBOWMAN at (11,10)|enemy HP:58 -> 58/100|your HP:100 -> 100 "
+    "CS:36|est damage dealt:~33\n  Post-combat: ~25/58 (estimate — verify with get_units)"
+)
+
+
+def test_only_a_ranged_unit_with_a_melee_reply_is_a_failed_attack():
+    assert attack_failed(build_unit(archer()), MELEE_FALLBACK)
+    assert attack_failed(build_unit(warrior()), REAL_MELEE) is None  # Unchanged hp is not a failure.
     assert attack_failed(build_unit(warrior()), MELEE_HIT) is None
+    assert attack_failed(build_unit(archer()), RANGED_HIT) is None
+
+
+def melee_game(left, reply=REAL_MELEE):
+    """A warrior beside a 58 hp barbarian. After the attack the threat read shows `left`."""
+    game = MilitaryGame(
+        [warrior(targets=[target(hp=58)])],
+        [barbarian(hp=58)],
+        cities=[city_info(garrison_unit="UNIT_WARRIOR")],
+    )
+    game.replies["attack"] = reply
+    plain = game.attack_unit
+
+    async def attack(unit_index, x, y):
+        result = await plain(unit_index, x, y)
+        game.data["threats"] = left
+        return result
+
+    game.attack_unit = attack
+    return game
+
+
+def test_a_melee_attack_with_an_unchanged_hp_reply_counts_and_a_kill_is_read_back(caplog):
+    game = melee_game([])
+    policy = MilitaryPolicy()
+    with caplog.at_level(logging.INFO):
+        run(policy, game)
+    (hit,) = [d for d in policy.decisions if d.action == "attack"]
+    assert "failed" not in hit.reason
+    (row,) = offense_rows(caplog)
+    assert row["attacks_barb"] == 1
+    assert row["kills_barb"] == 1
+
+
+def test_a_melee_attack_that_leaves_the_target_standing_is_not_a_kill(caplog):
+    game = melee_game([barbarian(hp=25)])
+    with caplog.at_level(logging.INFO):
+        run(MilitaryPolicy(), game)
+    (row,) = offense_rows(caplog)
+    assert row["attacks_barb"] == 1
+    assert row["kills_barb"] == 0
 
 
 def test_a_failed_attack_does_not_use_up_the_unit():

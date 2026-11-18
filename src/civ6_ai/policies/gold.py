@@ -62,6 +62,7 @@ from civ6_ai.policies import valuation
 from civ6_ai.policies.game_data import COMBAT_UNITS, UPGRADES
 from civ6_ai.policies.military import holds_tile
 from civ6_ai.policies.production import (
+    _CAMP_CITY_REACH,
     ProductionContext,
     ProductionWeights,
     build_context,
@@ -547,6 +548,10 @@ class GoldPolicy:
             value = camp_unit_value(
                 option.item, COMBAT_UNITS[option.item][4], float(option.cost), context
             )
+            if context.camp_target is not None and (
+                hex_distance(city.x, city.y, *context.camp_target) > _CAMP_CITY_REACH
+            ):
+                continue  # Too far to join the force.
             if context.camp_wants == "melee" and COMBAT_UNITS[option.item][4] == "RANGED":
                 continue  # Only a melee unit takes the tile the force is short of.
             if value is None:

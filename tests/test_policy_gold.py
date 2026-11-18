@@ -918,3 +918,24 @@ def test_gold_buys_the_best_matchup_unit_while_the_camp_force_is_short():
     asyncio.run(GoldPolicy(defence=state).run(game))
     assert ("buy", 65536, "UNIT", "UNIT_ARCHER") in game.actions
     assert ("buy", 65536, "UNIT", "UNIT_HEAVY_CHARIOT") not in game.actions
+
+
+def test_gold_offers_no_camp_unit_from_a_city_too_far_to_join_the_force():
+    from civ6_ai.policies.production import ProductionContext
+    from civ6_ai.state import ProductionChoice
+    from civ6_ai.state.reader import build_city
+
+    city = build_city(fx.city_info(), [], set())  # At (10, 10).
+    policy = GoldPolicy()
+    turn = gold._Turn(500, income=5.0, delay={}, now=100, last=330)
+    ranked = [ProductionChoice("UNIT", "UNIT_ARCHER", 60, 5, 130)]
+    near = ProductionContext(
+        turn=100, num_cities=2, camp_units=2, camp_wants="any",
+        camp_defender=45.0, camp_target=(14, 10),
+    )  # fmt: skip
+    far = ProductionContext(
+        turn=100, num_cities=2, camp_units=2, camp_wants="any",
+        camp_defender=45.0, camp_target=(60, 10),
+    )  # fmt: skip
+    assert policy._camp_candidates(city, ranked, near, turn)
+    assert not policy._camp_candidates(city, ranked, far, turn)

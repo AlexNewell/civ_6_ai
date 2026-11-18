@@ -112,6 +112,9 @@ class SecondaryWeights:
     # Highest net threat (threat plus fog, less our cover) allowed on any tile of a trade route's
     # estimated path (issue 269). A camp's strength is 15 at its own tile, fading with distance.
     route_danger_max: float = 5.0
+    # A tile's danger on a route is the worst of the last this many turns (issue 276): a route
+    # lasts many turns and a camp keeps sending units, so one quiet reading is not safety.
+    route_danger_turns: int = 5
 
     def __post_init__(self) -> None:
         for item in fields(self):
@@ -202,6 +205,31 @@ def route_danger(field_map: Any, x1: int, y1: int, x2: int, y2: int, turn: int) 
         (field_map.net_at(x, y, turn) for x, y in line_tiles(x1, y1, x2, y2, width)),
         default=0.0,
     )
+
+
+def route_check(
+    field_map: Any, x1: int, y1: int, x2: int, y2: int, turn: int
+) -> tuple[float, list[tuple[int, int]]]:
+    """(danger, camps) of a route's estimated path. Danger is the worst tile, where a tile is the
+    larger of its net threat and what any camp's reach brings there with our cover ignored; the
+    camps are the (x, y) of every camp whose reach touches the path (issue 276)."""
+    if field_map is None:
+        return 0.0, []
+    width = field_map.settings.map_width
+    worst = 0.0
+    camps: set[tuple[int, int]] = set()
+    for x, y in line_tiles(x1, y1, x2, y2, width):
+        worst = max(worst, field_map.net_at(x, y, turn))
+        for camp, value in field_map.camps_reaching(x, y):
+            worst = max(worst, value)
+            camps.add((camp.x, camp.y))
+    return worst, sorted(camps)
+
+
+def _camp_note(camps: Iterable[tuple[int, int]]) -> str:
+    """ " (camp at (x,y), ...)" for a log line, or nothing when no camp is involved."""
+    found = sorted(set(camps))
+    return " (camp at " + ", ".join(f"({x},{y})" for x, y in found) + ")" if found else ""
 
 
 def rank_destinations(
@@ -359,6 +387,10 @@ class SecondaryPolicy:
     _traders: dict[int, tuple[int, int, bool]] = field(default_factory=dict, init=False, repr=False)
     traders_lost: int = field(default=0, init=False)
     _blocked_turn: int = field(default=-10_000, init=False, repr=False)
+    # Route tile -> {turn: danger read there}, for the max over the last few turns.
+    _recent: dict[tuple[int, int], dict[int, float]] = field(
+        default_factory=dict, init=False, repr=False
+    )
     _great: dict[int, _GreatPersonState] = field(default_factory=dict, init=False, repr=False)
     # Every great person on the map: id -> (name, kind, turn first seen, idle already logged).
     _great_seen: dict[int, tuple[str, str, int, bool]] = field(
@@ -719,6 +751,34 @@ class SecondaryPolicy:
         """True while every route a trader could take was too dangerous (read by production)."""
         return 0 <= turn - self._blocked_turn <= TRADE_BLOCKED_TURNS
 
+    def recent_danger(self, tile: tuple[int, int], turn: int) -> float:
+        """The worst danger read on this tile within `route_danger_turns` turns, 0.0 if none."""
+        window = self.weights.route_danger_turns
+        return max(
+            (v for t, v in self._recent.get(tile, {}).items() if 0 <= turn - t < window),
+            default=0.0,
+        )
+
+    def _route_danger(
+        self, trader: Any, dest: Any, turn: int
+    ) -> tuple[float, list[tuple[int, int]]]:
+        """Danger of a route now, raised to the recent max over its tiles; plus its camps."""
+        danger, camps = route_check(self.map, trader.x, trader.y, dest.x, dest.y, turn)
+        if self.map is None:
+            return danger, camps
+        window = self.weights.route_danger_turns
+        for tile in line_tiles(trader.x, trader.y, dest.x, dest.y, self.map.settings.map_width):
+            seen = self._recent.setdefault(tile, {})
+            now = max(
+                self.map.net_at(tile[0], tile[1], turn),
+                max((v for _, v in self.map.camps_reaching(*tile)), default=0.0),
+            )
+            seen[turn] = now
+            for t in [t for t in seen if turn - t >= window]:
+                del seen[t]
+            danger = max(danger, self.recent_danger(tile, turn))
+        return danger, camps
+
     def _note_losses(self, status: Any, turn: int) -> None:
         """Log each trader that was there last turn and is gone now (captured or killed)."""
         seen = {t.unit_id for t in status.traders}
@@ -757,20 +817,19 @@ class SecondaryPolicy:
             index = trader.unit_id % 65536
             ranked = rank_destinations(await game.get_trade_destinations(index), self.weights, met)
             ranked = [d for d in ranked if (trader.x, trader.y, d.x, d.y) not in used]
-            dangers = {
-                (d.x, d.y): route_danger(self.map, trader.x, trader.y, d.x, d.y, turn)
-                for d in ranked
-            }
+            checks = {(d.x, d.y): self._route_danger(trader, d, turn) for d in ranked}
+            dangers = {k: v[0] for k, v in checks.items()}
             limit = self.weights.route_danger_max
             safe = [d for d in ranked if dangers[(d.x, d.y)] <= limit]
             if ranked and not safe:
                 self._blocked_turn = turn
                 log.info(
-                    "Trader %d held: all %d routes pass danger above %.1f (least %.1f)",
+                    "Trader %d held: all %d routes pass danger above %.1f (least %.1f)%s",
                     trader.unit_id,
                     len(ranked),
                     limit,
                     min(dangers.values()),
+                    _camp_note(c for k, v in checks.items() if dangers[k] > limit for c in v[1]),
                 )
             ranked = safe
             started = False
@@ -780,13 +839,14 @@ class SecondaryPolicy:
                     used.add((trader.x, trader.y, dest.x, dest.y))
                     self._blocked_turn = -10_000
                     log.info(
-                        "Trade route started: trader %d to %s (%d,%d), yield %s, danger %.1f",
+                        "Trade route started: trader %d to %s (%d,%d), yield %s, danger %.1f%s",
                         trader.unit_id,
                         dest.city_name,
                         dest.x,
                         dest.y,
                         dest.origin_yields or "none",
                         dangers[(dest.x, dest.y)],
+                        _camp_note(checks[(dest.x, dest.y)][1]),
                     )
                     free -= 1
                     started = True

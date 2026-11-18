@@ -666,6 +666,12 @@ class ThreatMap:
             self._field(src).get((x, y), 0.0) * self._fade(src, turn) for src in self.sources
         )
 
+    def camps_reaching(self, x: int, y: int) -> list[tuple[Source, float]]:
+        """Each camp whose reach covers this tile, with the threat it brings there. Our cover
+        is not taken off: a camp keeps sending units whatever stands on the tile (issue 276)."""
+        found = [(c, self._field(c).get((x, y), 0.0)) for c in self.camps()]
+        return [(c, v) for c, v in found if v > 0.0]
+
     def danger_near(self, x: int, y: int, radius: int, turn: int | None = None) -> float:
         """The most threat on any tile within `radius` of (x, y)."""
         width = self.settings.map_width

@@ -416,6 +416,9 @@ class _Turn:
     # Tiles where a target died: the reply said so, our estimate took its last hit points, or a
     # later attack found nobody there (Run 16: the game's reply says "killed" only sometimes).
     killed: set[tuple[int, int]] = field(default_factory=set)
+    # Of those, the ones the game's reply confirmed (not an estimate that took the last hit
+    # points): only these leave the threat map and the threat state.
+    confirmed: set[tuple[int, int]] = field(default_factory=set)
     hp: dict[int, float] = field(default_factory=dict)
     target_hp: dict[tuple[int, int], float] = field(default_factory=dict)
     at_city: dict[tuple[int, int], int] = field(default_factory=dict)
@@ -792,6 +795,8 @@ class MilitaryPolicy:
         if killed or t.target_hp[where] <= 0:
             t.dead.add(where)
             t.killed.add(where)
+        if killed:
+            t.confirmed.add(where)
 
     # City strikes.
 
@@ -985,6 +990,7 @@ class MilitaryPolicy:
             if result and "NO_ENEMY" in result and where in t.attacked:
                 t.dead.add(where)  # An earlier attack this turn killed it.
                 t.killed.add(where)
+                t.confirmed.add(where)  # The game says nobody is there.
             self._refuse(t, unit, "attack")
             self._log(
                 t, unit, "attack", "attack refused",
@@ -1340,7 +1346,7 @@ class MilitaryPolicy:
         first, so production, which runs next, does not answer a unit that is already dead.
         """
         if self.threat_map is not None:
-            self.threat_map.forget_units_at(t.killed)
+            self.threat_map.forget_units_at(t.confirmed)
             # Cover moves with the units that moved, and shrinks with the ones that took damage.
             health = {
                 u.unit_id: t.hp[u.unit_id] / max(u.max_hp, 1) for u in t.units if u.unit_id in t.hp
@@ -1348,7 +1354,7 @@ class MilitaryPolicy:
             self.threat_map.relocate(t.placed, health)
         if self.defence is None:
             return
-        self.defence.forget_killed(t.killed)
+        self.defence.forget_killed(t.confirmed)
         self.defence.refresh()
         for city in t.cities:
             if self._state_threatened(city):

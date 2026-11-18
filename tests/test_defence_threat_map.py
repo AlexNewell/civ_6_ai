@@ -315,3 +315,14 @@ def test_a_unit_that_took_damage_gives_less_cover_after_the_map_is_updated():
     whole = m.cover_at(5, 5)
     m.relocate({}, {ours.unit_id: 0.5})
     assert m.cover_at(5, 5) == whole / 2
+
+
+def test_only_a_kill_the_game_confirmed_leaves_the_defence_state():
+    from civ6_ai.policies.military import MilitaryPolicy, _Turn
+
+    t = _Turn(TURN, (), (), (), [], frozenset())
+    policy = MilitaryPolicy()
+    policy._record_hit(t, (1, 1), "Dealt about 40 damage (estimate)", 40, 30)  # Estimate only.
+    policy._record_hit(t, (2, 2), "Target killed", 40, 30)
+    assert t.killed == {(1, 1), (2, 2)}
+    assert t.confirmed == {(2, 2)}

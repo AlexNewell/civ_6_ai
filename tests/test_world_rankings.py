@@ -126,6 +126,20 @@ def test_failed_read_clears_the_holder():
     assert holder.last is None
 
 
+def test_failed_overview_read_clears_the_holder():
+    class BrokenGame:
+        async def get_game_overview(self):
+            raise RuntimeError("overview failed")
+
+    holder = RankingsHolder()
+    asyncio.run(WorldRankingsLog(LuaGame(REPLY), holder).run(Game()))
+    try:
+        asyncio.run(WorldRankingsLog(LuaGame(REPLY), holder).run(BrokenGame()))
+    except RuntimeError:
+        pass
+    assert holder.last is None
+
+
 def test_victory_threat_line_names_unmet_leaders():
     r = parse_world_rankings(REPLY)
     line = format_line(151, None, r)

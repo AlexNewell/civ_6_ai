@@ -252,6 +252,7 @@ class WorldRankingsLog:
         self._warned = False
 
     async def run(self, game: _OverviewGame) -> None:
+        self._holder.last = None  # Whatever fails below, an old turn's table is never reused.
         turn = int((await game.get_game_overview()).turn)  # type: ignore[attr-defined]
         rankings = await read_world_rankings(self._lua)
         if rankings is None:

@@ -114,6 +114,7 @@ _NOT_LAND = (
 )
 _ATTACK_TAGS = ("RANGE_ATTACK", "MELEE_ATTACK", "AIR_ATTACK")
 _DAMAGE_DEALT = re.compile(r"damage dealt:~?(\d+)")
+_ENEMY_HP = re.compile(r"enemy HP:\s*(-?\d+)\s*->\s*(-?\d+)")
 _HP_AFTER = re.compile(r"your HP:\s*-?\d+\s*->\s*(-?\d+)")
 _NOW_AT = re.compile(r"now_at:(-?\d+),(-?\d+)")
 _ALREADY_ON = re.compile(r"STACKING_CONFLICT.*already on \((-?\d+),\s*(-?\d+)\)")
@@ -132,6 +133,10 @@ def is_land_military(unit: Unit) -> bool:
         and unit.unit_type != SCOUT
         and not any(word in unit.unit_type for word in _NOT_LAND)
     )
+
+
+def _unit_key(unit: Unit) -> int:
+    return unit.unit_id
 
 
 def holds_tile(unit: Unit) -> bool:
@@ -216,6 +221,8 @@ class MilitarySettings:
     fallback_tiles: int = (
         2  # Other tiles tried for a unit whose move was refused, before it fortifies.
     )
+    split_stacks: bool = True  # Move all but one unit off a tile that two of ours share.
+    stack_tiles: int = 4  # Tiles tried for a unit leaving a stack, as the game may refuse some.
     defend_radius: int = 3  # A target this close to one of our cities is on our doorstep.
     spare_hunt_radius: int = 3  # A hostile unit this close to a spare unit may be walked at.
     spare_leash: int = 4  # A spare unit never goes further than this from its nearest city.
@@ -278,6 +285,10 @@ def assess_attack(
 
     A ranged unit attacks with its ranged strength and takes damage back only from a defender
     that has a ranged attack of its own. A melee unit trades blows.
+
+    These odds are the bot's own. A reply that opens "Combat Estimate (Melee)" with the melee
+    strength and ~24 damage back is civ6-mcp's own estimate text (issue 266: Run 20, turn 57 was
+    a RANGE_ATTACK at distance 1); it never feeds `taken`, so the logged odds were already ranged.
     """
     defence = defender.combat_strength + weights.assumed_defender_bonus
     if defender.combat_strength <= 0 and defender.ranged_strength <= 0:
@@ -320,6 +331,23 @@ def attack_landed(result: str) -> bool:
     return any(line.startswith(_ATTACK_TAGS) for line in lines) and not any(
         line.startswith("Error") for line in lines
     )
+
+
+def attack_failed(unit: Unit, result: str) -> str | None:
+    """Why an attack that `attack_landed` calls a success did nothing, or None if it did something.
+
+    Run 20: a ranged unit's order came back as `MELEE_ATTACK` with `enemy HP:100 -> 100/100`.
+    The unit was stacked with another military unit, and civ6-mcp fell back to a melee attack
+    that deals nothing. A ranged unit's melee reply, or any reply showing the enemy's hit points
+    unchanged, is a failure.
+    """
+    lines = [line.strip() for line in result.splitlines()]
+    if unit.ranged_strength > 0 and any(line.startswith("MELEE_ATTACK") for line in lines):
+        return "a ranged unit's attack came back as MELEE_ATTACK"
+    for found in _ENEMY_HP.finditer(result):
+        if found.group(1) == found.group(2):
+            return f"the enemy's hit points did not change ({found.group(1)})"
+    return None
 
 
 def garrison_required(city: City, settings: MilitarySettings) -> int:
@@ -511,10 +539,13 @@ class MilitaryPolicy:
         )
         mine = [u for u in mine if u.unit_id not in reserved]
         t = _Turn(turn, tuple(units), cities, threats, mine, reserved)
-        city_tiles = {(c.x, c.y) for c in cities}
-        for u in mine:  # A reserved unit may leave with a settler, so it is not a defender.
-            if (u.x, u.y) in city_tiles:
-                t.at_city[u.x, u.y] = t.at_city.get((u.x, u.y), 0) + 1
+        self._count_defenders(t)
+        if await self._split_stacks(game, t):
+            # The moved units stand elsewhere now, with targets seen from their new tiles.
+            units = await _read_units(game, s.map_width)
+            t.units = tuple(units)
+            t.mine = [u for u in units if is_land_military(u) and u.unit_id not in t.reserved]
+            self._count_defenders(t)
         await self._attack(game, t)
         await self._heal(game, t)
         await self._garrison(game, t)
@@ -524,6 +555,117 @@ class MilitaryPolicy:
         await self._idle(game, t)
         self._publish_defence(t)
         self._log_offense(t)
+
+    @staticmethod
+    def _count_defenders(t: _Turn) -> None:
+        """Count the land military units standing on each of our city tiles."""
+        t.at_city.clear()
+        city_tiles = {(c.x, c.y) for c in t.cities}
+        for u in t.mine:  # A reserved unit may leave with a settler, so it is not a defender.
+            if (u.x, u.y) in city_tiles:
+                t.at_city[u.x, u.y] = t.at_city.get((u.x, u.y), 0) + 1
+
+    # ----- stacks (issue 266) -----
+
+    def _stack_tiles(self, t: _Turn, unit: Unit) -> list[tuple[int, int]]:
+        """Free tiles beside the unit, best first, for the unit to leave a stack for.
+
+        A tile with a hostile unit in reach of the unit's attack comes first, so it can still
+        fight this turn. Then the least threat and the most cover on the threat map.
+        """
+        w = self.settings.map_width
+        here = (unit.x, unit.y)
+        taken = {self._pos(t, u) for u in t.units if u.unit_id != unit.unit_id and holds_tile(u)}
+        taken |= {(th.x, th.y) for th in t.threats} | t.blocked | {(c.x, c.y) for c in t.cities}
+        found = set()
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                x, y = unit.x + dx, unit.y + dy
+                if w:
+                    x %= w
+                if (x, y) != here and hex_distance(unit.x, unit.y, x, y, w) == 1:
+                    found.add((x, y))
+        reach = 2 if unit.ranged_strength > 0 else 1
+        hostile = [(th.x, th.y) for th in t.threats if th.hostile]
+
+        def rank(p: tuple[int, int]) -> tuple[int, float, float, tuple[int, int]]:
+            can_attack = any(hex_distance(p[0], p[1], h[0], h[1], w) <= reach for h in hostile)
+            if self.threat_map is None:
+                return (0 if can_attack else 1, 0.0, 0.0, p)
+            return (
+                0 if can_attack else 1,
+                self.threat_map.threat_at(p[0], p[1], t.turn),
+                -self.threat_map.cover_at(p[0], p[1]),
+                p,
+            )
+
+        return sorted(found - taken, key=rank)
+
+    async def _split_stacks(self, game: MilitaryGame, t: _Turn) -> int:
+        """Move all but one unit off any tile that two of our land military units share.
+
+        The game places a unit trained or upgraded in a city on a tile that already holds one,
+        and the second cannot make a ranged attack until it moves off (Run 20: the attack came
+        back as a no-damage MELEE_ATTACK). The unit kept is the one already fortified, then the
+        stronger one. The rest go to the best free adjacent tile, trying the next when a move is
+        refused. Returns how many units moved.
+        """
+        if not self.settings.split_stacks:
+            return 0
+        stacks: dict[tuple[int, int], list[Unit]] = {}
+        for u in t.mine:
+            stacks.setdefault((u.x, u.y), []).append(u)
+        moved = 0
+        for where, group in sorted(stacks.items()):
+            if len(group) < 2:
+                continue
+            keeper = max(
+                group,
+                key=lambda u: (
+                    self._fortified.get(u.unit_id) == where,
+                    _hold_strength(u),
+                    u.hp,
+                    -u.unit_id,
+                ),
+            )
+            others = sorted((u for u in group if u is not keeper), key=lambda u: u.unit_id)
+            names = ", ".join(f"{u.unit_type} {u.unit_id}" for u in sorted(group, key=_unit_key))
+            self._log(
+                t, keeper, "stack",
+                f"stack found: {len(group)} land military units on one tile ({names}); "
+                f"keeping {keeper.unit_type} {keeper.unit_id}",
+                where,
+            )  # fmt: skip
+            for unit in others:
+                if await self._split_off(game, t, unit, where):
+                    moved += 1
+        return moved
+
+    async def _split_off(
+        self, game: MilitaryGame, t: _Turn, unit: Unit, where: tuple[int, int]
+    ) -> bool:
+        """Move one unit of a stack to the best free adjacent tile that accepts it."""
+        if not unit.can_move:
+            self._log(t, unit, "stack", "stack not split: no moves left", where)
+            return False
+        for goal in self._stack_tiles(t, unit)[: self.settings.stack_tiles]:
+            if t.actions >= self.settings.max_actions:
+                break
+            result = await self._order(t, unit, "split", game.move_unit(unit.unit_index, *goal))
+            if result is not None and move_succeeded(result):
+                at = self._reached(result, goal)
+                t.placed[unit.unit_id] = at
+                self._log(
+                    t, unit, "stack",
+                    f"stack split: {unit.unit_type} {unit.unit_id} "
+                    f"left {where[0]},{where[1]} for {at[0]},{at[1]}",
+                    goal, result=result,
+                )  # fmt: skip
+                return True
+            self._learn_full_tile(t, result)
+            self._log(t, unit, "stack", "stack split: move refused", goal, result=result or "")
+        self._log(t, unit, "stack", "stack not split: no tile accepted the unit", where)
+        return False
 
     # ----- offense summary -----
 
@@ -552,7 +694,7 @@ class MilitaryPolicy:
             d
             for d in mine
             if d.action in ("attack", "city_strike") and "refused" not in d.reason
-            and "refused" not in d.result
+            and "failed" not in d.reason and "refused" not in d.result
         ]  # fmt: skip
         on_barb = [d for d in landed if d.target in barb_tiles]
         line = {
@@ -995,6 +1137,15 @@ class MilitaryPolicy:
             self._log(
                 t, unit, "attack", "attack refused",
                 target=where, odds=asdict(odds), result=result or "",
+            )  # fmt: skip
+            return False
+        failure = attack_failed(unit, result)
+        if failure is not None:
+            # Not a hit: no kill, no attack counted, and the unit is free to try something else.
+            self._refused[unit.unit_id, "attack"] = t.turn  # Not asked to attack again this turn.
+            self._log(
+                t, unit, "attack", f"attack failed: {failure}",
+                target=where, odds=asdict(odds), result=result,
             )  # fmt: skip
             return False
         t.acted.add(unit.unit_id)

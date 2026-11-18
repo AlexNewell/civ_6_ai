@@ -40,6 +40,28 @@ Written offline against civ6-mcp's source, so none of this has run in a game yet
 | Ranged units are not hit back by melee defenders, and ranged defenders do hit back (`assess_attack` assumes both) | Not reached |
 | `Unit.targets` lists only targets in range with line of sight, and ranged units fire at adjacent targets | Not reached |
 
+## Run 19: turns 1 to 150, a fresh 150-turn run from STD_T1_03 (Byzantium) (2026-11-18)
+
+STD_T1_03 on main from c299773, log `20261118T045839Z`, `--turns 150` (no `--save-at`), console in `runs/run35.out`. One session, no resume: stopped on `turn_limit` after 2,996 s with no handler errors and no blockers (the Run 18 "Unit needs orders" stop did not recur; settling found a site on 59 of 60 decisions). Decision time mean 12.1 s, median 11.6 s, p90 16.1 s, max 48.6 s; end-turn wait mean 7.9 s; total per turn mean 20.0 s, max 55.1 s. G1 gate clean, 3 warnings (gold: nothing bought on 88% of turns above the reserve; builders: 12% of builder actions refused; one Dark Age, the Ancient Era at 1 point against a Dark threshold of 9). $0.00 in model spend.
+
+| Turn | Score | Rank (true) | Alive | Leader | Gap | Cities |
+|---|---|---|---|---|---|---|
+| 25 | 19 | 6/6 | 6 | 34 | -15 | 1 |
+| 50 | 35 | 6/6 | 6 | 117 | -82 | 2 |
+| 75 | 82 | 6/6 | 6 | 196 | -114 | 3 |
+| 100 | 110 | 6/6 | 6 | 309 | -199 | 3 |
+| 125 | 170 | 6/6 | 6 | 414 | -244 | 5 |
+| 150 | 223 | 6/6 | 6 | 482 | -259 | 6 |
+
+CivBench gap table: turn 100 -199 (LLM median -129, AI median -144), turn 150 -259 (LLM -146, AI -194). The turn-150 leader is Rome (482), with another civ at 478; we were last of six all game, and no victory threat beyond Norway's religious progress (0.4). Cities: 6 (Constantinople turn 2, then cities 2 to 6 on turns 48, 54, 106, 119, 134), the slowest early expansion of the three standard saves. No city or settler lost; a wonder district tile in Constantinople was lost on turn 121. Wonder: Temple of Artemis turn 122.
+
+| Check | Result |
+|---|---|
+| Settling | 60 decisions: move 26, escort_move 12, hold 7, found 6, flee 4, escort_gather 4, no_site 1 (turn 42, "no acceptable site on the revealed map"). The holds were "the escort could not move" (6) and "route is threatened, so the escort joins first" (1), mostly turns 43 to 50 while barbarians were near; city 2 came only on turn 48. |
+| Barbarians | Per-turn counters summed: `camps_gone` 3, `kills_barb` 38, `attacks_barb` 88, `camp_orders` 99. Barbarians near on 65 early turns (from turn 5); 10 of 65 had no spare unit and 23 of 55 had a spare unit but no attack or camp order (both within the gate). Several camp orders were refused (blocked tile, water tile). |
+| Faith effectiveness | "no data" (no faith lines judged), no failure. Faith was saved toward Artemisia (Great Admiral, 550) at about 4 a turn, 290 held at turn 150. No Holy Site was ever started ("no HOLY_SITE (never started)"; also no Campus, Commercial Hub or Theater). |
+| Handler errors | None. |
+
 ## Run 18: turns 1 to 150, a fresh 150-turn run from STD_T1_02 (Khmer), stopped once and resumed (2026-11-17)
 
 STD_T1_02 on main from deb78ca, logs `20261118T040000Z` (turns 1 to 27) and `20261118T040823Z` (turns 27 to 150, resumed once with `--load AutoSave_0028 --turns 123`), consoles `runs/run33.out` and `runs/run34.out`. The first session stopped `blocked` on turn 27 after 384 s: the screenshot showed the end-turn button reading "Unit needs orders" with a Settler idle, and the settling log had `no_site` for 13 of 14 decisions (the only candidates were rejected "likely to flip to a rival (loyalty)"). No known blocker was named, so this is a new blocker, not yet in blockers.md. The resumed session loaded the turn-27 autosave, moved on, and stopped on `turn_limit` after 2,594 s with no handler errors. Total wall time about 2,980 s. Decision time mean 8.7 s then 12.2 s (p90 10.5 s then 15.4 s, max 62.8 s); end-turn wait mean 8.9 s; total per turn mean 21.1 s. The resumed session's G1 gate was clean with 5 warnings (gold nothing bought 80%, builder refusals 11%, settling no_site 64%, 2 Dark Ages, deals 2 of 13 accepted). The stopped session's gate failed on the one stop. $0.00 in model spend.

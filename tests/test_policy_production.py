@@ -1474,3 +1474,44 @@ def test_pillaged_items_and_repairs_are_logged(caplog):
     with caplog.at_level(logging.INFO):
         run(policy.assign(game))
     assert any("repaired: building LIBRARY" in m for m in caplog.messages)
+
+
+# ----- the army floor by matchup (issue 279) -----
+
+
+def floor_score(item, **ctx):
+    context = ProductionContext(turn=100, num_cities=3, builders=3, recon=1, army=1, **ctx)
+    return score(option("UNIT", item, 4), city(), context, ProductionWeights())
+
+
+def test_the_army_floor_prefers_the_unit_that_matches_the_strongest_hostile_unit():
+    # Iteration 2: "Nicaea options: UNIT_HEAVY_CHARIOT 8.2, UNIT_SPEARMAN 8.1" with a Man-at-Arms
+    # (45) about. A Heavy Chariot loses to it; an Archer shoots it for nothing back.
+    known = dict(hostile=45.0)
+    chariot = floor_score("UNIT_HEAVY_CHARIOT", **known)
+    archer = floor_score("UNIT_ARCHER", **known)
+    spear = floor_score("UNIT_SPEARMAN", **known)
+    assert archer > chariot and archer > spear
+    assert (
+        floor_score("UNIT_HEAVY_CHARIOT") > chariot
+    )  # With none known, strength decides as before.
+
+
+def test_the_army_floor_counts_the_cost_of_the_unit_and_a_ranged_hostile():
+    ctx = dict(hostile=45.0, hostile_ranged=0.0)
+    assert floor_score("UNIT_ARCHER", **ctx) > floor_score("UNIT_CROSSBOWMAN", **ctx)  # Dearer.
+    back = dict(hostile=45.0, hostile_ranged=40.0)
+    assert floor_score("UNIT_ARCHER", **back) < floor_score("UNIT_ARCHER", **ctx)
+
+
+def test_build_context_takes_the_strongest_hostile_from_the_camp_or_a_roaming_barbarian():
+    from civ6_ai.policies.defence import DefenceState
+    from civ6_ai.policies.military import CampPlan
+
+    empire = run(read_empire(fx.FakeGame(overview=fx.overview(turn=100, num_cities=2))))
+    state = DefenceState()
+    state.hostile = (36.0, 20.0)
+    assert build_context(empire, [], defence=state).hostile == 36.0
+    state.camp_plan = CampPlan((55, 7), 5, 1, 20, 6, 2, 3, "any", 14, 0.04, defender=45.0)
+    ctx = build_context(empire, [], defence=state)
+    assert (ctx.hostile, ctx.hostile_ranged) == (45.0, 20.0)

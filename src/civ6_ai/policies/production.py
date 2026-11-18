@@ -74,6 +74,7 @@ _FIRST_SETTLER_TURNS = 45  # No builders before the first settler until this tur
 _CAMP_UNIT_SCORE = 17.0  # A unit for a camp force, while one is short (issue 268).
 _CAMP_ODDS_CAP = 3.0  # Odds above this against a camp's defender are no better a pick.
 _CAMP_COST_BASE = 60.0  # An Archer's cost: the unit the matchup per cost is scaled by.
+_ARMY_MATCHUP_SCORE = 3.0  # The most the matchup adds to an army-floor unit's score (279).
 _CAMP_MATCHUP_SCORE = 8.0  # The most the matchup adds to a camp unit's score.
 _MATCHUP_WEIGHTS = MilitaryWeights()
 _CAMP_CITY_REACH = 14  # Matches `MilitarySettings.camp_reach`.
@@ -148,6 +149,10 @@ class ProductionContext:
     camp_defender: float = 0.0
     camp_defender_ranged: float = 0.0
     camp_building: int = 0
+    # Issue 279: the strongest known hostile land unit near us (a camp's defender or a roaming
+    # barbarian): melee and ranged strength. The army floor picks units by their match against it.
+    hostile: float = 0.0
+    hostile_ranged: float = 0.0
     sites_ok: bool = True  # False when settling found no safe site to send a settler to.
     idle_builders: int = 0  # Builders that found no job on offer the last time they ran (1.45).
     spare_jobs: int | None = None  # Jobs no builder holds; None when not known this turn.
@@ -251,6 +256,12 @@ def build_context(
             camp_defender=getattr(plan, "defender", 0.0),
             camp_defender_ranged=getattr(plan, "defender_ranged", 0.0),
         )
+    near = getattr(defence, "hostile", (0.0, 0.0))
+    ctx = replace(
+        ctx,
+        hostile=max(near[0], ctx.camp_defender),
+        hostile_ranged=max(near[1], ctx.camp_defender_ranged),
+    )
     for item in in_progress:
         ctx = ctx.after_choosing(item)
     return ctx
@@ -627,13 +638,34 @@ def _unit_score(
     if wanted > 0:
         # Below the floor (issue 267) a unit outranks an ordinary building, so the floor is reached
         # even when no city is short: a threat that arrives finds something to fight with.
-        floor = (_ARMY_FLOOR_SCORE + min(wanted, 4.0)) * w.military + strength / 20.0
+        # Issue 279: by the unit's match against the strongest hostile unit known, per cost,
+        # once one is known (iteration 2 kept picking Heavy Chariots, which lose to a
+        # Man-at-Arms); by strength before.
+        match = hostile_unit_value(item, ctx)
+        pick = strength / 20.0 if match is None else _ARMY_MATCHUP_SCORE * match
+        floor = (_ARMY_FLOOR_SCORE + min(wanted, 4.0)) * w.military + pick
     return max(floor, _camp_score(city, item, stats[4], strength, ctx, w))
 
 
 def camp_share_cap(num_cities: int, share: float) -> int:
     """Cities that may build camp units at once: the share of them, rounded down, at least one."""
     return max(1, int(num_cities * share))
+
+
+def hostile_unit_value(item: str, ctx: ProductionContext) -> float | None:
+    """A unit's worth against the strongest known hostile unit, per production cost, or None
+    when none is known or the unit cannot fight (issue 279).
+
+    The odds are continuous (a melee unit that loses scores low, not 0), capped at 3 to 1 and set
+    against a unit costing 60, so a cheap unit that does as well beats a dear one.
+    """
+    if ctx.hostile <= 0:
+        return None
+    odds = camp_matchup(item, ctx.hostile, ctx.hostile_ranged, _MATCHUP_WEIGHTS, "melee")
+    if odds is None:
+        return None
+    cost = float(COMBAT_UNITS[item][3])
+    return min(odds, _CAMP_ODDS_CAP) / _CAMP_ODDS_CAP * min(1.5, _CAMP_COST_BASE / max(cost, 1.0))
 
 
 def camp_unit_value(

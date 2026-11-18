@@ -939,3 +939,48 @@ def test_gold_offers_no_camp_unit_from_a_city_too_far_to_join_the_force():
     )  # fmt: skip
     assert policy._camp_candidates(city, ranked, near, turn)
     assert not policy._camp_candidates(city, ranked, far, turn)
+
+
+def test_a_camp_unit_dearer_than_the_gold_on_hand_is_logged_and_saved_for(caplog):
+    # Iteration 2: 24 to 143 gold against prices of 160 to 210, and no word of it in the log.
+    import logging
+
+    from civ6_ai.policies.defence import DefenceState
+    from civ6_ai.policies.military import CampPlan
+
+    state = DefenceState()
+    state.camp_plan = CampPlan((13, 10), 3, 1, 20, 6, 2, 2, "any", 10, 0.1, defender=45.0)
+    game = GoldGame(
+        gold_amount=100,
+        cities=[fx.city_info(currently_building="BUILDING_MONUMENT", garrison_unit="UNIT_WARRIOR")],
+        production=[option("UNIT_ARCHER", 160, "UNIT", cost=60)],
+        units=[fx.unit_info(unit_type="UNIT_WARRIOR"), fx.unit_info(unit_id=2, unit_index=2)],
+    )
+    with caplog.at_level(logging.INFO, logger=gold.log.name):
+        asyncio.run(GoldPolicy(defence=state).run(game))
+    assert not [a for a in game.actions if a[0] == "buy"]
+    text = " ".join(r.message for r in caplog.records)
+    assert "No camp unit bought" in text and "UNIT_ARCHER" in text and "costs 160" in text
+
+
+def test_a_threatened_city_is_named_as_the_reason_no_camp_unit_is_offered(caplog):
+    import logging
+
+    policy = GoldPolicy()
+    why: list[str] = []
+    from civ6_ai.policies.production import ProductionContext
+    from civ6_ai.state.reader import build_city
+
+    city = build_city(fx.city_info(), [], set())
+    far = ProductionContext(
+        turn=100, num_cities=2, camp_units=2, camp_wants="any",
+        camp_defender=45.0, camp_target=(60, 10),
+    )  # fmt: skip
+    turn = gold._Turn(500, income=5.0, delay={}, now=100, last=330)
+    assert policy._camp_candidates(city, [], far, turn, why) == []
+    assert "too far" in why[0]
+    with caplog.at_level(logging.INFO, logger=gold.log.name):
+        asyncio.run(policy._buy_camp_unit(GoldGame(), turn, [], [], 3, why))
+    assert any(
+        "No camp unit bought" in r.message and "too far" in r.message for r in caplog.records
+    )

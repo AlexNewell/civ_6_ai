@@ -2026,3 +2026,87 @@ def test_a_settler_one_tile_short_steps_on_and_founds_in_one_turn():
     game.move_unit = move
     run(policy, game)
     assert game.actions == [("move", 7, 14, 10), ("found", 7)]
+
+
+# ----- issue 291: escort strength, settlers in cities, backing off after a flee -----
+
+
+def _courser(x, y):
+    return _t("UNIT_COURSER", x, y, 46)
+
+
+def test_settler_in_a_city_stays_with_two_coursers_adjacent_and_one_warrior():
+    # Run 20 turn 142: the settler left Constantinople with a Warrior into two adjacent Coursers.
+    warrior = unit_info(unit_id=9, unit_index=9, x=10, y=10, combat_strength=20)
+    game = make_game(
+        [settler(), warrior],
+        cities=[alpha()],
+        threats=[_courser(10, 11), _courser(11, 10)],
+        sites=[site(14, 6, food=40)],
+    )
+    policy = _policy()
+    run(policy, game)
+    assert not game.actions
+    assert policy.decisions[-1].action == "hold"
+
+
+def _route_game(escort_type_strength, threats, escort_at=(10, 14)):
+    escort = unit_info(
+        unit_id=9,
+        unit_index=9,
+        x=escort_at[0],
+        y=escort_at[1],
+        combat_strength=escort_type_strength,
+    )
+    return make_game(
+        [settler(y=14), escort],
+        cities=[alpha()],
+        threats=threats,
+        sites=[site(14, 6, food=40)],
+    )
+
+
+def test_escort_that_cannot_hold_the_stop_tile_does_not_lead():
+    # Two Coursers reach the stop tile (five tiles out is beyond a settler's flee radius).
+    game = _route_game(20, [_courser(12, 9), _courser(12, 10)])
+    policy = _policy()
+    run(policy, game)
+    assert not game.actions
+    decision = policy.decisions[-1]
+    assert decision.action == "hold" and "would not hold" in decision.reason
+
+
+def test_escort_that_can_hold_the_stop_tile_still_leads():
+    game = _route_game(36, [_courser(12, 9)])
+    policy = _policy()
+    run(policy, game)
+    assert [a[1] for a in game.actions] == [9, 7]
+    assert policy.decisions[-1].action == "escort_move"
+
+
+def test_settler_that_fled_does_not_resume_while_the_hostile_is_near_the_route():
+    policy = _policy()
+    policy._fled[7] = (14, 6)
+    game = _route_game(36, [_courser(12, 11)])
+    run(policy, game)
+    assert not game.actions
+    assert "fled" in policy.decisions[-1].reason
+    # The hostile is gone: it goes on, and the memory is cleared.
+    clear = _route_game(36, [])
+    run(policy, clear)
+    assert clear.actions
+    assert 7 not in policy._fled
+
+
+def test_backing_off_one_route_leaves_another_site_open():
+    policy = _policy()
+    policy._fled[7] = (14, 6)
+    game = make_game(
+        [settler(y=14), unit_info(unit_id=9, unit_index=9, x=10, y=14, combat_strength=36)],
+        cities=[alpha()],
+        threats=[_courser(12, 11)],
+        sites=[site(14, 6, food=40), site(4, 18, food=40)],
+    )
+    run(policy, game)
+    assert game.actions
+    assert all("fled" not in d.reason for d in policy.decisions)

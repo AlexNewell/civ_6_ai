@@ -437,6 +437,37 @@ def _strength(threat: Threat) -> tuple[float, bool]:
     return float(max(threat.combat_strength, threat.ranged_strength)), False
 
 
+def escort_holds_tile(
+    escort: Unit, tile: tuple[int, int], threats: Iterable[Threat], s: "SettlingSettings"
+) -> tuple[bool, float, int]:
+    """Whether `escort` plausibly holds `tile` for a turn, as (holds, damage taken, attackers).
+
+    Issue 291: two settlers were taken after an escort led them to a tile hostile Coursers could
+    reach. Every hostile unit that can reach the tile (a mounted one from further) attacks once
+    with its own strength, and the escort defends with its melee strength scaled by its health
+    and `assumed_defender_bonus` for terrain. Damage is the military policy's `expected_damage`,
+    with its variance on the bad side. The escort holds when it survives the total.
+    """
+    from civ6_ai.policies.military import MilitaryWeights, expected_damage
+
+    w = MilitaryWeights()
+    defence = escort.combat_strength * escort.hp / max(escort.max_hp, 1) + w.assumed_defender_bonus
+    taken = 0.0
+    attackers = 0
+    for t in threats:
+        reach = s.flee_radius + (
+            s.flee_mounted_extra if any(m in t.unit_type for m in _MOUNTED) else 0
+        )
+        if not t.hostile or hex_distance(tile[0], tile[1], t.x, t.y, s.map_width) > reach:
+            continue
+        attack = _strength(t)[0] * t.hp / max(t.max_hp, 1)
+        if attack <= 0:
+            continue
+        attackers += 1
+        taken += expected_damage(attack, defence) * (1 + w.damage_variance)
+    return taken < escort.hp, taken, attackers
+
+
 def garrison_may_leave(
     city: City,
     threats: Iterable[Threat],
@@ -718,6 +749,9 @@ class SettlingPolicy:
     # The threat map (issue 288): it remembers hostile units that have gone out of sight.
     threat_map: Any = field(default=None, repr=False)
     _lone_ok: frozenset = field(default_factory=frozenset, init=False, repr=False)
+    # Settlers that fled a hostile unit (issue 291), with the site they were heading for: that
+    # route is not resumed while a hostile unit is near it.
+    _fled: dict[int, tuple[int, int]] = field(default_factory=dict, init=False, repr=False)
     _stripped: dict[tuple[int, int], int] = field(default_factory=dict, init=False, repr=False)
     _automated: dict[int, int] = field(default_factory=dict, init=False, repr=False)
     _scout_targets: dict[int, tuple[int, int]] = field(default_factory=dict, init=False, repr=False)
@@ -1353,6 +1387,29 @@ class SettlingPolicy:
             and await self._flee(game, settler, city_tiles, record, near)
         ):
             return
+        # Issue 291: a settler in a city never flees, but must not walk out into the units the flee
+        # rule would have run from. One hostile is left to the escort gate, which may gather one.
+        if threatened and (settler.x, settler.y) in city_tiles and outnumbered:
+            self._holds[settler.unit_id] = self._holds.get(settler.unit_id, 0) + 1
+            record(
+                "hold",
+                f"{near} hostile unit(s) close to the city, so the settler stays inside",
+            )
+            return
+        if settler.unit_id in self._fled:
+            claim = self._fled[settler.unit_id]
+            if danger.on_path((settler.x, settler.y), claim, s.threat_radius):
+                # Only that route is backed off from; another site may still be taken.
+                usable = [c for c in usable if (c.x, c.y) != claim]
+                if not usable:
+                    record(
+                        "hold",
+                        "fled a hostile unit that is still near the route, so not resuming yet",
+                        claim,
+                    )
+                    return
+            else:
+                del self._fled[settler.unit_id]
 
         options = usable
         found_here = False
@@ -1392,6 +1449,7 @@ class SettlingPolicy:
             if action_succeeded(result):
                 record("found", reason, (settler.x, settler.y), result)
                 self._site_claims.pop(settler.unit_id, None)
+                self._fled.pop(settler.unit_id, None)
                 self._holds.pop(settler.unit_id, None)
                 self._no_site_turns.pop(settler.unit_id, None)
                 self._founded.add(settler.unit_id)
@@ -1464,12 +1522,33 @@ class SettlingPolicy:
         reason = "heading for the best site"
         self._site_claims[settler.unit_id] = (target.x, target.y)
         moved = await self._advance(
-            game, settler, target, escort, claimed, record, turn, reason, units, crowded
+            game,
+            settler,
+            target,
+            escort,
+            claimed,
+            record,
+            turn,
+            reason,
+            units,
+            crowded,
+            danger.threats,
         )
         self._holds[settler.unit_id] = 0 if moved else holds + 1
 
     async def _advance(
-        self, game, settler, target, escort, claimed, record, turn, reason, units=(), crowded=False
+        self,
+        game,
+        settler,
+        target,
+        escort,
+        claimed,
+        record,
+        turn,
+        reason,
+        units=(),
+        crowded=False,
+        danger_threats=(),
     ) -> bool:
         """Take one step towards the site. Returns False if the settler did not get closer."""
         s = self.settings
@@ -1478,6 +1557,16 @@ class SettlingPolicy:
             line = hex_line((settler.x, settler.y), goal, s.map_width)
             step = line[min(max(1, int(settler.moves)), len(line)) - 1]
             claimed.add(escort.unit_id)
+            # Issue 291: the escort must be able to hold the tile the pair ends this turn on.
+            holds, taken, attackers = escort_holds_tile(escort, step, danger_threats, s)
+            if attackers and not holds:
+                record(
+                    "hold",
+                    f"the escort ({escort.unit_type}, {escort.hp} hp) would not hold {step}: "
+                    f"{attackers} hostile unit(s) can reach it for about {taken:.0f} damage",
+                    goal,
+                )
+                return False
             if (escort.x, escort.y) != (settler.x, settler.y):
                 if not crowded:
                     meet = (settler.x, settler.y)
@@ -1653,6 +1742,9 @@ class SettlingPolicy:
         for city in ordered[:2]:
             result = await game.move_unit(settler.unit_index, *city)
             if move_succeeded(result):
+                claim = self._site_claims.get(settler.unit_id)
+                if claim is not None:
+                    self._fled[settler.unit_id] = claim
                 record(
                     "flee",
                     f"{near} hostile unit(s) close, retreating to the nearest city",

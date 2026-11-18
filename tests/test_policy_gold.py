@@ -984,3 +984,18 @@ def test_a_threatened_city_is_named_as_the_reason_no_camp_unit_is_offered(caplog
     assert any(
         "No camp unit bought" in r.message and "too far" in r.message for r in caplog.records
     )
+
+
+def test_the_defence_note_says_whether_any_defence_is_affordable():
+    from types import SimpleNamespace
+
+    from civ6_ai.policies.gold import GoldPolicy
+    from civ6_ai.state import ProductionChoice
+
+    c = SimpleNamespace(name="Constantinople")
+    spear = ProductionChoice("UNIT", "UNIT_SPEARMAN", 60, 5, 170)
+    poor = GoldPolicy._defence_note(c, [spear], SimpleNamespace(budget=48))
+    assert "cheapest costs 170 and 48 is to spend, so nothing is affordable" in poor
+    rich = GoldPolicy._defence_note(c, [spear], SimpleNamespace(budget=200))
+    assert "affordable" in rich and "nothing" not in rich
+    assert "none on offer" in GoldPolicy._defence_note(c, [], SimpleNamespace(budget=200))

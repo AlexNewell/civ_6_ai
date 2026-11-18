@@ -40,6 +40,9 @@ class ExpansionState:
     safe_sites: int = 0  # Sites a settler could be sent to now.
     best_site_score: float | None = None  # Best adjusted score among them.
     settlers_on_map: int = 0
+    # Settlers that could move this turn and were held (no site, or no safe route and no escort).
+    # Production builds no settler while one is held: the next could do no more (issue 283).
+    held_settlers: int = 0
     target_cities: int = TARGET_CITIES  # Set by production from its weights.
     # Why surveyed sites were refused, by reason, so a stall shows its cause in the log line.
     rejected: dict[str, int] = field(default_factory=dict)

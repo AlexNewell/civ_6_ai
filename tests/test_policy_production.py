@@ -13,6 +13,7 @@ from civ6_ai.policies.production import (
     ProductionContext,
     ProductionWeights,
     build_context,
+    choose_for_city,
     drop_dominated,
     rank_production,
     score,
@@ -1515,3 +1516,55 @@ def test_build_context_takes_the_strongest_hostile_from_the_camp_or_a_roaming_ba
     state.camp_plan = CampPlan((55, 7), 5, 1, 20, 6, 2, 3, "any", 14, 0.04, defender=45.0)
     ctx = build_context(empire, [], defence=state)
     assert (ctx.hostile, ctx.hostile_ranged) == (45.0, 20.0)
+
+
+# ----- the camp force before a settler while the camp holds settling back (issues 283, 284) -----
+
+
+def test_no_settler_while_one_is_already_held_with_nowhere_to_go():
+    grown = city(population=4)
+    ctx = ProductionContext(turn=60, num_cities=3, builders=3, recon=1, army=4)
+    settler = option("UNIT", "UNIT_SETTLER", 5)
+    w = ProductionWeights()
+    assert score(settler, grown, ctx, w) > 0
+    assert score(settler, grown, replace(ctx, held_settlers=1), w) == 0.0
+
+
+def test_a_blocking_camp_lifts_the_share_cap_so_every_city_builds_for_it():
+    base = dict(camp_units=3, camp_wants="any")
+    assert camp_menu_score("UNIT_WARRIOR", **base, camp_building=1) == 0.0  # Cap: one of two.
+    held = camp_menu_score("UNIT_WARRIOR", **base, camp_building=1, held_settlers=1)
+    assert held >= 15.0
+
+
+def test_a_camp_blocks_expansion_only_while_a_force_is_short_and_settling_is_stuck():
+    ctx = ProductionContext(turn=100, num_cities=2, camp_units=2, held_settlers=1)
+    assert ctx.camp_blocks
+    assert not replace(ctx, held_settlers=0).camp_blocks
+    assert replace(ctx, held_settlers=0, sites_ok=False).camp_blocks
+    assert not replace(ctx, camp_units=0).camp_blocks
+
+
+def test_the_options_line_shows_the_camp_demand(caplog):
+    import logging
+
+    c = city()
+    ctx = ProductionContext(
+        turn=100, num_cities=2, builders=2, recon=1, army=4, camp_units=2, camp_wants="any"
+    )
+    menu = [option("UNIT", "UNIT_WARRIOR", 4), option("BUILDING", "BUILDING_LIBRARY", 5)]
+    with caplog.at_level(logging.INFO):
+        run(choose_for_city(ScriptedGame(), c, menu, ctx, ProductionWeights()))
+    line = next(m for m in caplog.messages if "options" in m)
+    assert "camp demand: UNIT_WARRIOR" in line and "2 wanted" in line
+    assert "blocks expansion=no" in line
+
+
+def test_a_zero_scored_settler_is_never_started_as_the_last_item():
+    c = city(population=4)
+    ctx = ProductionContext(turn=60, num_cities=3, builders=3, recon=1, army=4, held_settlers=1)
+    game = ScriptedGame()
+    picked = run(
+        choose_for_city(game, c, [option("UNIT", "UNIT_SETTLER", 5)], ctx, ProductionWeights())
+    )
+    assert picked is None and game.set_calls == []

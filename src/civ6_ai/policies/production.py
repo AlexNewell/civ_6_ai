@@ -154,10 +154,23 @@ class ProductionContext:
     hostile: float = 0.0
     hostile_ranged: float = 0.0
     sites_ok: bool = True  # False when settling found no safe site to send a settler to.
+    # Issue 283: settlers on the map that settling held this turn (no site, or no safe route and
+    # no escort). While one waits, another settler could do no more than it.
+    held_settlers: int = 0
     idle_builders: int = 0  # Builders that found no job on offer the last time they ran (1.45).
     spare_jobs: int | None = None  # Jobs no builder holds; None when not known this turn.
     # Each city's growth plan (`growth.py`). Empty: food and housing items score the old way.
     growth: Mapping[int, CityGrowth] = field(default_factory=dict, compare=False)
+
+    @property
+    def camp_blocks(self) -> bool:
+        """A camp force is short and expansion is stuck: a settler is held, or no site is safe.
+
+        Issue 284: iteration 3 queued 12 settlers in 50 turns while the camp's barbarians held
+        every settler back and the camp force was never built. Clearing the camp is then the
+        expansion move, so the force comes before the settler and the share cap is lifted.
+        """
+        return self.camp_units > 0 and (self.held_settlers > 0 or not self.sites_ok)
 
     def after_choosing(
         self, item: str, unknown_combat: bool = False, orders: bool = True
@@ -580,6 +593,8 @@ def _unit_score(
             or city.pop < _SETTLER_MIN_POP
             or ctx.num_cities + ctx.settlers >= w.target_cities
             or ctx.settlers >= in_flight_cap
+            # Issue 283: a settler already waits with nowhere to go, so another adds nothing.
+            or ctx.held_settlers > 0
             # Run 11: a settler with no site was built five times and disbanded four. Only the
             # boost used to read this; now no fresh survey site means no settler at all.
             or not ctx.sites_ok
@@ -717,7 +732,10 @@ def _camp_score(
         return 0.0
     # Only a share of the cities builds for the camp, so the rest keep their districts and
     # settlers; a city already building a camp unit is counted in `camp_building`.
-    if ctx.camp_building >= camp_share_cap(ctx.num_cities, w.camp_share):
+    # Issue 284: not while the camp is what holds the settlers back; then every city in reach
+    # builds for it, and the settlers wait for the force.
+    cap = ctx.num_cities if ctx.camp_blocks else camp_share_cap(ctx.num_cities, w.camp_share)
+    if ctx.camp_building >= cap:
         return 0.0
     ranged = unit_class == "RANGED"
     lift = 0.0
@@ -863,6 +881,28 @@ def rank_production(
     return sorted(
         [*repairs, *keep],
         key=lambda o: (-scores[id(o)], o.category, o.item, o.repair_x or 0),
+    )
+
+
+def _camp_demand_note(
+    city: City, ranked: list[ProductionChoice], ctx: ProductionContext, w: ProductionWeights
+) -> str:
+    """For the options line (issue 284): the best a camp unit scores here while the force is
+    short, so a settler or building that wins over it can be read against it."""
+    if ctx.camp_units <= 0:
+        return ""
+    best: tuple[float, str] | None = None
+    for o in ranked:
+        stats = COMBAT_UNITS.get(o.item) if o.category == "UNIT" else None
+        if stats is None:
+            continue
+        value = _camp_score(city, o.item, stats[4], defence_strength(o.item), ctx, w)
+        if best is None or value > best[0]:
+            best = (value, o.item)
+    shown = "none offered" if best is None else f"{best[1]} {best[0]:.1f}"
+    return (
+        f" | camp demand: {shown}, {ctx.camp_units} wanted, {ctx.camp_building} building, "
+        f"blocks expansion={'yes' if ctx.camp_blocks else 'no'}"
     )
 
 
@@ -1114,10 +1154,11 @@ async def choose_for_city(
     ranked = rank_production(city, options, context, weights)
     if ranked:
         log.info(
-            "%s options%s: %s",
+            "%s options%s: %s%s",
             city.name,
             " (defence only)" if only_defence else "",
             ", ".join(f"{o.item} {score(o, city, context, weights):.1f}" for o in ranked[:3]),
+            _camp_demand_note(city, ranked, context, weights),
         )
     chain = PlanContext(planner, reads) if planner is not None and reads is not None else None
     if only_defence:
@@ -1128,6 +1169,10 @@ async def choose_for_city(
     for option in ranked:
         if tried >= MAX_ATTEMPTS:
             break
+        # Issue 283: a settler scored 0 (one is held, no safe site, enough cities) is never built
+        # as the last item left; the city takes the next option or stays idle.
+        if option.item == "UNIT_SETTLER" and score(option, city, context, weights) <= 0:
+            continue
         # A remembered refusal is checked only when the item has won its place in the ranking, so
         # a changed signature by itself costs no call and gives the item no priority.
         if (
@@ -1300,7 +1345,12 @@ class CityProductionPolicy:
         )
         self.expansion.target_cities = self.weights.target_cities
         growth = self.growth.update(cities, empire, self.weights.target_cities, tiles=self._tiles)
-        return replace(context, sites_ok=self.expansion.sites_ok(empire.turn), growth=growth)
+        return replace(
+            context,
+            sites_ok=self.expansion.sites_ok(empire.turn),
+            held_settlers=self.expansion.held_settlers,
+            growth=growth,
+        )
 
     async def assign(self, game: ProductionGame) -> list[str]:
         """Choose for each idle city, and return the names of any left without a choice.
@@ -1384,6 +1434,12 @@ class CityProductionPolicy:
             options = await _read_production(game, city.city_id)
             wanted = self._replaced[city.city_id]
             offered = [o for o in options if o.item == wanted]
+            if offered and score(offered[0], city, context, self.weights) <= 0:
+                # Issue 283: the build was interrupted for defence and is no longer wanted (a
+                # settler while another waits, or while the camp holds settling back). It is not
+                # resumed at a score of 0; the city chooses afresh when it is idle.
+                log.info("%s does not resume %s: it scores 0 now", city.name, wanted)
+                offered = []
             if not offered:
                 del self._replaced[city.city_id]  # The game no longer offers it.
                 if city.is_idle:

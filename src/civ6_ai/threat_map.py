@@ -569,20 +569,16 @@ class ThreatMap:
         # Our blows: (strength, tile, tiles it strikes from). A blow can only land on an attacker
         # it reaches: a unit's moves in a turn plus its shooting reach, the city's strike its range.
         blows: list[tuple[float, int, int, int]] = []
-        city_x, city_y = x, y
         for a in self.allies:
-            if (
-                a.kind == "unit"
-                and a is not defender_unit
-                and a.strength > 0
-                and self._cover_field(a).get((x, y), 0.0) > 0
-            ):
-                moves, _naval, rng = self._unit_profile(a.unit_type)
+            if a.kind != "unit" or a.strength <= 0:
+                continue
+            moves, _naval, rng = self._unit_profile(a.unit_type)
+            if a is defender_unit:
+                # A garrison stays in the city; only a ranged one can shoot from it.
+                if a.base > a.defence_base:
+                    blows.append((a.strength, a.x, a.y, rng))
+            elif self._cover_field(a).get((x, y), 0.0) > 0:
                 blows.append((a.strength, a.x, a.y, int(moves) + rng))
-        if defender_unit is not None and defender_unit.base > defender_unit.defence_base:
-            # A ranged garrison still shoots from the city, though it does not move to do it.
-            _moves, _naval, rng = self._unit_profile(defender_unit.unit_type)
-            blows.append((defender_unit.strength, city_x, city_y, rng))
         if city is not None and city.walls and city.strength > 0:
             blows.append((city.strength, city.x, city.y, s.ranged_reach))
         blows.sort(reverse=True)

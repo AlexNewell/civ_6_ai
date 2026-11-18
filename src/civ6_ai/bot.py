@@ -295,12 +295,14 @@ def build_orchestrator(
     )
     government = GovernmentPolicy()  # One instance, so handler and blockers share its bounds.
     secondary = SecondaryPolicy()
+    production.trade_blocked = secondary.trade_blocked  # No Trader while no route is safe (269).
     military = MilitaryPolicy(defence=defence)
     settling = SettlingPolicy(expansion=expansion, defence=defence)
     threat_map_handler = ThreatMapHandler(dump=threat_map_dump)
     settling.terrain = threat_map_handler.terrain  # What a step costs (issue 238).
     if use_threat_map:
         military.threat_map = threat_map_handler.map
+        secondary.map = threat_map_handler.map  # Routes are checked against it (issue 269).
         defence.map = threat_map_handler.map  # The same map decides who is short (issue 264).
     victory_watch = VictoryWatch()
     rankings = RankingsHolder()  # Every living civ's score (issue 256).

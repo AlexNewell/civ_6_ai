@@ -841,3 +841,105 @@ def test_a_refused_tile_is_not_tried_again_for_a_few_turns():
     assert len(moves_to(game)) == 1
     run(policy, game)  # Same turn number is a retry inside the window.
     assert len(moves_to(game)) == 1
+
+
+# ----- route danger (issue 269) -----
+
+
+def camp_map(x=15, y=10):
+    from civ6_ai.state.reader import build_tile
+    from civ6_ai.threat_map import ThreatMap
+    from fixtures.civ_state import tile
+
+    m = ThreatMap()
+    m.see_tiles(
+        50, [build_tile(tile(x=x, y=y, improvement="IMPROVEMENT_BARBARIAN_CAMP", units=[]))]
+    )
+    return m
+
+
+def test_line_tiles_run_between_the_ends_and_wrap_the_seam():
+    from civ6_ai.policies.secondary import line_tiles
+
+    row = line_tiles(10, 10, 14, 10, 44)
+    assert row == [(10, 10), (11, 10), (12, 10), (13, 10), (14, 10)]
+    seam = line_tiles(42, 10, 1, 10, 44)
+    assert seam[0] == (42, 10) and seam[-1] == (1, 10) and len(seam) == 4
+
+
+def test_route_danger_is_zero_without_a_map_and_high_through_a_camp():
+    from civ6_ai.policies.secondary import route_danger
+
+    assert route_danger(None, 10, 10, 20, 10, 50) == 0.0
+    m = camp_map()
+    assert route_danger(m, 10, 10, 20, 10, 50) > SecondaryWeights().route_danger_max
+    assert route_danger(m, 10, 30, 10, 36, 50) < SecondaryWeights().route_danger_max
+
+
+def test_a_route_through_a_camp_is_skipped_for_a_safe_domestic_one(caplog):
+    game = trade_game(
+        [trader()],
+        dests={
+            5: [
+                dest("Far", x=20, origin_yields="Gold:9"),
+                dest("Home", owner="Domestic", x=10, y=16, domestic=True, origin_yields="Gold:1"),
+            ]
+        },
+    )
+    policy = SecondaryPolicy()
+    policy.map = camp_map()
+    with caplog.at_level("INFO", logger="civ6_ai.policies.secondary"):
+        run(policy, game)
+    assert acted(game, "route") == [("route", 5, 10, 16)]
+    started = next(r.getMessage() for r in caplog.records if "route started" in r.getMessage())
+    assert "Home" in started and "Gold:1" in started and "danger" in started
+    assert not policy.trade_blocked(50)
+
+
+def test_trader_is_held_when_every_route_is_dangerous_and_production_hears_it():
+    game = trade_game([trader()], dests={5: [dest("Far", x=20), dest("Farther", x=21)]})
+    policy = SecondaryPolicy()
+    policy.map = camp_map()
+    run(policy, game)
+    assert acted(game, "route") == []
+    assert policy.trade_blocked(50) and policy.trade_blocked(55) and not policy.trade_blocked(56)
+
+
+def test_routes_are_unchecked_without_a_threat_map():
+    game = trade_game([trader()], dests={5: [dest("Far", x=20)]})
+    run(SecondaryPolicy(), game)
+    assert acted(game, "route") == [("route", 5, 20, 10)]
+
+
+def test_a_trader_that_disappears_is_logged_as_lost(caplog):
+    game = trade_game([trader(5), trader(6, on_route=True, has_moves=False)], dests={})
+    policy = SecondaryPolicy()
+    run(policy, game)
+    game.data["trade"] = lq.TradeRouteStatus(capacity=2, active_count=0, traders=[trader(5)])
+    with caplog.at_level("WARNING", logger="civ6_ai.policies.secondary"):
+        run(policy, game)
+    assert policy.traders_lost == 1
+    assert "Trader 6 lost" in caplog.text and "on a route" in caplog.text
+
+
+def test_production_builds_no_trader_while_no_route_is_safe():
+    from civ6_ai.state.reader import build_city
+    from fixtures import civ_state as fx
+
+    city = build_city(fx.city_info(), (), set())
+    unsafe = ProductionContext(
+        turn=120, num_cities=3, trade_capacity=2, traders=0, trade_safe=False
+    )
+    assert score(trader_option(), city, unsafe, ProductionWeights()) == 0
+
+
+def test_unsafe_trader_is_not_a_fallback_candidate():
+    from civ6_ai.policies.production import rank_production
+    from civ6_ai.state.reader import build_city
+    from fixtures import civ_state as fx
+
+    city = build_city(fx.city_info(), (), set())
+    ctx = ProductionContext(turn=120, num_cities=3, trade_capacity=2, trade_safe=False)
+    assert rank_production(city, [trader_option()], ctx) == []
+    safe = ProductionContext(turn=120, num_cities=3, trade_capacity=2)
+    assert len(rank_production(city, [trader_option()], safe)) == 1

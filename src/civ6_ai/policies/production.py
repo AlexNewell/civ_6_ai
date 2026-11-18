@@ -118,6 +118,7 @@ class ProductionContext:
     army: int = 0
     traders: int = 0  # Traders that exist, on a route or not, plus those being built.
     trade_capacity: int = 0  # Routes the empire can run at once.
+    trade_safe: bool = True  # False while every route is too dangerous (issue 269): no Trader.
     districts: frozenset[str] = frozenset()  # Short names of districts any city has built.
     science_districts: int = 0  # Campuses (or the unique district in their place) built or begun.
     threatened: frozenset[int] = frozenset()  # Ids of cities the threat state marks (1.35).
@@ -178,6 +179,7 @@ def build_context(
     defence: Any = None,
     idle_builders: int = 0,
     spare_jobs: int | None = None,
+    trade_safe: bool = True,
 ) -> ProductionContext:
     """Count what exists plus what cities are already building, so picks don't double up.
 
@@ -187,6 +189,7 @@ def build_context(
         turn=empire.turn,
         num_cities=empire.num_cities,
         trade_capacity=empire.trade_capacity,
+        trade_safe=trade_safe,
         threatened=defence.threatened_ids if defence is not None else frozenset(),
         short=defence.short_ids if defence is not None else frozenset(),
         mapped=defence.mapped_ids if defence is not None else frozenset(),
@@ -552,7 +555,7 @@ def _unit_score(
     if kind == "UNIT_TRADER":
         # Every route slot needs a trader. Traders already on a route count, since they fill a slot.
         wanted = ctx.trade_capacity - ctx.traders
-        if wanted <= 0 or threatened:
+        if wanted <= 0 or threatened or not ctx.trade_safe:
             return 0.0
         return (7.0 + min(wanted, 3)) * w.trade
     if kind == "UNIT_SCOUT":
@@ -669,6 +672,7 @@ def rank_production(
     input gives the same list.
     """
     weights = weights or ProductionWeights()
+    options = [o for o in options if o.item != "UNIT_TRADER" or context.trade_safe]  # Issue 269.
     keep, repairs = drop_dominated(list(options), city, context, weights)
     ranked = sorted(
         [*repairs, *keep],
@@ -1048,7 +1052,11 @@ class CityProductionPolicy:
         expansion: ExpansionState | None = None,
         defence: Any = None,
         builder_demand: Any = None,
+        trade_blocked: Any = None,
     ) -> None:
+        self.trade_blocked = (
+            trade_blocked  # `SecondaryPolicy.trade_blocked` (turn -> bool), or None.
+        )
         self.builder_demand = builder_demand  # `builder.BuilderDemand`, or None.
         self._food_focus: set[int] = set()  # Cities this policy set to a food focus.
         self._reset: set[int] = set()  # Cities returned to default, which may starve again.
@@ -1085,6 +1093,7 @@ class CityProductionPolicy:
             self.defence,
             idle_builders=demand.idle if demand is not None else 0,
             spare_jobs=demand.spare_jobs if demand is not None else None,
+            trade_safe=not (self.trade_blocked is not None and self.trade_blocked(empire.turn)),
         )
         self.expansion.target_cities = self.weights.target_cities
         growth = self.growth.update(cities, empire, self.weights.target_cities, tiles=self._tiles)

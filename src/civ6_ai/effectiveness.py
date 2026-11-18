@@ -485,10 +485,14 @@ def faith_was_buyable(msg: str) -> bool:
     religion, so no city purchases either). Saving toward a price is not idling. Lines that say
     nothing about prices still count, so a refusal or a skipped list is not hidden.
     """
-    if NO_GP_BUYABLE in msg:
-        return False
-    cheapest = FAITH_CHEAPEST.search(msg)
-    return not (cheapest and int(cheapest[1]) > int(cheapest[2]))
+    for note in msg.split("; "):
+        if NO_GP_BUYABLE in note or " needs about " in note or note.startswith("no unit or"):
+            continue  # Nothing offered, or a price above the faith held.
+        cheapest = FAITH_CHEAPEST.search(note)
+        if cheapest and int(cheapest[1]) > int(cheapest[2]):
+            continue
+        return True  # A price within reach, a refusal, a block, or a line that says nothing.
+    return False
 
 
 def faith_checks(run: RunLogs) -> list[Check]:

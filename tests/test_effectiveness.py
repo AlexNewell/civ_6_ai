@@ -907,3 +907,28 @@ def test_faith_idle_with_an_affordable_great_person_still_fails():
     checks = by_name(run)
     assert checks[("faith", "turns idle vs turns spent")].status == FAIL
     assert checks[("faith", "most faith idle above reserve")].created == 440
+
+
+def test_faith_city_purchase_refusal_with_no_great_person_still_counts_as_idle():
+    msg = (
+        "Faith 500 above reserve 60 but nothing bought: no great person can be bought with faith"
+        " (4 listed: 4 claimed, 0 priced 0, 0 not buyable); BUILDING_SHRINE in Alpha refused"
+    )
+    run = RunLogs(records=[turn(1, {})], bot=[bot("faith", msg)] * 10, has_bot_log=True)
+    checks = by_name(run)
+    assert checks[("faith", "most faith idle above reserve")].created == 440
+
+
+def test_faith_city_prices_out_of_reach_are_not_idle():
+    msg = (
+        "Faith 90 above reserve 60 but nothing bought: no great person can be bought with faith"
+        " (4 listed: 4 claimed, 0 priced 0, 0 not buyable); UNIT_BUILDER in Alpha needs about"
+        " 205, have 30; no unit or building to buy yet (looked again from turn 74)"
+    )
+    bought = "Faith bought A (Great Merchant) for 158 faith"
+    run = RunLogs(
+        records=[turn(1, {})],
+        bot=[bot("faith", msg)] * 8 + [bot("faith", bought)],
+        has_bot_log=True,
+    )
+    assert by_name(run)[("faith", "most faith idle above reserve")].created == 0

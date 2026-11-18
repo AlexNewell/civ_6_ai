@@ -609,7 +609,7 @@ class _Turn:
     attacked: set[tuple[int, int]] = field(default_factory=set)  # Targets any attack landed on.
     # Targets a melee attack landed on. Its reply shows the enemy's health from before the combat,
     # so these are read again after the attacks and judged by what is there (issue 275).
-    melee_hit: set[tuple[int, int]] = field(default_factory=set)
+    melee_hit: dict[tuple[int, int], set[int]] = field(default_factory=dict)
     # Barbarian tiles of the threats before the re-read, so an attack on one that died still counts.
     barb_before: set[tuple[int, int]] = field(default_factory=set)
     # Per target, the best attack turned down: its odds, the unit and the reason.
@@ -1092,12 +1092,26 @@ class MilitaryPolicy:
             return
         t.barb_before = {(b.x, b.y) for b in t.threats if b.owner_id == BARBARIAN_ID}
         t.threats = threats
-        for where in t.melee_hit:
+        alive: set[int] | None = None
+        for where, attackers in t.melee_hit.items():
             left = [th for th in threats if (th.x, th.y) == where and th.hostile]
             if not left:
-                t.dead.add(where)
-                t.killed.add(where)
-                t.confirmed.add(where)
+                # The scan lists visible units only: if every attacker died, the target may be
+                # out of sight and alive, so a kill is confirmed only with an attacker standing.
+                if alive is None:
+                    try:
+                        alive = {
+                            u.unit_id for u in await _read_units(game, self.settings.map_width)
+                        }
+                    except ConnectionError:
+                        raise
+                    except Exception:
+                        log.exception("Reading the units after the melee attacks failed")
+                        alive = set()
+                if attackers & alive:
+                    t.dead.add(where)
+                    t.killed.add(where)
+                    t.confirmed.add(where)
             elif where not in t.confirmed:
                 # Still standing: the estimate that killed it was wrong, and what is left is real.
                 t.dead.discard(where)
@@ -1355,7 +1369,7 @@ class MilitaryPolicy:
         t.acted.add(unit.unit_id)
         t.attacked.add(where)
         if unit.ranged_strength <= 0:
-            t.melee_hit.add(where)
+            t.melee_hit.setdefault(where, set()).add(unit.unit_id)
         t.hp[unit.unit_id] = max(0.0, t.hp.get(unit.unit_id, unit.hp) - odds.taken)  # Expected.
         self._fortified.pop(unit.unit_id, None)  # Attacking ends a fortification.
         self._record_hit(t, where, result, odds.dealt, target.hp)

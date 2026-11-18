@@ -2250,3 +2250,20 @@ def test_a_campaign_that_is_hurting_the_camp_is_kept_through_losses():
     run(policy, game)
     assert (55, 7) not in policy._camp_aside
     assert state.camp_plan is not None
+
+
+def test_a_melee_kill_is_not_confirmed_when_every_attacker_died(caplog):
+    game = melee_game([])
+    attack = game.attack_unit
+
+    async def attack_and_die(unit_index, x, y):
+        result = await attack(unit_index, x, y)
+        game.data["units"] = []  # The attacker died; the target may only be out of sight.
+        return result
+
+    game.attack_unit = attack_and_die
+    with caplog.at_level(logging.INFO):
+        run(MilitaryPolicy(), game)
+    (row,) = offense_rows(caplog)
+    assert row["attacks_barb"] == 1
+    assert row["kills_barb"] == 0

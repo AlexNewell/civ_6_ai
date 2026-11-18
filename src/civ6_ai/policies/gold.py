@@ -547,6 +547,8 @@ class GoldPolicy:
             value = camp_unit_value(
                 option.item, COMBAT_UNITS[option.item][4], float(option.cost), context
             )
+            if context.camp_wants == "melee" and COMBAT_UNITS[option.item][4] == "RANGED":
+                continue  # Only a melee unit takes the tile the force is short of.
             if value is None:
                 value = defence_strength(option.item) / 100.0  # No defender seen: by strength.
             if value > 0:

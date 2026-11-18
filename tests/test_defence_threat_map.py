@@ -326,3 +326,25 @@ def test_only_a_kill_the_game_confirmed_leaves_the_defence_state():
     policy._record_hit(t, (2, 2), "Target killed", 40, 30)
     assert t.killed == {(1, 1), (2, 2)}
     assert t.confirmed == {(2, 2)}
+
+
+def test_a_resume_drops_the_cancelled_defence_unit_from_the_armys_count():
+    policy = CityProductionPolicy(defence=DefenceState())  # The threat is gone.
+    policy._replaced[ALPHA] = "BUILDING_LIBRARY"
+    game = ProductionGame(
+        overview=fx.overview(num_cities=1),
+        cities=[fx.city_info(currently_building="UNIT_WARRIOR", production_turns_left=5)],
+        production=OPTIONS,
+    )
+    seen = []
+    original = policy._context
+
+    def spy(empire, units, in_progress, cities):
+        in_progress = list(in_progress)
+        seen.append(in_progress)
+        return original(empire, units, in_progress, cities)
+
+    policy._context = spy
+    asyncio.run(policy.run(game))
+    assert game.set == [(ALPHA, "BUILDING", "BUILDING_LIBRARY")]
+    assert seen[-1] == ["BUILDING_LIBRARY"]

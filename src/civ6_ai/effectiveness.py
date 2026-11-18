@@ -26,6 +26,9 @@ LOG_LINE = re.compile(r"^\S+ \S+ civ6_ai\.(?P<logger>\S+) (?P<level>[A-Z]+) (?P<
 GP_LINE = re.compile(r"great_people turn (\d+): (\d+) on the map: (.*)$")
 GP_NAME = re.compile(r"(?:^|; )(.+?) \((UNIT_GREAT_\w+)\) at ")
 FAITH_IDLE = re.compile(r"Faith (\d+) above reserve (\d+) but nothing bought")
+# The cheapest great person the policy priced, against the faith it had above the reserve.
+FAITH_CHEAPEST = re.compile(r"best .*? (\d+) faith vs (\d+) above reserve")
+NO_GP_BUYABLE = "no great person can be bought with faith"
 CANT_BUILD = re.compile(r"^(?P<city>.+?) can't build (?P<item>\w+): (?P<why>[A-Za-z_:]+)")
 BUILDS = re.compile(r"^(.+?) builds (\w+)")
 GP_ACTIVATED = re.compile(r"^great_people activated turn (\d+): ")
@@ -474,13 +477,27 @@ def blocker_checks(run: RunLogs) -> list[Check]:
     return out
 
 
+def faith_was_buyable(msg: str) -> bool:
+    """False when a "nothing bought" line shows nothing could have been bought.
+
+    Run 16: 14 of 15 turns "idle" were turns where the cheapest great person cost 500 faith
+    against 3 to 78 above the reserve, or the game offered no great person for faith at all (no
+    religion, so no city purchases either). Saving toward a price is not idling. Lines that say
+    nothing about prices still count, so a refusal or a skipped list is not hidden.
+    """
+    if NO_GP_BUYABLE in msg:
+        return False
+    cheapest = FAITH_CHEAPEST.search(msg)
+    return not (cheapest and int(cheapest[1]) > int(cheapest[2]))
+
+
 def faith_checks(run: RunLogs) -> list[Check]:
     if not run.has_bot_log:
         return [_no_data("faith", "held vs spent", "see rule", "needs the bot log")]
     idle = [
         int(m[1]) - int(m[2])
         for msg in run.messages("policies.faith")
-        if (m := FAITH_IDLE.search(msg))
+        if (m := FAITH_IDLE.search(msg)) and faith_was_buyable(msg)
     ]
     bought = sum(1 for m in run.messages("policies.faith") if m.startswith("Faith bought"))
     # A turn can buy twice, so spending turns come from the calls when the run has them.
@@ -504,7 +521,7 @@ def faith_checks(run: RunLogs) -> list[Check]:
             len(idle) + turns_spent,
             turns_spent,
             0.2,
-            "faith spent on at least 20% of the turns it was above reserve",
+            "faith spent on at least 20% of the turns something was affordable",
             f"{len(idle)} idle turns, {bought} purchases logged"
             + ("" if run.has_calls else "; no call counts, so a turn buying twice counts twice"),
         ),

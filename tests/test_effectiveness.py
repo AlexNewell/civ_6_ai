@@ -877,3 +877,33 @@ def test_wonder_check_counts_legacy_building_events_without_double_counting():
     run = RunLogs(records=[turn(1)], events=events, has_events=True)
     check = by_name(run)[("wonders", "wonders completed")]
     assert check.used == 2 and "ORACLE t88" in check.note
+
+
+def test_faith_saving_toward_a_price_out_of_reach_is_not_idle():
+    # Run 16: the cheapest great person cost 500 faith with 3 above the reserve, and with no
+    # religion the cities had nothing to buy, so the old check warned about "1 of 15".
+    far = (
+        "Faith 63 above reserve 60 but nothing bought: great people: best Colaeus (Great Merchant)"
+        " 500 faith vs 3 above reserve (roi 0.24), no target at 3.1 a turn with 263 turns left"
+    )
+    none = (
+        "Faith 90 above reserve 60 but nothing bought: no great person can be bought with faith"
+        " (4 listed: 4 claimed, 0 priced 0, 0 not buyable)"
+    )
+    bought = "Faith bought A (Great Merchant) for 158 faith"
+    lines = [bot("faith", far), bot("faith", none)] * 8 + [bot("faith", bought)]
+    run = RunLogs(records=[turn(1, {})], bot=lines, has_bot_log=True)
+    checks = by_name(run)
+    assert checks[("faith", "turns idle vs turns spent")].status != FAIL
+    assert checks[("faith", "most faith idle above reserve")].created == 0
+
+
+def test_faith_idle_with_an_affordable_great_person_still_fails():
+    near = (
+        "Faith 500 above reserve 60 but nothing bought: great people: best Colaeus (Great Merchant)"
+        " 300 faith vs 440 above reserve (roi 0.01), no target at 3.1 a turn with 20 turns left"
+    )
+    run = RunLogs(records=[turn(1, {})], bot=[bot("faith", near)] * 10, has_bot_log=True)
+    checks = by_name(run)
+    assert checks[("faith", "turns idle vs turns spent")].status == FAIL
+    assert checks[("faith", "most faith idle above reserve")].created == 440

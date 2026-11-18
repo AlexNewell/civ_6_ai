@@ -470,6 +470,7 @@ class GoldPolicy:
         threatened = [c for c in cities if self._may_buy_while_saving(c)]
         pool: list[_Option] = []
         camp: list[tuple[float, int, City, Any]] = []  # Camp units on offer: value, price, city.
+        why: list[str] = []  # Why no camp unit is on offer (issue 279), for the log.
         if not threatened and self._scan_skipped(turn, notes):
             return
         for city in cities:
@@ -493,8 +494,11 @@ class GoldPolicy:
                 spare_jobs=demand.spare_jobs if demand is not None else None,
             )
             ranked = rank_production(city, options, context, self.weights)
-            if city not in threatened and context.camp_units > 0:
-                camp += self._camp_candidates(city, ranked, context, turn)
+            if context.camp_units > 0:
+                if city in threatened:
+                    why.append(f"{city.name} is threatened and buys defence")
+                else:
+                    camp += self._camp_candidates(city, ranked, context, turn, why)
             if city in threatened:
                 if turn.purchases >= limit or turn.budget <= 0:
                     continue
@@ -522,16 +526,33 @@ class GoldPolicy:
                 label = f"{city.name} {option.item}"
                 priced = valuation.price(label, option.gold_cost, worth, turn.now, turn.last)
                 pool.append(_Option(priced, city, option, context))
-        await self._buy_camp_unit(game, turn, camp, notes, limit)
+        await self._buy_camp_unit(game, turn, camp, notes, limit, why)
         pool += await self._great_people(game, turn)
         self._note_scan(turn, pool)
         await self._spend_by_return(game, turn, pool, notes, limit)
 
     def _camp_candidates(
-        self, city: City, ranked: list, context: ProductionContext, turn: _Turn
+        self,
+        city: City,
+        ranked: list,
+        context: ProductionContext,
+        turn: _Turn,
+        why: list[str] | None = None,
     ) -> list[tuple[float, int, City, Any]]:
-        """Units this city could buy for the camp force, by matchup (issue 275)."""
+        """Units this city could buy for the camp force, by matchup (issue 275).
+
+        Dear ones are kept in the list (issue 279): iteration 2 had 40 to 140 gold against prices
+        of 160 to 210, so nothing was ever affordable, and the log never said so. The reasons a
+        city offers nothing go to `why`.
+        """
         found = []
+        why = [] if why is None else why
+        if context.camp_target is not None and (
+            hex_distance(city.x, city.y, *context.camp_target) > _CAMP_CITY_REACH
+        ):
+            why.append(f"{city.name} is too far from the camp to join the force")
+            return found
+        skipped = 0
         for option in ranked:
             if (
                 option.category != "UNIT"
@@ -539,25 +560,26 @@ class GoldPolicy:
                 or option.is_repair
                 or option.gold_cost is None
                 or option.gold_cost <= 0
-                or option.gold_cost > turn.budget
                 or not _NAME.fullmatch(option.item)
                 or self._stack.is_blocked(city.city_id, option.item)
                 or score(option, city, context, self.weights) <= 0
             ):
+                skipped += 1 if option.category == "UNIT" and option.item in COMBAT_UNITS else 0
                 continue
             value = camp_unit_value(
                 option.item, COMBAT_UNITS[option.item][4], float(option.cost), context
             )
-            if context.camp_target is not None and (
-                hex_distance(city.x, city.y, *context.camp_target) > _CAMP_CITY_REACH
-            ):
-                continue  # Too far to join the force.
             if context.camp_wants == "melee" and COMBAT_UNITS[option.item][4] == "RANGED":
                 continue  # Only a melee unit takes the tile the force is short of.
             if value is None:
                 value = defence_strength(option.item) / 100.0  # No defender seen: by strength.
             if value > 0:
                 found.append((value, option.gold_cost, city, option))
+        if not found:
+            why.append(
+                f"{city.name} offers no unit worth buying for the camp "
+                f"({skipped} combat units scored 0 or could not be bought)"
+            )
         return found
 
     async def _buy_camp_unit(
@@ -567,20 +589,36 @@ class GoldPolicy:
         candidates: list[tuple[float, int, City, Any]],
         notes: list[str],
         limit: int,
+        why: list[str] | None = None,
     ) -> None:
         """While a camp goal is unmet, buy the best matchup unit gold allows.
 
         Iteration 1 of the turn-100 test had gold above the reserve on 41 of 45 turns with the camp
         force short and nothing bought: a unit's return on gold was under the floor. The camp
         plan's own shortfall is the case, so one unit a turn is bought, the best value first.
+        Iteration 2 bought none either: every camp unit cost more than the gold on hand (160 to
+        210 against 24 to 143). Now the reason is logged, and when income closes the gap soon the
+        cheapest camp unit becomes the saving target, which holds back lesser buys.
         """
+        if turn.purchases >= limit or turn.refused_out:
+            why = [*(why or []), "no purchases left this turn"]
         if not candidates or turn.purchases >= limit or turn.refused_out:
+            if why is not None and (why or candidates):
+                log.info("No camp unit bought: %s", "; ".join(why))
+            return
+        affordable = [c for c in candidates if c[1] <= turn.budget]
+        if not affordable:
+            _, price, city, option = min(candidates, key=lambda c: (c[1], c[2].city_id))
+            saving = turn.save_for(f"{city.name} {option.item} (camp force)", price)
+            log.info(
+                "No camp unit bought: the cheapest, %s in %s, costs %d and %d is to spend%s",
+                option.item, city.name, price, turn.budget,
+                "; saving for it" if saving else "; income is too slow to save for it",
+            )  # fmt: skip
             return
         for value, price, city, option in sorted(
-            candidates, key=lambda c: (-c[0], c[1], c[2].city_id)
+            affordable, key=lambda c: (-c[0], c[1], c[2].city_id)
         ):
-            if price > turn.budget:
-                continue
             result = await self._call(
                 game.purchase_item(city.city_id, option.category, option.item)
             )

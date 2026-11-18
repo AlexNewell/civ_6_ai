@@ -40,6 +40,30 @@ Written offline against civ6-mcp's source, so none of this has run in a game yet
 | Ranged units are not hit back by melee defenders, and ranged defenders do hit back (`assess_attack` assumes both) | Not reached |
 | `Unit.targets` lists only targets in range with line of sight, and ranged units fire at adjacent targets | Not reached |
 
+## Run 18: turns 1 to 150, a fresh 150-turn run from STD_T1_02 (Khmer), stopped once and resumed (2026-11-17)
+
+STD_T1_02 on main from deb78ca, logs `20261118T040000Z` (turns 1 to 27) and `20261118T040823Z` (turns 27 to 150, resumed once with `--load AutoSave_0028 --turns 123`), consoles `runs/run33.out` and `runs/run34.out`. The first session stopped `blocked` on turn 27 after 384 s: the screenshot showed the end-turn button reading "Unit needs orders" with a Settler idle, and the settling log had `no_site` for 13 of 14 decisions (the only candidates were rejected "likely to flip to a rival (loyalty)"). No known blocker was named, so this is a new blocker, not yet in blockers.md. The resumed session loaded the turn-27 autosave, moved on, and stopped on `turn_limit` after 2,594 s with no handler errors. Total wall time about 2,980 s. Decision time mean 8.7 s then 12.2 s (p90 10.5 s then 15.4 s, max 62.8 s); end-turn wait mean 8.9 s; total per turn mean 21.1 s. The resumed session's G1 gate was clean with 5 warnings (gold nothing bought 80%, builder refusals 11%, settling no_site 64%, 2 Dark Ages, deals 2 of 13 accepted). The stopped session's gate failed on the one stop. $0.00 in model spend.
+
+| Turn | Score | Rank (true) | Alive | Leader | Gap |
+|---|---|---|---|---|---|
+| 25 | 28 | 6/6 | 6 | 40 | -12 |
+| 50 | 78 | 4/6 | 6 | 115 | -37 |
+| 75 | 151 | 4/6 | 6 | 211 | -60 |
+| 100 | 193 | 5/6 | 6 | 303 | -110 |
+| 125 | 298 | 4/6 | 6 | 438 | -140 |
+| 150 | 347 | 5/6 | 6 | 513 | -166 |
+
+CivBench gap table: turn 100 -110 (LLM median -46, AI median -61), turn 150 -166 (LLM -22, AI -70). The turn-150 leader is Aztec (513), then Maya (400); we were fifth of six. Cities: 4 (Angkor Thom turn 2, then cities 2 to 4 on turns 33, 50, 62); no fifth city, 21 of 33 settling decisions found no site. No city or settler lost. Wonders: Hanging Gardens turn 100, Great Bath 111, Machu Picchu 122.
+
+| Check | Result |
+|---|---|
+| Barbarians | `camps_gone` 1, `kills_barb` 0, `attacks_barb` 2, `camp_orders` 6; barbarians near on turns 20, 33 and 103. The stopped session's offense gate warned 7 of 7 early barbarian turns unanswered. |
+| Faith effectiveness | No faith warning in the report; great people bought (Zhang Qian 310, Piero de' Bardi 320, John the Baptist 550). No Holy Site was ever started ("no HOLY_SITE (never started)"). |
+| PR 247, peace-offer late acceptance | Reached: the turn-71 war with Hungary was offered peace on turn 81, refused at once, and the game ended the war on turn 82 ("lasted 11 turns, after our peace offer on turn 81, the game answers late"). A second war from turn 134 had no offer (the game waits 10 turns). |
+| Handler errors | None in either session. |
+
+New against STD_T1_01: the turn-27 stop. An idle Settler with no acceptable site (every candidate rejected on loyalty) leaves "Unit needs orders" and the run stops `blocked`. Reloading the turn-27 autosave got past it (the settler founded city 2 on turn 33), so the cause is not a stuck popup. Not fixed in this run.
+
 ## Run 17: turns 1 to 150, a repeat of Run 16 with PRs 257 to 259 (2026-11-17)
 
 STD_T1_01 on main from b120efb, log `20261118T025353Z`, `--turns 150` (no `--save-at`), console in `runs/run32.out`. Stopped on `turn_limit` after 3,487 s, no handler errors, no blockers. Decision time mean 14.4 s, p90 20.2 s, max 51.0 s; end-turn wait mean 8.9 s; total per turn mean 23.2 s. G1 gate clean, 4 warnings (gold nothing bought on 64% of turns above the reserve, one city lost, boosts 15%, 2 Dark Ages). $0.00 in model spend.

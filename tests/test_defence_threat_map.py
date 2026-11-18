@@ -521,3 +521,14 @@ def test_a_ranged_garrison_still_shoots_from_the_city():
     inside = make_map((5, 5), 30.0, swords, [("UNIT_CROSSBOWMAN", 5, 5, 30, 40)])
     melee = make_map((5, 5), 30.0, swords, [("UNIT_WARRIOR", 5, 5, 30, 0)])
     assert inside.city_reading(5, 5, TURN).damage < melee.city_reading(5, 5, TURN).damage
+
+
+def test_a_galley_hits_walls_as_melee_and_a_frigate_as_ranged():
+    def wall_share(kind):
+        m = make_map((5, 5), 30.0, [(kind, 5, 6, 30, 1.0)], [("UNIT_WARRIOR", 5, 5, 20, 0)], 100.0)
+        r = m.city_reading(5, 5, TURN)
+        return r.wall_damage / r.damage
+
+    heal = DEFAULT_COMBAT_HEAL
+    assert abs(wall_share("UNIT_GALLEY") - heal.wall_percent_melee / 100) < 1e-9
+    assert abs(wall_share("UNIT_FRIGATE") - heal.wall_percent_ranged / 100) < 1e-9

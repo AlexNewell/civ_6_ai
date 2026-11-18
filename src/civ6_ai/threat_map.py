@@ -37,6 +37,7 @@ from civ6_ai.terrain import TerrainStore
 log = logging.getLogger(__name__)
 
 BARBARIAN_ID = 63
+_RANGED_SHIPS = ("QUADRIREME", "FRIGATE", "BATTLESHIP", "CRUISER", "DESTROYER", "MISSILE")
 UNIT_MAX_HP = 100.0  # COMBAT_MAX_HIT_POINTS: a unit at full health.
 CAMP_IMPROVEMENT = "IMPROVEMENT_BARBARIAN_CAMP"
 CAMP = "camp"
@@ -518,7 +519,9 @@ class ThreatMap:
         klass = stats[4] if stats else ""
         if klass == "SIEGE":
             return "siege"
-        if src.naval or klass == "RANGED" or (stats is not None and stats[1] > 0):
+        # Ships are melee (Galley, Caravel, Ironclad) or ranged (Quadrireme, Frigate and later).
+        shoots = any(w in src.unit_type for w in _RANGED_SHIPS)
+        if shoots or klass == "RANGED" or (stats is not None and stats[1] > 0):
             return "ranged"
         return "melee"
 

@@ -672,6 +672,7 @@ def rank_production(
     input gives the same list.
     """
     weights = weights or ProductionWeights()
+    options = [o for o in options if o.item != "UNIT_TRADER" or context.trade_safe]  # Issue 269.
     keep, repairs = drop_dominated(list(options), city, context, weights)
     ranked = sorted(
         [*repairs, *keep],

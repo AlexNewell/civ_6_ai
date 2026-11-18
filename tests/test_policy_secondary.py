@@ -931,3 +931,15 @@ def test_production_builds_no_trader_while_no_route_is_safe():
         turn=120, num_cities=3, trade_capacity=2, traders=0, trade_safe=False
     )
     assert score(trader_option(), city, unsafe, ProductionWeights()) == 0
+
+
+def test_unsafe_trader_is_not_a_fallback_candidate():
+    from civ6_ai.policies.production import rank_production
+    from civ6_ai.state.reader import build_city
+    from fixtures import civ_state as fx
+
+    city = build_city(fx.city_info(), (), set())
+    ctx = ProductionContext(turn=120, num_cities=3, trade_capacity=2, trade_safe=False)
+    assert rank_production(city, [trader_option()], ctx) == []
+    safe = ProductionContext(turn=120, num_cities=3, trade_capacity=2)
+    assert len(rank_production(city, [trader_option()], safe)) == 1

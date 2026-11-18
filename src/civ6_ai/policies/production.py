@@ -1142,9 +1142,10 @@ class CityProductionPolicy:
         # Then the cities with an interrupted build, once they are covered again.
         for city in sorted(resuming, key=lambda c: c.city_id):
             options = await _read_production(game, city.city_id)
-            wanted = self._replaced.pop(city.city_id)
+            wanted = self._replaced[city.city_id]
             offered = [o for o in options if o.item == wanted]
             if not offered:
+                del self._replaced[city.city_id]  # The game no longer offers it.
                 if city.is_idle:
                     idle.append(city)  # No longer on offer: choose afresh.
                 continue
@@ -1160,6 +1161,7 @@ class CityProductionPolicy:
                 planner=self.planner,
             )
             if picked is not None:
+                del self._replaced[city.city_id]  # Kept on a refusal, to try again next turn.
                 building[city.city_id] = picked.item
                 self._note(city, f"production: resumed {picked.item}")
                 context = context.after_choosing(picked.item)

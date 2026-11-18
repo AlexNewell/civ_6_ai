@@ -1340,9 +1340,11 @@ class MilitaryPolicy:
         """
         if self.threat_map is not None:
             self.threat_map.forget_units_at(t.killed)
+            self.threat_map.relocate(t.placed)  # Cover moves with the units that moved.
         if self.defence is None:
             return
         self.defence.forget_killed(t.killed)
+        self.defence.refresh()
         for city in t.cities:
             if self._state_threatened(city):
                 self.defence.set_defenders(

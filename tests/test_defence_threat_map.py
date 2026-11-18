@@ -278,3 +278,31 @@ def test_killing_the_last_threat_removes_the_city_unless_something_else_marks_it
     state.reset(TURN, {ALPHA: at_war})
     state.forget_killed([(5, 6)])
     assert state.cities[ALPHA].reasons == ("war:Rome",)
+
+
+def test_a_unit_that_moved_into_the_city_adds_its_cover_after_the_map_is_read_again():
+    tile = (5, 5)
+    m = ThreatMap(ThreatMapSettings(map_width=None))
+    ours = build_unit(fx.unit_info(x=8, y=8, unit_type="UNIT_WARRIOR", combat_strength=40))
+    m.see_own(TURN, [ours], [])
+    m.allies.append(Ally("city", *tile, 10.0))
+    m.sources.append(Source(UNIT, 5, 6, 40.0, TURN, TURN, unit_type="UNIT_WARRIOR"))
+    state = DefenceState(map=m)
+    state.reset(TURN, {ALPHA: threat_for(m, tile, [("UNIT_WARRIOR", 5, 6, 40)])})
+    before = state.cities[ALPHA].reading
+    m.relocate({ours.unit_id: tile})
+    state.refresh()
+    assert state.cities[ALPHA].reading.cover > before.cover
+    assert state.cities[ALPHA].reading.damage < before.damage
+
+
+def test_a_resume_that_fails_is_tried_again_and_one_no_longer_offered_is_dropped():
+    policy = CityProductionPolicy(defence=_state(short=False))
+    policy._replaced[ALPHA] = "BUILDING_LIBRARY"
+    game = ProductionGame(
+        overview=fx.overview(num_cities=1),
+        cities=[fx.city_info(currently_building=None)],
+        production=[lq.ProductionOption("BUILDING", "BUILDING_WALLS", 80, 8, 160)],
+    )
+    asyncio.run(policy.run(game))
+    assert policy._replaced == {}  # Not on offer any more.

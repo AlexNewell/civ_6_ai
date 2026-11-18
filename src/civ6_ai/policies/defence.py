@@ -176,6 +176,12 @@ class DefenceState:
             updated = replace(found, hostile_units=left, hostile_tiles=alive, reasons=reasons)
             self.cities[city_id] = replace(updated, reading=self._read(updated))
 
+    def refresh(self) -> None:
+        """Read the map again for every city, after our units have moved (it holds cover)."""
+        for city_id, found in list(self.cities.items()):
+            if found.reading is not None and self.map is not None:
+                self.cities[city_id] = replace(found, reading=self._read(found))
+
     def _read(self, city: CityThreat) -> Any:
         if self.map is None or city.reading is None:
             return None

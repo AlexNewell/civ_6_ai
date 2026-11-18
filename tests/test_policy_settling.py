@@ -1256,6 +1256,54 @@ def test_an_escorted_settler_does_not_flee_back_to_the_city():
     assert policy.decisions[0].action != "flee"
 
 
+def test_an_escorted_settler_flees_when_outnumbered():
+    # Issue 283: two settlers were taken with an escort beside them and two or more hostile
+    # units close.
+    escort = unit_info(unit_id=9, unit_index=9, x=13, y=10)
+    game = make_game(
+        [settler(x=13, y=10), escort],
+        cities=[alpha()],
+        threats=[barbarian(15, 10), barbarian(13, 12)],
+        sites=[site(16, 10, food=40)],
+    )
+    policy = SettlingPolicy()
+    run(policy, game)
+    assert policy.decisions[0].action == "flee"
+
+
+def test_a_settler_runs_from_cavalry_beyond_the_foot_soldier_radius():
+    horse = threat_info(unit_type="UNIT_COURSER", x=17, y=10, owner_id=BARBARIANS)
+    game = make_game(
+        [settler(x=13, y=10)], cities=[alpha()], threats=[horse], sites=[site(16, 10, food=40)]
+    )
+    policy = SettlingPolicy()
+    run(policy, game)
+    assert policy.decisions[0].action == "flee"
+    foot = make_game(
+        [settler(x=13, y=10)],
+        cities=[alpha()],
+        threats=[barbarian(17, 10)],
+        sites=[site(16, 10, food=40)],
+    )
+    foot_policy = SettlingPolicy()
+    run(foot_policy, foot)
+    assert foot_policy.decisions[0].action != "flee"
+
+
+def test_a_refused_flee_is_logged_not_silent():
+    game = make_game(
+        [settler(x=13, y=10)],
+        cities=[alpha()],
+        threats=[barbarian(15, 10)],
+        sites=[site(16, 10, food=40)],
+    )
+    game.failing = {"move"}
+    policy = SettlingPolicy()
+    run(policy, game)
+    refused = [d for d in policy.decisions if "refused" in d.reason]
+    assert refused and "fleeing" in refused[0].reason
+
+
 def test_a_ship_in_a_coastal_city_is_not_the_settlers_companion():
     ship = unit_info(unit_id=8, unit_index=8, x=10, y=10, unit_type="UNIT_GALLEY", name="Galley")
     warrior = unit_info(unit_id=9, unit_index=9, x=10, y=10)

@@ -149,7 +149,10 @@ class ProductionContext:
         """
         kinds = _counted_as(item) or (("army",) if unknown_combat else ())
         counted = replace(self, **{kind: getattr(self, kind) + 1 for kind in kinds})
-        if "army" in kinds and counted.camp_units > 0:
+        stats = COMBAT_UNITS.get(item)
+        # A ranged unit cannot take the camp tile, so it does not meet a demand for a melee one.
+        fills = not (self.camp_wants == "melee" and stats is not None and stats[4] == "RANGED")
+        if "army" in kinds and counted.camp_units > 0 and fills:
             counted = replace(counted, camp_units=counted.camp_units - 1)
         if orders and "builders" in kinds and counted.spare_jobs is not None:
             counted = replace(counted, spare_jobs=max(0, counted.spare_jobs - 1))
@@ -620,7 +623,9 @@ def _camp_score(
     ranged = unit_class == "RANGED"
     lift = 0.0
     if ctx.camp_wants == "melee":
-        lift = -3.0 if ranged else 2.0
+        if ranged:
+            return 0.0  # Only a melee unit takes the camp tile; the force's missing piece.
+        lift = 2.0
     elif ctx.camp_wants == "ranged":
         lift = 2.0 if ranged else -1.0
     return (_CAMP_UNIT_SCORE + lift + strength / 10.0) * w.military

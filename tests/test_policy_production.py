@@ -1252,7 +1252,7 @@ def test_a_camp_force_demand_lifts_military_units_above_the_army_floor():
 def test_a_camp_demand_prefers_the_kind_the_force_lacks():
     melee = camp_menu_score("UNIT_WARRIOR", camp_units=1, camp_wants="melee")
     ranged = camp_menu_score("UNIT_ARCHER", camp_units=1, camp_wants="melee")
-    assert melee > ranged > 0
+    assert melee > ranged == 0.0
     archer = camp_menu_score("UNIT_ARCHER", camp_units=1, camp_wants="ranged")
     warrior = camp_menu_score("UNIT_WARRIOR", camp_units=1, camp_wants="ranged")
     assert archer > warrior > 0
@@ -1269,7 +1269,7 @@ def test_a_camp_demand_combines_with_the_army_floor_and_never_adds_to_it():
 
 
 def test_each_unit_chosen_counts_off_the_camp_demand():
-    ctx = ProductionContext(turn=100, num_cities=2, camp_units=2, camp_wants="melee")
+    ctx = ProductionContext(turn=100, num_cities=2, camp_units=2, camp_wants="any")
     once = ctx.after_choosing("UNIT_WARRIOR")
     twice = once.after_choosing("UNIT_ARCHER")
     assert (once.camp_units, twice.camp_units) == (1, 0)
@@ -1311,3 +1311,10 @@ def test_a_city_beyond_the_forces_reach_builds_nothing_for_the_camp():
     w = ProductionWeights()
     assert score(opt, here, ctx, w) > 0.0
     assert score(opt, far, ctx, w) == 0.0
+
+
+def test_a_melee_demand_is_met_by_melee_units_only():
+    ctx = ProductionContext(turn=100, num_cities=2, camp_units=1, camp_wants="melee")
+    assert ctx.after_choosing("UNIT_ARCHER").camp_units == 1  # An Archer does not fill it.
+    assert ctx.after_choosing("UNIT_WARRIOR").camp_units == 0
+    assert camp_menu_score("UNIT_ARCHER", camp_units=1, camp_wants="melee") == 0.0

@@ -6,9 +6,10 @@ is picked up and nothing is typed in twice. The comparison is a reference level,
 the CivBench scenario (Ground Control, 8 players, Standard map) is not our standard game, and the
 medians use only games that reached each turn. See that page for the caveats.
 
-The leader is the best *met* rival, as in history.py, so the gap to it is a lower bound on the
-true gap. A gap is our score minus theirs: negative means we are behind. Nothing here reads the
-game or the network.
+The leader is the best rival score the run logged. Runs from issue 256 on log every living civ's
+score (`all_scores`, unmet civs included), so the gap is to the true leader. Older logs hold met
+rivals only, so for them the gap is a lower bound on the true gap. A gap is our score minus
+theirs: negative means we are behind. Nothing here reads the game or the network.
 """
 
 import re

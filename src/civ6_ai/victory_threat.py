@@ -29,6 +29,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from civ6_ai.world_rankings import RankingsHolder, WorldRankings
+
 log = logging.getLogger(__name__)
 
 SCIENCE = "VICTORY_TECHNOLOGY"
@@ -201,15 +203,28 @@ def assess(
     return Assessment(turn, tuple(standings), science_rank(players, our_id))
 
 
-def format_line(turn: int, read: Assessment | None) -> str:
+def unmet_leaders_text(rankings: WorldRankings | None) -> str:
+    """Victory types led by a civ we have not met, as the Overall tab shows them (issue 256).
+
+    Such a civ can't be a target or a flag (its identity is hidden), but the line says it leads and
+    by what progress, so a human reading the log sees a leader the met-civ reads can't."""
+    if rankings is None:
+        return ""
+    unmet = rankings.unmet_leaders()
+    leaders = "; ".join(f"{x.short} {x.progress:g}" for x in unmet) or "none"
+    return f" unmet_leaders=[{leaders}]"
+
+
+def format_line(turn: int, read: Assessment | None, rankings: WorldRankings | None = None) -> str:
     if read is None:
-        return f"victory_threat: turn={turn} no reading yet"
+        return f"victory_threat: turn={turn} no reading yet{unmet_leaders_text(rankings)}"
     flagged = "; ".join(s.describe() for s in read.threats) or "none"
     leaders = "; ".join(s.describe() for s in read.standings if not s.flagged) or "none"
     rank = read.science_rank.describe() if read.science_rank else "science_rank=unknown"
     return (
         f"victory_threat: turn={turn} read={read.turn} age={turn - read.turn} "
         f"flagged=[{flagged}] others=[{leaders}] {rank}"
+        f"{unmet_leaders_text(rankings)}"
     )
 
 
@@ -238,8 +253,9 @@ class VictoryThreatLog:
 
     name = "victory_threat"
 
-    def __init__(self, watch: VictoryWatch) -> None:
+    def __init__(self, watch: VictoryWatch, rankings: RankingsHolder | None = None) -> None:
         self._watch = watch
+        self._rankings = rankings
         self._flagged: tuple[int, ...] = ()
 
     async def run(self, game: _OverviewGame) -> None:
@@ -248,7 +264,7 @@ class VictoryThreatLog:
         if last is not None and last.turn > turn:
             self._watch.reset()  # A reading from a later turn is from another game.
         read = self._watch.last
-        log.info(format_line(turn, read))
+        log.info(format_line(turn, read, self._rankings.last if self._rankings else None))
         ids = read.threat_ids if read else ()
         if ids != self._flagged:
             if ids:

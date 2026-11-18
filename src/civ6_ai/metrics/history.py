@@ -5,10 +5,11 @@ Each run becomes one row, with these choices:
 
 - **Score at fixed checkpoint turns** (50, 100, ... 300), blank when the run didn't reach one. Two
   runs are only ever compared at a turn both reached, so length can't flatter or punish a run.
-- **Share of the leader**: our score over the highest score among us and the rivals we've met, and
-  **rank** (1 + met rivals scoring strictly more). Both ignore how fast scores grow as a game
-  goes on, so they hold up across runs. Unmet rivals aren't in the data, so the leader is the best
-  *met* one, and the share is an upper bound. Blank where rival scores weren't recorded (old logs).
+- **Share of the leader**: our score over the highest score among us and the rivals logged, and
+  **rank** (1 + rivals scoring strictly more). Both ignore how fast scores grow as a game
+  goes on, so they hold up across runs. Runs from issue 256 on log every living civ's score,
+  unmet ones included. Older logs hold met rivals only, so there the leader is the best *met*
+  one and the share is an upper bound. Blank where rival scores weren't recorded.
 - **score_per_turn** is the mean score over the turns played. It is the single summary asked for,
   but a long run has more late, high turns, so it is biased by length. **mean_share** (the mean of
   our share of the leader over the run) has no such bias and is the better single number.
@@ -79,9 +80,17 @@ def merge_logs(paths: list[Path]) -> list[dict]:
     return [by_turn[turn] for turn in sorted(by_turn)]
 
 
+def _rival_scores(record: dict) -> tuple[int, ...]:
+    """Every living rival's score when the run logged them (met or not), else the met ones."""
+    everyone = record.get("all_scores")
+    if everyone:
+        return tuple(everyone)
+    return tuple((record.get("rival_scores") or {}).values())
+
+
 def points(records: list[dict]) -> list[Point]:
     return [
-        Point(r["turn"], r["score"], tuple((r.get("rival_scores") or {}).values()))
+        Point(r["turn"], r["score"], _rival_scores(r))
         for r in records
         if isinstance(r.get("score"), int)
     ]

@@ -86,6 +86,7 @@ from civ6_ai.strategy.apply import PolicyDocumentHandler
 from civ6_ai.strategy.tasks import TaskDB, TaskHandler
 from civ6_ai.threat_map import ThreatMapHandler
 from civ6_ai.victory_threat import VictoryThreatLog, VictoryWatch
+from civ6_ai.world_rankings import RankingsHolder, WorldRankingsLog
 
 SETTLING_LOGGER = "civ6_ai.policies.settling"
 _DECISION_PREFIX = "settle_decision "
@@ -301,6 +302,7 @@ def build_orchestrator(
     if use_threat_map:
         military.threat_map = threat_map_handler.map
     victory_watch = VictoryWatch()
+    rankings = RankingsHolder()  # Every living civ's score (issue 256).
     diplomacy = DiplomacyPolicy(threats=victory_watch.threat_ids)
     research_policy = research.ResearchPolicy()
     gold = GoldPolicy(defence=defence, plans=production.planner.book, builder_demand=builder_demand)
@@ -348,7 +350,8 @@ def build_orchestrator(
         ),
         watcher,
         ExpansionLog(expansion),
-        VictoryThreatLog(victory_watch),
+        WorldRankingsLog(game, rankings),  # Before the threat line, which names unmet leaders.
+        VictoryThreatLog(victory_watch, rankings),
         diplomacy,
         WarPolicy(state_path=wars_state),
         *([TradeOfferPolicy(diplomacy.weights)] if trade_offers else []),
@@ -379,4 +382,5 @@ def build_orchestrator(
         defeat_check=partial(is_defeated, game),
         call_timer=timer,
         screenshots=screenshots,
+        rankings=rankings,
     )

@@ -151,6 +151,16 @@ READ_AUDIT = {
         "score, so the list itself carries a small leak.",
         ("score", "loyalty_pressure"),
     ),
+    "world_rankings": ReadAudit(
+        Verdict.FLAGGED,
+        "Not a civ6-mcp call: a fixed Lua string in world_rankings.py, run once a turn, that "
+        "reads what the World Rankings screen shows. Every living major civ's score, with the "
+        "name and id only for met civs and us (an unmet civ is an anonymous slot, as the screen's "
+        "'Unmet Player'), and the leader of science, culture and religious victory with its "
+        "progress (id only if met). Legal because a player sees all of it; flagged because it is "
+        "raw Lua, so it never reads an unmet civ's identity, cities or positions, and the leader "
+        "uses per-team victory progress without the screen's tiebreakers.",
+    ),
     "get_rival_snapshot": ReadAudit(
         Verdict.BANNED, "Any met rival's strategic stockpiles, population and net income."
     ),

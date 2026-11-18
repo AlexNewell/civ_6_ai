@@ -245,6 +245,13 @@ class ScriptedGame(fx.FakeGame):
     def __init__(self, refuse=(), **overrides):
         count = len(overrides["cities"]) if "cities" in overrides else 2  # The fixture's two.
         overrides.setdefault("overview", fx.overview(num_cities=count))
+        # With no threat, an army at the floor (issue 267), so these tests see no military
+        # pushed ahead of the rest.
+        if not overrides.get("threats"):
+            overrides.setdefault(
+                "units",
+                [fx.unit_info(unit_id=131073 + i, unit_index=i + 1) for i in range(2 * count)],
+            )
         overrides.setdefault("threats", [])
         super().__init__(**overrides)
         self.refuse = dict(refuse)

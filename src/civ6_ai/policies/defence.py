@@ -86,15 +86,16 @@ class CityThreat:
     def short(self) -> bool:
         """Short of defenders.
 
-        By the threat map when it has a reading and hostile units are near: the force that can
-        reach the city's own tile out-damages its defence and its healing by more than the margin
-        (issue 264: the head count called Constantinople short at net -60 and a Campus gave way
-        to a Slinger). Only the city tile counts, since an unwalled city covers none beside it.
+        By the threat map when it has a reading and hostile units are near: the attackers that can
+        reach the city hit its actual defender, and break its walls or out-damage its healing
+        within a few turns (issue 264: the head count called Constantinople short at net -60 and
+        a Campus gave way to a Slinger; issue 267: the first reading took our cover as the
+        defender's strength and no city was ever short).
         With no reading, or no unit near (a war alone), the head count stays: a city at war
         wants two.
         """
         if self.reading is not None and self.hostile_tiles:
-            return self.reading.net > self.margin
+            return self.reading.pressed(self.margin)
         return self.defenders < self.wanted
 
 
@@ -332,7 +333,9 @@ class DefenceReport:
             seen = city.reading
             mapped = (
                 f"map: threat={seen.threat:.1f} fog={seen.fog:.1f} cover={seen.cover:.1f} "
-                f"damage={seen.damage:.1f} net={seen.net:.1f}/{city.margin:g}"
+                f"defender={seen.defender:.1f} damage={seen.damage:.1f} "
+                f"walls={seen.wall_damage:.1f} net={seen.net:.1f}/{city.margin:g} "
+                f"turns={seen.turns:.1f}/{seen.horizon:g}"
                 if seen is not None
                 else "map: off"
             )

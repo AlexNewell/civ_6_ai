@@ -1,4 +1,5 @@
 import asyncio
+import dataclasses
 import json
 import logging
 import math
@@ -17,12 +18,13 @@ from civ6_ai.policies.military import (
     assess_attack,
     attack_failed,
     attack_landed,
+    camp_attacks_needed,
     camp_force_ok,
     camp_matchup,
     choose_promotion,
     expected_damage,
     garrison_required,
-    remembered_need,
+    remembered_defenders,
 )
 from civ6_ai.policies.settling import units_reserved_for_settling
 from civ6_ai.state import read_cities, read_threats, read_units
@@ -1978,8 +1980,8 @@ def test_a_camp_near_a_city_becomes_a_plan_when_nothing_is_spare(caplog):
     assert plan is not None and plan.target == (55, 7)
     assert not camp_orders(policy)  # Too few spare units: nothing is sent yet.
     assert plan.units_wanted >= 1 and not plan.met
-    assert plan.needed == pytest.approx(2.0 * (45 + W.assumed_defender_bonus))
-    assert plan.units_available == 2
+    assert plan.needed > plan.available  # Attacks from simulated combat, not strength.
+    assert plan.units_available == 1  # One of Constantinople's two is released.
     assert plan.eta >= plan.units_wanted * MilitarySettings().camp_build_turns
     lines = [r.message for r in caplog.records if "military_camp_plan" in r.message]
     assert len(lines) == 1 and '"target": [55, 7]' in lines[0] and '"needed"' in lines[0]
@@ -1988,7 +1990,8 @@ def test_a_camp_near_a_city_becomes_a_plan_when_nothing_is_spare(caplog):
 def test_the_plan_does_not_take_a_garrison_into_the_force():
     game, policy, state = run20_turn100()
     run(policy, game)
-    assert state.camp_plan.units_available == 2  # Thessalonica's Archer is not counted.
+    # Constantinople keeps one of its two units; Thessalonica's lone Archer is not counted.
+    assert state.camp_plan.units_available == 1
     assert not camp_orders(policy)
 
 
@@ -1998,7 +2001,7 @@ def test_the_plan_asks_for_a_melee_unit_when_the_force_has_none():
     assert state.camp_plan.wants == "melee"
     game, policy, state = run20_turn100()  # With the Warrior, the force has a melee unit.
     run(policy, game)
-    assert state.camp_plan.wants == "any"
+    assert state.camp_plan.wants == "ranged"
 
 
 def test_a_force_with_melee_and_strength_is_met_and_marches():
@@ -2018,7 +2021,9 @@ def test_a_weak_defender_needs_a_smaller_force_than_a_strong_one():
     _, _, strong = run20_turn100()
     game, policy, weak = run20_turn100(defender_cs=10)
     run(policy, game)
-    assert weak.camp_plan.needed < 2.0 * (45 + W.assumed_defender_bonus)
+    assert weak.camp_plan.needed < camp_attacks_needed(
+        [], [man_at_arms(45)], W
+    )  # Reference units, since the weak camp's force is on hand: fewer attacks.
     assert strong.camp_plan is None  # Not run yet.
 
 
@@ -2076,14 +2081,12 @@ def test_plan_camp_force_counts_units_to_build():
     from civ6_ai.policies.military import plan_camp_force
 
     settings = MilitarySettings()
-    thug = Threat(
-        owner_id=-1, owner="Barbarians", unit_type="UNIT_MAN_AT_ARMS", x=1, y=1, hp=100,
-        max_hp=100, combat_strength=45, ranged_strength=0, distance=1, hostile=True,
-    )  # fmt: skip
+    thug = man_at_arms(45)
     ours = [build_unit(unit_info(unit_id=i, unit_index=i, combat_strength=20)) for i in (1, 2)]
     needed, have, wanted, kind = plan_camp_force(ours, [thug], W, settings)
-    assert needed == pytest.approx(102.0) and have == pytest.approx(40.0)
-    assert wanted == 3 and kind == "ranged"  # ceil(62 / 25); the force is all melee.
+    assert needed == camp_attacks_needed(ours, [thug], W) > have == 2 * W.camp_strike_turns
+    assert wanted == min(settings.camp_max_build, math.ceil((needed - have) / W.camp_strike_turns))
+    assert kind == "ranged"  # The force is all melee.
     assert plan_camp_force(ours, [], W, settings)[2] == 0
 
 
@@ -2127,19 +2130,52 @@ def test_a_unit_with_both_attacks_counts_as_melee_by_its_class():
 # ----- the camp campaign (issue 275) -----
 
 
-def test_the_camp_need_does_not_swing_with_the_defenders_in_sight():
-    # The need seen in iteration 1 as defenders came and went: 102, 0, 92, 184, 154, 62, 184.
-    seen = [102.0, 0.0, 92.0, 184.0, 154.0, 62.0, 184.0]
-    decay = MilitarySettings().camp_need_decay
-    memory, kept = None, []
-    for turn, now in enumerate(seen, start=100):
-        need = remembered_need(memory, turn, now, decay)
-        memory = (need, turn)
-        kept.append(need)
-    assert min(kept) >= 90.0  # Never the 0 or the 62 of a turn with the defenders out of sight.
-    assert kept[3] == 184.0 and kept[4] == pytest.approx(184.0 * decay)
-    far = remembered_need((184.0, 100), 140, 0.0, decay)  # Out of sight for a long time.
-    assert 0 < far < 184.0 * decay  # It does decay.
+def replace_id(unit, uid):
+    return dataclasses.replace(unit, unit_id=uid, unit_index=uid)
+
+
+def man_at_arms(cs, hp=100, ranged=0, x=1, y=1):
+    return Threat(
+        owner_id=-1, owner="Barbarians", unit_type="UNIT_MAN_AT_ARMS", x=x, y=y, hp=hp,
+        max_hp=100, combat_strength=cs, ranged_strength=ranged, distance=1, hostile=True,
+    )  # fmt: skip
+
+
+def test_the_camp_defenders_are_the_strongest_group_of_the_last_ten_turns():
+    # Iteration 1 saw 102, 0, 92, 184, 154, 62, 184 as defenders came and went from sight.
+    window = MilitarySettings().camp_memory_turns
+    memory, groups = [], []
+    for turn, seen in enumerate([[45], [], [40], [45, 45], [45], [], [45, 45]], start=100):
+        memory, group = remembered_defenders(memory, turn, [man_at_arms(c) for c in seen], window)
+        groups.append(len(group))
+    assert groups == [1, 1, 1, 2, 2, 2, 2]  # Never the empty turn.
+    _, group = remembered_defenders(memory, 106 + window, [], window)
+    assert [d.combat_strength for d in group] == [45, 45]  # Seen on turn 106: still in the window.
+    _, group = remembered_defenders(memory, 107 + window, [], window)
+    assert group == []  # Ten turns on, nothing is remembered: no 150 thirty turns later.
+
+
+def test_the_need_is_attacks_from_simulated_combat_not_twice_the_strength():
+    # Iteration 2's fixture: a Man-at-Arms (45) and a Spearman at the camp, our army of Archers,
+    # Horsemen, Heavy Chariots and a Crossbowman, with three cities not short.
+    guards = [man_at_arms(45), man_at_arms(36)]
+    army = [
+        build_unit(unit_info(unit_id=i, unit_index=i, unit_type=t, combat_strength=c,
+                             ranged_strength=r))
+        for i, (t, c, r) in enumerate(
+            [("UNIT_ARCHER", 15, 25), ("UNIT_ARCHER", 15, 25), ("UNIT_CROSSBOWMAN", 20, 40),
+             ("UNIT_HORSEMAN", 36, 0), ("UNIT_HEAVY_CHARIOT", 28, 0), ("UNIT_HORSEMAN", 36, 0)],
+            start=1,
+        )
+    ]  # fmt: skip
+    army += [replace_id(u, 10 + u.unit_id) for u in army]  # Twelve combat units, as at turn 130.
+    old_need = 2.0 * (45 + W.assumed_defender_bonus + 36 + W.assumed_defender_bonus)
+    needed = camp_attacks_needed(army, guards, W)
+    assert old_need > 150  # The kind of need that was out of reach (102 to 279 in the log).
+    assert 8 <= needed <= len(army) * W.camp_strike_turns  # Twelve units reach it in 3 turns.
+    assert camp_force_ok(army, guards, W, 2, True)
+    assert not camp_force_ok(army[:3], guards, W, 2, True)  # Too few units for that many attacks.
+    assert camp_attacks_needed(army, [], W) == 0
 
 
 def test_the_matchup_against_a_men_at_arms_rejects_the_heavy_chariot():
@@ -2154,18 +2190,20 @@ def test_the_matchup_against_a_men_at_arms_rejects_the_heavy_chariot():
     assert camp_matchup("UNIT_ARCHER", 0, 0, W) is None  # No defender known.
 
 
-def test_the_remembered_need_stays_when_the_defenders_leave_sight():
+def test_the_remembered_defenders_stay_for_ten_turns_then_go():
     game, policy, state = run20_turn100()
     run(policy, game)
     seen = state.camp_plan
-    assert seen.needed == pytest.approx(2.0 * (45 + W.assumed_defender_bonus))
-    assert seen.defender == 45
+    assert seen.defender == 45 and seen.defenders == 1
     game.data["threats"] = []  # The Man-at-Arms walked out of sight.
     game.data["overview"] = overview(turn=101, num_cities=2)
     run(policy, game)
-    plan = state.camp_plan
-    assert plan.needed == pytest.approx(seen.needed * MilitarySettings().camp_need_decay, abs=0.1)
-    assert plan.defender == pytest.approx(45 * MilitarySettings().camp_need_decay, abs=0.1)
+    assert state.camp_plan.needed == seen.needed and state.camp_plan.defender == 45
+    game.data["overview"] = overview(
+        turn=100 + MilitarySettings().camp_memory_turns + 1, num_cities=2
+    )
+    run(policy, game)
+    assert state.camp_plan.defender == 0 and state.camp_plan.needed == 0
 
 
 def camp_force_at(rallied_x, far_x):
@@ -2179,11 +2217,11 @@ def camp_force_at(rallied_x, far_x):
 
 
 def test_the_gathered_force_waits_until_it_meets_the_need():
-    # The whole force (90) is enough for a remembered need of 80, but the two gathered (60) are
-    # not, so they wait and the third walks to the rally ring.
+    # The whole force (3 units, 9 attacks) is enough for a remembered defender needing 7, but the
+    # two gathered (6) are not, so they wait and the third walks to the rally ring.
     game = camp_game(camp_force_at(11, 5), [])
     policy = MilitaryPolicy()
-    policy._camp_memory[(14, 10)] = (80.0, 30.0, 0.0, 20)
+    policy._camp_memory[(14, 10)] = [(20, (man_at_arms(24),))]
     run(policy, game)
     waits = [d for d in camp_orders(policy) if "waiting" in d.reason]
     assert {d.unit_id for d in waits} == {1, 2}
@@ -2195,7 +2233,7 @@ def test_the_gathered_force_waits_until_it_meets_the_need():
 def test_the_force_commits_together_once_the_gathered_units_meet_the_need():
     game = camp_game(camp_force_at(11, 11), [])
     policy = MilitaryPolicy()
-    policy._camp_memory[(14, 10)] = (80.0, 30.0, 0.0, 20)
+    policy._camp_memory[(14, 10)] = [(20, (man_at_arms(24),))]
     run(policy, game)
     assert (14, 10) in policy._committed
     assert not [d for d in camp_orders(policy) if "waiting" in d.reason]
@@ -2267,3 +2305,147 @@ def test_a_melee_kill_is_not_confirmed_when_every_attacker_died(caplog):
     (row,) = offense_rows(caplog)
     assert row["attacks_barb"] == 1
     assert row["kills_barb"] == 0
+
+
+# ----- issue 279: a force that commits, and says why it did not -----
+
+
+def threatened_city(city_id, name, units_in=3, hostile=1):
+    from civ6_ai.policies.defence import CityThreat
+
+    return CityThreat(
+        city_id=city_id, name=name, x=50, y=7, reasons=("barbarians",),
+        hostile_units=hostile, defenders_in=units_in,
+    )  # fmt: skip
+
+
+def test_a_city_that_is_not_short_releases_all_but_one_unit_to_the_camp_force():
+    units = [archer(uid=i, x=50, y=7) for i in (4, 5, 6)]
+    game, policy, state = run20_turn100(extra_units=units)
+    state.cities = {65536: threatened_city(65536, "Constantinople", units_in=5)}
+    assert not state.cities[65536].short  # Five defenders against one hostile unit.
+    run(policy, game)
+    # Constantinople holds warrior, archer and three more: it keeps one, four are free.
+    assert state.camp_plan.units_available == 4
+
+
+def test_a_short_city_keeps_every_unit_even_with_a_camp_to_clear():
+    units = [archer(uid=i, x=50, y=7) for i in (4, 5, 6)]
+    game, policy, state = run20_turn100(extra_units=units)
+    state.cities = {65536: threatened_city(65536, "Constantinople", units_in=2, hostile=6)}
+    assert state.cities[65536].short
+    run(policy, game)
+    assert state.camp_plan.units_available == 0
+
+
+def test_units_beside_a_city_that_is_not_short_are_available_but_not_beside_a_short_one():
+    beside = [archer(uid=7, x=51, y=7), archer(uid=8, x=51, y=8)]
+    game, policy, state = run20_turn100(extra_units=beside)
+    state.cities = {65536: threatened_city(65536, "Constantinople", units_in=2, hostile=1)}
+    run(policy, game)
+    free = state.camp_plan.units_available
+    game, policy, state = run20_turn100(extra_units=beside)
+    state.cities = {65536: threatened_city(65536, "Constantinople", units_in=2, hostile=6)}
+    run(policy, game)
+    assert free - state.camp_plan.units_available >= 2
+
+
+def hold_lines(caplog):
+    return [
+        json.loads(r.message.split(" ", 1)[1])
+        for r in caplog.records
+        if r.message.startswith("military_camp_hold")
+    ]
+
+
+def test_each_turn_the_force_does_not_commit_the_reason_need_gap_and_city_holds_are_logged(
+    caplog,
+):
+    game, policy, state = run20_turn100()
+    with caplog.at_level(logging.INFO, logger=military_module.log.name):
+        run(policy, game)
+    (row,) = hold_lines(caplog)
+    assert row["turn"] == 100 and row["camp"] == [55, 7]
+    assert row["reason"] and row["needed"] > row["available"]
+    assert row["gap"] == pytest.approx(row["needed"] - row["available"])
+    assert set(row["held"]) == {"Constantinople", "Thessalonica"}
+    assert row["held"]["Constantinople"]["inside"] == 2
+    assert row["held"]["Thessalonica"]["free"] == 0
+
+
+def test_the_iteration_2_army_commits_once_the_need_comes_from_simulated_combat():
+    # Man-at-Arms (45) and a Spearman at the camp, 3 cities not short, and an army of Archers,
+    # Horsemen, Heavy Chariots and a Crossbowman: needed 102 to 279 and available 0 to 114 before.
+    from civ6_ai.policies.defence import DefenceState
+
+    cities = [
+        city_info(city_id=65536 + i, name=n, x=x, y=7)
+        for i, (n, x) in enumerate([("A", 50), ("B", 50), ("C", 50)])
+    ]
+    army = [
+        archer(uid=1, x=52, y=7), archer(uid=2, x=52, y=8),
+        warrior(uid=3, x=52, y=6, unit_type="UNIT_HORSEMAN", combat_strength=36),
+        warrior(uid=4, x=52, y=9, unit_type="UNIT_HEAVY_CHARIOT", combat_strength=28),
+        warrior(uid=5, x=51, y=7, unit_type="UNIT_HORSEMAN", combat_strength=36),
+        archer(uid=6, x=51, y=8, ranged_strength=40, unit_type="UNIT_CROSSBOWMAN"),
+        warrior(uid=7, x=51, y=6, unit_type="UNIT_HEAVY_CHARIOT", combat_strength=28),
+        archer(uid=8, x=51, y=9), archer(uid=9, x=52, y=10),
+        warrior(uid=10, x=50, y=7),
+    ]  # fmt: skip
+    game = camp_game(
+        army,
+        [barbarian(kind="UNIT_MAN_AT_ARMS", x=54, y=7, cs=45),
+         barbarian(kind="UNIT_SPEARMAN", x=55, y=8, cs=36)],
+        camp=CAMP_55_7, cities=cities, turn=130,
+    )  # fmt: skip
+    state = DefenceState()
+    policy = MilitaryPolicy(defence=state)
+    run(policy, game)
+    assert state.camp_plan.met and state.camp_plan.needed <= state.camp_plan.available
+    assert camp_orders(policy)
+
+
+# ----- a camp that someone else cleared -----
+
+
+def test_a_camp_cleared_by_someone_else_is_logged_released_and_counted_apart(caplog):
+    policy = MilitaryPolicy()
+    policy._mission[3] = ((14, 10), 20)
+    policy._camps[(14, 10)] = 20
+    unit = warrior(uid=3, x=12, y=10, **STRONG)
+    game = MilitaryGame([warrior(uid=1), unit], [barbarian(x=13, y=10, cs=40)])
+    with caplog.at_level(logging.INFO):
+        run(policy, game)
+        del policy._camps[(14, 10)]  # Vanished, none of our units near it.
+        run(policy, MilitaryGame([warrior(uid=1), unit], [barbarian(x=13, y=10, cs=40)]))
+    rows = offense_rows(caplog)
+    assert [(r["camps_gone"], r["camps_cleared_by_us"]) for r in rows] == [(0, 0), (1, 0)]
+    gone = [r.message for r in caplog.records if "military_camp_gone" in r.message]
+    assert len(gone) == 1 and '"by": "other"' in gone[0]
+    assert 3 not in policy._mission  # The force is released.
+
+
+def test_a_camp_our_unit_took_counts_as_ours_not_as_gone(caplog):
+    policy = MilitaryPolicy()
+    policy._mission[3] = ((14, 10), 20)
+    policy._camps[(14, 10)] = 20
+    near = warrior(uid=3, x=13, y=10, **STRONG)
+    with caplog.at_level(logging.INFO):
+        run(policy, MilitaryGame([warrior(uid=1), near], []))
+        del policy._camps[(14, 10)]  # Taken by the unit standing beside it.
+        run(policy, MilitaryGame([warrior(uid=1), near], []))
+    rows = offense_rows(caplog)
+    assert [(r["camps_gone"], r["camps_cleared_by_us"]) for r in rows][-1] == (0, 1)
+    assert any('"by": "us"' in r.message for r in caplog.records)
+
+
+def test_a_camp_that_vanishes_with_no_force_sent_is_still_noticed(caplog):
+    game = camp_game(strong_pair(), [])
+    policy = MilitaryPolicy()
+    policy.threat_map = None
+    with caplog.at_level(logging.INFO):
+        run(policy, game)
+        policy._camps.pop((14, 10), None)
+        game2 = MilitaryGame([warrior(uid=1, x=2, y=2)], [])
+        run(policy, game2)
+    assert any('"by": "other"' in r.message for r in caplog.records)

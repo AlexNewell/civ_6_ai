@@ -112,12 +112,16 @@ class DefenceState:
     # The camp the military policy means to clear (`military.CampPlan`) or None. Issue 268:
     # production reads it to build the units the force lacks.
     camp_plan: Any = None
+    # The strongest barbarian land unit near our cities this turn: (melee, ranged) strength, set
+    # by the military policy. Production's army floor picks units by their match against it.
+    hostile: tuple[float, float] = (0.0, 0.0)
 
     def reset(self, turn: int, cities: dict[int, CityThreat], wary: tuple[str, ...] = ()) -> None:
         self.turn = turn
         self.cities = cities
         self.notes = {}
         self.wary = wary
+        self.hostile = (0.0, 0.0)
         self.camp_plan = None  # Made again by the military policy, which runs after this.
 
     @property

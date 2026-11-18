@@ -2097,3 +2097,18 @@ def test_settler_that_fled_does_not_resume_while_the_hostile_is_near_the_route()
     run(policy, clear)
     assert clear.actions
     assert 7 not in policy._fled
+
+
+def test_backing_off_one_route_leaves_another_site_open():
+    policy = _policy()
+    policy._fled.add(7)
+    policy._site_claims[7] = (14, 6)
+    game = make_game(
+        [settler(y=14), unit_info(unit_id=9, unit_index=9, x=10, y=14, combat_strength=36)],
+        cities=[alpha()],
+        threats=[_courser(12, 11)],
+        sites=[site(14, 6, food=40), site(4, 18, food=40)],
+    )
+    run(policy, game)
+    assert game.actions
+    assert all("fled" not in d.reason for d in policy.decisions)

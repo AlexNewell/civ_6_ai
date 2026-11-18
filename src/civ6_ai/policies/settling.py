@@ -1386,9 +1386,9 @@ class SettlingPolicy:
             and await self._flee(game, settler, city_tiles, record, near)
         ):
             return
-        # Issue 291: a settler in a city never flees, but it must not walk out into the units the
-        # flee rule would have run from. The same test as above, so the two cannot disagree.
-        if threatened and (settler.x, settler.y) in city_tiles and (not escorted or outnumbered):
+        # Issue 291: a settler in a city never flees, but must not walk out into the units the flee
+        # rule would have run from. One hostile is left to the escort gate, which may gather one.
+        if threatened and (settler.x, settler.y) in city_tiles and outnumbered:
             self._holds[settler.unit_id] = self._holds.get(settler.unit_id, 0) + 1
             record(
                 "hold",
@@ -1398,13 +1398,17 @@ class SettlingPolicy:
         if settler.unit_id in self._fled:
             claim = self._site_claims.get(settler.unit_id)
             if claim is not None and danger.on_path((settler.x, settler.y), claim, s.threat_radius):
-                record(
-                    "hold",
-                    "fled a hostile unit that is still near the route, so not resuming yet",
-                    claim,
-                )
-                return
-            self._fled.discard(settler.unit_id)
+                # Only that route is backed off from; another site may still be taken.
+                usable = [c for c in usable if (c.x, c.y) != claim]
+                if not usable:
+                    record(
+                        "hold",
+                        "fled a hostile unit that is still near the route, so not resuming yet",
+                        claim,
+                    )
+                    return
+            else:
+                self._fled.discard(settler.unit_id)
 
         options = usable
         found_here = False

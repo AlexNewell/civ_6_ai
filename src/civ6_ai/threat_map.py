@@ -122,6 +122,7 @@ class Ally:
     strength: float
     unit_type: str = ""
     naval: bool = False
+    base: float = 0.0  # A unit's strength at full health.
     unit_id: int = 0  # Of a unit, so a move this turn can be applied (`relocate`).
     walls: bool = False  # A city with walls shoots at range, so it covers tiles beside it.
 
@@ -323,6 +324,7 @@ class ThreatMap:
                 float(max(u.combat_strength, u.ranged_strength)) * (u.hp / max(u.max_hp, 1)),
                 u.unit_type,
                 any(w in u.unit_type for w in _SEA_UNITS),
+                base=float(max(u.combat_strength, u.ranged_strength)),
                 unit_id=u.unit_id,
             )
             for u in units
@@ -478,11 +480,18 @@ class ThreatMap:
             net=net,
         )
 
-    def relocate(self, moves: dict[int, tuple[int, int]]) -> None:
-        """Our units that moved this turn (unit id to tile): their cover goes with them."""
+    def relocate(
+        self, moves: dict[int, tuple[int, int]], health: dict[int, float] | None = None
+    ) -> None:
+        """Our units that moved this turn (unit id to tile): their cover goes with them. `health`
+        is a unit id to its fraction of hit points left, for those that took damage."""
         for ally in self.allies:
-            if ally.kind == "unit" and ally.unit_id in moves:
+            if ally.kind != "unit":
+                continue
+            if ally.unit_id in moves:
                 ally.x, ally.y = moves[ally.unit_id]
+            if health and ally.unit_id in health:
+                ally.strength = ally.base * max(0.0, min(1.0, health[ally.unit_id]))
 
     def forget_units_at(self, tiles: Iterable[tuple[int, int]]) -> int:
         """Drop hostile unit sources standing on these tiles (they died this turn). Returns how

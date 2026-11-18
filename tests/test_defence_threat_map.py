@@ -306,3 +306,12 @@ def test_a_resume_that_fails_is_tried_again_and_one_no_longer_offered_is_dropped
     )
     asyncio.run(policy.run(game))
     assert policy._replaced == {}  # Not on offer any more.
+
+
+def test_a_unit_that_took_damage_gives_less_cover_after_the_map_is_updated():
+    m = ThreatMap(ThreatMapSettings(map_width=None))
+    ours = build_unit(fx.unit_info(x=5, y=5, unit_type="UNIT_WARRIOR", combat_strength=40))
+    m.see_own(TURN, [ours], [])
+    whole = m.cover_at(5, 5)
+    m.relocate({}, {ours.unit_id: 0.5})
+    assert m.cover_at(5, 5) == whole / 2

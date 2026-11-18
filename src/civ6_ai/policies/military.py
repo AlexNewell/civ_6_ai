@@ -993,6 +993,7 @@ class MilitaryPolicy:
             return False
         t.acted.add(unit.unit_id)
         t.attacked.add(where)
+        t.hp[unit.unit_id] = max(0.0, t.hp.get(unit.unit_id, unit.hp) - odds.taken)  # Expected.
         self._fortified.pop(unit.unit_id, None)  # Attacking ends a fortification.
         self._record_hit(t, where, result, odds.dealt, target.hp)
         self._log(t, unit, "attack", reason, target=where, odds=asdict(odds), result=result)
@@ -1340,7 +1341,11 @@ class MilitaryPolicy:
         """
         if self.threat_map is not None:
             self.threat_map.forget_units_at(t.killed)
-            self.threat_map.relocate(t.placed)  # Cover moves with the units that moved.
+            # Cover moves with the units that moved, and shrinks with the ones that took damage.
+            health = {
+                u.unit_id: t.hp[u.unit_id] / max(u.max_hp, 1) for u in t.units if u.unit_id in t.hp
+            }
+            self.threat_map.relocate(t.placed, health)
         if self.defence is None:
             return
         self.defence.forget_killed(t.killed)

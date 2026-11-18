@@ -1722,3 +1722,15 @@ def test_the_offense_line_counts_a_camp_marched_on_that_is_gone_once(caplog):
         run(policy, MilitaryGame([warrior(uid=1), unit], [barbarian(x=13, y=10, cs=40)]))
     rows = offense_rows(caplog)
     assert [r["camps_gone"] for r in rows] == [0, 1, 0]
+
+
+def test_a_camp_gone_is_counted_though_its_force_is_sent_at_another_camp(caplog):
+    policy = MilitaryPolicy()
+    policy._mission[1] = ((20, 10), 20)  # Sent at a camp that is no longer known.
+    policy._mission[2] = ((20, 10), 20)
+    game = camp_game(strong_pair(), [barbarian(x=15, y=10, cs=5)])  # The scan shows (14, 10).
+    with caplog.at_level(logging.INFO):
+        run(policy, game)
+    (row,) = offense_rows(caplog)
+    assert row["camps_gone"] == 1
+    assert policy._mission[1][0] == (14, 10)  # The same units were sent at the other camp.

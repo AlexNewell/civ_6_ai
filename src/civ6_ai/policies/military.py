@@ -1380,6 +1380,8 @@ class MilitaryPolicy:
         await self._scan_camps(game, t, barbarians)
         known = self._known_camps()
         self._gone_noted -= known  # A camp that is back is a new one.
+        for camp in {m[0] for m in self._mission.values()} - known:
+            self._note_gone(camp)  # Before the force is sent at another camp.
         own = set(self._camps)
         if self.threat_map is not None:
             t.map_use["camps_only_in_map"] = len(known - own)
@@ -1582,9 +1584,7 @@ class MilitaryPolicy:
             # the settler's best site for three turns and cost the fourth city).
             self._mission.pop(unit.unit_id, None)
             self._released += 1  # Reported on the next offense line.
-            if sent[0] not in self._gone_noted:
-                self._gone_noted.add(sent[0])
-                self._camps_gone += 1
+            self._note_gone(sent[0])
             return False
         near = hex_distance(unit.x, unit.y, *sent[0], s.map_width) <= s.camp_reach
         return near and unit.hp >= s.weights.camp_leave_hp * unit.max_hp
@@ -1643,6 +1643,11 @@ class MilitaryPolicy:
                 elif tile.visible:
                     self._camps.pop((tile.x, tile.y), None)
         self._camp_baseline = False
+
+    def _note_gone(self, camp: tuple[int, int]) -> None:
+        if camp not in self._gone_noted:
+            self._gone_noted.add(camp)
+            self._camps_gone += 1
 
     def _known_camps(self) -> set[tuple[int, int]]:
         known = set(self._camps)

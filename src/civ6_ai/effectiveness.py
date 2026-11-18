@@ -498,11 +498,17 @@ def faith_was_buyable(msg: str) -> bool:
 def faith_checks(run: RunLogs) -> list[Check]:
     if not run.has_bot_log:
         return [_no_data("faith", "held vs spent", "see rule", "needs the bot log")]
-    idle = [
-        int(m[1]) - int(m[2])
-        for msg in run.messages("policies.faith")
-        if (m := FAITH_IDLE.search(msg)) and faith_was_buyable(msg)
-    ]
+    idle = []
+    refused = False  # A "Can't buy" line comes just before the same turn's "nothing bought" line.
+    for msg in run.messages("policies.faith"):
+        if msg.startswith("Can't buy "):
+            refused = True
+        elif m := FAITH_IDLE.search(msg):
+            if refused or faith_was_buyable(msg):
+                idle.append(int(m[1]) - int(m[2]))
+            refused = False
+        elif msg.startswith("Faith "):
+            refused = False
     bought = sum(1 for m in run.messages("policies.faith") if m.startswith("Faith bought"))
     # A turn can buy twice, so spending turns come from the calls when the run has them.
     spending_turns = sum(

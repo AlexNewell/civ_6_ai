@@ -932,3 +932,14 @@ def test_faith_city_prices_out_of_reach_are_not_idle():
         has_bot_log=True,
     )
     assert by_name(run)[("faith", "most faith idle above reserve")].created == 0
+
+
+def test_faith_idle_after_a_refused_great_person_buy_still_counts():
+    refused = "Can't buy A with faith: REFUSED"
+    far = (
+        "Faith 500 above reserve 60 but nothing bought: great people: best B (Great Merchant)"
+        " 1000 faith vs 440 above reserve (roi 0.1), no target at 3.0 a turn with 200 turns left"
+    )
+    lines = [bot("faith", refused), bot("faith", far)] * 6
+    run = RunLogs(records=[turn(1, {})], bot=lines, has_bot_log=True)
+    assert by_name(run)[("faith", "most faith idle above reserve")].created == 440

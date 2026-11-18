@@ -806,7 +806,9 @@ class SecondaryPolicy:
                     x,
                     y,
                     "on a route" if on_route else "idle",
-                    self._nearest_note(self._route_of.pop(uid, None) or [(x, y)], turn),
+                    self._nearest_note(
+                        (self._route_of.pop(uid, None) if on_route else None) or [(x, y)], turn
+                    ),
                 )
         self._traders = {t.unit_id: (t.x, t.y, bool(t.on_route)) for t in status.traders}
 

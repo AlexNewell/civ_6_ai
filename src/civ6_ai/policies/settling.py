@@ -1603,7 +1603,9 @@ class SettlingPolicy:
         if self.terrain is None:
             return None
         for c in candidates:
-            if c.rejected != HOSTILE_NEAR_SITE:
+            # A hostile seen near and now unseen (issue 288) also steps on and founds at once,
+            # so the settler is never left on the site with its moves spent.
+            if c.rejected != HOSTILE_NEAR_SITE and not (c.rejected is None and c.recent_near):
                 continue  # No hostile near: the usual route (step now, found next turn).
             if hex_distance(settler.x, settler.y, c.x, c.y, s.map_width) != 1:
                 continue

@@ -2009,3 +2009,20 @@ def test_a_settler_stops_a_tile_short_of_a_site_with_a_recent_sighting_beside_it
     run(policy, game)
     moves = [a for a in game.actions if a[0] == "move"]
     assert moves == [("move", 7, 13, 10)]
+
+
+def test_a_settler_one_tile_short_steps_on_and_founds_in_one_turn():
+    # Codex on PR 290: after stopping short, the next turn must found, not just step on.
+    policy = SettlingPolicy(SettlingSettings(map_width=84))
+    policy.threat_map = _Sightings((14, 7))
+    policy.terrain = type("T", (), {"step_cost": lambda self, x, y, naval=False: 1})()
+    lone = settler(x=13, y=10, moves_remaining=2.0, max_moves=2.0)
+    game = make_game([lone], cities=[alpha()], sites=[site(14, 10, food=40)], turn=100)
+
+    async def move(unit_index, x, y):
+        game.actions.append(("move", unit_index, x, y))
+        return f"MOVING_TO|{x},{y} now_at:{x},{y}"
+
+    game.move_unit = move
+    run(policy, game)
+    assert game.actions == [("move", 7, 14, 10), ("found", 7)]

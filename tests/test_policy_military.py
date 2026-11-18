@@ -15,6 +15,7 @@ from civ6_ai.policies.military import (
     MilitarySettings,
     MilitaryWeights,
     assess_attack,
+    attack_failed,
     attack_landed,
     camp_force_ok,
     choose_promotion,
@@ -443,7 +444,7 @@ def test_a_unit_healing_is_forgotten_when_it_dies():
 
 def test_an_empty_threatened_city_calls_the_nearest_spare_unit():
     cities = [city_info(garrison_unit=""), city_info(city_id=2, name="Beta", x=14, y=10)]
-    units = [warrior(uid=1, x=12, y=10), warrior(uid=2, x=14, y=10), warrior(uid=3, x=14, y=10)]
+    units = [warrior(uid=1, x=12, y=10), warrior(uid=2, x=14, y=10), warrior(uid=3, x=15, y=10)]
     game = MilitaryGame(units, [barbarian(x=11, y=11, cs=8)], cities=cities)
     run(MilitaryPolicy(), game)
     assert game.orders("move") == [("move", 1, 10, 10)]
@@ -1216,7 +1217,7 @@ def test_a_strike_and_one_unit_can_form_a_planned_kill():
     spare = warrior(uid=3)  # A second defender, so the first is not the city's only one.
     game = MilitaryGame([unit, spare], [barbarian(hp=35, cs=30)], cities=[walled()])
     game.replies["attack"] = MELEE_HIT
-    run(MilitaryPolicy(), game)
+    run(MilitaryPolicy(MilitarySettings(split_stacks=False)), game)
     assert game.orders("city_attack")
     assert [a[0] for a in game.actions][:2] == ["city_attack", "attack"]
 
@@ -1350,7 +1351,7 @@ def test_a_hurt_spare_unit_heals_instead():
 def test_a_spare_unit_walks_toward_a_hostile_unit_it_can_beat():
     units = [warrior(uid=1), warrior(uid=3, combat_strength=40)]
     game = MilitaryGame(units, [barbarian(x=13, y=10, cs=5)])
-    policy = MilitaryPolicy()
+    policy = MilitaryPolicy(MilitarySettings(split_stacks=False))
     run(policy, game)
     hunts = spare_decisions(policy, "hunt")
     assert [d.unit_id for d in hunts] == [3]
@@ -1362,7 +1363,7 @@ def test_a_spare_unit_walks_toward_a_hostile_unit_it_can_beat():
 def test_a_spare_unit_does_not_hunt_when_the_odds_are_poor():
     units = [warrior(uid=1), warrior(uid=3)]
     game = MilitaryGame(units, [barbarian(x=13, y=10, cs=30)])
-    policy = MilitaryPolicy()
+    policy = MilitaryPolicy(MilitarySettings(split_stacks=False))
     run(policy, game)
     assert not spare_decisions(policy, "hunt")
     assert game.orders("move") == []
@@ -1371,7 +1372,7 @@ def test_a_spare_unit_does_not_hunt_when_the_odds_are_poor():
 def test_a_spare_unit_does_not_go_past_the_leash():
     units = [warrior(uid=1), warrior(uid=3, combat_strength=40)]
     game = MilitaryGame(units, [barbarian(x=13, y=10, cs=5)])
-    policy = MilitaryPolicy(MilitarySettings(spare_leash=1))
+    policy = MilitaryPolicy(MilitarySettings(spare_leash=1, split_stacks=False))
     run(policy, game)
     assert game.orders("move") == []
     assert ("fortify", 3) in game.orders("fortify")  # Stays home instead.
@@ -1385,8 +1386,8 @@ def test_a_spare_unit_hunts_a_unit_of_a_civ_at_war_but_not_one_at_peace():
         return game
 
     war, peace = scene(True), scene(False)
-    run(MilitaryPolicy(), war)
-    run(MilitaryPolicy(), peace)
+    run(MilitaryPolicy(MilitarySettings(split_stacks=False)), war)
+    run(MilitaryPolicy(MilitarySettings(split_stacks=False)), peace)
     assert war.orders("move") == [("move", 3, 12, 10)]
     assert peace.orders("move") == []
 
@@ -1734,3 +1735,154 @@ def test_a_camp_gone_is_counted_though_its_force_is_sent_at_another_camp(caplog)
     (row,) = offense_rows(caplog)
     assert row["camps_gone"] == 1
     assert policy._mission[1][0] == (14, 10)  # The same units were sent at the other camp.
+
+
+# ----- stacked units (issue 266) -----
+
+MELEE_FALLBACK = (
+    "Combat Estimate (Melee):\n  UNIT_ARCHER (CS:13, HP:100) vs UNIT_SLINGER (CS:7, HP:100)\n"
+    "MELEE_ATTACK|target:UNIT_SLINGER at (11,10)|enemy HP:100 -> 100/100|your HP:100 -> 100 CS:15"
+)
+
+
+def decisions_of(policy, action):
+    return [d for d in policy.decisions if d.action == action]
+
+
+def test_a_stack_in_a_city_is_split_before_attacks_keeping_the_fortified_unit():
+    keeper = archer(uid=2)
+    other = archer(uid=3, targets=[target()])
+    game = MilitaryGame([keeper, other], [barbarian()])
+    policy = MilitaryPolicy()
+    policy._fortified[2] = (10, 10)
+    run(policy, game)
+    first = game.orders()[0]
+    assert first[0] == "move" and first[1] == 3  # The unit that was not fortified leaves.
+    assert (first[2], first[3]) != (10, 10)
+    assert hex_distance(10, 10, first[2], first[3], 0) == 1
+    found = decisions_of(policy, "stack")
+    assert "stack found" in found[0].reason and "keeping UNIT_ARCHER 2" in found[0].reason
+    assert "stack split" in found[1].reason
+
+
+def test_the_stronger_unit_stays_when_neither_is_fortified():
+    game = MilitaryGame([warrior(uid=1), archer(uid=2)], [])
+    run(MilitaryPolicy(), game)
+    moves = game.orders("move")
+    assert [m[1] for m in moves][:1] == [1]  # The warrior is weaker, so it leaves.
+
+
+def test_a_refused_split_move_tries_the_next_tile():
+    game = MilitaryGame([archer(uid=2), archer(uid=3)], [])
+    policy = MilitaryPolicy()
+    policy._fortified[2] = (10, 10)
+    game.refuse_moves_to = {(11, 10)}
+    run(policy, game)
+    moves = [m for m in game.orders("move") if m[1] == 3]
+    assert len(moves) >= 2 or (moves[0][2], moves[0][3]) != (11, 10)
+    split = [d for d in decisions_of(policy, "stack") if d.reason.startswith("stack split:")]
+    assert any("left 10,10" in d.reason for d in split)
+
+
+def test_a_split_prefers_a_tile_from_which_the_unit_can_still_attack():
+    game = MilitaryGame([archer(uid=2), archer(uid=3)], [barbarian(x=13, y=10)])
+    policy = MilitaryPolicy()
+    policy._fortified[2] = (10, 10)
+    run(policy, game)
+    move = next(m for m in game.orders("move") if m[1] == 3)
+    assert hex_distance(move[2], move[3], 13, 10, 0) <= 2
+
+
+def test_a_split_ranks_tiles_by_threat_map_cover_and_threat():
+    class Map:
+        def threat_at(self, x, y, turn=None):
+            return 5.0 if (x, y) == (11, 10) else 0.0
+
+        def cover_at(self, x, y):
+            return 3.0 if (x, y) == (9, 10) else 0.0
+
+        def forget_units_at(self, tiles):
+            return 0
+
+        def relocate(self, placed, health):
+            return 0
+
+        def camps(self):
+            return []
+
+        def see_tiles(self, turn, tiles, baseline=False):
+            return None
+
+    game = MilitaryGame([archer(uid=2), archer(uid=3)], [])
+    policy = MilitaryPolicy()
+    policy.threat_map = Map()
+    policy._fortified[2] = (10, 10)
+    run(policy, game)
+    move = next(m for m in game.orders("move") if m[1] == 3)
+    assert (move[2], move[3]) == (9, 10)
+
+
+def test_no_stack_means_no_split_order():
+    game = MilitaryGame([archer(uid=2), archer(uid=3, x=11, y=10)], [])
+    policy = MilitaryPolicy()
+    run(policy, game)
+    assert not decisions_of(policy, "stack")
+
+
+def test_a_ranged_order_that_comes_back_melee_is_a_failed_attack(caplog):
+    game = MilitaryGame(
+        [archer(targets=[target()])], [barbarian()], cities=[city_info(garrison_unit="UNIT_ARCHER")]
+    )
+    game.replies["attack"] = MELEE_FALLBACK
+    policy = MilitaryPolicy()
+    with caplog.at_level(logging.INFO):
+        run(policy, game)
+    (failed,) = [d for d in policy.decisions if d.action == "attack"]
+    assert failed.reason.startswith("attack failed")
+    (row,) = offense_rows(caplog)
+    assert row["attacks_barb"] == 0
+    assert row["kills_barb"] == 0
+    assert len(game.orders("attack")) == 1  # Not tried again this turn.
+
+
+def test_a_reply_that_leaves_the_enemy_hp_unchanged_is_a_failure():
+    unit = build_unit(archer())
+    assert attack_failed(unit, MELEE_FALLBACK)
+    assert attack_failed(build_unit(warrior()), MELEE_HIT.replace("100 -> 76", "100 -> 100"))
+    assert attack_failed(unit, RANGED_HIT) is None
+    assert attack_failed(build_unit(warrior()), MELEE_HIT) is None
+
+
+def test_a_failed_attack_does_not_use_up_the_unit():
+    game = MilitaryGame(
+        [archer(targets=[target()])], [barbarian()], cities=[city_info(garrison_unit="UNIT_ARCHER")]
+    )
+    game.replies["attack"] = MELEE_FALLBACK
+    policy = MilitaryPolicy()
+    run(policy, game)
+    assert not any(d.action == "attack" and "failed" not in d.reason for d in policy.decisions)
+    assert policy.decisions  # It went on to another option, so there is more than one line.
+
+
+def test_ranged_odds_use_ranged_strength_and_take_no_damage_from_a_melee_target():
+    unit = build_unit(archer(combat_strength=13, ranged_strength=25))
+    defender = Threat(BARBARIANS, "B", "UNIT_SLINGER", 11, 10, 100, 100, 7, 0, 1, True)
+    odds = assess_attack(unit, Target("UNIT_SLINGER", 11, 10, 100), defender, W)
+    assert odds.taken == 0
+    assert odds.dealt == pytest.approx(expected_damage(25, 7 + W.assumed_defender_bonus))
+    assert odds.dealt > expected_damage(13, 7 + W.assumed_defender_bonus)  # Not melee strength.
+
+
+def test_a_split_refreshes_the_threats_so_a_revealed_enemy_can_be_attacked():
+    game = MilitaryGame([archer(uid=2), archer(uid=3, targets=[target()])], [])
+    policy = MilitaryPolicy()
+    policy._fortified[2] = (10, 10)
+
+    async def move(unit_index, x, y):
+        game.actions.append(("move", unit_index, x, y))
+        game.data["threats"] = [barbarian()]  # Seen only from the new tile.
+        return f"MOVING_TO|{x},{y}|from:10,10|now_at:{x},{y}"
+
+    game.move_unit = move
+    run(policy, game)
+    assert game.orders("attack")

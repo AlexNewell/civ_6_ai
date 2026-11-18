@@ -1871,3 +1871,18 @@ def test_ranged_odds_use_ranged_strength_and_take_no_damage_from_a_melee_target(
     assert odds.taken == 0
     assert odds.dealt == pytest.approx(expected_damage(25, 7 + W.assumed_defender_bonus))
     assert odds.dealt > expected_damage(13, 7 + W.assumed_defender_bonus)  # Not melee strength.
+
+
+def test_a_split_refreshes_the_threats_so_a_revealed_enemy_can_be_attacked():
+    game = MilitaryGame([archer(uid=2), archer(uid=3, targets=[target()])], [])
+    policy = MilitaryPolicy()
+    policy._fortified[2] = (10, 10)
+
+    async def move(unit_index, x, y):
+        game.actions.append(("move", unit_index, x, y))
+        game.data["threats"] = [barbarian()]  # Seen only from the new tile.
+        return f"MOVING_TO|{x},{y}|from:10,10|now_at:{x},{y}"
+
+    game.move_unit = move
+    run(policy, game)
+    assert game.orders("attack")

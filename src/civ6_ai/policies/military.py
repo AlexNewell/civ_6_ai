@@ -544,6 +544,7 @@ class MilitaryPolicy:
             # The moved units stand elsewhere now, with targets seen from their new tiles.
             units = await _read_units(game, s.map_width)
             t.units = tuple(units)
+            t.threats = await _read_threats(game)  # A move may reveal a new target.
             t.mine = [u for u in units if is_land_military(u) and u.unit_id not in t.reserved]
             self._count_defenders(t)
         await self._attack(game, t)

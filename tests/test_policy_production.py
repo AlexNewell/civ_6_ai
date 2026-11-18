@@ -18,7 +18,7 @@ from civ6_ai.policies.production import (
     score,
 )
 from civ6_ai.state import ProductionChoice, Threat, read_empire
-from civ6_ai.state.reader import build_city, build_unit
+from civ6_ai.state.reader import build_city, build_production, build_unit
 from fixtures import civ_state as fx
 
 
@@ -218,12 +218,12 @@ def test_dominated_options_are_dropped():
         option("UNIT", "UNIT_MISSIONARY"),
         option("UNIT", "UNIT_SLINGER"),
         option("UNIT", "UNIT_ARCHER"),
-        option("BUILDING", "BUILDING_X", is_repair=True),  # No coordinates to repair at.
+        option("BUILDING", "BUILDING_LIBRARY", 1, is_repair=True),  # A building repair has no tile.
         option("DISTRICT", "DISTRICT_CAMPUS", is_repair=True, repair_x=11, repair_y=10),
     ]
     kept, repairs = drop_dominated(menu, c)
     assert [k.item for k in kept] == ["BUILDING_LIBRARY", "UNIT_ARCHER"]
-    assert [r.item for r in repairs] == ["DISTRICT_CAMPUS"]
+    assert [r.item for r in repairs] == ["BUILDING_LIBRARY", "DISTRICT_CAMPUS"]
 
 
 def test_ranking_ignores_input_order():
@@ -1376,6 +1376,104 @@ def test_a_city_kept_off_the_camp_builds_something_else():
     assert ranked[0].item == "BUILDING_LIBRARY"
     free = replace(ctx, camp_building=0)
     assert rank_production(city(), options, free, ProductionWeights())[0].item == "UNIT_WARRIOR"
+
+
+# ----- repairs (issue 280) -----
+
+# What the game offered live on turn 150: building repairs have no tile and one turn to build.
+LIVE_OPTIONS = [
+    lq.ProductionOption("BUILDING", "BUILDING_LIBRARY", 0, 1, -1, True),
+    lq.ProductionOption("BUILDING", "BUILDING_MARKET", 0, 1, -1, True),
+    lq.ProductionOption("DISTRICT", "DISTRICT_INDUSTRIAL_ZONE", 54, 8, -1),
+    lq.ProductionOption("UNIT", "UNIT_SETTLER", 80, 10, -1),
+    lq.ProductionOption("BUILDING", "BUILDING_WORKSHOP", 80, 9, -1),
+]
+LIVE_REPAIRS = list(build_production(LIVE_OPTIONS))
+
+
+def pillaged_game(building="UNIT_SETTLER", turns_left=8, pillaged=("BUILDING_LIBRARY",), **kw):
+    info = fx.city_info(
+        currently_building=building,
+        production_turns_left=turns_left,
+        buildings=["PALACE", "MONUMENT", "LIBRARY", "MARKET"],
+        pillaged_buildings=list(pillaged),
+        **kw,
+    )
+    return ScriptedGame(cities=[info], production=LIVE_OPTIONS)
+
+
+def test_building_repairs_are_kept_and_rank_above_a_new_district():
+    c = city(buildings=["PALACE", "MONUMENT", "LIBRARY", "MARKET"])
+    ranked = [o for o in rank_production(c, LIVE_REPAIRS, MID)]
+    names = [(o.item, o.is_repair) for o in ranked]
+    assert ("BUILDING_LIBRARY", True) in names and ("BUILDING_MARKET", True) in names
+    first_district = next(i for i, (n, _) in enumerate(names) if n == "DISTRICT_INDUSTRIAL_ZONE")
+    assert names.index(("BUILDING_LIBRARY", True)) < first_district
+    assert names.index(("BUILDING_MARKET", True)) < first_district
+
+
+def test_a_repair_is_scored_by_what_it_restores():
+    c = city(buildings=["PALACE", "LIBRARY", "MARKET"])
+    w = ProductionWeights()
+    library, market = LIVE_REPAIRS[:2]
+    unknown = option("BUILDING", "BUILDING_LIGHTHOUSE_X", 1, is_repair=True)
+    assert score(library, c, MID, w) > score(unknown, c, MID, w)
+    # Science is weighted above gold, so a Library is worth more than a Market.
+    assert score(library, c, MID, w) > score(market, c, MID, w) > 2.0
+    assert score(library, c, MID, w) != 8.0 * 20 / 21
+
+
+def test_defence_still_comes_before_a_repair_under_threat():
+    c = city(threats=[threat()], buildings=["PALACE", "LIBRARY"])
+    menu = [*LIVE_REPAIRS[:1], option("UNIT", "UNIT_WARRIOR", 4)]
+    assert rank_production(c, menu, MID)[0].item == "UNIT_WARRIOR"
+
+
+def test_an_idle_city_starts_a_building_repair_without_a_tile():
+    game = pillaged_game(building="nothing")
+    game.data["production"] = [o for o in LIVE_OPTIONS if o.item_name != "UNIT_SETTLER"]
+    run(CityProductionPolicy().run(game))
+    assert game.set_calls[0] == (65536, "BUILDING", "BUILDING_LIBRARY", None, None)
+
+
+def test_a_busy_city_puts_a_repair_before_a_long_build_and_resumes_it():
+    game = pillaged_game()
+    policy = CityProductionPolicy()
+    run(policy.run(game))
+    assert [c[2] for c in game.set_calls] == ["BUILDING_LIBRARY"]
+    assert policy._replaced[65536] == "UNIT_SETTLER"
+
+
+def test_a_busy_city_that_is_nearly_done_or_unpillaged_is_left_alone():
+    game = pillaged_game(turns_left=1)
+    run(CityProductionPolicy().run(game))
+    assert game.set_calls == []
+    game = pillaged_game(pillaged=())
+    run(CityProductionPolicy().run(game))
+    assert game.set_calls == []
+
+
+def test_a_threatened_city_does_not_stop_for_a_repair():
+    game = pillaged_game(building="BUILDING_WALLS")
+    game.data["threats"] = [fx.threat_info(x=12, y=11)]
+    run(CityProductionPolicy().run(game))
+    assert all(not c[2].endswith("LIBRARY") for c in game.set_calls)
+
+
+def test_pillaged_items_and_repairs_are_logged(caplog):
+    import logging
+
+    policy = CityProductionPolicy()
+    game = pillaged_game(pillaged=("BUILDING_LIBRARY", "BUILDING_MARKET"))
+    with caplog.at_level(logging.INFO):
+        run(policy.assign(game))
+    assert any("pillaged: building LIBRARY, building MARKET" in m for m in caplog.messages)
+    assert any("repairs BUILDING_LIBRARY" in m for m in caplog.messages)
+    game = pillaged_game(pillaged=("BUILDING_MARKET",))
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        run(policy.assign(game))
+    assert any("repaired: building LIBRARY" in m for m in caplog.messages)
 
 
 # ----- the army floor by matchup (issue 279) -----

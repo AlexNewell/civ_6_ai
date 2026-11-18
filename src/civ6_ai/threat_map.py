@@ -245,6 +245,28 @@ async def read_combat_heal(game: Any) -> CombatHeal:
         return replace(DEFAULT_COMBAT_HEAL, source=f"fallback ({err})")
 
 
+_CIVILIAN_WORDS = ("SETTLER", "BUILDER", "TRADER", "MISSIONARY", "APOSTLE", "GREAT_", "ENGINEER")
+
+
+def foreign_civilian(entry: str) -> tuple[str, str] | None:
+    """(owner, unit) for a map-area unit entry like "Barbarian SETTLER", or None if not civilian."""
+    owner, _, unit = entry.rpartition(" ")
+    if not owner or not any(word in unit for word in _CIVILIAN_WORDS):
+        return None
+    return owner, unit
+
+
+@dataclass(frozen=True)
+class Civilian:
+    """A foreign civilian unit seen on a visible tile (issue 280)."""
+
+    x: int
+    y: int
+    owner: str
+    unit: str
+    seen: int  # The turn.
+
+
 @dataclass
 class ThreatMap:
     settings: ThreatMapSettings = field(default_factory=ThreatMapSettings)
@@ -253,6 +275,8 @@ class ThreatMap:
     heal: CombatHeal = field(default_factory=lambda: DEFAULT_COMBAT_HEAL)  # Read once a session.
     barbarian_peak: float = 0.0  # Strongest barbarian land unit seen this session.
     allies: list["Ally"] = field(default_factory=list)
+    # Foreign civilians on visible tiles, by tile (issue 280): the tile reads already tell us.
+    civilians: dict[tuple[int, int], "Civilian"] = field(default_factory=dict)
     _last_scan: int = -10_000
     _baselined: bool = False
     _fields: dict[tuple, dict[tuple[int, int], float]] = field(default_factory=dict)
@@ -283,6 +307,8 @@ class ThreatMap:
         saw it).
         """
         for tile in tiles:
+            if tile.visible:
+                self._see_civilian(turn, tile)
             known = next(
                 (s for s in self.sources if s.kind == CAMP and (s.x, s.y) == (tile.x, tile.y)),
                 None,
@@ -300,6 +326,15 @@ class ThreatMap:
                     known.last_seen = turn
             elif tile.visible and known is not None:
                 self.sources.remove(known)
+
+    def _see_civilian(self, turn: int, tile: Tile) -> None:
+        """Keep a foreign civilian on a visible tile; a visible tile without one forgets it."""
+        found = [c for c in map(foreign_civilian, tile.foreign_units) if c is not None]
+        if found and len(found) == len(tile.foreign_units):  # With a soldier it is not a prize.
+            owner, unit = found[0]
+            self.civilians[tile.x, tile.y] = Civilian(tile.x, tile.y, owner, unit, turn)
+        else:
+            self.civilians.pop((tile.x, tile.y), None)
 
     def see_threats(self, turn: int, threats: Iterable[Threat]) -> None:
         """Hostile units visible now, then drop the old ones that are stale or replaced."""

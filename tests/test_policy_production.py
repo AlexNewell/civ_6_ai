@@ -18,7 +18,7 @@ from civ6_ai.policies.production import (
     score,
 )
 from civ6_ai.state import ProductionChoice, Threat, read_empire
-from civ6_ai.state.reader import build_city
+from civ6_ai.state.reader import build_city, build_unit
 from fixtures import civ_state as fx
 
 
@@ -1238,3 +1238,90 @@ def test_no_settler_when_the_survey_found_no_safe_site():
     assert best(grown, MENU, replace(ctx, sites_ok=False)) != "UNIT_SETTLER"
     behind = replace(ctx, turn=140, sites_ok=False)
     assert best(grown, MENU, behind) != "UNIT_SETTLER"
+
+
+# ----- units for a camp force (issue 268) -----
+
+
+def camp_menu_score(item, **ctx):
+    garrisoned = city()
+    context = ProductionContext(turn=100, num_cities=2, builders=2, recon=1, army=4, **ctx)
+    opt = option("UNIT", item, 4)
+    return score(opt, garrisoned, context, ProductionWeights())
+
+
+def test_a_camp_force_demand_lifts_military_units_above_the_army_floor():
+    quiet = camp_menu_score("UNIT_WARRIOR")
+    wanted = camp_menu_score("UNIT_WARRIOR", camp_units=2, camp_wants="melee")
+    assert quiet == 0.0 and wanted >= 15.0
+
+
+def test_a_camp_demand_prefers_the_kind_the_force_lacks():
+    melee = camp_menu_score("UNIT_WARRIOR", camp_units=1, camp_wants="melee")
+    ranged = camp_menu_score("UNIT_ARCHER", camp_units=1, camp_wants="melee")
+    assert melee > ranged == 0.0
+    archer = camp_menu_score("UNIT_ARCHER", camp_units=1, camp_wants="ranged")
+    warrior = camp_menu_score("UNIT_WARRIOR", camp_units=1, camp_wants="ranged")
+    assert archer > warrior > 0
+
+
+def test_a_camp_demand_combines_with_the_army_floor_and_never_adds_to_it():
+    ctx = ProductionContext(turn=100, num_cities=4, builders=4, recon=1, army=0, camp_units=1)
+    plain = ProductionContext(turn=100, num_cities=4, builders=4, recon=1, army=0)
+    c = city()
+    opt = option("UNIT", "UNIT_WARRIOR", 4)
+    w = ProductionWeights()
+    assert score(opt, c, ctx, w) == max(score(opt, c, plain, w), score(opt, c, ctx, w))
+    assert score(opt, c, ctx, w) < 14.0 + 20.0  # Under a threatened city's defender.
+
+
+def test_each_unit_chosen_counts_off_the_camp_demand():
+    ctx = ProductionContext(turn=100, num_cities=2, camp_units=2, camp_wants="any")
+    once = ctx.after_choosing("UNIT_WARRIOR")
+    twice = once.after_choosing("UNIT_ARCHER")
+    assert (once.camp_units, twice.camp_units) == (1, 0)
+    assert ctx.after_choosing("BUILDING_LIBRARY").camp_units == 2
+
+
+def test_build_context_reads_the_camp_plan_from_the_defence_state():
+    from civ6_ai.policies.defence import DefenceState
+    from civ6_ai.policies.military import CampPlan
+
+    state = DefenceState()
+    state.camp_plan = CampPlan((55, 7), 5, 1, 102.0, 40.0, 2, 3, "melee", 14, 0.04)
+    empire = run(read_empire(fx.FakeGame(overview=fx.overview(turn=100, num_cities=2))))
+    ctx = build_context(empire, [], defence=state)
+    assert (ctx.camp_units, ctx.camp_wants) == (3, "melee")
+    state.reset(101, {})
+    assert build_context(empire, [], defence=state).camp_units == 0
+
+
+def test_existing_units_do_not_count_off_the_camp_demand():
+    from civ6_ai.policies.defence import DefenceState
+    from civ6_ai.policies.military import CampPlan
+
+    state = DefenceState()
+    state.camp_plan = CampPlan((55, 7), 5, 1, 102.0, 40.0, 2, 3, "any", 14, 0.04)
+    empire = run(read_empire(fx.FakeGame(overview=fx.overview(turn=100, num_cities=2))))
+    units = [build_unit(fx.unit_info(unit_id=i, unit_index=i)) for i in (1, 2, 3, 4)]
+    assert build_context(empire, units, defence=state).camp_units == 3
+    assert build_context(empire, units, ["UNIT_WARRIOR"], defence=state).camp_units == 2
+
+
+def test_a_city_beyond_the_forces_reach_builds_nothing_for_the_camp():
+    here = city(x=50, y=7)
+    far = city(x=20, y=7)
+    ctx = ProductionContext(
+        turn=100, num_cities=2, army=4, camp_units=2, camp_wants="any", camp_target=(55, 7)
+    )
+    opt = option("UNIT", "UNIT_WARRIOR", 4)
+    w = ProductionWeights()
+    assert score(opt, here, ctx, w) > 0.0
+    assert score(opt, far, ctx, w) == 0.0
+
+
+def test_a_melee_demand_is_met_by_melee_units_only():
+    ctx = ProductionContext(turn=100, num_cities=2, camp_units=1, camp_wants="melee")
+    assert ctx.after_choosing("UNIT_ARCHER").camp_units == 1  # An Archer does not fill it.
+    assert ctx.after_choosing("UNIT_WARRIOR").camp_units == 0
+    assert camp_menu_score("UNIT_ARCHER", camp_units=1, camp_wants="melee") == 0.0

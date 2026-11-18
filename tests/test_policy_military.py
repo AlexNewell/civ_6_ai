@@ -1886,3 +1886,188 @@ def test_a_split_refreshes_the_threats_so_a_revealed_enemy_can_be_attacked():
     game.move_unit = move
     run(policy, game)
     assert game.orders("attack")
+
+
+# ----- a camp near our cities is a goal with its own force (issue 268) -----
+
+CAMP_55_7 = tile(x=55, y=7, improvement="IMPROVEMENT_BARBARIAN_CAMP", owner_id=-1, units=[])
+
+
+def run20_turn100(extra_units=(), defender_cs=45, units=None):
+    """Turn 100 of Run 20: a Warrior and two Archers in two cities, a camp five tiles off with a
+    Man-at-Arms beside it. Thessalonica's lone Archer is its garrison; the two units in
+    Constantinople are more than it needs."""
+    from civ6_ai.policies.defence import DefenceState
+
+    cities = [
+        city_info(city_id=65536, name="Constantinople", x=50, y=7),
+        city_info(city_id=65537, name="Thessalonica", x=50, y=11),
+    ]
+    units = [
+        *(units if units is not None else [warrior(uid=1, x=50, y=7), archer(uid=2, x=50, y=7)]),
+        archer(uid=3, x=50, y=11),
+        *extra_units,
+    ]
+    game = camp_game(
+        units,
+        [barbarian(kind="UNIT_MAN_AT_ARMS", x=54, y=7, cs=defender_cs)],
+        camp=CAMP_55_7,
+        cities=cities,
+        turn=100,
+    )
+    state = DefenceState()
+    return game, MilitaryPolicy(defence=state), state
+
+
+def test_a_camp_near_a_city_becomes_a_plan_when_nothing_is_spare(caplog):
+    game, policy, state = run20_turn100()
+    with caplog.at_level(logging.INFO, logger=military_module.log.name):
+        run(policy, game)
+    plan = state.camp_plan
+    assert plan is not None and plan.target == (55, 7)
+    assert not camp_orders(policy)  # Too few spare units: nothing is sent yet.
+    assert plan.units_wanted >= 1 and not plan.met
+    assert plan.needed == pytest.approx(2.0 * (45 + W.assumed_defender_bonus))
+    assert plan.units_available == 2
+    assert plan.eta >= plan.units_wanted * MilitarySettings().camp_build_turns
+    lines = [r.message for r in caplog.records if "military_camp_plan" in r.message]
+    assert len(lines) == 1 and '"target": [55, 7]' in lines[0] and '"needed"' in lines[0]
+
+
+def test_the_plan_does_not_take_a_garrison_into_the_force():
+    game, policy, state = run20_turn100()
+    run(policy, game)
+    assert state.camp_plan.units_available == 2  # Thessalonica's Archer is not counted.
+    assert not camp_orders(policy)
+
+
+def test_the_plan_asks_for_a_melee_unit_when_the_force_has_none():
+    game, policy, state = run20_turn100(units=[archer(uid=2, x=50, y=7), archer(uid=4, x=50, y=7)])
+    run(policy, game)
+    assert state.camp_plan.wants == "melee"
+    game, policy, state = run20_turn100()  # With the Warrior, the force has a melee unit.
+    run(policy, game)
+    assert state.camp_plan.wants == "any"
+
+
+def test_a_force_with_melee_and_strength_is_met_and_marches():
+    extra = [
+        warrior(uid=4, x=51, y=7, combat_strength=36),
+        archer(uid=5, x=51, y=8),
+        archer(uid=6, x=51, y=6),
+        warrior(uid=7, x=50, y=8, combat_strength=30),
+    ]
+    game, policy, state = run20_turn100(extra)
+    run(policy, game)
+    assert state.camp_plan.met and state.camp_plan.wants == ""
+    assert camp_orders(policy)  # The force is formed and sent at the camp.
+
+
+def test_a_weak_defender_needs_a_smaller_force_than_a_strong_one():
+    _, _, strong = run20_turn100()
+    game, policy, weak = run20_turn100(defender_cs=10)
+    run(policy, game)
+    assert weak.camp_plan.needed < 2.0 * (45 + W.assumed_defender_bonus)
+    assert strong.camp_plan is None  # Not run yet.
+
+
+def test_a_camp_beyond_the_goal_radius_is_no_goal():
+    from civ6_ai.policies.defence import DefenceState
+
+    state = DefenceState()
+    far = tile(x=70, y=7, improvement="IMPROVEMENT_BARBARIAN_CAMP", owner_id=-1, units=[])
+    game = camp_game([warrior(uid=1, x=10, y=10)], [], camp=far)
+    policy = MilitaryPolicy(MilitarySettings(camp_home_radius=40), defence=state)
+    run(policy, game)
+    assert state.camp_plan is None
+
+
+def test_camps_are_ranked_by_cost_to_stand_over_cost_to_clear():
+    from civ6_ai.policies.defence import DefenceState
+
+    state = DefenceState()
+    near = (13, 10)
+    farther = (16, 10)
+    tiles = {
+        near: tile(x=13, y=10, improvement="IMPROVEMENT_BARBARIAN_CAMP", owner_id=-1, units=[]),
+        farther: tile(x=16, y=10, improvement="IMPROVEMENT_BARBARIAN_CAMP", owner_id=-1, units=[]),
+    }
+    game = MilitaryGame([warrior(uid=1, x=10, y=10)], [])
+
+    async def area(cx, cy, radius=2):
+        return list(tiles.values())
+
+    game.get_map_area = area
+    run(MilitaryPolicy(defence=state), game)
+    assert state.camp_plan.target == near
+    # A guard on the near camp makes it dearer to clear than the one a few tiles further on.
+    game2 = MilitaryGame(
+        [warrior(uid=1, x=10, y=10)],
+        [barbarian(kind="UNIT_MAN_AT_ARMS", x=13, y=11, cs=60)],
+    )
+    game2.get_map_area = area
+    state2 = DefenceState()
+    run(MilitaryPolicy(defence=state2), game2)
+    assert state2.camp_plan.target == farther
+
+
+def test_the_plan_is_cleared_when_no_camp_is_known():
+    from civ6_ai.policies.defence import DefenceState
+
+    state = DefenceState()
+    state.camp_plan = object()
+    game = MilitaryGame([warrior(uid=1)], [])
+    run(MilitaryPolicy(defence=state), game)
+    assert state.camp_plan is None
+
+
+def test_plan_camp_force_counts_units_to_build():
+    from civ6_ai.policies.military import plan_camp_force
+
+    settings = MilitarySettings()
+    thug = Threat(
+        owner_id=-1, owner="Barbarians", unit_type="UNIT_MAN_AT_ARMS", x=1, y=1, hp=100,
+        max_hp=100, combat_strength=45, ranged_strength=0, distance=1, hostile=True,
+    )  # fmt: skip
+    ours = [build_unit(unit_info(unit_id=i, unit_index=i, combat_strength=20)) for i in (1, 2)]
+    needed, have, wanted, kind = plan_camp_force(ours, [thug], W, settings)
+    assert needed == pytest.approx(102.0) and have == pytest.approx(40.0)
+    assert wanted == 3 and kind == "ranged"  # ceil(62 / 25); the force is all melee.
+    assert plan_camp_force(ours, [], W, settings)[2] == 0
+
+
+def test_the_force_is_sent_at_the_camp_the_plan_chose_not_the_nearest():
+    from civ6_ai.policies.defence import DefenceState
+
+    near, farther = (13, 10), (16, 10)
+    tiles = [
+        tile(x=x, y=10, improvement="IMPROVEMENT_BARBARIAN_CAMP", owner_id=-1, units=[])
+        for x in (13, 16)
+    ]
+    units = [
+        warrior(uid=1, x=15, y=10, **STRONG),
+        warrior(uid=2, x=15, y=11, **STRONG),
+        warrior(uid=3),
+    ]
+    game = MilitaryGame(units, [barbarian(kind="UNIT_MAN_AT_ARMS", x=13, y=11, cs=60)])
+
+    async def area(cx, cy, radius=2):
+        return tiles
+
+    game.get_map_area = area
+    state = DefenceState()
+    policy = MilitaryPolicy(defence=state)
+    run(policy, game)
+    assert state.camp_plan.target == farther and state.camp_plan.met
+    assert {d.target for d in camp_orders(policy)} == {farther}
+    assert near not in {d.target for d in camp_orders(policy)}
+
+
+def test_a_unit_with_both_attacks_counts_as_melee_by_its_class():
+    from civ6_ai.policies.military import _is_melee
+
+    immortal = build_unit(
+        unit_info(unit_type="UNIT_PERSIAN_IMMORTAL", combat_strength=35, ranged_strength=25)
+    )
+    archer_ = build_unit(unit_info(unit_type="UNIT_ARCHER", combat_strength=15, ranged_strength=25))
+    assert _is_melee(immortal) and not _is_melee(archer_)

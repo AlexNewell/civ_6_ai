@@ -216,6 +216,13 @@ class MilitarySettings:
     max_camp_turns: int = 8  # Turns spent assaulting one camp before it is set aside.
     camp_travel_turns: int = 20  # Turns a force may take to reach the muster point first.
     camp_retry_turns: int = 30
+    # Issue 268: a known camp this close to a city is a goal. Production builds the force that
+    # clears it when the spare units fall short (Run 20: a camp 5 tiles off for 70 turns, with
+    # nothing spare, so never attacked).
+    camp_goal_radius: int = 8
+    camp_unit_strength: float = 25.0  # What one more unit is counted as, to size the build.
+    camp_max_build: int = 4  # Units asked of production for one camp at a time.
+    camp_build_turns: int = 4  # Turns counted for each unit still to be built, in the ETA.
     camp_idle_turns: int = 10  # A camp not advanced on for this long starts its count again.
     city_strike_range: int = 2  # civ6-mcp: "city attack range is 2".
     fallback_tiles: int = (
@@ -357,11 +364,49 @@ def garrison_required(city: City, settings: MilitarySettings) -> int:
     return 1
 
 
+@dataclass(frozen=True)
+class CampPlan:
+    """The camp this empire means to clear, and what the force lacks (issue 268).
+
+    Made by the military policy each turn and read by production through `DefenceState`.
+    `needed` and `available` are strength totals on the scale of `camp_force_ok`; `units_wanted`
+    is how many more combat units production should build, and `wants` the kind most missing
+    (a melee unit takes the tile, a ranged one softens a strong defender).
+    """
+
+    target: tuple[int, int]
+    distance: int  # From the camp to our nearest city.
+    defenders: int
+    needed: float
+    available: float
+    units_available: int
+    units_wanted: int
+    wants: str  # "melee", "ranged", "any", or "" when the force is enough.
+    eta: int  # Turns until the force can strike: the walk, plus the units still to be built.
+    rank: float  # Ongoing cost over the cost to clear; the highest ranked camp is the target.
+
+    @property
+    def met(self) -> bool:
+        return self.units_wanted == 0
+
+
+def _is_melee(unit: Unit) -> bool:
+    """A unit that can close in and take the camp tile. Production counts the same units as melee
+    (by the unit table's class), so a Persian Immortal, with a ranged attack too, qualifies."""
+    if unit.combat_strength <= 0:
+        return False
+    stats = COMBAT_UNITS.get(unit.unit_type)
+    if stats is not None:
+        return stats[4] not in ("RANGED", "SIEGE", "RECON")
+    return unit.ranged_strength == 0
+
+
 def camp_force_ok(
     attackers: Iterable[Unit],
     defenders: Iterable[Threat],
     weights: MilitaryWeights,
     min_units: int = 2,
+    need_melee: bool = False,
 ) -> bool:
     """True if the units on hand are clearly stronger than the camp's, counting health.
 
@@ -370,12 +415,55 @@ def camp_force_ok(
     ours = [u for u in attackers if u.hp >= weights.camp_min_hp * u.max_hp]
     if len(ours) < min_units:
         return False
-    ours_total = sum(max(u.combat_strength, u.ranged_strength) * u.hp / u.max_hp for u in ours)
-    theirs_total = sum(
+    if need_melee and not any(_is_melee(u) for u in ours):
+        return False  # Only a unit that closes in takes the camp tile.
+    return _force_total(ours) >= camp_force_needed(defenders, weights)
+
+
+def _force_total(units: Iterable[Unit]) -> float:
+    return sum(max(u.combat_strength, u.ranged_strength) * u.hp / u.max_hp for u in units)
+
+
+def camp_force_needed(defenders: Iterable[Threat], weights: MilitaryWeights) -> float:
+    """The strength total a force must reach to clear a camp: a margin over the defenders."""
+    return weights.camp_force_ratio * sum(
         max(d.combat_strength, d.ranged_strength) + weights.assumed_defender_bonus
         for d in defenders
     )
-    return ours_total >= weights.camp_force_ratio * theirs_total
+
+
+def plan_camp_force(
+    force: Iterable[Unit],
+    defenders: Iterable[Threat],
+    weights: MilitaryWeights,
+    settings: "MilitarySettings",
+) -> tuple[float, float, int, str]:
+    """What a camp force lacks: (needed, available, units to build, the kind most wanted).
+
+    A healthy force that meets `camp_force_ok` (two units, one of them melee, and the strength
+    margin) lacks nothing. Otherwise the shortfall is counted in units of `camp_unit_strength`,
+    at least enough to make two and to include a melee unit, and no more than `camp_max_build`.
+    """
+    defenders = list(defenders)
+    ours = [u for u in force if u.hp >= weights.camp_min_hp * u.max_hp]
+    needed = camp_force_needed(defenders, weights)
+    have = _force_total(ours)
+    if camp_force_ok(ours, defenders, weights, settings.camp_min_units, need_melee=True):
+        return needed, have, 0, ""
+    gap = max(0.0, needed - have)
+    wanted = max(
+        settings.camp_min_units - len(ours),
+        math.ceil(gap / settings.camp_unit_strength) if gap > 0 else 0,
+        0 if any(_is_melee(u) for u in ours) else 1,
+        1,
+    )
+    if not any(_is_melee(u) for u in ours):
+        kind = "melee"
+    elif defenders and not any(u.ranged_strength > 0 for u in ours):
+        kind = "ranged"
+    else:
+        kind = "any"
+    return needed, have, min(wanted, settings.camp_max_build), kind
 
 
 def choose_promotion(options: Iterable[Any], preference: tuple[str, ...]) -> Any | None:
@@ -1546,7 +1634,7 @@ class MilitaryPolicy:
             and u.hp >= s.weights.camp_min_hp * u.max_hp
             and self._spare(t, u)
         ]
-        if len(spare) < s.camp_min_units or t.camp_scanned:
+        if t.camp_scanned:
             return
         t.camp_scanned = True
         await self._scan_camps(game, t, barbarians)
@@ -1563,18 +1651,19 @@ class MilitaryPolicy:
             if self._camp_aside.get(c, -1) < t.turn
             and self._home_distance(t, c) <= s.camp_home_radius
         ]
-        if not camps:
+        plan = self._plan_camps(t, camps, spare)
+        if len(spare) < s.camp_min_units or not camps:
             return
-        where = min(camps, key=lambda c: (self._home_distance(t, c), c))
+        where = (
+            plan.target
+            if plan is not None
+            else min(camps, key=lambda c: (self._home_distance(t, c), c))
+        )
         if where not in own:
             t.map_use["target_from_map"] = 1  # The map alone put this camp on the list.
-        defenders = [
-            b
-            for b in barbarians
-            if hex_distance(b.x, b.y, *where, s.map_width) <= s.camp_defender_radius
-        ]
+        defenders = self._camp_defenders(t, where)
         force = [u for u in spare if hex_distance(u.x, u.y, *where, s.map_width) <= s.camp_reach]
-        if not camp_force_ok(force, defenders, s.weights, s.camp_min_units):
+        if not camp_force_ok(force, defenders, s.weights, s.camp_min_units, need_melee=True):
             return
         muster = s.camp_muster_radius
         gathered = sum(1 for u in force if hex_distance(u.x, u.y, *where, s.map_width) <= muster)
@@ -1640,6 +1729,76 @@ class MilitaryPolicy:
             if unit.unit_id not in t.acted and not out_of_orders:
                 self._refuse(t, unit, "move")
                 self._log(t, unit, "camp", "move refused", where, result=result or "")
+
+    def _camp_defenders(self, t: _Turn, camp: tuple[int, int]) -> list[Threat]:
+        """The barbarians in sight within `camp_defender_radius` of the camp."""
+        s = self.settings
+        return [
+            b
+            for b in t.threats
+            if b.owner_id == BARBARIAN_ID
+            and b.hostile
+            and hex_distance(b.x, b.y, *camp, s.map_width) <= s.camp_defender_radius
+        ]
+
+    def _plan_camps(
+        self, t: _Turn, camps: list[tuple[int, int]], spare: list[Unit]
+    ) -> CampPlan | None:
+        """Choose the camp to clear and size its force (issue 268), then log and share the plan.
+
+        A camp within `camp_goal_radius` of a city is a goal whether or not any unit is spare.
+        Each camp is ranked by what it costs while it stands (nearness to a city, and the
+        barbarians about it) over what it costs to clear (the defenders' strength with a margin,
+        and the walk). The best one gets a force from the spare units, never a city's garrison;
+        what it lacks goes to production as `CampPlan.units_wanted`.
+        """
+        s = self.settings
+        w = s.weights
+        goals = [c for c in camps if self._home_distance(t, c) <= s.camp_goal_radius]
+        if not goals:
+            if self.defence is not None:
+                self.defence.camp_plan = None
+            return None
+        barbs = [b for b in t.threats if b.owner_id == BARBARIAN_ID and b.hostile]
+
+        def rank(camp: tuple[int, int]) -> float:
+            near = self._home_distance(t, camp)
+            about = sum(
+                1
+                for b in barbs
+                if hex_distance(b.x, b.y, *camp, s.map_width) <= s.camp_search_radius
+            )
+            ongoing = (s.camp_goal_radius + 1 - near) + 0.5 * about
+            cost = camp_force_needed(self._camp_defenders(t, camp), w) + near
+            return ongoing / max(cost, 1.0)
+
+        ranked = sorted(goals, key=lambda c: (-rank(c), self._home_distance(t, c), c))
+        target = ranked[0]
+        defenders = self._camp_defenders(t, target)
+        force = [u for u in spare if hex_distance(u.x, u.y, *target, s.map_width) <= s.camp_reach]
+        needed, have, wanted, kind = plan_camp_force(force, defenders, w, s)
+        walk = max(
+            (math.ceil(hex_distance(u.x, u.y, *target, s.map_width) / 2) for u in force), default=0
+        )
+        plan = CampPlan(
+            target=target,
+            distance=self._home_distance(t, target),
+            defenders=len(defenders),
+            needed=round(needed, 1),
+            available=round(have, 1),
+            units_available=len(force),
+            units_wanted=wanted,
+            wants=kind,
+            eta=walk + wanted * s.camp_build_turns,
+            rank=round(rank(target), 3),
+        )
+        if self.defence is not None:
+            self.defence.camp_plan = plan
+        log.info(
+            "military_camp_plan %s",
+            json.dumps({"turn": t.turn, "camps": len(goals), **asdict(plan)}, sort_keys=True),
+        )
+        return plan
 
     def _note_sightings(self, t: _Turn) -> None:
         """Where barbarian land units were seen, the trail back to their camp."""

@@ -53,6 +53,7 @@ from civ6_ai.state import read_cities as _read_cities
 from civ6_ai.state import read_empire as _read_empire
 from civ6_ai.state import read_production as _read_production
 from civ6_ai.state import read_units as _read_units
+from civ6_ai.state.reader import hex_distance
 
 log = logging.getLogger(__name__)
 
@@ -69,6 +70,8 @@ _TURN_SCALE = 20.0  # A build this many turns away scores half as much as an ins
 _URGENT_SCALE = 10.0
 _FINISHING_TURNS = 2  # A build this close to done is let finish.
 _FIRST_SETTLER_TURNS = 45  # No builders before the first settler until this turn.
+_CAMP_UNIT_SCORE = 17.0  # A unit for a camp force, while one is short (issue 268).
+_CAMP_CITY_REACH = 14  # Matches `MilitarySettings.camp_reach`.
 _EARLY_TURNS = 60  # Turns in which a city with no garrison should get one first.
 
 
@@ -127,6 +130,11 @@ class ProductionContext:
     short: frozenset[int] = frozenset()  # Of those, the ones with fewer than two defenders.
     mapped: frozenset[int] = frozenset()  # Of those, the ones the threat map judged (issue 264).
     wary: bool = False  # A much stronger rival at peace with us (`defence.wary_of`): walls.
+    # Issue 268: combat units still to build to clear the camp the military policy has chosen,
+    # and the kind most missing ("melee", "ranged" or "any"). Each army pick counts one off.
+    camp_units: int = 0
+    camp_wants: str = ""
+    camp_target: tuple[int, int] | None = None  # The camp, so only a city in reach builds.
     sites_ok: bool = True  # False when settling found no safe site to send a settler to.
     idle_builders: int = 0  # Builders that found no job on offer the last time they ran (1.45).
     spare_jobs: int | None = None  # Jobs no builder holds; None when not known this turn.
@@ -143,6 +151,11 @@ class ProductionContext:
         """
         kinds = _counted_as(item) or (("army",) if unknown_combat else ())
         counted = replace(self, **{kind: getattr(self, kind) + 1 for kind in kinds})
+        stats = COMBAT_UNITS.get(item)
+        # A ranged unit cannot take the camp tile, so it does not meet a demand for a melee one.
+        fills = not (self.camp_wants == "melee" and stats is not None and stats[4] == "RANGED")
+        if "army" in kinds and counted.camp_units > 0 and fills:
+            counted = replace(counted, camp_units=counted.camp_units - 1)
         if orders and "builders" in kinds and counted.spare_jobs is not None:
             counted = replace(counted, spare_jobs=max(0, counted.spare_jobs - 1))
         if item.startswith("DISTRICT_"):  # A district being built counts, so two cities don't.
@@ -187,6 +200,7 @@ def build_context(
 
     `defence` is the threat state (`defence.DefenceState`), or None.
     """
+    plan = getattr(defence, "camp_plan", None)
     ctx = ProductionContext(
         turn=empire.turn,
         num_cities=empire.num_cities,
@@ -208,6 +222,12 @@ def build_context(
             unit.unit_type,
             unknown_combat=unit.is_combat and unit.unit_type not in COMBAT_UNITS,
             orders=False,
+        )
+    # The plan's count is of units to add to a force it already sized from the units that exist,
+    # so it is set after those are counted; only builds under way count off.
+    if plan is not None:
+        ctx = replace(
+            ctx, camp_units=plan.units_wanted, camp_wants=plan.wants, camp_target=plan.target
         )
     for item in in_progress:
         ctx = ctx.after_choosing(item)
@@ -579,11 +599,41 @@ def _unit_score(
     if city.garrison_unit is None:
         return (16.0 if ctx.turn <= _EARLY_TURNS else 12.0) + strength / 10.0
     wanted = w.army_per_city * ctx.num_cities - ctx.army
-    if wanted <= 0:
+    floor = 0.0
+    if wanted > 0:
+        # Below the floor (issue 267) a unit outranks an ordinary building, so the floor is reached
+        # even when no city is short: a threat that arrives finds something to fight with.
+        floor = (_ARMY_FLOOR_SCORE + min(wanted, 4.0)) * w.military + strength / 20.0
+    return max(floor, _camp_score(city, stats[4], strength, ctx, w))
+
+
+def _camp_score(
+    city: City, unit_class: str, strength: float, ctx: ProductionContext, w: ProductionWeights
+) -> float:
+    """A unit for the force that clears a nearby camp (issue 268), while one is still short.
+
+    Above an ordinary building (the camp keeps spawning units and blocks settling), below a
+    defender for a threatened city. The kind the force lacks gets a little more, and a kind it has
+    enough of a little less, so the build is a melee unit to take the tile or a ranged one to
+    soften a strong defender, whichever is missing.
+    """
+    if ctx.camp_units <= 0 or w.military <= 0:
         return 0.0
-    # Below the floor (issue 267) a unit outranks an ordinary building, so the floor is reached
-    # even when no city is short: a threat that arrives finds something to fight with.
-    return (_ARMY_FLOOR_SCORE + min(wanted, 4.0)) * w.military + strength / 20.0
+    # A city further than the force is called from (`camp_reach`) builds no unit for it: the unit
+    # would never join the force.
+    if ctx.camp_target is not None and (
+        hex_distance(city.x, city.y, *ctx.camp_target) > _CAMP_CITY_REACH
+    ):
+        return 0.0
+    ranged = unit_class == "RANGED"
+    lift = 0.0
+    if ctx.camp_wants == "melee":
+        if ranged:
+            return 0.0  # Only a melee unit takes the camp tile; the force's missing piece.
+        lift = 2.0
+    elif ctx.camp_wants == "ranged":
+        lift = 2.0 if ranged else -1.0
+    return (_CAMP_UNIT_SCORE + lift + strength / 10.0) * w.military
 
 
 def _building_score(

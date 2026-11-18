@@ -40,6 +40,31 @@ Written offline against civ6-mcp's source, so none of this has run in a game yet
 | Ranged units are not hit back by melee defenders, and ranged defenders do hit back (`assess_attack` assumes both) | Not reached |
 | `Unit.targets` lists only targets in range with line of sight, and ranged units fire at adjacent targets | Not reached |
 
+## Run 17: turns 1 to 150, a repeat of Run 16 with PRs 257 to 259 (2026-11-17)
+
+STD_T1_01 on main from b120efb, log `20261118T025353Z`, `--turns 150` (no `--save-at`), console in `runs/run32.out`. Stopped on `turn_limit` after 3,487 s, no handler errors, no blockers. Decision time mean 14.4 s, p90 20.2 s, max 51.0 s; end-turn wait mean 8.9 s; total per turn mean 23.2 s. G1 gate clean, 4 warnings (gold nothing bought on 64% of turns above the reserve, one city lost, boosts 15%, 2 Dark Ages). $0.00 in model spend.
+
+| Turn | Score | Rank (true) | Alive | Leader | Gap | Era score |
+|---|---|---|---|---|---|---|
+| 25 | 33 | 4/6 | 6 | 46 | -13 | |
+| 50 | 68 | 4/6 | 6 | 118 | -50 | |
+| 75 | 132 | 5/6 | 6 | 199 | -67 | |
+| 100 | 235 | 5/5 | 5 | 324 | -89 | |
+| 125 | 306 | 5/5 | 5 | 438 | -132 | |
+| 150 | 391 | 4/5 | 5 | 587 | -196 | |
+
+The run played the same as Run 16 (scores 33, 68, 132, 235, 306, 391 match exactly; cities 2 to 5 on turns 21, 54, 77, 96; a sixth, Copan, on 142 and lost to Free Cities by loyalty on turn 150; no settler lost). CivBench gap table: turn 100 -89 (LLM median -4, AI median -19), turn 150 -196 (LLM +22, AI -26). The true rank is fourth of five: one civ dropped out on turn 87 and two unmet civs lead (587 and 492 at turn 150), matching the Run 16 screen reading of about -206.
+
+| Check | Result |
+|---|---|
+| PR 259, issue 256, `world_rankings:` line each turn | Pass: 150 lines. Rank, alive and leader score are plausible (alive 6 until turn 86, 5 from 87; leader 587 on turn 150, so rank 4/5 and gap -196, not the old "second of three"). `unmet=` counts 5 early, 2 from turn 50. Unmet civs show as `unmet=N` in the score list. |
+| PR 259, `victory_leaders` | Reads: science `us 0` throughout, culture and religious show `unmet 0.04 to 0.07` and `unmet 0.25` on 31 turns (turn 125 on), `Khmer` religious on 5 turns, never `[none]`. |
+| PR 259, `unmet_leaders` in victory_threat | Pass: `[none]` on 112 turns, `[culture 0.04 to 0.07; religious 0.25]` on the rest. |
+| PR 258, offense counters | Pass: `camps_gone` 1 on turn 44 and turn 121; `kills_barb` 1 on 6 turns, `attacks_barb` or kills nonzero on 19 turns (39 to 104). Run 16 read 0 throughout. |
+| PR 257, faith idle only when affordable | Pass: 14 "above reserve but nothing bought" lines, every one with the cheapest great person out of reach (500 to 550 faith against 3 to 78 above the reserve); the effectiveness report has no faith warning. No Holy Site was ever started ("no HOLY_SITE (never started)"). |
+| PR 247, peace-offer late acceptance | Not reached: no peace talk in the log. |
+| Barbarians near | `hostile_units_near` 5 events, camps acted on; one `district_lost` (wonder district, Wak Kab'nal, turn 27) not examined. |
+
 ## Run 16: turns 1 to 150, a fresh 150-turn run from STD_T1_01 (2026-11-17)
 
 STD_T1_01 on main from 9685c99, log `20261117T233448Z`, `--turns 150 --save-at 25,50,75,100,125`, console in `runs/run31.out`. Stopped on `turn_limit` after 3,489 s with no handler errors and no blockers. Decision time mean 14.3 s, p90 19.8 s, max 50.9 s (under the 60 s bar, over the 10 s goal); end-turn wait mean 9.0 s; total per turn mean 23.3 s. Checkpoints `CKPT_STD_T1_01_T025`, `T050`, `T075`, `T100` and `T125` were all written. $0.00 in model spend.

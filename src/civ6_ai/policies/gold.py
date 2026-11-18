@@ -291,8 +291,10 @@ class GoldPolicy:
         defence: Any = None,
         plans: PlanBook | None = None,
         builder_demand: Any = None,
+        expansion: Any = None,
     ) -> None:
         self.builder_demand = builder_demand  # `builder.BuilderDemand`, or None.
+        self.expansion = expansion  # `expansion.ExpansionState`, or None (issue 284).
         self._stack = StackBlocks()  # Purchases a unit on the city tile blocks.
         self._delay: dict[str, float] = {}  # Lesser spending while saving, per target.
         self._hostile: list[tuple[int, int]] = []  # Hostile unit tiles, read for the upgrades.
@@ -493,10 +495,16 @@ class GoldPolicy:
                 idle_builders=demand.idle if demand is not None else 0,
                 spare_jobs=demand.spare_jobs if demand is not None else None,
             )
+            if self.expansion is not None:  # The same two reads production scores a settler by.
+                context = replace(
+                    context,
+                    sites_ok=self.expansion.sites_ok(empire.turn),
+                    held_settlers=self.expansion.held_settlers,
+                )
             ranked = rank_production(city, options, context, self.weights)
             if context.camp_units > 0:
                 if city in threatened:
-                    why.append(f"{city.name} is threatened and buys defence")
+                    why.append(self._defence_note(city, ranked, turn))
                 else:
                     camp += self._camp_candidates(city, ranked, context, turn, why)
             if city in threatened:
@@ -530,6 +538,26 @@ class GoldPolicy:
         pool += await self._great_people(game, turn)
         self._note_scan(turn, pool)
         await self._spend_by_return(game, turn, pool, notes, limit)
+
+    @staticmethod
+    def _defence_note(city: City, ranked: list, turn: Any) -> str:
+        """Why a threatened city gives the camp force no purchase: it buys defence, and whether
+        any defence is affordable (issue 284: 'buys defence' was logged on 46 turns with nothing
+        bought)."""
+        prices = [
+            o.gold_cost
+            for o in ranked
+            if is_defence(o) and not o.is_repair and o.gold_cost is not None and o.gold_cost > 0
+        ]
+        if not prices:
+            return f"{city.name} is threatened and buys defence (none on offer to buy)"
+        cheapest = min(prices)
+        if cheapest > turn.budget:
+            return (
+                f"{city.name} is threatened and buys defence, but the cheapest costs {cheapest} "
+                f"and {turn.budget} is to spend, so nothing is affordable"
+            )
+        return f"{city.name} is threatened and buys defence (cheapest {cheapest} is affordable)"
 
     def _camp_candidates(
         self,

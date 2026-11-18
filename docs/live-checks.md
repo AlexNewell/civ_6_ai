@@ -40,6 +40,34 @@ Written offline against civ6-mcp's source, so none of this has run in a game yet
 | Ranged units are not hit back by melee defenders, and ranged defenders do hit back (`assess_attack` assumes both) | Not reached |
 | `Unit.targets` lists only targets in range with line of sight, and ranged units fire at adjacent targets | Not reached |
 
+## Run 16: turns 1 to 150, a fresh 150-turn run from STD_T1_01 (2026-11-17)
+
+STD_T1_01 on main from 9685c99, log `20261117T233448Z`, `--turns 150 --save-at 25,50,75,100,125`, console in `runs/run31.out`. Stopped on `turn_limit` after 3,489 s with no handler errors and no blockers. Decision time mean 14.3 s, p90 19.8 s, max 50.9 s (under the 60 s bar, over the 10 s goal); end-turn wait mean 9.0 s; total per turn mean 23.3 s. Checkpoints `CKPT_STD_T1_01_T025`, `T050`, `T075`, `T100` and `T125` were all written. $0.00 in model spend.
+
+| Turn | Score | Cities | Best rival | Era score |
+|---|---|---|---|---|
+| 25 | 33 | 2 | 46 | 4 |
+| 50 | 68 | 2 | 88 | 15 |
+| 75 | 132 | 3 | 178 | 33 |
+| 100 | 235 | 5 | 254 | 44 |
+| 125 | 306 | 5 | 331 | 53 |
+| 150 | 391 | 5 | 417 | 64 |
+
+Second, third and fourth cities on turns 21, 54 and 77 (fifth on 96, a sixth on 142). We finished second of three living players (391 against 417 and 385; one rival was gone before turn 100). Against the 17 Nov 30-turn slices (score 203 to 213 and 4 cities on turn 100) this run is ahead (235 and 5 cities). Run 14 was 121 and 229 on turns 75 and 100 under a different build. Copan (founded turn 142) was lost on turn 150 to Free Cities by loyalty after a warning on turn 142 (-19 a turn, governor sent, nothing more to do); no settler was lost. G1 gate clean with five warnings: faith idle (1 of 15 used), gold unspent on 64% of turns above the reserve, one city lost, boosts saved 18% of civic points, two Dark Ages. Score gap table (ours minus theirs): turn 100 leader -19 (LLM median -4, AI median -19), turn 150 leader -26 (LLM +22, AI -26).
+
+| Check | Result |
+|---|---|
+| PR 247, suzerain change lines | Pass: five lines, one per change (turns 58, 72, 90, 144; "Caguana suzerain changed from none to Sumeria (5) (held since turn 87)"), none repeated. |
+| PR 247, peace-offer late acceptance | Not reached: no peace talk in the log (we were at war with no one). |
+| PR 249, city_lost taker and cause | Pass: `city_lost` Copan, turn 150, `taker_name: Free Cities`, `cause: loyalty`. |
+| PR 249, `runs/<name>_threat.json` each turn | Pass: written, last turn 150. It is named `STD_T1_01_threat.json` (the save name, not the timestamped game name). |
+| PR 252, score gap table | Pass: printed at the end, rows for turns 100 and 150 only. |
+| PR 253, wonder_completed beside building_completed | Pass: turn 98, Tikal, both `building_completed` and `wonder_completed` for ORACLE. |
+| PR 254, victory_threat line each turn, age 0-4, science_rank | Pass: 150 lines, ages 0 to 4 in turn with the age counter cycling, `science_rank=3/3` at turn 146, one religious flag (Sumeria). |
+| PR 241, threat map camps acted on | Pass: `camp_orders` above 0 on 19 turns and 72 `military_decision` lines with `"action": "camp"`; no camp was destroyed (`kills_barb` stayed 0), so acting on a camp does not yet mean clearing it. |
+| PR 241, threat map dumps | Pass: `_threatmap.jsonl` has 150 lines, with camps (strength 45, ages, city distance) and unit sources. |
+| PR 237, era score in turn lines | Pass: `era_score`, `era_dark` and `era_golden` in all 150 rows (4, 15, 33, 44, 53, 64 on turns 25 to 150). |
+
 ## Run 14: turns 1 to 296, with PRs 225 to 228, stopped once (PR 229); eliminated
 
 STD_T1_01 on main from 5736c59, 2026-11-15, two sessions on one game: `20261115T162807Z` (turns 1 to 53) and `20261115T165303Z` (53 to 296). Result: eliminated on turn 296. Sumeria declared war on turn 241 and took the capital on turn 249, Xunantunich on turn 289 and Coba on turn 291, and then the last city. Final standing: Germany 1,377, Sumeria 1,208, Brazil 870, Mapuche 815, Khmer 791, Maya 385 (40 techs against 63 to 65). $0.00 in model spend. Decision time mean 12.1 s.

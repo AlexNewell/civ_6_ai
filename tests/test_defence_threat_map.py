@@ -514,3 +514,10 @@ def test_a_blow_must_reach_the_attacker_and_a_ranged_attacker_defends_with_its_c
     archer = Threat(63, "Barbarians", "UNIT_ARCHER", 6, 5, 100, 100, 15, 25, 1, True)
     m.see_threats(TURN, [archer])
     assert m.sources[0].defence == 15 and m.sources[0].strength == 25
+
+
+def test_a_ranged_garrison_still_shoots_from_the_city():
+    swords = [("UNIT_SWORDSMAN", 5, 6, 36, 1.0), ("UNIT_SWORDSMAN", 6, 6, 36, 1.0)]
+    inside = make_map((5, 5), 30.0, swords, [("UNIT_CROSSBOWMAN", 5, 5, 30, 40)])
+    melee = make_map((5, 5), 30.0, swords, [("UNIT_WARRIOR", 5, 5, 30, 0)])
+    assert inside.city_reading(5, 5, TURN).damage < melee.city_reading(5, 5, TURN).damage

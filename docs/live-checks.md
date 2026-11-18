@@ -40,6 +40,38 @@ Written offline against civ6-mcp's source, so none of this has run in a game yet
 | Ranged units are not hit back by melee defenders, and ranged defenders do hit back (`assess_attack` assumes both) | Not reached |
 | `Unit.targets` lists only targets in range with line of sight, and ranged units fire at adjacent targets | Not reached |
 
+## Run 20: turns 1 to 150, STD_T1_03 with PR 265, a regression run (2026-11-18)
+
+STD_T1_03 on main from 28e31bc (PR 265: defence "short" from the threat map's city-tile reading, city cover, heal read, resumed builds, new logging), logs `20261118T144707Z` (turns 1 to 14) and `20261118T145249Z` (turns 15 to 150, resumed once with no `--load` because the game was already on turn 15), consoles `runs/run_live20.out` and `runs/run_live20b.out`. The first session stopped `blocked` on turn 14 after 251 s: "Turn did not read as advanced", but the screenshot showed turn 15 with the Next Turn button, so the stop looks like a false read; nothing was named in blockers.md. The resumed session stopped on `turn_limit` after 2,612 s with no handler errors. Decision time mean 9.8 s over both logs (11.4 s resumed session; p90 14.5 s, max 47.7 s); end-turn wait mean 7.9 s; total per turn mean 19.2 s, max 66.0 s. Resumed session's G1 gate clean, 7 warnings (gold nothing bought 88%, no spare unit 73%, settlers used 1 of 7, no site found 89% of settling decisions, one city lost, one Dark Age, trade routes used 8 of 36). The first session's gate failed on the one stop. $0.00 in model spend.
+
+Compared with Run 19 (same save, previous code):
+
+| | Run 19 | Run 20 |
+|---|---|---|
+| Score turn 50 / 100 / 150 | 35 / 110 / 223 | 52 / 142 / 161 |
+| Rank, alive, leader, gap at 150 | 6/6, 6, 482, -259 | 6/6, 6, 543, -382 |
+| CivBench gap 100 / 150 (LLM, AI medians) | -199 / -259 (-129, -146 / -144, -194) | -172 / -382 (-97, -208 / -112, -256) |
+| Cities founded (turns) | 6 (2, 48, 54, 106, 119, 134) | 2 (2, 30); city 2 lost on turn 129 |
+| Districts started | Campus 4, Commercial Hub 4, Diplomatic Quarter 1, Industrial Zone 1, Aqueduct 2 | Campus 5, Commercial Hub 1, Diplomatic Quarter 1, Aqueduct 2 |
+| Districts completed | Commercial Hub 89 and 141, Diplomatic Quarter 114, Industrial Zone 147, Aqueduct 150 (plus wonder districts 109, 115) | Campus 33 and 69, Commercial Hub 63, Diplomatic Quarter 94, Aqueduct 100 and 105 |
+| First district completed | turn 89 | turn 33 |
+| Theater, Holy Site | none | none |
+| "defence turn" lines / SHORT | 113 / 26 | 213 / 38 |
+| "production: switched to" / "resumed" | 6 / 0 | 4 / 2 |
+| Units started (production_set) | Slinger 9 (7 in Constantinople), Settler 7, Builder 15, Trader 4, Spearman 3, Archer 3, Heavy Chariot 2, Horseman 3, Warrior 2, Scout 1 | Slinger 4 (4 in Constantinople), Settler 10, Builder 8, Trader 7, Archer 6, Horseman 3, Warrior 2, Scout 1 |
+
+What PR 265 did right: the two Campuses finished (turns 33 and 69; Run 19 finished none), the first district came 56 turns earlier, Constantinople built 4 Slingers instead of 7, and the score was ahead of Run 19 through turn 100 (142 against 110) and level at turn 125 (169 against 170), then fell behind after the capture (161 against 223 at turn 150). The heal read worked: both sessions log `Threat map: combat heal CombatHeal(city_garrison=20.0, outer_defences=10.0, outer_defence_cooldown=3.0)` and there is no `Combat heal read failed` warning (the values equal the table fallback, so the log cannot tell a read from the fallback by value alone). Two builds were resumed: Thessalonica turn 111 and Constantinople turn 145, both Settlers.
+
+What went wrong, the regression: `ThreatMap.city_reading` (`src/civ6_ai/threat_map.py`) computes each attacker's damage as `expected_damage(strength, cover)`, where `cover` is the sum of all allied cover on the city tile (city plus units, 125 to 139 here). It treats that sum as one defender's combat strength, so five barbarians come out at 2 to 5 damage a turn and a city is almost never "short" however many hostile units stand around it. Evidence:
+
+| Turn | City | Reading | Result |
+|---|---|---|---|
+| 108 | Thessalonica | 6 hostile, 1 defender, threat 216.3, cover 80.0, damage 27.4: SHORT | the right verdict |
+| 110 to 117 | Thessalonica | 3 to 5 hostile, 1 defender, threat 160 to 209, cover 101 to 147, damage 1.4 to 11.5: not short | built a Trader and a Campus district; captured by barbarians on turn 129 (`city_lost`, cause `capture`) |
+| 120 | Constantinople | threat 223 against cover 125, damage 4.5: not short | built Traders |
+
+Consequences seen in the run: the army fell to 2 combat units from about turn 85 while 6 to 9 barbarians were near; `camp_orders` was 0 all game and the camp at (55,7), known since turn 61, was never attacked; 7 settlers created but only 1 used for a city; settling holds were "escort could not move" 24 times and "every route passes a hostile unit" 22 times, with `no_site` on 67 decisions. Trade routes are chosen by yield with no check for barbarians on the path (8 of 36 used). The short verdicts that did fire were right on spot checks (turn 14: 3 hostile, damage 45.2 against heal 20, cover 23.0; turn 34: threat 74.9, cover 21.9, damage 88.5), and the not-short ones with a real garrison near few units were right too (turn 12: one Warrior against two defenders; turn 52: 3 hostile, 2 in the city, damage 10.2), so the fault is summed cover against many attackers, not the idea. Top-3 production logging works, for example: `Constantinople options: UNIT_SLINGER 21.3, UNIT_WARRIOR 20.0, BUILDING_MONUMENT 1.5`. A follow-up issue is filed for the cover fix.
+
 ## Run 19: turns 1 to 150, a fresh 150-turn run from STD_T1_03 (Byzantium) (2026-11-18)
 
 STD_T1_03 on main from c299773, log `20261118T045839Z`, `--turns 150` (no `--save-at`), console in `runs/run35.out`. One session, no resume: stopped on `turn_limit` after 2,996 s with no handler errors and no blockers (the Run 18 "Unit needs orders" stop did not recur; settling found a site on 59 of 60 decisions). Decision time mean 12.1 s, median 11.6 s, p90 16.1 s, max 48.6 s; end-turn wait mean 7.9 s; total per turn mean 20.0 s, max 55.1 s. G1 gate clean, 3 warnings (gold: nothing bought on 88% of turns above the reserve; builders: 12% of builder actions refused; one Dark Age, the Ancient Era at 1 point against a Dark threshold of 9). $0.00 in model spend.
@@ -59,7 +91,7 @@ CivBench gap table: turn 100 -199 (LLM median -129, AI median -144), turn 150 -2
 |---|---|
 | Settling | 60 decisions: move 26, escort_move 12, hold 7, found 6, flee 4, escort_gather 4, no_site 1 (turn 42, "no acceptable site on the revealed map"). The holds were "the escort could not move" (6) and "route is threatened, so the escort joins first" (1), mostly turns 43 to 50 while barbarians were near; city 2 came only on turn 48. |
 | Barbarians | Per-turn counters summed: `camps_gone` 3, `kills_barb` 38, `attacks_barb` 88, `camp_orders` 99. Barbarians near on 65 early turns (from turn 5); 10 of 65 had no spare unit and 23 of 55 had a spare unit but no attack or camp order (both within the gate). Several camp orders were refused (blocked tile, water tile). |
-| Faith effectiveness | "no data" (no faith lines judged), no failure. Faith was saved toward Artemisia (Great Admiral, 550) at about 4 a turn, 290 held at turn 150. No Holy Site was ever started ("no HOLY_SITE (never started)"; also no Campus, Commercial Hub or Theater). |
+| Faith effectiveness | "no data" (no faith lines judged), no failure. Faith was saved toward Artemisia (Great Admiral, 550) at about 4 a turn, 290 held at turn 150. No Holy Site was ever started ("no HOLY_SITE (never started)"). Correction (Run 20): Run 19 did complete Commercial Hubs (turns 89 in Constantinople and 141 in Amaseia), a Diplomatic Quarter (114) and an Industrial Zone (147); what it lacked was a Campus, Theater and Holy Site (four Campuses were started and abandoned through defence switches). |
 | Handler errors | None. |
 
 ## Run 18: turns 1 to 150, a fresh 150-turn run from STD_T1_02 (Khmer), stopped once and resumed (2026-11-17)

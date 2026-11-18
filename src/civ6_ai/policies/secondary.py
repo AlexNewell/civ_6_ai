@@ -34,6 +34,7 @@ from typing import Any, Protocol
 from civ6_ai.blockers import Blocker, BlockerGame, BlockerType, move_succeeded
 from civ6_ai.policies.game_data import REPLACES
 from civ6_ai.state import GameReads, Unit, read_units
+from civ6_ai.state.reader import hex_distance
 
 log = logging.getLogger(__name__)
 
@@ -49,6 +50,7 @@ _YIELD_LABELS = {
 _YIELD_PATTERN = re.compile(r"(Food|Prod|Gold|Sci|Cul|Faith):(-?\d+(?:\.\d+)?)")
 
 MAX_DESTINATIONS = 4  # Routes tried per trader per turn. Every refusal costs a call.
+TRADE_BLOCKED_TURNS = 5  # Production holds off Traders this long after a held trader.
 TRADE_WAIT_TURNS = 3  # A trader with nowhere to go is left alone this long.
 MAX_BELIEF_TRIES = 3
 MAX_RECRUITS = 6  # Recruits per call. A refused person is skipped, so this only bounds a loop.
@@ -107,6 +109,9 @@ class SecondaryWeights:
     gp_admiral: float = 0.5
     pantheon_min_faith: float = 10.0  # Below this the pantheon isn't tried outside a blocker.
     retry_turns: int = 3  # Wait after a pantheon the game didn't accept.
+    # Highest net threat (threat plus fog, less our cover) allowed on any tile of a trade route's
+    # estimated path (issue 269). A camp's strength is 15 at its own tile, fading with distance.
+    route_danger_max: float = 5.0
 
     def __post_init__(self) -> None:
         for item in fields(self):
@@ -148,6 +153,55 @@ def score_destination(dest: Any, weights: SecondaryWeights) -> float:
     if dest.is_city_state and dest.has_quest:
         value += weights.quest
     return value
+
+
+def line_tiles(x1: int, y1: int, x2: int, y2: int, map_width: int | None) -> list[tuple[int, int]]:
+    """Tiles on the straight hex line from one tile to another, both ends included.
+
+    A stand-in for the trade path, which the game picks. Odd rows sit half a tile east; x wraps,
+    so the line takes the shorter way round the seam.
+    """
+    east = x2
+    if map_width is not None:
+        east = min(
+            (x2 + k * map_width for k in (-1, 0, 1)),
+            key=lambda e: hex_distance(x1, y1, e, y2, None),
+        )
+
+    def cube(x: int, y: int) -> tuple[float, float, float]:
+        q = x - (y - (y & 1)) // 2
+        return float(q), float(-q - y), float(y)
+
+    a, b = cube(x1, y1), cube(east, y2)
+    steps = hex_distance(x1, y1, east, y2, None)
+    tiles: list[tuple[int, int]] = []
+    for i in range(steps + 1):
+        t = i / steps if steps else 0.0
+        cx, cy, cz = (a[k] + (b[k] - a[k]) * t for k in range(3))
+        rx, ry, rz = round(cx), round(cy), round(cz)
+        dx, dy, dz = abs(rx - cx), abs(ry - cy), abs(rz - cz)
+        if dx > dy and dx > dz:
+            rx = -ry - rz
+        elif dy > dz:
+            ry = -rx - rz
+        else:
+            rz = -rx - ry
+        col = rx + (rz - (rz & 1)) // 2
+        tile = (col % map_width if map_width else col, rz)
+        if not tiles or tiles[-1] != tile:
+            tiles.append(tile)
+    return tiles
+
+
+def route_danger(field_map: Any, x1: int, y1: int, x2: int, y2: int, turn: int) -> float:
+    """The worst net threat on the estimated path of a route, 0.0 with no map."""
+    if field_map is None:
+        return 0.0
+    width = field_map.settings.map_width
+    return max(
+        (field_map.net_at(x, y, turn) for x, y in line_tiles(x1, y1, x2, y2, width)),
+        default=0.0,
+    )
 
 
 def rank_destinations(
@@ -299,7 +353,12 @@ class SecondaryPolicy:
 
     weights: SecondaryWeights = field(default_factory=SecondaryWeights)
     name: str = "secondary"
+    map: Any = None  # The threat map (a `ThreatMap`), or None: routes are not checked.
     _trade_wait: dict[int, int] = field(default_factory=dict, init=False, repr=False)
+    # Trader id -> (x, y, on a route) last turn, to tell when one is lost.
+    _traders: dict[int, tuple[int, int, bool]] = field(default_factory=dict, init=False, repr=False)
+    traders_lost: int = field(default=0, init=False)
+    _blocked_turn: int = field(default=-10_000, init=False, repr=False)
     _great: dict[int, _GreatPersonState] = field(default_factory=dict, init=False, repr=False)
     # Every great person on the map: id -> (name, kind, turn first seen, idle already logged).
     _great_seen: dict[int, tuple[str, str, int, bool]] = field(
@@ -656,9 +715,30 @@ class SecondaryPolicy:
             [c.civ_name for c in civs if c.has_met] + [s.name for s in states.city_states]
         )
 
+    def trade_blocked(self, turn: int) -> bool:
+        """True while every route a trader could take was too dangerous (read by production)."""
+        return 0 <= turn - self._blocked_turn <= TRADE_BLOCKED_TURNS
+
+    def _note_losses(self, status: Any, turn: int) -> None:
+        """Log each trader that was there last turn and is gone now (captured or killed)."""
+        seen = {t.unit_id for t in status.traders}
+        for uid, (x, y, on_route) in sorted(self._traders.items()):
+            if uid not in seen:
+                self.traders_lost += 1
+                log.warning(
+                    "Trader %d lost on turn %d (last at (%d,%d), %s)",
+                    uid,
+                    turn,
+                    x,
+                    y,
+                    "on a route" if on_route else "idle",
+                )
+        self._traders = {t.unit_id: (t.x, t.y, bool(t.on_route)) for t in status.traders}
+
     async def _trade(self, game: SecondaryGame, turn: int) -> None:
         """Send each idle trader on a route. Capacity is counted down as routes start."""
         status = await game.get_trade_routes()
+        self._note_losses(status, turn)
         seen = {t.unit_id for t in status.traders}
         self._trade_wait = {k: v for k, v in self._trade_wait.items() if k in seen}
         idle = sorted(
@@ -677,11 +757,37 @@ class SecondaryPolicy:
             index = trader.unit_id % 65536
             ranked = rank_destinations(await game.get_trade_destinations(index), self.weights, met)
             ranked = [d for d in ranked if (trader.x, trader.y, d.x, d.y) not in used]
+            dangers = {
+                (d.x, d.y): route_danger(self.map, trader.x, trader.y, d.x, d.y, turn)
+                for d in ranked
+            }
+            limit = self.weights.route_danger_max
+            safe = [d for d in ranked if dangers[(d.x, d.y)] <= limit]
+            if ranked and not safe:
+                self._blocked_turn = turn
+                log.info(
+                    "Trader %d held: all %d routes pass danger above %.1f (least %.1f)",
+                    trader.unit_id,
+                    len(ranked),
+                    limit,
+                    min(dangers.values()),
+                )
+            ranked = safe
             started = False
             for dest in ranked[:MAX_DESTINATIONS]:
                 result = await game.make_trade_route(index, dest.x, dest.y)
                 if "TRADE_ROUTE_STARTED" in result:
                     used.add((trader.x, trader.y, dest.x, dest.y))
+                    self._blocked_turn = -10_000
+                    log.info(
+                        "Trade route started: trader %d to %s (%d,%d), yield %s, danger %.1f",
+                        trader.unit_id,
+                        dest.city_name,
+                        dest.x,
+                        dest.y,
+                        dest.origin_yields or "none",
+                        dangers[(dest.x, dest.y)],
+                    )
                     free -= 1
                     started = True
                     break

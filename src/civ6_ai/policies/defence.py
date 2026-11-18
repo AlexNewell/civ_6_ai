@@ -108,12 +108,16 @@ class DefenceState:
     wary: tuple[str, ...] = ()  # Rivals at peace with us that are much stronger. See `wary_of`.
     # The shared threat map, or None (`--no-threat-map`): `short` is then the head count.
     map: Any = field(default=None, repr=False)
+    # The camp the military policy means to clear (`military.CampPlan`) or None. Issue 268:
+    # production reads it to build the units the force lacks.
+    camp_plan: Any = None
 
     def reset(self, turn: int, cities: dict[int, CityThreat], wary: tuple[str, ...] = ()) -> None:
         self.turn = turn
         self.cities = cities
         self.notes = {}
         self.wary = wary
+        self.camp_plan = None  # Made again by the military policy, which runs after this.
 
     @property
     def any(self) -> bool:

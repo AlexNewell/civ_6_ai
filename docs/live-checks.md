@@ -64,7 +64,7 @@ Second, third and fourth cities on turns 21, 54 and 77 (fifth on 96, a sixth on 
 | PR 252, score gap table | Pass: printed at the end, rows for turns 100 and 150 only. |
 | PR 253, wonder_completed beside building_completed | Pass: turn 98, Tikal, both `building_completed` and `wonder_completed` for ORACLE. |
 | PR 254, victory_threat line each turn, age 0-4, science_rank | Pass: 150 lines, ages 0 to 4 in turn with the age counter cycling, `science_rank=3/3` at turn 146, one religious flag (Sumeria). |
-| PR 241, threat map camps acted on | Pass: `camp_orders` above 0 on 19 turns and 72 `military_decision` lines with `"action": "camp"`; no camp was destroyed (`kills_barb` stayed 0), so acting on a camp does not yet mean clearing it. |
+| PR 241, threat map camps acted on | Pass: `camp_orders` above 0 on 19 turns and 72 `military_decision` lines with `"action": "camp"`; `kills_barb` stayed 0, which read as no camp cleared and no barbarian killed. Reread (issue 238): the metric was blind, not the play. Two of the three camps left the map after a unit stepped onto the emptied tile (turn 43 at (69,27), era score +3 next turn; turn 120 at (59,36)); the third stood 15 tiles from a city, past the 13-tile limit. Kills were lost because only a reply saying "killed" counted, and the game's replies carry an estimate ("Post-combat: ~0/46"); a later attack on the same tile got `NO_ENEMY`. The offense line now counts estimated kills and `camps_gone`. |
 | PR 241, threat map dumps | Pass: `_threatmap.jsonl` has 150 lines, with camps (strength 45, ages, city distance) and unit sources. |
 | PR 237, era score in turn lines | Pass: `era_score`, `era_dark` and `era_golden` in all 150 rows (4, 15, 33, 44, 53, 64 on turns 25 to 150). |
 

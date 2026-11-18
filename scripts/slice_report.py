@@ -75,7 +75,9 @@ if bot_log.exists():
             f"{sum(u.get('target_from_map', 0) for u in uses)}, "
             f"muster moves {sum(u.get('muster_moves', 0) for u in uses)}, "
             f"waits {sum(u.get('muster_waits', 0) for u in uses)}, "
-            f"missions released {sum(u.get('missions_released', 0) for u in uses)}"
+            f"missions released {sum(u.get('missions_released', 0) for u in uses)}, "
+            f"camps gone {sum(o.get('camps_gone', 0) for o in offense)}, "
+            f"barbarian kills {sum(o.get('kills_barb', 0) for o in offense)}"
         )
 for c in run_checks(load_run([path])):
     if c.policy in ("offense", "boosts", "era score"):

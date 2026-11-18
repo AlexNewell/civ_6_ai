@@ -253,3 +253,28 @@ def test_the_map_judges_by_the_heal_it_was_given():
     assert m.city_reading(*tile, TURN).net > 0
     m.heal = CombatHeal(city_garrison=500.0)
     assert m.city_reading(*tile, TURN).net == 0
+
+
+def test_only_a_rivals_units_near_keeps_the_head_count():
+    """Rival units at peace are not sources on the map, so the map cannot judge them."""
+    m = make_map((5, 5), 50.0, [])
+    found = CityThreat(
+        ALPHA, "City", 5, 5, ("rival_units:1",), 1, 1, 0, reading=m.city_reading(5, 5, TURN)
+    )
+    assert found.short  # One defender, two wanted.
+
+
+def test_killing_the_last_threat_removes_the_city_unless_something_else_marks_it():
+    tile, cover, units = ((5, 5), 50.0, [("UNIT_SCOUT", 5, 6, 10)])
+    m = make_map(tile, cover, units)
+    state = DefenceState(map=m)
+    state.reset(TURN, {ALPHA: threat_for(m, tile, units)})
+    state.forget_killed([(5, 6)])
+    assert not state.any
+    at_war = CityThreat(
+        ALPHA, "City", 5, 5, ("war:Rome", "hostile_units:1"), 1, 1, 0,
+        reading=m.city_reading(5, 5, TURN), hostile_tiles=((5, 6),),
+    )  # fmt: skip
+    state.reset(TURN, {ALPHA: at_war})
+    state.forget_killed([(5, 6)])
+    assert state.cities[ALPHA].reasons == ("war:Rome",)

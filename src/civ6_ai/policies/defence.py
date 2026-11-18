@@ -60,12 +60,12 @@ class CityThreat:
     # The threat map's view of the city (`threat_map.CityReading`), or None with no map (or when
     # the policies are run without it). When set, it decides `short` where hostile units are near.
     reading: Any = None
-    margin: float = (
-        0.0  # Hit points a turn over healing the map may show before the city counts as short.
-    )
-    hostile_tiles: tuple[
-        tuple[int, int], ...
-    ] = ()  # Where the near units stood, to drop killed ones.
+    # Hit points a turn over healing the map may show before the city counts as short.
+    margin: float = 0.0
+    # Where the near hostile units (the map's own sources) stood, to drop killed ones. Units of a
+    # rival at peace are in `hostile_units` but not here: the map does not hold them, so a city
+    # with only those near falls back to the head count.
+    hostile_tiles: tuple[tuple[int, int], ...] = ()
 
     @property
     def defenders(self) -> int:
@@ -93,7 +93,7 @@ class CityThreat:
         With no reading, or no unit near (a war alone), the head count stays: a city at war
         wants two.
         """
-        if self.reading is not None and self.hostile_units > 0:
+        if self.reading is not None and self.hostile_tiles:
             return self.reading.net > self.margin
         return self.defenders < self.wanted
 
@@ -136,7 +136,7 @@ class DefenceState:
     def mapped_ids(self) -> frozenset[int]:
         """Cities whose `short` the threat map decided (a reading, and a hostile unit near)."""
         return frozenset(
-            i for i, c in self.cities.items() if c.reading is not None and c.hostile_units > 0
+            i for i, c in self.cities.items() if c.reading is not None and bool(c.hostile_tiles)
         )
 
     def is_threatened(self, city_id: int) -> bool:
@@ -163,13 +163,17 @@ class DefenceState:
             return
         for city_id, found in list(self.cities.items()):
             alive = tuple(t for t in found.hostile_tiles if t not in gone)
-            if len(alive) == len(found.hostile_tiles):
+            dead = len(found.hostile_tiles) - len(alive)
+            if not dead:
                 continue
-            updated = replace(
-                found,
-                hostile_units=found.hostile_units - (len(found.hostile_tiles) - len(alive)),
-                hostile_tiles=alive,
-            )
+            left = found.hostile_units - dead
+            reasons = tuple(r for r in found.reasons if not r.startswith("hostile_units:"))
+            if alive:
+                reasons = (*reasons, f"hostile_units:{len(alive)}")
+            if not reasons:  # The last threat died and nothing else marks the city.
+                del self.cities[city_id]
+                continue
+            updated = replace(found, hostile_units=left, hostile_tiles=alive, reasons=reasons)
             self.cities[city_id] = replace(updated, reading=self._read(updated))
 
     def _read(self, city: CityThreat) -> Any:
@@ -264,7 +268,7 @@ def assess(
             beside,
             reading=threat_map.city_reading(city.x, city.y, turn) if threat_map else None,
             margin=threat_map.settings.short_margin if threat_map else 0.0,
-            hostile_tiles=tuple((t.x, t.y) for t in near),
+            hostile_tiles=tuple((t.x, t.y) for t in near if t.hostile),
         )
     return found
 

@@ -897,3 +897,24 @@ def test_one_scout_wanted_is_not_bought_by_every_city():
     run(game)
     scouts = [a for a in game.actions if a[0] == "buy" and a[3] == "UNIT_SCOUT"]
     assert len(scouts) == 1
+
+
+def test_gold_buys_the_best_matchup_unit_while_the_camp_force_is_short():
+    from civ6_ai.policies.defence import DefenceState
+    from civ6_ai.policies.military import CampPlan
+
+    state = DefenceState()
+    # Two units short against Men-at-Arms (45): an Archer outmatches one, a Heavy Chariot does not.
+    state.camp_plan = CampPlan((13, 10), 3, 1, 102.0, 40.0, 2, 2, "any", 10, 0.1, defender=45.0)
+    game = GoldGame(
+        gold_amount=500,
+        cities=[fx.city_info(currently_building="BUILDING_MONUMENT", garrison_unit="UNIT_WARRIOR")],
+        production=[
+            option("UNIT_HEAVY_CHARIOT", 90, "UNIT", cost=65),
+            option("UNIT_ARCHER", 130, "UNIT", cost=60),
+        ],
+        units=[fx.unit_info(unit_type="UNIT_WARRIOR"), fx.unit_info(unit_id=2, unit_index=2)],
+    )
+    asyncio.run(GoldPolicy(defence=state).run(game))
+    assert ("buy", 65536, "UNIT", "UNIT_ARCHER") in game.actions
+    assert ("buy", 65536, "UNIT", "UNIT_HEAVY_CHARIOT") not in game.actions

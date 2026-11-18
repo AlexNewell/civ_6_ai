@@ -1325,3 +1325,54 @@ def test_a_melee_demand_is_met_by_melee_units_only():
     assert ctx.after_choosing("UNIT_ARCHER").camp_units == 1  # An Archer does not fill it.
     assert ctx.after_choosing("UNIT_WARRIOR").camp_units == 0
     assert camp_menu_score("UNIT_ARCHER", camp_units=1, camp_wants="melee") == 0.0
+
+
+# ----- camp units by matchup and a cap on the share of cities (issue 275) -----
+
+
+def test_a_camp_unit_is_chosen_by_its_matchup_against_the_strongest_defender():
+    # Iteration 1: Men-at-Arms (45) defended the camp and our main unit was the Heavy Chariot (28).
+    ctx = dict(camp_units=2, camp_wants="any", camp_defender=45.0)
+    chariot = camp_menu_score("UNIT_HEAVY_CHARIOT", **ctx)
+    archer = camp_menu_score("UNIT_ARCHER", **ctx)
+    warrior = camp_menu_score("UNIT_WARRIOR", **ctx)
+    assert chariot == 0.0 and warrior == 0.0  # Both lose one-on-one and nothing covers them.
+    assert archer > 17.0  # Shoots and takes nothing back from a melee defender.
+    # The force has no melee unit to take the tile: the chariot is then wanted.
+    assert camp_menu_score("UNIT_HEAVY_CHARIOT", **{**ctx, "camp_wants": "melee"}) > 17.0
+
+
+def test_a_ranged_defender_makes_a_ranged_camp_unit_worth_less():
+    ctx = dict(camp_units=2, camp_wants="any", camp_defender=30.0)
+    plain = camp_menu_score("UNIT_ARCHER", **ctx)
+    hit_back = camp_menu_score("UNIT_ARCHER", **ctx, camp_defender_ranged=40.0)
+    assert plain > hit_back > 0
+
+
+def test_with_no_defender_known_a_camp_unit_scores_by_strength_as_before():
+    assert camp_menu_score("UNIT_WARRIOR", camp_units=1, camp_wants="melee") >= 15.0
+
+
+def test_only_a_share_of_the_cities_builds_camp_units():
+    base = dict(camp_units=3, camp_wants="any")
+    free = camp_menu_score("UNIT_WARRIOR", **base)
+    held = camp_menu_score("UNIT_WARRIOR", **base, camp_building=1)  # Two cities, share 0.5.
+    assert free > 0 and held == 0.0
+    ctx = ProductionContext(turn=100, num_cities=2, camp_units=3, camp_wants="any")
+    assert ctx.after_choosing("UNIT_WARRIOR").camp_building == 1
+    assert ctx.after_choosing("BUILDING_LIBRARY").camp_building == 0
+    from civ6_ai.policies.production import camp_share_cap
+
+    assert [camp_share_cap(n, 0.5) for n in (1, 2, 3, 4, 6)] == [1, 1, 1, 2, 3]
+
+
+def test_a_city_kept_off_the_camp_builds_something_else():
+    ctx = ProductionContext(
+        turn=100, num_cities=2, builders=2, recon=1, army=4,
+        camp_units=3, camp_wants="any", camp_building=1,
+    )  # fmt: skip
+    options = [option("UNIT", "UNIT_WARRIOR"), option("BUILDING", "BUILDING_LIBRARY")]
+    ranked = rank_production(city(), options, ctx, ProductionWeights())
+    assert ranked[0].item == "BUILDING_LIBRARY"
+    free = replace(ctx, camp_building=0)
+    assert rank_production(city(), options, free, ProductionWeights())[0].item == "UNIT_WARRIOR"

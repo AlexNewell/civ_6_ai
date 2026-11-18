@@ -48,6 +48,7 @@ from civ6_ai.policies.growth import (
     food_multiplier,
     housing_multiplier,
 )
+from civ6_ai.policies.military import MilitaryWeights, camp_matchup
 from civ6_ai.state import City, Empire, ProductionChoice, Unit
 from civ6_ai.state import read_cities as _read_cities
 from civ6_ai.state import read_empire as _read_empire
@@ -71,6 +72,10 @@ _URGENT_SCALE = 10.0
 _FINISHING_TURNS = 2  # A build this close to done is let finish.
 _FIRST_SETTLER_TURNS = 45  # No builders before the first settler until this turn.
 _CAMP_UNIT_SCORE = 17.0  # A unit for a camp force, while one is short (issue 268).
+_CAMP_ODDS_CAP = 3.0  # Odds above this against a camp's defender are no better a pick.
+_CAMP_COST_BASE = 60.0  # An Archer's cost: the unit the matchup per cost is scaled by.
+_CAMP_MATCHUP_SCORE = 8.0  # The most the matchup adds to a camp unit's score.
+_MATCHUP_WEIGHTS = MilitaryWeights()
 _CAMP_CITY_REACH = 14  # Matches `MilitarySettings.camp_reach`.
 _EARLY_TURNS = 60  # Turns in which a city with no garrison should get one first.
 
@@ -99,6 +104,9 @@ class ProductionWeights:
     # The army floor: combat units kept per city. Below it, military units score above an ordinary
     # building even when no city is short; at it, military stops scoring.
     army_per_city: float = 1.5
+    # Issue 275: while a camp's force is short, at most this share of the cities (rounded down, at
+    # least one) build units for it, so districts and settlers keep running in the rest.
+    camp_share: float = 0.5
     # Turns a one-city empire holds back builders to put the first settler first. 0 turns it off.
     builder_hold_turns: int = _FIRST_SETTLER_TURNS
 
@@ -135,6 +143,11 @@ class ProductionContext:
     camp_units: int = 0
     camp_wants: str = ""
     camp_target: tuple[int, int] | None = None  # The camp, so only a city in reach builds.
+    # The strongest defender seen at the camp (melee and ranged strength), for the matchup; and
+    # how many cities are already building a camp unit, for the share cap (issue 275).
+    camp_defender: float = 0.0
+    camp_defender_ranged: float = 0.0
+    camp_building: int = 0
     sites_ok: bool = True  # False when settling found no safe site to send a settler to.
     idle_builders: int = 0  # Builders that found no job on offer the last time they ran (1.45).
     spare_jobs: int | None = None  # Jobs no builder holds; None when not known this turn.
@@ -155,7 +168,11 @@ class ProductionContext:
         # A ranged unit cannot take the camp tile, so it does not meet a demand for a melee one.
         fills = not (self.camp_wants == "melee" and stats is not None and stats[4] == "RANGED")
         if "army" in kinds and counted.camp_units > 0 and fills:
-            counted = replace(counted, camp_units=counted.camp_units - 1)
+            counted = replace(
+                counted,
+                camp_units=counted.camp_units - 1,
+                camp_building=counted.camp_building + 1,
+            )
         if orders and "builders" in kinds and counted.spare_jobs is not None:
             counted = replace(counted, spare_jobs=max(0, counted.spare_jobs - 1))
         if item.startswith("DISTRICT_"):  # A district being built counts, so two cities don't.
@@ -227,7 +244,12 @@ def build_context(
     # so it is set after those are counted; only builds under way count off.
     if plan is not None:
         ctx = replace(
-            ctx, camp_units=plan.units_wanted, camp_wants=plan.wants, camp_target=plan.target
+            ctx,
+            camp_units=plan.units_wanted,
+            camp_wants=plan.wants,
+            camp_target=plan.target,
+            camp_defender=getattr(plan, "defender", 0.0),
+            camp_defender_ranged=getattr(plan, "defender_ranged", 0.0),
         )
     for item in in_progress:
         ctx = ctx.after_choosing(item)
@@ -604,11 +626,45 @@ def _unit_score(
         # Below the floor (issue 267) a unit outranks an ordinary building, so the floor is reached
         # even when no city is short: a threat that arrives finds something to fight with.
         floor = (_ARMY_FLOOR_SCORE + min(wanted, 4.0)) * w.military + strength / 20.0
-    return max(floor, _camp_score(city, stats[4], strength, ctx, w))
+    return max(floor, _camp_score(city, item, stats[4], strength, ctx, w))
+
+
+def camp_share_cap(num_cities: int, share: float) -> int:
+    """Cities that may build camp units at once: the share of them, rounded down, at least one."""
+    return max(1, int(num_cities * share))
+
+
+def camp_unit_value(
+    item: str, unit_class: str, cost: float, ctx: ProductionContext
+) -> float | None:
+    """What a unit is worth to the camp force: its odds against the strongest known defender, per
+    production cost (issue 275), or None when no defender has been seen (then strength decides).
+
+    The odds are `expected_damage` both ways (`military.camp_matchup`), capped at 3 to 1 and set
+    against a unit costing 60. A melee unit that loses one-on-one is worth 0, unless the force
+    lacks one to take the tile.
+    """
+    if ctx.camp_defender <= 0:
+        return None
+    odds = camp_matchup(
+        item, ctx.camp_defender, ctx.camp_defender_ranged, _MATCHUP_WEIGHTS, ctx.camp_wants
+    )
+    if odds is None:
+        return None
+    if ctx.camp_wants == "melee" and COMBAT_UNITS[item][1] == 0:
+        odds = _CAMP_ODDS_CAP  # The tile needs a unit standing on it, not one that wins the duel.
+    if odds <= 0:
+        return 0.0
+    return min(odds, _CAMP_ODDS_CAP) / _CAMP_ODDS_CAP * min(1.5, _CAMP_COST_BASE / max(cost, 1.0))
 
 
 def _camp_score(
-    city: City, unit_class: str, strength: float, ctx: ProductionContext, w: ProductionWeights
+    city: City,
+    item: str,
+    unit_class: str,
+    strength: float,
+    ctx: ProductionContext,
+    w: ProductionWeights,
 ) -> float:
     """A unit for the force that clears a nearby camp (issue 268), while one is still short.
 
@@ -625,6 +681,10 @@ def _camp_score(
         hex_distance(city.x, city.y, *ctx.camp_target) > _CAMP_CITY_REACH
     ):
         return 0.0
+    # Only a share of the cities builds for the camp, so the rest keep their districts and
+    # settlers; a city already building a camp unit is counted in `camp_building`.
+    if ctx.camp_building >= camp_share_cap(ctx.num_cities, w.camp_share):
+        return 0.0
     ranged = unit_class == "RANGED"
     lift = 0.0
     if ctx.camp_wants == "melee":
@@ -633,6 +693,11 @@ def _camp_score(
         lift = 2.0
     elif ctx.camp_wants == "ranged":
         lift = 2.0 if ranged else -1.0
+    worth = camp_unit_value(item, unit_class, float(COMBAT_UNITS[item][3]), ctx)
+    if worth is not None:
+        if worth <= 0:
+            return 0.0  # It loses to the defender one-on-one, and the force does not need it.
+        return (_CAMP_UNIT_SCORE + lift + _CAMP_MATCHUP_SCORE * worth) * w.military
     return (_CAMP_UNIT_SCORE + lift + strength / 10.0) * w.military
 
 

@@ -51,7 +51,7 @@ import logging
 import math
 import re
 from collections.abc import Iterable, Mapping
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Protocol
 
 from civ6_ai.blockers import Blocker, BlockerType, action_succeeded, move_succeeded
@@ -215,6 +215,13 @@ class MilitarySettings:
     max_camp_turns: int = 8  # Turns spent assaulting one camp before it is set aside.
     camp_travel_turns: int = 20  # Turns a force may take to reach the muster point first.
     camp_retry_turns: int = 30
+    # Issue 275: the need for a camp is the largest seen, kept as the defenders go out of sight and
+    # decaying by this factor a turn (it swung 102, 0, 92, 184, 154, 62, 184 with sightings).
+    camp_need_decay: float = 0.97
+    camp_pullback_hp: float = 0.5  # A unit on a camp mission under this health does not attack.
+    camp_loss_limit: int = 3  # Units lost on a camp mission within `camp_loss_window` turns, with
+    camp_loss_window: int = 10  # no hit on the camp's defenders in that time, end the campaign.
+    camp_suspend_turns: int = 25  # How long such a camp is left alone, so defence comes first.
     # Issue 268: a known camp this close to a city is a goal. Production builds the force that
     # clears it when the spare units fall short (Run 20: a camp 5 tiles off for 70 turns, with
     # nothing spare, so never attacked).
@@ -381,6 +388,11 @@ class CampPlan:
     wants: str  # "melee", "ranged", "any", or "" when the force is enough.
     eta: int  # Turns until the force can strike: the walk, plus the units still to be built.
     rank: float  # Ongoing cost over the cost to clear; the highest ranked camp is the target.
+    # The strongest defenders seen at the camp, remembered while they are out of sight (issue 275):
+    # production picks units by how they match up against these.
+    defender: float = 0.0
+    defender_ranged: float = 0.0
+    committed: bool = False  # The gathered force met the need and is going in.
 
     @property
     def met(self) -> bool:
@@ -404,6 +416,7 @@ def camp_force_ok(
     weights: MilitaryWeights,
     min_units: int = 2,
     need_melee: bool = False,
+    need: float | None = None,
 ) -> bool:
     """True if the units on hand are clearly stronger than the camp's, counting health.
 
@@ -414,7 +427,8 @@ def camp_force_ok(
         return False
     if need_melee and not any(_is_melee(u) for u in ours):
         return False  # Only a unit that closes in takes the camp tile.
-    return _force_total(ours) >= camp_force_needed(defenders, weights)
+    wanted = camp_force_needed(defenders, weights) if need is None else need
+    return _force_total(ours) >= wanted
 
 
 def _force_total(units: Iterable[Unit]) -> float:
@@ -429,11 +443,58 @@ def camp_force_needed(defenders: Iterable[Threat], weights: MilitaryWeights) -> 
     )
 
 
+def remembered_need(
+    previous: tuple[float, int] | None, turn: int, current: float, decay: float
+) -> float:
+    """The need for a camp: the largest estimate seen, decayed slowly (issue 275).
+
+    `previous` is the (need, turn) kept last time. The defenders come and go from sight, so the
+    current estimate alone swung between 0 and 184 and the force never knew what to assemble.
+    """
+    if previous is None:
+        return current
+    kept = previous[0] * decay ** max(0, turn - previous[1])
+    return max(current, kept)
+
+
+def camp_matchup(
+    unit_type: str,
+    defender: float,
+    defender_ranged: float,
+    weights: "MilitaryWeights",
+    wants: str = "",
+) -> float | None:
+    """Expected odds of one unit against the strongest known defender of a camp, or None.
+
+    Dealt damage over damage taken, both from `expected_damage` with the defender's terrain and
+    fortification assumed. A ranged unit takes damage back only from a ranged defender. A melee
+    unit that loses one-on-one (odds under 1) scores 0 unless the force lacks a melee unit to take
+    the tile, which an emptied camp needs of nothing more than standing there (`wants` "melee").
+    None when the table does not know the unit or it cannot fight (siege, scouts).
+    """
+    stats = COMBAT_UNITS.get(unit_type)
+    if stats is None or stats[4] in ("SIEGE", "RECON") or defender <= 0:
+        return None
+    melee, ranged = float(stats[0]), float(stats[1])
+    guard = defender + weights.assumed_defender_bonus
+    if ranged > 0:
+        dealt = expected_damage(ranged, guard)
+        taken = expected_damage(defender_ranged, melee or ranged) if defender_ranged > 0 else 0.0
+        return dealt / max(taken, 1.0)
+    if melee <= 0:
+        return None
+    odds = expected_damage(melee, guard) / max(expected_damage(guard, melee), 1.0)
+    if odds < 1.0 and wants != "melee":
+        return 0.0
+    return odds
+
+
 def plan_camp_force(
     force: Iterable[Unit],
     defenders: Iterable[Threat],
     weights: MilitaryWeights,
     settings: "MilitarySettings",
+    need: float | None = None,
 ) -> tuple[float, float, int, str]:
     """What a camp force lacks: (needed, available, units to build, the kind most wanted).
 
@@ -443,9 +504,9 @@ def plan_camp_force(
     """
     defenders = list(defenders)
     ours = [u for u in force if u.hp >= weights.camp_min_hp * u.max_hp]
-    needed = camp_force_needed(defenders, weights)
+    needed = camp_force_needed(defenders, weights) if need is None else need
     have = _force_total(ours)
-    if camp_force_ok(ours, defenders, weights, settings.camp_min_units, need_melee=True):
+    if camp_force_ok(ours, defenders, weights, settings.camp_min_units, True, needed):
         return needed, have, 0, ""
     gap = max(0.0, needed - have)
     wanted = max(
@@ -596,6 +657,15 @@ class MilitaryPolicy:
         default_factory=dict, init=False, repr=False
     )  # Unit id to the camp it was sent at and the turn.
     _camp_home_scan: int = field(default=-99, init=False, repr=False)
+    # Issue 275. Per camp: (need, strongest melee defender, strongest ranged, turn) kept while the
+    # defenders are out of sight; the turn the force committed; turns units on its mission died;
+    # and the last turn one of our attacks hit its defenders.
+    _camp_memory: dict[tuple[int, int], tuple[float, float, float, int]] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _committed: dict[tuple[int, int], int] = field(default_factory=dict, init=False, repr=False)
+    _losses: dict[tuple[int, int], list[int]] = field(default_factory=dict, init=False, repr=False)
+    _camp_hit: dict[tuple[int, int], int] = field(default_factory=dict, init=False, repr=False)
     # The threat state (see `defence.DefenceState`), or None to play without it.
     defence: Any = field(default=None, repr=False)
 
@@ -813,6 +883,17 @@ class MilitaryPolicy:
     def _forget(self, units: Iterable[Unit], turn: int) -> None:
         """Drop what is kept for units that are gone, have moved or healed, and old set-asides."""
         by_id = {u.unit_id: u for u in units}
+        for uid, (camp, sent) in list(self._mission.items()):
+            if uid not in by_id:
+                del self._mission[uid]
+                if turn - sent <= self.settings.camp_mission_turns:
+                    self._losses.setdefault(camp, []).append(turn)  # Lost on the way or at it.
+        window = self.settings.camp_loss_window
+        self._losses = {
+            c: [x for x in v if turn - x <= window]
+            for c, v in self._losses.items()
+            if any(turn - x <= window for x in v)
+        }
         self._resting = {
             k: v
             for k, v in self._resting.items()
@@ -1278,6 +1359,11 @@ class MilitaryPolicy:
         t.hp[unit.unit_id] = max(0.0, t.hp.get(unit.unit_id, unit.hp) - odds.taken)  # Expected.
         self._fortified.pop(unit.unit_id, None)  # Attacking ends a fortification.
         self._record_hit(t, where, result, odds.dealt, target.hp)
+        for camp in self._known_camps():
+            if hex_distance(*where, *camp, self.settings.map_width) <= (
+                self.settings.camp_defender_radius
+            ):
+                self._camp_hit[camp] = t.turn  # The campaign is doing damage.
         self._log(t, unit, "attack", reason, target=where, odds=asdict(odds), result=result)
         return True
 
@@ -1288,6 +1374,13 @@ class MilitaryPolicy:
         floor = self._floor_for(t, unit)
         used = w.min_hp_after_attack if floor is None else floor
         hurt = unit.hp < w.heal_below * unit.max_hp
+        sent = self._mission.get(unit.unit_id)
+        if (
+            sent is not None
+            and t.turn - sent[1] <= s.camp_mission_turns
+            and unit.hp < s.camp_pullback_hp * unit.max_hp
+        ):
+            return []  # Issue 275: a wounded unit of the campaign pulls back, sure kill or not.
         v = w.damage_variance
         found = []
         for target in unit.targets:
@@ -1681,6 +1774,7 @@ class MilitaryPolicy:
         own = set(self._camps)
         if self.threat_map is not None:
             t.map_use["camps_only_in_map"] = len(known - own)
+        self._suspend_failing(t, sorted(known))
         camps = [
             c
             for c in sorted(known)
@@ -1698,15 +1792,27 @@ class MilitaryPolicy:
         if where not in own:
             t.map_use["target_from_map"] = 1  # The map alone put this camp on the list.
         defenders = self._camp_defenders(t, where)
+        need = self._remember(t, where, defenders)[0]
         force = [u for u in spare if hex_distance(u.x, u.y, *where, s.map_width) <= s.camp_reach]
-        if not camp_force_ok(force, defenders, s.weights, s.camp_min_units, need_melee=True):
+        if not camp_force_ok(force, defenders, s.weights, s.camp_min_units, True, need):
+            self._committed.pop(where, None)
             return
         muster = s.camp_muster_radius
-        gathered = sum(1 for u in force if hex_distance(u.x, u.y, *where, s.map_width) <= muster)
+        # Issue 275: the force gathers at the rally ring, out of the camp's reach, and goes in
+        # together once what is gathered meets the need. A unit never goes in alone.
+        rallied = [u for u in force if hex_distance(u.x, u.y, *where, s.map_width) <= muster]
+        committed = where in self._committed
+        if not committed and camp_force_ok(rallied, defenders, s.weights, s.camp_min_units,
+                                           True, need):  # fmt: skip
+            committed = True
+            self._committed[where] = t.turn
+            t.map_use["camp_committed"] = 1
+        if self.defence is not None and self.defence.camp_plan is not None:
+            self.defence.camp_plan = replace(self.defence.camp_plan, committed=committed)
         # Two limits. The walk to the muster point has its own, longer one (Run 18: a far camp's
         # force took eight turns to arrive, which used up the assault's limit before anyone was
         # there, and 4-9 spare units then sat idle for twenty turns). The assault keeps its own.
-        key = (where, gathered >= s.camp_min_units)
+        key = (where, committed)
         limit = s.max_camp_turns if key[1] else s.camp_travel_turns
         spent = self._camp_turns.get(key, (0, t.turn))[0] + 1
         self._camp_turns[key] = (spent, t.turn)
@@ -1714,6 +1820,7 @@ class MilitaryPolicy:
             self._camp_aside[where] = t.turn + s.camp_retry_turns
             self._camp_turns.pop((where, True), None)
             self._camp_turns.pop((where, False), None)
+            self._committed.pop(where, None)
             return
         occupied = any((b.x, b.y) == where for b in t.threats if b.hostile)
         for unit in sorted(force, key=lambda u: u.unit_id):
@@ -1721,14 +1828,14 @@ class MilitaryPolicy:
             if not self._available(t, unit, "move"):
                 continue
             far = hex_distance(unit.x, unit.y, *where, s.map_width) > muster
-            if not far and gathered < s.camp_min_units:
+            adjacent = hex_distance(unit.x, unit.y, *where, s.map_width) <= 1
+            if not far and not committed and not (adjacent and not occupied):
                 t.acted.add(unit.unit_id)  # Waiting for the rest; not idle, not spare.
                 t.map_use["muster_waits"] = t.map_use.get("muster_waits", 0) + 1
-                self._log(t, unit, "camp", "waiting for the rest of the force", where)
+                self._log(t, unit, "camp", "gathered, waiting for the rest of the force", where)
                 continue
             # Run 15: a move straight onto a camp three tiles off is refused (the game only allows
             # that capture move from beside it), so walk to the tile beside it first.
-            adjacent = hex_distance(unit.x, unit.y, *where, s.map_width) <= 1
             if adjacent and not occupied:
                 goals = [where]
             elif adjacent:
@@ -1765,6 +1872,47 @@ class MilitaryPolicy:
             if unit.unit_id not in t.acted and not out_of_orders:
                 self._refuse(t, unit, "move")
                 self._log(t, unit, "camp", "move refused", where, result=result or "")
+
+    def _remember(
+        self, t: _Turn, camp: tuple[int, int], defenders: list[Threat]
+    ) -> tuple[float, float, float]:
+        """The need and the strongest defenders of a camp, from this turn's sight and the past."""
+        s = self.settings
+        now = camp_force_needed(defenders, s.weights)
+        strong = max((d.combat_strength for d in defenders), default=0.0)
+        ranged = max((d.ranged_strength for d in defenders), default=0.0)
+        old = self._camp_memory.get(camp)
+        decay = s.camp_need_decay ** max(0, t.turn - old[3]) if old is not None else 1.0
+        if old is not None:
+            now = max(now, old[0] * decay)
+            strong = max(strong, old[1] * decay)
+            ranged = max(ranged, old[2] * decay)
+        self._camp_memory[camp] = (now, strong, ranged, t.turn)
+        return now, strong, ranged
+
+    def _suspend_failing(self, t: _Turn, camps: Iterable[tuple[int, int]]) -> None:
+        """End a campaign that keeps losing units and never hurts the camp (issue 275).
+
+        `camp_loss_limit` units lost within `camp_loss_window` turns, with none of our attacks
+        hitting the camp's defenders in that time, sets the camp aside for `camp_suspend_turns`.
+        The force goes home and production stops building for it, so defence comes first.
+        """
+        s = self.settings
+        for camp in camps:
+            lost = self._losses.get(camp, [])
+            if len(lost) < s.camp_loss_limit:
+                continue
+            if t.turn - self._camp_hit.get(camp, -999) <= s.camp_loss_window:
+                continue
+            self._camp_aside[camp] = t.turn + s.camp_suspend_turns
+            self._committed.pop(camp, None)
+            self._losses.pop(camp, None)
+            for uid in [u for u, m in self._mission.items() if m[0] == camp]:
+                del self._mission[uid]
+            log.info(
+                "military_camp_suspended %s",
+                json.dumps({"turn": t.turn, "camp": list(camp), "lost": len(lost)}),
+            )
 
     def _camp_defenders(self, t: _Turn, camp: tuple[int, int]) -> list[Threat]:
         """The barbarians in sight within `camp_defender_radius` of the camp."""
@@ -1811,8 +1959,9 @@ class MilitaryPolicy:
         ranked = sorted(goals, key=lambda c: (-rank(c), self._home_distance(t, c), c))
         target = ranked[0]
         defenders = self._camp_defenders(t, target)
+        need, strong, strong_ranged = self._remember(t, target, defenders)
         force = [u for u in spare if hex_distance(u.x, u.y, *target, s.map_width) <= s.camp_reach]
-        needed, have, wanted, kind = plan_camp_force(force, defenders, w, s)
+        needed, have, wanted, kind = plan_camp_force(force, defenders, w, s, need)
         walk = max(
             (math.ceil(hex_distance(u.x, u.y, *target, s.map_width) / 2) for u in force), default=0
         )
@@ -1827,6 +1976,9 @@ class MilitaryPolicy:
             wants=kind,
             eta=walk + wanted * s.camp_build_turns,
             rank=round(rank(target), 3),
+            defender=round(strong, 1),
+            defender_ranged=round(strong_ranged, 1),
+            committed=target in self._committed,
         )
         if self.defence is not None:
             self.defence.camp_plan = plan
@@ -2012,6 +2164,8 @@ class MilitaryPolicy:
         self._camp_baseline = False
 
     def _note_gone(self, camp: tuple[int, int]) -> None:
+        for kept in (self._camp_memory, self._committed, self._losses, self._camp_hit):
+            kept.pop(camp, None)  # A camp that is gone leaves nothing to remember.
         if camp not in self._gone_noted:
             self._gone_noted.add(camp)
             self._camps_gone += 1

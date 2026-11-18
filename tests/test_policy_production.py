@@ -1299,3 +1299,15 @@ def test_existing_units_do_not_count_off_the_camp_demand():
     units = [build_unit(fx.unit_info(unit_id=i, unit_index=i)) for i in (1, 2, 3, 4)]
     assert build_context(empire, units, defence=state).camp_units == 3
     assert build_context(empire, units, ["UNIT_WARRIOR"], defence=state).camp_units == 2
+
+
+def test_a_city_beyond_the_forces_reach_builds_nothing_for_the_camp():
+    here = city(x=50, y=7)
+    far = city(x=20, y=7)
+    ctx = ProductionContext(
+        turn=100, num_cities=2, army=4, camp_units=2, camp_wants="any", camp_target=(55, 7)
+    )
+    opt = option("UNIT", "UNIT_WARRIOR", 4)
+    w = ProductionWeights()
+    assert score(opt, here, ctx, w) > 0.0
+    assert score(opt, far, ctx, w) == 0.0

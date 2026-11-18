@@ -53,6 +53,7 @@ from civ6_ai.state import read_cities as _read_cities
 from civ6_ai.state import read_empire as _read_empire
 from civ6_ai.state import read_production as _read_production
 from civ6_ai.state import read_units as _read_units
+from civ6_ai.state.reader import hex_distance
 
 log = logging.getLogger(__name__)
 
@@ -70,6 +71,7 @@ _URGENT_SCALE = 10.0
 _FINISHING_TURNS = 2  # A build this close to done is let finish.
 _FIRST_SETTLER_TURNS = 45  # No builders before the first settler until this turn.
 _CAMP_UNIT_SCORE = 17.0  # A unit for a camp force, while one is short (issue 268).
+_CAMP_CITY_REACH = 14  # Matches `MilitarySettings.camp_reach`.
 _EARLY_TURNS = 60  # Turns in which a city with no garrison should get one first.
 
 
@@ -130,6 +132,7 @@ class ProductionContext:
     # and the kind most missing ("melee", "ranged" or "any"). Each army pick counts one off.
     camp_units: int = 0
     camp_wants: str = ""
+    camp_target: tuple[int, int] | None = None  # The camp, so only a city in reach builds.
     sites_ok: bool = True  # False when settling found no safe site to send a settler to.
     idle_builders: int = 0  # Builders that found no job on offer the last time they ran (1.45).
     spare_jobs: int | None = None  # Jobs no builder holds; None when not known this turn.
@@ -218,7 +221,9 @@ def build_context(
     # The plan's count is of units to add to a force it already sized from the units that exist,
     # so it is set after those are counted; only builds under way count off.
     if plan is not None:
-        ctx = replace(ctx, camp_units=plan.units_wanted, camp_wants=plan.wants)
+        ctx = replace(
+            ctx, camp_units=plan.units_wanted, camp_wants=plan.wants, camp_target=plan.target
+        )
     for item in in_progress:
         ctx = ctx.after_choosing(item)
     return ctx
@@ -591,11 +596,11 @@ def _unit_score(
     floor = 0.0
     if wanted > 0:
         floor = min(wanted, 4.0) * 1.5 * w.military + strength / 20.0
-    return max(floor, _camp_score(item, stats[4], strength, ctx, w))
+    return max(floor, _camp_score(city, stats[4], strength, ctx, w))
 
 
 def _camp_score(
-    item: str, unit_class: str, strength: float, ctx: ProductionContext, w: ProductionWeights
+    city: City, unit_class: str, strength: float, ctx: ProductionContext, w: ProductionWeights
 ) -> float:
     """A unit for the force that clears a nearby camp (issue 268), while one is still short.
 
@@ -605,6 +610,12 @@ def _camp_score(
     soften a strong defender, whichever is missing.
     """
     if ctx.camp_units <= 0 or w.military <= 0:
+        return 0.0
+    # A city further than the force is called from (`camp_reach`) builds no unit for it: the unit
+    # would never join the force.
+    if ctx.camp_target is not None and (
+        hex_distance(city.x, city.y, *ctx.camp_target) > _CAMP_CITY_REACH
+    ):
         return 0.0
     ranged = unit_class == "RANGED"
     lift = 0.0

@@ -859,7 +859,7 @@ def offense_checks(run: RunLogs) -> list[Check]:
                 f"{phase}: attacks (turns {first}-{min(last, final)})",
                 barb + other,
                 f"{barb} on barbarians, {other} on others, {(barb + other) * 10 / turns:.1f} "
-                f"per 10 turns; {sum(d['kills_barb'] for d in window)} barbarian kills reported",
+                f"per 10 turns; {sum(d['kills_barb'] for d in window)} barbarian kills counted",
             )
         )
         if phase != "early":

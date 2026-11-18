@@ -413,7 +413,9 @@ class _Turn:
     acted: set[int] = field(default_factory=set)
     calls: dict[int, int] = field(default_factory=dict)
     dead: set[tuple[int, int]] = field(default_factory=set)
-    killed: set[tuple[int, int]] = field(default_factory=set)  # Kills an attack reply reported.
+    # Tiles where a target died: the reply said so, our estimate took its last hit points, or a
+    # later attack found nobody there (Run 16: the game's reply says "killed" only sometimes).
+    killed: set[tuple[int, int]] = field(default_factory=set)
     hp: dict[int, float] = field(default_factory=dict)
     target_hp: dict[tuple[int, int], float] = field(default_factory=dict)
     at_city: dict[tuple[int, int], int] = field(default_factory=dict)
@@ -465,6 +467,9 @@ class MilitaryPolicy:
     # The shared threat map (issue 238), set by the bot's wiring; camps come from it too.
     threat_map: Any = field(default=None, init=False, repr=False)
     _released: int = field(default=0, init=False, repr=False)
+    # Camps marched on that have gone, reported once each on the next offense line.
+    _camps_gone: int = field(default=0, init=False, repr=False)
+    _gone_noted: set[tuple[int, int]] = field(default_factory=set, init=False, repr=False)
     _muster_bad: dict[tuple[int, int], int] = field(default_factory=dict, init=False, repr=False)
     _mission: dict[int, tuple[tuple[int, int], int]] = field(
         default_factory=dict, init=False, repr=False
@@ -523,8 +528,12 @@ class MilitaryPolicy:
         """One line a turn on how much offense there was and what it faced (Run 15).
 
         The effectiveness report reads it to judge barbarian handling in the early game and
-        attacking later. `kills_barb` counts only kills the attack reply reported, so a city
-        strike's kill may be missed. Turns with no combat unit write no line.
+        attacking later. `kills_barb` counts the barbarian targets that died this turn: the reply
+        said "killed", the estimated damage took the last hit points, or a later attack found the
+        tile empty (Run 16 counted only replies saying "killed", which the game rarely prints, and
+        read 0 over a hundred and fifty turns). `camps_gone` counts camps we marched on that are
+        no longer known (taken by a unit stepping on the emptied tile, or seen empty).
+        Turns with no combat unit write no line.
         """
         s = self.settings
         barbs = [b for b in t.threats if b.owner_id == BARBARIAN_ID and b.hostile]
@@ -554,11 +563,13 @@ class MilitaryPolicy:
             "attacks_barb": len(on_barb),
             "attacks_other": len(landed) - len(on_barb),
             "kills_barb": len(t.killed & barb_tiles),
+            "camps_gone": self._camps_gone,
             "camp_orders": sum(1 for d in mine if d.action == "camp" and "refused" not in d.reason),
             "map_use": {**t.map_use, "missions_released": self._released},
             "map_on": self.threat_map is not None,
         }
         self._released = 0
+        self._camps_gone = 0
         log.info("military_offense %s", json.dumps(line, sort_keys=True))
 
     # ----- bookkeeping -----
@@ -777,11 +788,10 @@ class MilitaryPolicy:
         killed = "killed" in result.lower() or "eliminated" in result.lower()
         dealt = _DAMAGE_DEALT.search(result)
         hp_now = t.target_hp.get(where, hp)
-        if killed:
-            t.killed.add(where)
         t.target_hp[where] = 0 if killed else hp_now - (int(dealt[1]) if dealt else fallback)
         if killed or t.target_hp[where] <= 0:
             t.dead.add(where)
+            t.killed.add(where)
 
     # City strikes.
 
@@ -972,6 +982,9 @@ class MilitaryPolicy:
         )
         where = (target.x, target.y)
         if result is None or not attack_landed(result):
+            if result and "NO_ENEMY" in result and where in t.attacked:
+                t.dead.add(where)  # An earlier attack this turn killed it.
+                t.killed.add(where)
             self._refuse(t, unit, "attack")
             self._log(
                 t, unit, "attack", "attack refused",
@@ -1366,6 +1379,9 @@ class MilitaryPolicy:
         t.camp_scanned = True
         await self._scan_camps(game, t, barbarians)
         known = self._known_camps()
+        self._gone_noted -= known  # A camp that is back is a new one.
+        for camp in {m[0] for m in self._mission.values()} - known:
+            self._note_gone(camp)  # Before the force is sent at another camp.
         own = set(self._camps)
         if self.threat_map is not None:
             t.map_use["camps_only_in_map"] = len(known - own)
@@ -1568,6 +1584,7 @@ class MilitaryPolicy:
             # the settler's best site for three turns and cost the fourth city).
             self._mission.pop(unit.unit_id, None)
             self._released += 1  # Reported on the next offense line.
+            self._note_gone(sent[0])
             return False
         near = hex_distance(unit.x, unit.y, *sent[0], s.map_width) <= s.camp_reach
         return near and unit.hp >= s.weights.camp_leave_hp * unit.max_hp
@@ -1626,6 +1643,11 @@ class MilitaryPolicy:
                 elif tile.visible:
                     self._camps.pop((tile.x, tile.y), None)
         self._camp_baseline = False
+
+    def _note_gone(self, camp: tuple[int, int]) -> None:
+        if camp not in self._gone_noted:
+            self._gone_noted.add(camp)
+            self._camps_gone += 1
 
     def _known_camps(self) -> set[tuple[int, int]]:
         known = set(self._camps)

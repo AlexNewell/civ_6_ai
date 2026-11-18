@@ -1653,3 +1653,84 @@ def test_a_fogged_camp_the_threat_map_never_took_is_not_learned():
     run(policy, game)
     assert not camp_orders(policy)
     assert (14, 10) not in policy._camps
+
+
+# ----- Run 16: kills and camps the offense line missed -----
+
+# Real replies of Run 16: the game's reply to a lethal attack carries only an estimate, with no
+# "killed" in it, so the offense line read 0 kills for 150 turns while targets died.
+EST_KILL_RANGED = (
+    "RANGE_ATTACK|target:UNIT_ARCHER at (11,10)|pre_hp:46/100|your HP:100|range:2 dist:1"
+    "|est damage dealt:~46\n  Post-combat: ~0/46 (estimate — verify with get_units)"
+)
+NO_ENEMY = "Error: NO_ENEMY|No hostile unit at (11,10)"
+
+
+def test_the_offense_line_counts_an_estimated_kill_the_reply_does_not_call_a_kill(caplog):
+    game = MilitaryGame(
+        [archer(targets=[target(hp=46)])],
+        [barbarian(kind="UNIT_ARCHER", hp=46)],
+        cities=[city_info(garrison_unit="UNIT_ARCHER")],
+    )
+    game.replies["attack"] = EST_KILL_RANGED
+    with caplog.at_level(logging.INFO):
+        run(MilitaryPolicy(), game)
+    (row,) = offense_rows(caplog)
+    assert row["attacks_barb"] == 1
+    assert row["kills_barb"] == 1
+
+
+def test_a_hit_that_leaves_the_target_standing_is_no_kill(caplog):
+    game = MilitaryGame(
+        [archer(targets=[target()])], [barbarian()], cities=[city_info(garrison_unit="UNIT_ARCHER")]
+    )
+    with caplog.at_level(logging.INFO):
+        run(MilitaryPolicy(), game)
+    (row,) = offense_rows(caplog)
+    assert row["kills_barb"] == 0
+
+
+def test_an_attack_that_finds_nobody_after_an_earlier_hit_counts_the_kill(caplog):
+    game = MilitaryGame(
+        [archer(uid=2, targets=[target()]), archer(uid=3, targets=[target()])],
+        [barbarian()],
+        cities=[city_info(garrison_unit="UNIT_ARCHER")],
+    )
+    replies = iter([RANGED_HIT, NO_ENEMY])
+
+    async def attack(unit_index, x, y):
+        game.actions.append(("attack", unit_index, x, y))
+        return next(replies)
+
+    game.attack_unit = attack
+    with caplog.at_level(logging.INFO):
+        run(MilitaryPolicy(), game)
+    (row,) = offense_rows(caplog)
+    assert row["kills_barb"] == 1
+
+
+def test_the_offense_line_counts_a_camp_marched_on_that_is_gone_once(caplog):
+    policy = MilitaryPolicy()
+    unit = warrior(uid=3, x=12, y=10, **STRONG)
+    policy._mission[3] = ((14, 10), 20)
+    policy._camps[(14, 10)] = 20
+    game = MilitaryGame([warrior(uid=1), unit], [barbarian(x=13, y=10, cs=40)])
+    with caplog.at_level(logging.INFO):
+        run(policy, game)
+        del policy._camps[(14, 10)]  # A unit stepped on the emptied tile, or it was seen empty.
+        run(policy, MilitaryGame([warrior(uid=1), unit], [barbarian(x=13, y=10, cs=40)]))
+        run(policy, MilitaryGame([warrior(uid=1), unit], [barbarian(x=13, y=10, cs=40)]))
+    rows = offense_rows(caplog)
+    assert [r["camps_gone"] for r in rows] == [0, 1, 0]
+
+
+def test_a_camp_gone_is_counted_though_its_force_is_sent_at_another_camp(caplog):
+    policy = MilitaryPolicy()
+    policy._mission[1] = ((20, 10), 20)  # Sent at a camp that is no longer known.
+    policy._mission[2] = ((20, 10), 20)
+    game = camp_game(strong_pair(), [barbarian(x=15, y=10, cs=5)])  # The scan shows (14, 10).
+    with caplog.at_level(logging.INFO):
+        run(policy, game)
+    (row,) = offense_rows(caplog)
+    assert row["camps_gone"] == 1
+    assert policy._mission[1][0] == (14, 10)  # The same units were sent at the other camp.

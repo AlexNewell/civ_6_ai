@@ -1644,10 +1644,14 @@ class MilitaryPolicy:
             if self._camp_aside.get(c, -1) < t.turn
             and self._home_distance(t, c) <= s.camp_home_radius
         ]
-        self._plan_camps(t, camps, spare)
+        plan = self._plan_camps(t, camps, spare)
         if len(spare) < s.camp_min_units or not camps:
             return
-        where = min(camps, key=lambda c: (self._home_distance(t, c), c))
+        where = (
+            plan.target
+            if plan is not None
+            else min(camps, key=lambda c: (self._home_distance(t, c), c))
+        )
         if where not in own:
             t.map_use["target_from_map"] = 1  # The map alone put this camp on the list.
         defenders = self._camp_defenders(t, where)
@@ -1730,7 +1734,9 @@ class MilitaryPolicy:
             and hex_distance(b.x, b.y, *camp, s.map_width) <= s.camp_defender_radius
         ]
 
-    def _plan_camps(self, t: _Turn, camps: list[tuple[int, int]], spare: list[Unit]) -> None:
+    def _plan_camps(
+        self, t: _Turn, camps: list[tuple[int, int]], spare: list[Unit]
+    ) -> CampPlan | None:
         """Choose the camp to clear and size its force (issue 268), then log and share the plan.
 
         A camp within `camp_goal_radius` of a city is a goal whether or not any unit is spare.
@@ -1745,7 +1751,7 @@ class MilitaryPolicy:
         if not goals:
             if self.defence is not None:
                 self.defence.camp_plan = None
-            return
+            return None
         barbs = [b for b in t.threats if b.owner_id == BARBARIAN_ID and b.hostile]
 
         def rank(camp: tuple[int, int]) -> float:
@@ -1785,6 +1791,7 @@ class MilitaryPolicy:
             "military_camp_plan %s",
             json.dumps({"turn": t.turn, "camps": len(goals), **asdict(plan)}, sort_keys=True),
         )
+        return plan
 
     def _note_sightings(self, t: _Turn) -> None:
         """Where barbarian land units were seen, the trail back to their camp."""

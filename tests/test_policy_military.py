@@ -2034,3 +2034,30 @@ def test_plan_camp_force_counts_units_to_build():
     assert needed == pytest.approx(102.0) and have == pytest.approx(40.0)
     assert wanted == 3 and kind == "ranged"  # ceil(62 / 25); the force is all melee.
     assert plan_camp_force(ours, [], W, settings)[2] == 0
+
+
+def test_the_force_is_sent_at_the_camp_the_plan_chose_not_the_nearest():
+    from civ6_ai.policies.defence import DefenceState
+
+    near, farther = (13, 10), (16, 10)
+    tiles = [
+        tile(x=x, y=10, improvement="IMPROVEMENT_BARBARIAN_CAMP", owner_id=-1, units=[])
+        for x in (13, 16)
+    ]
+    units = [
+        warrior(uid=1, x=15, y=10, **STRONG),
+        warrior(uid=2, x=15, y=11, **STRONG),
+        warrior(uid=3),
+    ]
+    game = MilitaryGame(units, [barbarian(kind="UNIT_MAN_AT_ARMS", x=13, y=11, cs=60)])
+
+    async def area(cx, cy, radius=2):
+        return tiles
+
+    game.get_map_area = area
+    state = DefenceState()
+    policy = MilitaryPolicy(defence=state)
+    run(policy, game)
+    assert state.camp_plan.target == farther and state.camp_plan.met
+    assert {d.target for d in camp_orders(policy)} == {farther}
+    assert near not in {d.target for d in camp_orders(policy)}

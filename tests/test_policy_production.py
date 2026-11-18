@@ -18,7 +18,7 @@ from civ6_ai.policies.production import (
     score,
 )
 from civ6_ai.state import ProductionChoice, Threat, read_empire
-from civ6_ai.state.reader import build_city
+from civ6_ai.state.reader import build_city, build_unit
 from fixtures import civ_state as fx
 
 
@@ -1287,3 +1287,15 @@ def test_build_context_reads_the_camp_plan_from_the_defence_state():
     assert (ctx.camp_units, ctx.camp_wants) == (3, "melee")
     state.reset(101, {})
     assert build_context(empire, [], defence=state).camp_units == 0
+
+
+def test_existing_units_do_not_count_off_the_camp_demand():
+    from civ6_ai.policies.defence import DefenceState
+    from civ6_ai.policies.military import CampPlan
+
+    state = DefenceState()
+    state.camp_plan = CampPlan((55, 7), 5, 1, 102.0, 40.0, 2, 3, "any", 14, 0.04)
+    empire = run(read_empire(fx.FakeGame(overview=fx.overview(turn=100, num_cities=2))))
+    units = [build_unit(fx.unit_info(unit_id=i, unit_index=i)) for i in (1, 2, 3, 4)]
+    assert build_context(empire, units, defence=state).camp_units == 3
+    assert build_context(empire, units, ["UNIT_WARRIOR"], defence=state).camp_units == 2

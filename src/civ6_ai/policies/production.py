@@ -202,8 +202,6 @@ def build_context(
         short=defence.short_ids if defence is not None else frozenset(),
         mapped=defence.mapped_ids if defence is not None else frozenset(),
         wary=bool(defence is not None and defence.wary),
-        camp_units=plan.units_wanted if plan is not None else 0,
-        camp_wants=plan.wants if plan is not None else "",
         districts=frozenset(_short(d.district_type) for c in cities for d in c.districts),
         science_districts=sum(
             _base_district(d.district_type) == "CAMPUS" for c in cities for d in c.districts
@@ -217,6 +215,10 @@ def build_context(
             unknown_combat=unit.is_combat and unit.unit_type not in COMBAT_UNITS,
             orders=False,
         )
+    # The plan's count is of units to add to a force it already sized from the units that exist,
+    # so it is set after those are counted; only builds under way count off.
+    if plan is not None:
+        ctx = replace(ctx, camp_units=plan.units_wanted, camp_wants=plan.wants)
     for item in in_progress:
         ctx = ctx.after_choosing(item)
     return ctx

@@ -301,6 +301,7 @@ def build_orchestrator(
     settling.terrain = threat_map_handler.terrain  # What a step costs (issue 238).
     if use_threat_map:
         military.threat_map = threat_map_handler.map
+        defence.map = threat_map_handler.map  # The same map decides who is short (issue 264).
     victory_watch = VictoryWatch()
     rankings = RankingsHolder()  # Every living civ's score (issue 256).
     diplomacy = DiplomacyPolicy(threats=victory_watch.threat_ids)

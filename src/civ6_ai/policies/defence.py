@@ -18,7 +18,8 @@ last and logs one line per threatened city: why, how many defenders, and what wa
 """
 
 import logging
-from dataclasses import dataclass, field
+from collections.abc import Iterable
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from civ6_ai.policies.military import is_land_military
@@ -56,6 +57,15 @@ class CityThreat:
     hostile_units: int = 0
     defenders_in: int = 0  # Land military units on the city tile.
     defenders_beside: int = 0  # On the six tiles around it.
+    # The threat map's view of the city (`threat_map.CityReading`), or None with no map (or when
+    # the policies are run without it). When set, it decides `short` where hostile units are near.
+    reading: Any = None
+    # Hit points a turn over healing the map may show before the city counts as short.
+    margin: float = 0.0
+    # Where the near hostile units (the map's own sources) stood, to drop killed ones. Units of a
+    # rival at peace are in `hostile_units` but not here: the map does not hold them, so a city
+    # with only those near falls back to the head count.
+    hostile_tiles: tuple[tuple[int, int], ...] = ()
 
     @property
     def defenders(self) -> int:
@@ -74,6 +84,17 @@ class CityThreat:
 
     @property
     def short(self) -> bool:
+        """Short of defenders.
+
+        By the threat map when it has a reading and hostile units are near: the force that can
+        reach the city's own tile out-damages its defence and its healing by more than the margin
+        (issue 264: the head count called Constantinople short at net -60 and a Campus gave way
+        to a Slinger). Only the city tile counts, since an unwalled city covers none beside it.
+        With no reading, or no unit near (a war alone), the head count stays: a city at war
+        wants two.
+        """
+        if self.reading is not None and self.hostile_tiles:
+            return self.reading.net > self.margin
         return self.defenders < self.wanted
 
 
@@ -85,6 +106,8 @@ class DefenceState:
     cities: dict[int, CityThreat] = field(default_factory=dict)
     notes: dict[int, list[str]] = field(default_factory=dict)
     wary: tuple[str, ...] = ()  # Rivals at peace with us that are much stronger. See `wary_of`.
+    # The shared threat map, or None (`--no-threat-map`): `short` is then the head count.
+    map: Any = field(default=None, repr=False)
 
     def reset(self, turn: int, cities: dict[int, CityThreat], wary: tuple[str, ...] = ()) -> None:
         self.turn = turn
@@ -109,6 +132,13 @@ class DefenceState:
     def short_ids(self) -> frozenset[int]:
         return frozenset(i for i, c in self.cities.items() if c.short)
 
+    @property
+    def mapped_ids(self) -> frozenset[int]:
+        """Cities whose `short` the threat map decided (a reading, and a hostile unit near)."""
+        return frozenset(
+            i for i, c in self.cities.items() if c.reading is not None and bool(c.hostile_tiles)
+        )
+
     def is_threatened(self, city_id: int) -> bool:
         return city_id in self.cities
 
@@ -120,16 +150,42 @@ class DefenceState:
         """Replace the counts after the military policy has moved units."""
         found = self.cities.get(city_id)
         if found is not None:
-            self.cities[city_id] = CityThreat(
-                found.city_id,
-                found.name,
-                found.x,
-                found.y,
-                found.reasons,
-                found.hostile_units,
-                inside,
-                beside,
-            )
+            self.cities[city_id] = replace(found, defenders_in=inside, defenders_beside=beside)
+
+    def forget_killed(self, tiles: Iterable[tuple[int, int]]) -> None:
+        """Hostile units that died this turn no longer count (issue 264, cause 2).
+
+        The military policy acts after the state is made, so a city's count of near units, and the
+        map's reading of it, are from the start of the turn until this runs.
+        """
+        gone = set(tiles)
+        if not gone:
+            return
+        for city_id, found in list(self.cities.items()):
+            alive = tuple(t for t in found.hostile_tiles if t not in gone)
+            dead = len(found.hostile_tiles) - len(alive)
+            if not dead:
+                continue
+            left = found.hostile_units - dead
+            reasons = tuple(r for r in found.reasons if not r.startswith("hostile_units:"))
+            if alive:
+                reasons = (*reasons, f"hostile_units:{len(alive)}")
+            if not reasons:  # The last threat died and nothing else marks the city.
+                del self.cities[city_id]
+                continue
+            updated = replace(found, hostile_units=left, hostile_tiles=alive, reasons=reasons)
+            self.cities[city_id] = replace(updated, reading=self._read(updated))
+
+    def refresh(self) -> None:
+        """Read the map again for every city, after our units have moved (it holds cover)."""
+        for city_id, found in list(self.cities.items()):
+            if found.reading is not None and self.map is not None:
+                self.cities[city_id] = replace(found, reading=self._read(found))
+
+    def _read(self, city: CityThreat) -> Any:
+        if self.map is None or city.reading is None:
+            return None
+        return self.map.city_reading(city.x, city.y, self.turn)
 
 
 def count_defenders(
@@ -178,8 +234,13 @@ def assess(
     civs: list[Any],
     radius: int = THREAT_RADIUS,
     map_width: int | None = STANDARD_MAP_WIDTH,
+    threat_map: Any = None,
+    turn: int | None = None,
 ) -> dict[int, CityThreat]:
-    """The threatened cities, by id. `civs` are `get_diplomacy` entries."""
+    """The threatened cities, by id. `civs` are `get_diplomacy` entries.
+
+    With a `threat_map` each city also carries the map's reading of it, which decides `short`.
+    """
     at_war = sorted(c.civ_name for c in civs if c.has_met and c.is_at_war)
     hostile_owners = {
         c.player_id for c in civs if c.has_met and c.diplomatic_state in HOSTILE_STATES
@@ -203,7 +264,17 @@ def assess(
             continue
         inside, beside = count_defenders(city, units, map_width)
         found[city.city_id] = CityThreat(
-            city.city_id, city.name, city.x, city.y, tuple(reasons), len(near), inside, beside
+            city.city_id,
+            city.name,
+            city.x,
+            city.y,
+            tuple(reasons),
+            len(near),
+            inside,
+            beside,
+            reading=threat_map.city_reading(city.x, city.y, turn) if threat_map else None,
+            margin=threat_map.settings.short_margin if threat_map else 0.0,
+            hostile_tiles=tuple((t.x, t.y) for t in near if t.hostile),
         )
     return found
 
@@ -230,7 +301,15 @@ class DefencePolicy:
         units = await _read_units(game, self._map_width)
         self.state.reset(
             turn,
-            assess(list(cities), list(units), threats, civs, map_width=self._map_width),
+            assess(
+                list(cities),
+                list(units),
+                threats,
+                civs,
+                map_width=self._map_width,
+                threat_map=self.state.map,
+                turn=turn,
+            ),
             wary,
         )
 
@@ -246,9 +325,16 @@ class DefenceReport:
     async def run(self, game: Any) -> None:
         for city in sorted(self.state.cities.values(), key=lambda c: c.city_id):
             actions = "; ".join(self.state.notes.get(city.city_id, [])) or "none"
+            seen = city.reading
+            mapped = (
+                f"map: threat={seen.threat:.1f} fog={seen.fog:.1f} cover={seen.cover:.1f} "
+                f"damage={seen.damage:.1f} net={seen.net:.1f}/{city.margin:g}"
+                if seen is not None
+                else "map: off"
+            )
             log.info(
                 "defence turn %d: %s (%d,%d) threat=%s defenders=%d (%d in city, %d beside)%s "
-                "actions: %s",
+                "%s actions: %s",
                 self.state.turn,
                 city.name,
                 city.x,
@@ -258,5 +344,6 @@ class DefenceReport:
                 city.defenders_in,
                 city.defenders_beside,
                 " SHORT" if city.short else "",
+                mapped,
                 actions,
             )

@@ -152,9 +152,9 @@ def test_the_handler_scans_on_its_interval_not_every_turn():
     assert len(reads) == 1
 
 
-def test_only_the_military_policy_reads_the_map_so_far():
+def test_only_the_military_and_defence_policies_read_the_map_so_far():
     """Stage 2a (issue 238). Each later stage adds its policy here, one at a time."""
-    allowed = {"military.py"}
+    allowed = {"military.py", "defence.py"}  # Issue 264: defence reads it for "short".
     for path in (SRC / "policies").glob("*.py"):
         if path.name not in allowed:
             assert "threat_map" not in path.read_text(encoding="utf-8"), path.name
@@ -210,7 +210,7 @@ def test_our_cities_and_units_give_cover_and_it_falls_off_with_distance():
     from civ6_ai.state.reader import build_city
 
     m = ThreatMap(ThreatMapSettings(map_width=None))
-    city = build_city(city_info(x=20, y=20), (), set(), 74)
+    city = build_city(city_info(x=20, y=20, wall_hp=50, wall_max_hp=50), (), set(), 74)
     m.see_own(1, [_own(22, 20)], [city])
     assert m.cover_at(20, 20) > m.cover_at(22, 20) * 0 and m.cover_at(21, 20) > 0
     assert m.cover_at(21, 20) > m.cover_at(23, 20) > 0
@@ -223,7 +223,7 @@ def test_net_threat_is_threat_less_cover_and_never_negative():
     m = ThreatMap(ThreatMapSettings(map_width=None))
     m.see_threats(1, [hostile(x=10, y=10, cs=10)])
     far = m.net_at(10, 10, 1)
-    city = build_city(city_info(x=10, y=11), (), set(), 74)
+    city = build_city(city_info(x=10, y=11, wall_hp=50, wall_max_hp=50), (), set(), 74)
     m.see_own(1, [], [city])
     assert m.net_at(10, 10, 1) < far
     assert m.net_at(30, 30, 1) == 0
@@ -277,7 +277,10 @@ def test_a_citys_cover_reaches_across_the_map_seam():
     from civ6_ai.state.reader import build_city
 
     m = ThreatMap(ThreatMapSettings(map_width=74))
-    city = build_city(city_info(x=0, y=10, defense_strength=12, garrison_hp=200), (), set(), 74)
+    city = build_city(
+        city_info(x=0, y=10, defense_strength=12, garrison_hp=200, wall_hp=50, wall_max_hp=50),
+        (), set(), 74,
+    )  # fmt: skip
     m.see_own(1, [], [city])
     assert m.cover_at(73, 10) > 0 and m.cover_at(1, 10) > 0
     assert m.cover_at(-1, 10) == 0  # Nothing is stored under an out-of-range x.
@@ -303,7 +306,10 @@ def test_changed_ground_invalidates_the_cached_reach_and_the_fog_dump_wraps():
     assert store.revision > before  # Same tile count, but the ground changed.
     m = ThreatMap(ThreatMapSettings(map_width=74))
     m.terrain = store
-    city = build_city(city_info(x=0, y=10, defense_strength=12, garrison_hp=200), (), set(), 74)
+    city = build_city(
+        city_info(x=0, y=10, defense_strength=12, garrison_hp=200, wall_hp=50, wall_max_hp=50),
+        (), set(), 74,
+    )  # fmt: skip
     rec = m.record(5, [city])
     fog = rec["fog"]
     assert fog and all(0 <= x < 74 for x, _, _ in fog)

@@ -73,6 +73,7 @@ from civ6_ai.state.models import Target
 from civ6_ai.state.reader import STANDARD_MAP_WIDTH, hex_distance
 
 # Our civilians that an enemy may take (issue 280).
+_CAPTURE_KINDS = ("UNIT_SETTLER", "UNIT_TRADER")  # Ones whose vanishing may be a capture.
 _CIVILIAN_WORDS = ("SETTLER", "BUILDER", "TRADER", "MISSIONARY", "APOSTLE")
 
 log = logging.getLogger(__name__)
@@ -724,6 +725,7 @@ class MilitaryPolicy:
     _own_civilians: dict[int, tuple[str, int, int]] = field(
         default_factory=dict, init=False, repr=False
     )
+    _city_count: int = field(default=0, init=False, repr=False)
     _recaptured: int = field(default=0, init=False, repr=False)
     _captured: int = field(default=0, init=False, repr=False)
 
@@ -899,20 +901,27 @@ class MilitaryPolicy:
         """
         if self.threat_map is None:
             return []
-        self._hostile_owners |= {
-            th.owner for th in t.threats if th.hostile and th.owner_id != BARBARIAN_ID
-        }
+        for th in t.threats:  # What the scan says now: peace takes a civ off the list.
+            if th.owner_id == BARBARIAN_ID:
+                continue
+            if th.hostile:
+                self._hostile_owners.add(th.owner)
+            else:
+                self._hostile_owners.discard(th.owner)
         s = self.settings
         found = []
         for civ in getattr(self.threat_map, "civilians", {}).values():
             if t.turn - civ.seen > s.recapture_age:
                 continue
-            if not (civ.owner.startswith("Barbarian") or civ.owner in self._hostile_owners):
+            if not self._is_hostile(civ.owner):
                 continue
             home = self._home_distance(t, (civ.x, civ.y))
             if home <= s.recapture_reach:
                 found.append((home, civ.x, civ.y, civ))
         return [f[3] for f in sorted(found, key=lambda f: f[:3])]
+
+    def _is_hostile(self, owner: str) -> bool:
+        return owner.startswith("Barbarian") or owner in self._hostile_owners
 
     def _note_civilians(self, t: _Turn) -> None:
         """Tell a civilian of ours that was taken from one that was killed.
@@ -930,8 +939,8 @@ class MilitaryPolicy:
         for uid, (kind, x, y) in self._own_civilians.items():
             if uid in now:
                 continue
-            if any((c.x, c.y) == (x, y) for c in t.cities):
-                continue  # A settler that founded a city where it stood was used, not taken.
+            if kind not in _CAPTURE_KINDS or len(t.cities) > self._city_count:
+                continue  # A builder spends its charges and a settler founds: used, not taken.
             taken = [
                 c
                 for c in hostile
@@ -956,6 +965,7 @@ class MilitaryPolicy:
                 )
             # With none near, it may have founded a city or spent its charges, so it is not counted.
         self._own_civilians = now
+        self._city_count = len(t.cities)
 
     async def _recapture(self, game: MilitaryGame, t: _Turn) -> None:
         """Move a combat unit onto a hostile civilian it can reach this turn, to take it back.
@@ -994,8 +1004,9 @@ class MilitaryPolicy:
                 log.exception("Reading the tile of a hostile civilian failed")
                 continue
             self.threat_map.see_tiles(t.turn, area)
-            if where not in getattr(self.threat_map, "civilians", {}):
-                continue  # Gone, or taken back already.
+            civ = getattr(self.threat_map, "civilians", {}).get(where)
+            if civ is None or not self._is_hostile(civ.owner):
+                continue  # Gone, taken back, or now a civ we are not at war with.
             result = await self._order(
                 t, unit, "recapture", game.move_unit(unit.unit_index, *where)
             )

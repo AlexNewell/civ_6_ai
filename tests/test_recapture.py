@@ -6,7 +6,7 @@ import logging
 from civ6_ai.policies.military import MilitaryPolicy
 from civ6_ai.state.reader import build_tile
 from civ6_ai.threat_map import ThreatMap, foreign_civilian
-from fixtures.civ_state import tile
+from fixtures.civ_state import ROME, city_info, overview, tile
 from test_policy_military import MilitaryGame, barbarian, run, settler, warrior
 
 
@@ -142,11 +142,38 @@ def test_a_partial_move_is_not_counted_as_a_recapture(caplog):
 
 def test_a_settler_that_founded_a_city_is_not_a_capture_even_beside_a_hostile_civilian(caplog):
     tm = seen_map(civ_tile(x=11, y=11))
-    policy, game = setup(
-        [warrior(uid=1, x=10, y=10), settler(uid=8, x=10, y=10)], tm, civ=civ_tile(x=11, y=11)
-    )
-    run(policy, game)  # The settler stood on (10, 10), where our city is now.
-    game.data["units"] = [warrior(uid=1, x=10, y=10)]
+    policy, game = setup([warrior(uid=1), settler(uid=8, x=11, y=11)], tm, civ=civ_tile(x=11, y=11))
+    run(policy, game)
+    game.data["units"] = [warrior(uid=1)]  # The settler founded a city: one more than before.
+    game.data["cities"] = [*game.data["cities"], city_info(city_id=65537, name="Beta", x=11, y=11)]
+    game.data["overview"] = overview(turn=21, num_cities=2)
     with caplog.at_level(logging.INFO):
         run(policy, game)
     assert not any(m.startswith("military_capture") for m in caplog.messages)
+
+
+def test_a_builder_that_vanishes_is_not_a_capture(caplog):
+    builder = settler(uid=8, x=11, y=11, name="Builder", unit_type="UNIT_BUILDER")
+    tm = seen_map(civ_tile(x=11, y=11, units=("Barbarian BUILDER",)))
+    policy, game = setup([warrior(uid=1), builder], tm, civ=civ_tile(x=11, y=11))
+    run(policy, game)
+    game.data["units"] = [warrior(uid=1)]
+    with caplog.at_level(logging.INFO):
+        run(policy, game)
+    assert not any(m.startswith("military_capture") for m in caplog.messages)
+
+
+def test_a_civ_at_peace_again_is_no_longer_a_target():
+    peaceful = civ_tile(units=("Rome SETTLER",))
+    policy, game = setup(pair(), seen_map(peaceful), civ=peaceful)
+    policy._hostile_owners.add("Rome")
+    game.data["threats"] = [barbarian(x=18, y=18, owner_id=ROME, owner_name="Rome")]
+    run(policy, game)
+    assert not [d for d in policy.decisions if d.action == "recapture"]
+    assert "Rome" not in policy._hostile_owners
+
+
+def test_a_civilian_swapped_for_a_peaceful_one_at_the_reread_is_left():
+    policy, game = setup(pair(), seen_map(civ_tile()), civ=civ_tile(units=("Rome SETTLER",)))
+    run(policy, game)
+    assert not [m for m in game.orders("move") if m[2:] == (12, 10)]

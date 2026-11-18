@@ -18,9 +18,11 @@ from civ6_ai.policies.military import (
     attack_failed,
     attack_landed,
     camp_force_ok,
+    camp_matchup,
     choose_promotion,
     expected_damage,
     garrison_required,
+    remembered_need,
 )
 from civ6_ai.policies.settling import units_reserved_for_settling
 from civ6_ai.state import read_cities, read_threats, read_units
@@ -1845,12 +1847,61 @@ def test_a_ranged_order_that_comes_back_melee_is_a_failed_attack(caplog):
     assert len(game.orders("attack")) == 1  # Not tried again this turn.
 
 
-def test_a_reply_that_leaves_the_enemy_hp_unchanged_is_a_failure():
-    unit = build_unit(archer())
-    assert attack_failed(unit, MELEE_FALLBACK)
-    assert attack_failed(build_unit(warrior()), MELEE_HIT.replace("100 -> 76", "100 -> 100"))
-    assert attack_failed(unit, RANGED_HIT) is None
+# A real melee reply (iteration 1 of the turn-100 test): the enemy health is from before the
+# combat, so it reads "58 -> 58" on a hit that took 33.
+REAL_MELEE = (
+    "MELEE_ATTACK|target:UNIT_CROSSBOWMAN at (11,10)|enemy HP:58 -> 58/100|your HP:100 -> 100 "
+    "CS:36|est damage dealt:~33\n  Post-combat: ~25/58 (estimate — verify with get_units)"
+)
+
+
+def test_only_a_ranged_unit_with_a_melee_reply_is_a_failed_attack():
+    assert attack_failed(build_unit(archer()), MELEE_FALLBACK)
+    assert (
+        attack_failed(build_unit(warrior()), REAL_MELEE) is None
+    )  # Unchanged hp is not a failure.
     assert attack_failed(build_unit(warrior()), MELEE_HIT) is None
+    assert attack_failed(build_unit(archer()), RANGED_HIT) is None
+
+
+def melee_game(left, reply=REAL_MELEE):
+    """A warrior beside a 58 hp barbarian. After the attack the threat read shows `left`."""
+    game = MilitaryGame(
+        [warrior(targets=[target(hp=58)])],
+        [barbarian(hp=58)],
+        cities=[city_info(garrison_unit="UNIT_WARRIOR")],
+    )
+    game.replies["attack"] = reply
+    plain = game.attack_unit
+
+    async def attack(unit_index, x, y):
+        result = await plain(unit_index, x, y)
+        game.data["threats"] = left
+        return result
+
+    game.attack_unit = attack
+    return game
+
+
+def test_a_melee_attack_with_an_unchanged_hp_reply_counts_and_a_kill_is_read_back(caplog):
+    game = melee_game([])
+    policy = MilitaryPolicy()
+    with caplog.at_level(logging.INFO):
+        run(policy, game)
+    (hit,) = [d for d in policy.decisions if d.action == "attack"]
+    assert "failed" not in hit.reason
+    (row,) = offense_rows(caplog)
+    assert row["attacks_barb"] == 1
+    assert row["kills_barb"] == 1
+
+
+def test_a_melee_attack_that_leaves_the_target_standing_is_not_a_kill(caplog):
+    game = melee_game([barbarian(hp=25)])
+    with caplog.at_level(logging.INFO):
+        run(MilitaryPolicy(), game)
+    (row,) = offense_rows(caplog)
+    assert row["attacks_barb"] == 1
+    assert row["kills_barb"] == 0
 
 
 def test_a_failed_attack_does_not_use_up_the_unit():
@@ -2071,3 +2122,148 @@ def test_a_unit_with_both_attacks_counts_as_melee_by_its_class():
     )
     archer_ = build_unit(unit_info(unit_type="UNIT_ARCHER", combat_strength=15, ranged_strength=25))
     assert _is_melee(immortal) and not _is_melee(archer_)
+
+
+# ----- the camp campaign (issue 275) -----
+
+
+def test_the_camp_need_does_not_swing_with_the_defenders_in_sight():
+    # The need seen in iteration 1 as defenders came and went: 102, 0, 92, 184, 154, 62, 184.
+    seen = [102.0, 0.0, 92.0, 184.0, 154.0, 62.0, 184.0]
+    decay = MilitarySettings().camp_need_decay
+    memory, kept = None, []
+    for turn, now in enumerate(seen, start=100):
+        need = remembered_need(memory, turn, now, decay)
+        memory = (need, turn)
+        kept.append(need)
+    assert min(kept) >= 90.0  # Never the 0 or the 62 of a turn with the defenders out of sight.
+    assert kept[3] == 184.0 and kept[4] == pytest.approx(184.0 * decay)
+    far = remembered_need((184.0, 100), 140, 0.0, decay)  # Out of sight for a long time.
+    assert 0 < far < 184.0 * decay  # It does decay.
+
+
+def test_the_matchup_against_a_men_at_arms_rejects_the_heavy_chariot():
+    # Iteration 1: the barbarians' Men-at-Arms (45) against our Heavy Chariot (28).
+    chariot = camp_matchup("UNIT_HEAVY_CHARIOT", 45, 0, W)
+    archer_odds = camp_matchup("UNIT_ARCHER", 45, 0, W)
+    assert chariot == 0.0  # Loses one-on-one, and the force is not short of a melee unit.
+    assert archer_odds is not None and archer_odds > 1.0  # Shoots and takes nothing back.
+    assert camp_matchup("UNIT_HEAVY_CHARIOT", 45, 0, W, wants="melee") > 0  # To take the tile.
+    assert camp_matchup("UNIT_ARCHER", 45, 40, W) < archer_odds  # A Crossbowman hits back.
+    assert camp_matchup("UNIT_SCOUT", 45, 0, W) is None
+    assert camp_matchup("UNIT_ARCHER", 0, 0, W) is None  # No defender known.
+
+
+def test_the_remembered_need_stays_when_the_defenders_leave_sight():
+    game, policy, state = run20_turn100()
+    run(policy, game)
+    seen = state.camp_plan
+    assert seen.needed == pytest.approx(2.0 * (45 + W.assumed_defender_bonus))
+    assert seen.defender == 45
+    game.data["threats"] = []  # The Man-at-Arms walked out of sight.
+    game.data["overview"] = overview(turn=101, num_cities=2)
+    run(policy, game)
+    plan = state.camp_plan
+    assert plan.needed == pytest.approx(seen.needed * MilitarySettings().camp_need_decay, abs=0.1)
+    assert plan.defender == pytest.approx(45 * MilitarySettings().camp_need_decay, abs=0.1)
+
+
+def camp_force_at(rallied_x, far_x):
+    """Two strong warriors beside the rally ring and one far off, for a camp at (14, 10)."""
+    return [
+        warrior(uid=1, x=rallied_x, y=10, **STRONG),
+        warrior(uid=2, x=rallied_x, y=11, **STRONG),
+        warrior(uid=3, x=far_x, y=10, **STRONG),
+        warrior(uid=4),  # The garrison.
+    ]
+
+
+def test_the_gathered_force_waits_until_it_meets_the_need():
+    # The whole force (90) is enough for a remembered need of 80, but the two gathered (60) are
+    # not, so they wait and the third walks to the rally ring.
+    game = camp_game(camp_force_at(11, 5), [])
+    policy = MilitaryPolicy()
+    policy._camp_memory[(14, 10)] = (80.0, 30.0, 0.0, 20)
+    run(policy, game)
+    waits = [d for d in camp_orders(policy) if "waiting" in d.reason]
+    assert {d.unit_id for d in waits} == {1, 2}
+    assert not policy._committed
+    (move,) = [m for m in game.orders("move") if m[1] == 3]
+    assert hex_distance(move[2], move[3], 14, 10) == MilitarySettings().camp_muster_radius
+
+
+def test_the_force_commits_together_once_the_gathered_units_meet_the_need():
+    game = camp_game(camp_force_at(11, 11), [])
+    policy = MilitaryPolicy()
+    policy._camp_memory[(14, 10)] = (80.0, 30.0, 0.0, 20)
+    run(policy, game)
+    assert (14, 10) in policy._committed
+    assert not [d for d in camp_orders(policy) if "waiting" in d.reason]
+    assert {m[1] for m in game.orders("move")} >= {1, 2, 3}  # All three go in.
+
+
+def camp_wounded_game(hp, on_mission):
+    game = camp_game(
+        [
+            warrior(
+                uid=1, x=13, y=10, health=hp, combat_strength=60, targets=[target(x=14, y=11, hp=5)]
+            )
+        ],
+        [barbarian(x=14, y=11, hp=5)],
+        cities=[city_info(garrison_unit="UNIT_WARRIOR")],
+    )
+    policy = MilitaryPolicy()
+    policy._camps[(14, 10)] = 19
+    if on_mission:
+        policy._mission[1] = ((14, 10), 19)
+    return game, policy
+
+
+def test_a_wounded_unit_of_the_campaign_pulls_back_instead_of_attacking():
+    game, policy = camp_wounded_game(hp=49, on_mission=False)
+    run(policy, game)
+    assert game.orders("attack")  # A sure kill: a lone hurt unit takes it.
+    game, policy = camp_wounded_game(hp=49, on_mission=True)
+    run(policy, game)
+    assert not game.orders("attack")  # Under camp_pullback_hp on the campaign: it heals.
+    game, policy = camp_wounded_game(hp=60, on_mission=True)
+    run(policy, game)
+    assert game.orders("attack")  # Above the setting it fights on.
+
+
+def test_a_campaign_that_loses_units_without_hurting_the_camp_is_dropped(caplog):
+    game, policy, state = run20_turn100()
+    for uid in (91, 92, 93):  # Three units of the mission that no longer exist.
+        policy._mission[uid] = ((55, 7), 98)
+    with caplog.at_level(logging.INFO, logger=military_module.log.name):
+        run(policy, game)
+    assert (55, 7) in policy._camp_aside  # Set aside, so defence comes first.
+    assert state.camp_plan is None  # Production stops building for it.
+    assert any("military_camp_suspended" in r.message for r in caplog.records)
+
+
+def test_a_campaign_that_is_hurting_the_camp_is_kept_through_losses():
+    game, policy, state = run20_turn100()
+    for uid in (91, 92, 93):
+        policy._mission[uid] = ((55, 7), 98)
+    policy._camp_hit[(55, 7)] = 97  # One of our attacks hit its defenders lately.
+    run(policy, game)
+    assert (55, 7) not in policy._camp_aside
+    assert state.camp_plan is not None
+
+
+def test_a_melee_kill_is_not_confirmed_when_every_attacker_died(caplog):
+    game = melee_game([])
+    attack = game.attack_unit
+
+    async def attack_and_die(unit_index, x, y):
+        result = await attack(unit_index, x, y)
+        game.data["units"] = []  # The attacker died; the target may only be out of sight.
+        return result
+
+    game.attack_unit = attack_and_die
+    with caplog.at_level(logging.INFO):
+        run(MilitaryPolicy(), game)
+    (row,) = offense_rows(caplog)
+    assert row["attacks_barb"] == 1
+    assert row["kills_barb"] == 0

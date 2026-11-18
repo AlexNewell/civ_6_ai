@@ -62,9 +62,11 @@ from civ6_ai.policies import valuation
 from civ6_ai.policies.game_data import COMBAT_UNITS, UPGRADES
 from civ6_ai.policies.military import holds_tile
 from civ6_ai.policies.production import (
+    _CAMP_CITY_REACH,
     ProductionContext,
     ProductionWeights,
     build_context,
+    camp_unit_value,
     canonical,
     defence_strength,
     is_defence,
@@ -467,6 +469,7 @@ class GoldPolicy:
             limit = max(limit, len(self.defence.cities))
         threatened = [c for c in cities if self._may_buy_while_saving(c)]
         pool: list[_Option] = []
+        camp: list[tuple[float, int, City, Any]] = []  # Camp units on offer: value, price, city.
         if not threatened and self._scan_skipped(turn, notes):
             return
         for city in cities:
@@ -490,6 +493,8 @@ class GoldPolicy:
                 spare_jobs=demand.spare_jobs if demand is not None else None,
             )
             ranked = rank_production(city, options, context, self.weights)
+            if city not in threatened and context.camp_units > 0:
+                camp += self._camp_candidates(city, ranked, context, turn)
             if city in threatened:
                 if turn.purchases >= limit or turn.budget <= 0:
                     continue
@@ -517,9 +522,85 @@ class GoldPolicy:
                 label = f"{city.name} {option.item}"
                 priced = valuation.price(label, option.gold_cost, worth, turn.now, turn.last)
                 pool.append(_Option(priced, city, option, context))
+        await self._buy_camp_unit(game, turn, camp, notes, limit)
         pool += await self._great_people(game, turn)
         self._note_scan(turn, pool)
         await self._spend_by_return(game, turn, pool, notes, limit)
+
+    def _camp_candidates(
+        self, city: City, ranked: list, context: ProductionContext, turn: _Turn
+    ) -> list[tuple[float, int, City, Any]]:
+        """Units this city could buy for the camp force, by matchup (issue 275)."""
+        found = []
+        for option in ranked:
+            if (
+                option.category != "UNIT"
+                or option.item not in COMBAT_UNITS
+                or option.is_repair
+                or option.gold_cost is None
+                or option.gold_cost <= 0
+                or option.gold_cost > turn.budget
+                or not _NAME.fullmatch(option.item)
+                or self._stack.is_blocked(city.city_id, option.item)
+                or score(option, city, context, self.weights) <= 0
+            ):
+                continue
+            value = camp_unit_value(
+                option.item, COMBAT_UNITS[option.item][4], float(option.cost), context
+            )
+            if context.camp_target is not None and (
+                hex_distance(city.x, city.y, *context.camp_target) > _CAMP_CITY_REACH
+            ):
+                continue  # Too far to join the force.
+            if context.camp_wants == "melee" and COMBAT_UNITS[option.item][4] == "RANGED":
+                continue  # Only a melee unit takes the tile the force is short of.
+            if value is None:
+                value = defence_strength(option.item) / 100.0  # No defender seen: by strength.
+            if value > 0:
+                found.append((value, option.gold_cost, city, option))
+        return found
+
+    async def _buy_camp_unit(
+        self,
+        game: GoldGame,
+        turn: _Turn,
+        candidates: list[tuple[float, int, City, Any]],
+        notes: list[str],
+        limit: int,
+    ) -> None:
+        """While a camp goal is unmet, buy the best matchup unit gold allows.
+
+        Iteration 1 of the turn-100 test had gold above the reserve on 41 of 45 turns with the camp
+        force short and nothing bought: a unit's return on gold was under the floor. The camp
+        plan's own shortfall is the case, so one unit a turn is bought, the best value first.
+        """
+        if not candidates or turn.purchases >= limit or turn.refused_out:
+            return
+        for value, price, city, option in sorted(
+            candidates, key=lambda c: (-c[0], c[1], c[2].city_id)
+        ):
+            if price > turn.budget:
+                continue
+            result = await self._call(
+                game.purchase_item(city.city_id, option.category, option.item)
+            )
+            if _ok(result, "PURCHASED"):
+                turn.spend(price)
+                turn.purchases += 1
+                log.info(
+                    "Bought %s in %s for %d (camp force, matchup %.2f)",
+                    option.item, city.name, price, value,
+                )  # fmt: skip
+                if self.defence is not None:
+                    self.defence.note(city.city_id, f"gold: bought {option.item} for the camp")
+                return
+            turn.refusals += 1
+            if self._stack.record(city.city_id, option.item, result):
+                notes.append(f"{city.name} {option.item} blocked by a unit on the city tile")
+            log.info(
+                "Camp purchase of %s in %s refused: %s", option.item, city.name, str(result)[:120]
+            )
+            return
 
     def _scan_skipped(self, turn: _Turn, notes: list[str]) -> bool:
         """True when gold is far below the cheapest price seen a moment ago.

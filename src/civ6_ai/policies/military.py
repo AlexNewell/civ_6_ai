@@ -1105,12 +1105,21 @@ class MilitaryPolicy:
                 # Stop on a tile this turn's walk reaches, and only if it is safe: the target
                 # being safe says nothing of the way there.
                 line = hex_line((unit.x, unit.y), where, s.map_width)
-                goal = line[min(max(1, int(unit.moves)), len(line)) - 1]
-                stop = self.threat_map.threat_at(goal[0], goal[1], t.turn)
-                if stop > s.recapture_threat:
+                reach = min(max(1, int(unit.moves)), len(line))
+                goal = None
+                stop = 0.0
+                for step in reversed(line[:reach]):  # The furthest tile that can be stood on.
+                    if terrain is not None and terrain.step_cost(*step, naval=False) is None:
+                        continue  # Water or a mountain on the straight line.
+                    stop = self.threat_map.threat_at(step[0], step[1], t.turn)
+                    goal = step
+                    break
+                if goal is None or stop > s.recapture_threat:
                     self._skip_recapture(
-                        t, civ, "the march would stop in a threatened tile",
-                        stop=list(goal), threat=round(stop, 1),
+                        t, civ,
+                        "no passable tile on the way" if goal is None
+                        else "the march would stop in a threatened tile",
+                        stop=list(goal) if goal else None, threat=round(stop, 1),
                     )  # fmt: skip
                     continue
             result = await self._order(t, unit, "recapture", game.move_unit(unit.unit_index, *goal))

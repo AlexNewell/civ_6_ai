@@ -313,3 +313,17 @@ def test_a_march_that_would_stop_in_a_threatened_tile_is_not_started(caplog):
         run(policy, game)
     assert not [m for m in game.orders("move") if m[2:] == (15, 10)]
     assert any("threatened tile" in x["reason"] for x in skips(caplog))
+
+
+def test_a_march_steps_back_from_a_mountain_on_the_line_to_a_passable_tile():
+    class Ground:
+        def step_cost(self, x, y, naval):
+            return None if (x, y) == (13, 10) else 1.0
+
+    far = civ_tile(x=15, y=10)
+    tm = seen_map(far)
+    tm.terrain = Ground()
+    policy, game = setup(pair(), tm, civ=far)
+    run(policy, game)
+    moves = [m for m in game.orders("move") if m[1] == 2]
+    assert moves and all(m[2:] != (13, 10) for m in moves)

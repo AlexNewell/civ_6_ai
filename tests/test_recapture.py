@@ -177,3 +177,10 @@ def test_a_civilian_swapped_for_a_peaceful_one_at_the_reread_is_left():
     policy, game = setup(pair(), seen_map(civ_tile()), civ=civ_tile(units=("Rome SETTLER",)))
     run(policy, game)
     assert not [m for m in game.orders("move") if m[2:] == (12, 10)]
+
+
+def test_a_fogged_target_tile_is_not_confirmed_by_the_cache():
+    fogged = civ_tile(visibility="revealed")
+    policy, game = setup(pair(), seen_map(civ_tile()), civ=fogged)
+    run(policy, game)
+    assert not [m for m in game.orders("move") if m[2:] == (12, 10)]

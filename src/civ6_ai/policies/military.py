@@ -1004,9 +1004,10 @@ class MilitaryPolicy:
                 log.exception("Reading the tile of a hostile civilian failed")
                 continue
             self.threat_map.see_tiles(t.turn, area)
-            civ = getattr(self.threat_map, "civilians", {}).get(where)
-            if civ is None or not self._is_hostile(civ.owner):
-                continue  # Gone, taken back, or now a civ we are not at war with.
+            seen = next((x for x in area if (x.x, x.y) == where and x.visible), None)
+            civ = getattr(self.threat_map, "civilians", {}).get(where) if seen else None
+            if civ is None or civ.seen != t.turn or not self._is_hostile(civ.owner):
+                continue  # Not in sight now, gone, taken back, or now a civ we are not at war with.
             result = await self._order(
                 t, unit, "recapture", game.move_unit(unit.unit_index, *where)
             )

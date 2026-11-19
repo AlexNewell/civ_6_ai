@@ -2764,8 +2764,8 @@ class MilitaryPolicy:
             self._probe_note(t, "no suspicion: no area keeps sending barbarian units")
             return
         goal = (sus.x, sus.y)
-        if any(u.unit_type == "UNIT_SCOUT" and u.can_move for u in t.units):
-            self._probe_note(t, "a scout is free to go, and settling sends it", sus)
+        if any(u.unit_type == "UNIT_SCOUT" for u in t.units):
+            self._probe_note(t, "we have a scout, and settling sends it", sus)
             return
         terrain = getattr(self.threat_map, "terrain", None)
         pool = [

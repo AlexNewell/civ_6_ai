@@ -128,7 +128,7 @@ def test_a_free_scout_is_left_to_settling(caplog):
     with caplog.at_level(logging.INFO):
         run(policy, game)
     assert not [d for d in policy.decisions if d.action == "probe"]
-    assert "a scout is free" in caplog.text
+    assert "we have a scout" in caplog.text
 
 
 def test_no_unit_is_sent_to_a_stop_under_threat(caplog):

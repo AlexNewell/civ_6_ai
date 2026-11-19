@@ -166,3 +166,11 @@ def test_a_one_turn_raid_does_not_hide_a_real_trail():
     tm.sources = []
     feed(tm, [(20, 4, 10), (23, 4, 11), (27, 3, 10)])
     assert tm.suspected_camp() is not None
+
+
+def test_the_guess_stays_on_the_map():
+    tm = ThreatMap()
+    tm.allies = [Ally("city", 10, 38, 10.0)]
+    feed(tm, [(20, 10, 43), (23, 10, 44), (27, 10, 44)])
+    sus = tm.suspected_camp()
+    assert sus is not None and sus.y <= 45

@@ -54,6 +54,7 @@ class ThreatMapSettings:
     """Bounds of the map. All overridable; none is a rule (see the issue's settings split)."""
 
     map_width: int | None = STANDARD_MAP_WIDTH
+    map_height: int = 46  # The standard map's rows; a projected guess stays inside them.
     # A camp's strength is that of the strongest barbarian land unit seen so far (they spawn
     # at the barbarians' tech, which can be far from ours); until one is seen, this floor.
     camp_strength: float = 15.0
@@ -891,7 +892,7 @@ class ThreatMap:
         away = max(1.0, hex_distance(round(cx), round(cy), *city, None))
         factor = (away + s.suspect_lead) / away
         gx = round(city[0] + (cx - city[0]) * factor)
-        gy = max(0, round(city[1] + (cy - city[1]) * factor))
+        gy = min(s.map_height - 1, max(0, round(city[1] + (cy - city[1]) * factor)))
         goal = self._habitable_near(self._wrap(gx), gy)
         return Suspect(
             goal[0], goal[1], len(best), len({a.turn for a in best}),
@@ -905,7 +906,7 @@ class ThreatMap:
         w = self.settings.map_width
         options = [
             (hex_distance(x, y, tx, ty, w), tx, ty)
-            for ty in range(max(0, y - 3), y + 4)
+            for ty in range(max(0, y - 3), min(self.settings.map_height, y + 4))
             for tx in range(x - 4, x + 5)
             if hex_distance(x, y, tx, ty, w) <= 3
             and self.terrain.step_cost(self._wrap(tx), ty, naval=False) is not None

@@ -2461,3 +2461,107 @@ def test_a_unit_merely_beside_a_camp_that_vanished_does_not_make_it_ours(caplog)
         del policy._camps[(14, 10)]
         run(policy, MilitaryGame([warrior(uid=1), beside], []))
     assert any('"by": "other"' in r.message for r in caplog.records)
+
+
+# ----- the camp target is kept while the force is on it (issue 295) -----
+
+CAMP_58_11 = tile(x=58, y=11, improvement="IMPROVEMENT_BARBARIAN_CAMP", owner_id=-1, units=[])
+
+
+def two_camp_game(second=CAMP_58_11):
+    game, policy, state = run20_turn100()
+    camps = [CAMP_55_7, second]
+
+    async def area(cx, cy, radius=2):
+        return camps
+
+    game.get_map_area = area
+    return game, policy, state
+
+
+def at_turn(game, turn, threats):
+    game.data["overview"] = overview(turn=turn, num_cities=2)
+    game.data["threats"] = threats
+
+
+def test_the_target_does_not_flip_when_two_camps_alternate_in_rank(caplog):
+    game, policy, state = two_camp_game()
+    seen = [barbarian(kind="UNIT_MAN_AT_ARMS", x=54, y=7, cs=45)]
+    other = [barbarian(kind="UNIT_MAN_AT_ARMS", x=57, y=11, cs=45)]
+    run(policy, game)
+    first = state.camp_plan.target
+    policy._committed[first] = 100  # The force is going in.
+    targets = []
+    for turn, threats in zip(
+        range(101, 109), [seen, [], other, [], seen, other, [], seen], strict=True
+    ):
+        at_turn(game, turn, threats)
+        with caplog.at_level(logging.INFO, logger=military_module.log.name):
+            run(policy, game)
+        targets.append(state.camp_plan.target)
+    assert set(targets) == {first}
+    assert not [r for r in caplog.records if "military_camp_switch" in r.message]
+    line = next(r.message for r in caplog.records if "military_camp_plan" in r.message)
+    assert '"ranks"' in line and '"chosen_by": "kept: force is on it"' in line or "rank" in line
+
+
+def test_the_rank_alone_may_change_the_target_while_no_force_is_on_a_camp(caplog):
+    game, policy, state = two_camp_game()
+    run(policy, game)
+    first = state.camp_plan.target
+    other = (58, 11) if first == (55, 7) else (55, 7)
+    # A strong guard seen on the first camp makes the other cheaper to clear.
+    at_turn(game, 101, [barbarian(kind="UNIT_MAN_AT_ARMS", x=first[0] - 1, y=first[1], cs=90)])
+    with caplog.at_level(logging.INFO, logger=military_module.log.name):
+        run(policy, game)
+    assert state.camp_plan.target == other
+    switch = [r.message for r in caplog.records if "military_camp_switch" in r.message]
+    assert len(switch) == 1 and "rank decides" in switch[0]
+
+
+def test_the_target_changes_when_the_camp_is_gone_and_the_switch_is_logged(caplog):
+    game, policy, state = two_camp_game()
+    run(policy, game)
+    first = state.camp_plan.target
+    policy._committed[first] = 100
+    gone = tile(x=first[0], y=first[1], improvement="", owner_id=-1, units=[])
+    rest = [c for c in (CAMP_55_7, CAMP_58_11) if (c.x, c.y) != first]
+
+    async def area(cx, cy, radius=2):
+        return [gone, *rest]
+
+    game.get_map_area = area
+    at_turn(game, 100 + MilitarySettings().camp_home_scan_turns, [])  # The next scan of the cities.
+    with caplog.at_level(logging.INFO, logger=military_module.log.name):
+        run(policy, game)
+    assert state.camp_plan.target == (rest[0].x, rest[0].y)
+    switch = [r.message for r in caplog.records if "military_camp_switch" in r.message]
+    assert len(switch) == 1 and "gone" in switch[0]
+
+
+def test_a_camp_at_a_city_pulls_the_force_off_a_far_one(caplog):
+    near = tile(x=53, y=11, improvement="IMPROVEMENT_BARBARIAN_CAMP", owner_id=-1, units=[])
+    game, policy, state = two_camp_game(second=near)
+    run(policy, game)
+    policy._plan_target = (55, 7)
+    policy._committed[(55, 7)] = 100
+    at_turn(game, 101, [])
+    with caplog.at_level(logging.INFO, logger=military_module.log.name):
+        run(policy, game)
+    assert state.camp_plan.target == (53, 11)
+    switch = [r.message for r in caplog.records if "military_camp_switch" in r.message]
+    assert len(switch) == 1 and "threatens a city" in switch[0]
+
+
+def test_an_unseen_garrison_is_sized_at_the_default_strength_not_zero():
+    game, policy, state = run20_turn100()
+    game.data["threats"] = []  # Never seen: the camp is known only from the map.
+    fogged = dataclasses.replace(CAMP_55_7, visibility="revealed")
+
+    async def area(cx, cy, radius=2):
+        return [fogged]
+
+    game.get_map_area = area
+    run(policy, game)
+    plan = state.camp_plan
+    assert plan.defender == MilitaryWeights().camp_unseen_strength and plan.needed > 0

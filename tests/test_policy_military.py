@@ -2609,3 +2609,17 @@ def test_an_urgent_redirect_sticks_while_its_force_is_short(caplog):
         run(policy, game)
         targets.append(state.camp_plan.target)
     assert targets == [(53, 11)] * 5
+
+
+def test_an_urgent_redirect_restarts_the_far_camps_campaign_clock():
+    near = tile(x=53, y=11, improvement="IMPROVEMENT_BARBARIAN_CAMP", owner_id=-1, units=[])
+    game, policy, state = two_camp_game(second=near)
+    run(policy, game)
+    policy._plan_target = (55, 7)
+    policy._committed[(55, 7)] = 100
+    policy._camp_turns[(55, 7), False] = (5, 100)
+    policy._camp_turns[(55, 7), True] = (7, 100)
+    at_turn(game, 101, [])
+    run(policy, game)
+    assert state.camp_plan.target == (53, 11)
+    assert (55, 7) not in {k[0] for k in policy._camp_turns}

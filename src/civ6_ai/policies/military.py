@@ -2504,6 +2504,8 @@ class MilitaryPolicy:
         elif not threatened and urgent:
             best, reason = urgent[0], "another camp now threatens a city"
             self._committed.pop(old, None)  # The force is called off the far camp.
+            self._camp_turns.pop((old, True), None)  # Its campaign clock starts over.
+            self._camp_turns.pop((old, False), None)
             for uid in [u for u, m in self._mission.items() if m[0] == old]:
                 del self._mission[uid]
         else:

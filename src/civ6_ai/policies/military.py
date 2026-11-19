@@ -2485,8 +2485,10 @@ class MilitaryPolicy:
         if old == best and (threatened or not urgent):
             return best, "rank"
         ranks = {f"{c[0]},{c[1]}": round(rank(c), 3) for c in ranked}
+        # A camp at a city is kept while it is being reinforced, whether or not the force is on it.
         on_it = old in goals and (
-            old in self._committed
+            threatened
+            or old in self._committed
             or any(
                 m[0] == old and t.turn - m[1] <= s.camp_mission_turns
                 for m in self._mission.values()
@@ -2501,6 +2503,9 @@ class MilitaryPolicy:
             reason = "no force on the previous camp, rank decides"
         elif not threatened and urgent:
             best, reason = urgent[0], "another camp now threatens a city"
+            self._committed.pop(old, None)  # The force is called off the far camp.
+            for uid in [u for u, m in self._mission.items() if m[0] == old]:
+                del self._mission[uid]
         else:
             return old, "kept: force is on it"
         if best == old:

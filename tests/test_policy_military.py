@@ -2594,3 +2594,18 @@ def test_a_camp_seen_empty_stays_empty_between_scans():
 
     assert assumed(seen + scan) == []  # Between two scans of the cities: still empty.
     assert len(assumed(seen + scan + 1)) == 1  # Not seen for longer: an assumed defender.
+
+
+def test_an_urgent_redirect_sticks_while_its_force_is_short(caplog):
+    near = tile(x=53, y=11, improvement="IMPROVEMENT_BARBARIAN_CAMP", owner_id=-1, units=[])
+    game, policy, state = two_camp_game(second=near)
+    run(policy, game)
+    policy._plan_target = (55, 7)
+    policy._committed[(55, 7)] = 100
+    guard = [barbarian(kind="UNIT_MAN_AT_ARMS", x=53, y=10, cs=90)]
+    targets = []
+    for turn in range(101, 106):
+        at_turn(game, turn, guard)
+        run(policy, game)
+        targets.append(state.camp_plan.target)
+    assert targets == [(53, 11)] * 5

@@ -11,7 +11,7 @@ from civ6_ai.threat_map import (
     ThreatMapHandler,
     ThreatMapSettings,
 )
-from fixtures.civ_state import FakeGame, city_info, overview, tile
+from fixtures.civ_state import FakeGame, city_info, overview, threat_info, tile, unit_info
 
 CAMP_TILE = "IMPROVEMENT_BARBARIAN_CAMP"
 SRC = Path(__file__).resolve().parents[1] / "src" / "civ6_ai"
@@ -314,3 +314,56 @@ def test_changed_ground_invalidates_the_cached_reach_and_the_fog_dump_wraps():
     fog = rec["fog"]
     assert fog and all(0 <= x < 74 for x, _, _ in fog)
     assert any(x == 73 for x, _, _ in fog)
+
+
+def test_a_hostile_unit_on_a_visible_camp_tile_creates_the_camp_between_city_scans():
+    """Issue 293: a spearman stood on the unseen camp at (65,10) on turn 117, not a scan turn."""
+    on_camp = tile(x=65, y=10, improvement=CAMP_TILE, visibility="visible", units=[])
+    game = FakeGame(
+        units=[],
+        threats=[threat_info(unit_type="UNIT_SPEARMAN", x=65, y=10, owner_id=63)],
+        cities=[city_info(x=59, y=10)],
+        overview=overview(turn=117, num_cities=1),
+        civs=[],
+    )
+
+    async def area(cx, cy, radius=2):
+        return [on_camp] if (cx, cy, radius) == (65, 10, 0) else []
+
+    game.get_map_area = area
+    handler = ThreatMapHandler(ThreatMapSettings(scan_turns=3))
+    handler.map._last_scan = 116  # Not due: the city scan does not run this turn.
+    handler.map._baselined = True
+    asyncio.run(handler.run(game))
+    assert [(c.x, c.y) for c in handler.map.camps()] == [(65, 10)]
+
+
+def test_the_suspected_area_is_read_before_it_is_cleared_so_a_far_camp_registers():
+    from civ6_ai.threat_map import Arrival
+
+    camp_tile = tile(x=65, y=10, improvement=CAMP_TILE, visibility="visible", units=[])
+    game = FakeGame(
+        units=[unit_info(unit_id=5, unit_index=5, x=64, y=10)],
+        threats=[],
+        cities=[city_info(x=59, y=10)],
+        overview=overview(turn=130, num_cities=1),
+        civs=[],
+    )
+
+    async def area(cx, cy, radius=2):
+        return [camp_tile] if radius == 3 else []
+
+    game.get_map_area = area
+    handler = ThreatMapHandler(ThreatMapSettings(scan_turns=3))
+    handler.map._last_scan = 129
+    handler.map._baselined = True
+    handler.map.allies = []
+    from civ6_ai.threat_map import Ally
+
+    handler.map.allies = [Ally("city", 59, 10, 10.0)]
+    handler.map.arrivals = [
+        Arrival(t, x, 10, "UNIT_COURSER") for t, x in ((103, 62), (117, 64), (124, 63))
+    ]
+    assert handler.map.suspected_camp() is not None
+    asyncio.run(handler.run(game))
+    assert [(c.x, c.y) for c in handler.map.camps()] == [(65, 10)]

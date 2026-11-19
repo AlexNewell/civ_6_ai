@@ -860,6 +860,18 @@ class SettlingPolicy:
         self._survey(settlers, units, exploration, city_tiles, danger, turn)
         for rank, scout in enumerate(sorted(scouts, key=lambda u: u.unit_id)):
             look = self._look_points[rank % len(self._look_points)] if self._look_points else None
+            s_width = self.settings.map_width
+            if look is None and rank == 0 and self.threat_map is not None:
+                # Issue 293: a camp the threat map infers but nobody has seen is worth a look.
+                suspect = getattr(self.threat_map, "suspected_camp", lambda: None)()
+                if suspect is not None:
+                    # Stop two tiles short: it looks, and never walks onto the camp.
+                    line = hex_line((scout.x, scout.y), (suspect.x, suspect.y), s_width)
+                    short = [
+                        p for p in line if hex_distance(*p, suspect.x, suspect.y, s_width) >= 2
+                    ]
+                    look = short[-1] if short else None
+                    log.info("scout %s sent toward the suspected camp at %s", scout.unit_id, look)
             await self._explore(game, scout, exploration, danger, turn, look)
 
     def _recent_sightings(self, turn: int) -> tuple[tuple[int, int], ...]:

@@ -54,6 +54,7 @@ class ThreatMapSettings:
     """Bounds of the map. All overridable; none is a rule (see the issue's settings split)."""
 
     map_width: int | None = STANDARD_MAP_WIDTH
+    map_height: int = 46  # The standard map's rows; a projected guess stays inside them.
     # A camp's strength is that of the strongest barbarian land unit seen so far (they spawn
     # at the barbarians' tech, which can be far from ours); until one is seen, this floor.
     camp_strength: float = 15.0
@@ -96,6 +97,13 @@ class ThreatMapSettings:
     vision: int = 1  # A source this close to one of ours, and not seen, is no longer there.
     read_radius: int = 6  # Tiles of terrain read around a source that has none yet.
     read_retry_turns: int = 10  # Turns before an area that revealed nothing new is read again.
+    # A camp nobody has seen, inferred from where barbarian units first show up (issue 293).
+    suspect_sightings: int = 3  # Arrivals from the same area before it is suspected.
+    suspect_radius: int = 4  # Arrivals this close to one another are one area.
+    suspect_range: int = 9  # Only arrivals this close to a city of ours count.
+    suspect_lead: int = 3  # Tiles past the arrivals, away from the city, the camp is guessed at.
+    suspect_look: int = 2  # One of our units this close to the guess has seen the ground there.
+    suspect_memory: int = 60  # Most arrivals kept (a bound on memory, not a timer).
 
 
 @dataclass
@@ -114,6 +122,34 @@ class Source:
 
     def age(self, turn: int) -> int | None:
         return None if self.last_seen is None else turn - self.last_seen
+
+
+@dataclass(frozen=True)
+class Arrival:
+    """A barbarian land unit first seen at a tile, with no earlier sighting of it close by."""
+
+    turn: int
+    x: int
+    y: int
+    unit_type: str
+
+
+@dataclass(frozen=True)
+class Suspect:
+    """A camp that is probably there but unseen: where, from how many arrivals, and why."""
+
+    x: int
+    y: int
+    arrivals: int
+    turns: int  # Distinct turns the arrivals were seen on.
+    first: int  # Turn of the earliest arrival.
+    city: tuple[int, int]  # Our nearest city.
+
+    def as_row(self) -> dict[str, Any]:
+        return {
+            "x": self.x, "y": self.y, "arrivals": self.arrivals, "turns": self.turns,
+            "first": self.first, "city": list(self.city),
+        }  # fmt: skip
 
 
 @dataclass
@@ -276,6 +312,9 @@ class ThreatMap:
     heal: CombatHeal = field(default_factory=lambda: DEFAULT_COMBAT_HEAL)  # Read once a session.
     barbarian_peak: float = 0.0  # Strongest barbarian land unit seen this session.
     allies: list["Ally"] = field(default_factory=list)
+    arrivals: list[Arrival] = field(default_factory=list)
+    # Turn each tile was last read while visible (camp check), to find units on unread tiles.
+    _tile_read: dict[tuple[int, int], int] = field(default_factory=dict)
     # Foreign civilians on visible tiles, by tile (issue 280): the tile reads already tell us.
     civilians: dict[tuple[int, int], "Civilian"] = field(default_factory=dict)
     _last_scan: int = -10_000
@@ -309,6 +348,7 @@ class ThreatMap:
         """
         for tile in tiles:
             if tile.visible:
+                self._tile_read[tile.x, tile.y] = turn
                 self._see_civilian(turn, tile)
             known = next(
                 (s for s in self.sources if s.kind == CAMP and (s.x, s.y) == (tile.x, tile.y)),
@@ -327,6 +367,7 @@ class ThreatMap:
                     known.last_seen = turn
             elif tile.visible and known is not None:
                 self.sources.remove(known)
+                self._drop_arrivals_near(known.x, known.y, self.settings.camp_radius)
 
     def _see_civilian(self, turn: int, tile: Tile) -> None:
         """Keep a foreign civilian on a visible tile; a visible tile without one forgets it."""
@@ -363,6 +404,21 @@ class ThreatMap:
         for f in fresh:
             if f.hostile_owner == BARBARIAN_ID and not f.naval:
                 self.barbarian_peak = max(self.barbarian_peak, f.strength)
+        known = [o for o in self.sources if o.kind == UNIT]
+        for f in fresh:
+            if f.hostile_owner != BARBARIAN_ID or f.naval or "SCOUT" in f.unit_type:
+                continue
+            continuing = any(
+                o.unit_type == f.unit_type
+                and hex_distance(f.x, f.y, o.x, o.y, s.map_width) <= s.resight_radius
+                for o in known
+            )
+            explained = any(
+                hex_distance(f.x, f.y, c.x, c.y, s.map_width) <= s.camp_radius for c in self.camps()
+            )
+            if not continuing and not explained:
+                self.arrivals.append(Arrival(turn, f.x, f.y, f.unit_type))
+        del self.arrivals[: -s.suspect_memory]
         keep = []
         for old in self.sources:
             if old.kind != UNIT:
@@ -388,6 +444,7 @@ class ThreatMap:
         from turn 61).
         """
         s = self.settings
+        units = list(units)
         self.allies = [
             Ally(
                 "unit",
@@ -417,6 +474,17 @@ class ThreatMap:
             )
             for c in cities
         ]
+        suspect = self.suspected_camp()
+        if suspect is not None and any(
+            hex_distance(u.x, u.y, suspect.x, suspect.y, s.map_width) <= s.suspect_look
+            for u in units
+        ):
+            reach = s.suspect_radius + s.suspect_lead
+            dropped = self._drop_arrivals_near(suspect.x, suspect.y, reach)
+            log.info(
+                "suspected_camp_checked %s",
+                json.dumps({"turn": turn, **suspect.as_row(), "dropped": dropped}),
+            )
         self.sources = [
             src
             for src in self.sources
@@ -757,6 +825,97 @@ class ThreatMap:
             if hex_distance(x, y, source.x, source.y, width) <= reach
         ]
 
+    def unread_hostile_tiles(self, turn: int) -> list[tuple[int, int]]:
+        """Tiles holding a hostile land unit seen this turn that no read has checked for a camp
+        this turn (issue 293: the periodic city scan missed a camp a passing unit saw on a
+        turn between scans, and the spearman standing on it said so every turn)."""
+        found = {
+            (src.x, src.y)
+            for src in self.sources
+            if src.kind == UNIT
+            and src.last_seen == turn
+            and not src.naval
+            and self._tile_read.get((src.x, src.y)) != turn
+        }
+        self._tile_read = {p: t for p, t in self._tile_read.items() if t == turn}
+        return sorted(found)
+
+    def _drop_arrivals_near(self, x: int, y: int, radius: int) -> int:
+        """Forget arrivals within `radius` of a tile: their camp is found or gone."""
+        w = self.settings.map_width
+        before = len(self.arrivals)
+        self.arrivals = [a for a in self.arrivals if hex_distance(a.x, a.y, x, y, w) > radius]
+        return before - len(self.arrivals)
+
+    def suspected_camp(self) -> Suspect | None:
+        """Where an unseen camp probably is, from where barbarian units keep first appearing.
+
+        Arrivals within `suspect_range` of one of our cities, and not within a known camp's
+        reach, are grouped (`suspect_radius`). The biggest group with at least
+        `suspect_sightings` arrivals on more than one turn is a suspected camp: the group's
+        centre pushed `suspect_lead` tiles on, away from our nearest city (the units walk in
+        from their camp), and moved off water or a mountain. It is dropped once one of ours
+        stands within `suspect_look` of it (see `see_own`), and when a camp is seen near it.
+        """
+        s = self.settings
+        w = s.map_width
+        cities = [(a.x, a.y) for a in self.allies if a.kind == "city"]
+        if not cities:
+            return None
+        pool = [
+            a
+            for a in self.arrivals
+            if min(hex_distance(a.x, a.y, cx, cy, w) for cx, cy in cities) <= s.suspect_range
+            and not any(hex_distance(a.x, a.y, c.x, c.y, w) <= s.camp_radius for c in self.camps())
+        ]
+        best: list[Arrival] = []
+        best_seed = None
+        for seed in pool:
+            group = [
+                a for a in pool if hex_distance(a.x, a.y, seed.x, seed.y, w) <= s.suspect_radius
+            ]
+            if len({a.turn for a in group}) < 2 or len(group) < s.suspect_sightings:
+                continue  # A raid on one turn is no trail; it must not hide a real one.
+            if len(group) > len(best):
+                best, best_seed = group, seed
+        if best_seed is None:
+            return None
+
+        def unwrapped(x: int) -> int:  # x as the copy nearest the seed, so a seam does not split.
+            return best_seed.x + ((x - best_seed.x + w // 2) % w - w // 2) if w else x
+
+        cx = sum(unwrapped(a.x) for a in best) / len(best)
+        cy = sum(a.y for a in best) / len(best)
+        city = min(cities, key=lambda c: (hex_distance(self._wrap(round(cx)), round(cy), *c, w), c))
+        if w:  # Use the copy of the centre nearest the city.
+            cx = min((cx + k * w for k in (-1, 0, 1)), key=lambda x: abs(x - city[0]))
+        away = max(1.0, hex_distance(round(cx), round(cy), *city, None))
+        factor = (away + s.suspect_lead) / away
+        gx = round(city[0] + (cx - city[0]) * factor)
+        gy = min(s.map_height - 1, max(0, round(city[1] + (cy - city[1]) * factor)))
+        goal = self._habitable_near(self._wrap(gx), gy)
+        return Suspect(
+            goal[0], goal[1], len(best), len({a.turn for a in best}),
+            min(a.turn for a in best), city,
+        )  # fmt: skip
+
+    def _habitable_near(self, x: int, y: int) -> tuple[int, int]:
+        """The tile itself, or the nearest one within three that a camp could stand on."""
+        if self.terrain is None:
+            return x, y
+        w = self.settings.map_width
+        options = [
+            (hex_distance(x, y, tx, ty, w), tx, ty)
+            for ty in range(max(0, y - 3), min(self.settings.map_height, y + 4))
+            for tx in range(x - 4, x + 5)
+            if hex_distance(x, y, tx, ty, w) <= 3
+            and self.terrain.step_cost(self._wrap(tx), ty, naval=False) is not None
+        ]
+        if not options:
+            return x, y
+        _, tx, ty = min(options)
+        return self._wrap(tx), ty
+
     def camps(self) -> list[Source]:
         return [s for s in self.sources if s.kind == CAMP]
 
@@ -811,6 +970,7 @@ class ThreatMap:
             "turn": turn,
             "sources": rows,
             "camps_near_city": len(near),
+            "suspect": None if (sus := self.suspected_camp()) is None else sus.as_row(),
             "heat": self.heat(turn),
             "cover": self.layer(sorted(covered), self.cover_at),
             "fog": self.layer(sorted(set(near_cities)), self.fog_at),
@@ -856,6 +1016,7 @@ class ThreatMapHandler:
         cities = await read_cities(game, self.settings.map_width)
         units = await read_units(game, self.settings.map_width)
         self.map.see_threats(turn, await read_threats(game))
+        await self._read_suspected(game, turn, units)
         self.map.see_own(turn, units, cities)
         if self.map.due_for_scan(turn):
             self.map.mark_scanned(turn)
@@ -873,10 +1034,48 @@ class ThreatMapHandler:
                     continue
                 self.terrain.learn(tiles)
                 self.map.see_tiles(turn, tiles, baseline)
+        await self._read_unit_tiles(game, turn)
         await self._read_ground_around_sources(game, turn)
         if self._dump is not None:
             with self._dump.open("a", encoding="utf-8") as out:
                 out.write(json.dumps(self.map.record(turn, cities, units)) + "\n")
+
+    async def _read_suspected(self, game: Any, turn: int, units: Iterable[Unit]) -> None:
+        """One of ours is beside the suspected camp: read what it sees before the suspicion is
+        cleared (see `ThreatMap.see_own`), so a camp beyond the city scan is registered."""
+        sus = self.map.suspected_camp()
+        s = self.settings
+        if sus is None or not any(
+            hex_distance(u.x, u.y, sus.x, sus.y, s.map_width) <= s.suspect_look for u in units
+        ):
+            return
+        try:
+            tiles = await read_area(game, sus.x, sus.y, s.suspect_look + 1)
+        except ConnectionError:
+            raise
+        except Exception:
+            log.exception("Threat map: reading the suspected camp's area failed")
+            return
+        self.terrain.learn(tiles)
+        self.map.see_tiles(turn, tiles)
+
+    async def _read_unit_tiles(self, game: Any, turn: int) -> None:
+        """A hostile unit in sight stands on a tile we can see: read it for a camp now, not at
+        the next city scan. One tile each, so it is cheap; the map's own tile record skips tiles
+        a scan already read this turn."""
+        for x, y in self.map.unread_hostile_tiles(turn)[:8]:
+            try:
+                tiles = await read_area(game, x, y, 0)
+            except ConnectionError:
+                raise
+            except Exception:
+                log.exception("Threat map: reading a hostile unit's tile failed")
+                continue
+            self.terrain.learn(tiles)
+            before = len(self.map.camps())
+            self.map.see_tiles(turn, tiles)
+            if len(self.map.camps()) > before:
+                log.info("Threat map: camp found under a hostile unit at %s,%s", x, y)
 
     async def _read_ground_around_sources(self, game: Any, turn: int) -> None:
         """Terrain around each source, so its reach follows the ground. Terrain doesn't change,

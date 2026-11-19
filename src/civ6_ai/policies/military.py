@@ -205,6 +205,10 @@ class MilitarySettings:
     recapture_age: int = 3  # Turns a sighting stays believed (the threat map rescans every 3).
     recapture_threat: float = 4.0  # The most threat-map strength allowed on the tile stepped to.
     recapture_march_turns: int = 3  # A civilian this many turns of walking away is marched on.
+    # Issue 293: a spare unit goes to look at where the threat map suspects an unseen camp.
+    probe: bool = True
+    probe_stand: int = 2  # It stops this many tiles short of the guess: it looks, never attacks.
+    probe_threat: float = 4.0  # The most threat-map strength allowed on a tile it stops on.
     capture_radius: int = 4  # Tiles from where a settler was last seen that a captor may stand.
     capture_window: int = 4  # Turns a vanished settler waits for a hostile civilian to show.
     capture_creep: int = 2  # Tiles added to that radius for each turn a captor may have moved.
@@ -737,6 +741,9 @@ class MilitaryPolicy:
     _city_count: int = field(default=0, init=False, repr=False)
     _recaptured: int = field(default=0, init=False, repr=False)
     _captured: int = field(default=0, init=False, repr=False)
+    # Issue 293: the last reason no probe was sent (logged on change), and the unit walking out.
+    _probe_why: tuple[Any, ...] | None = field(default=None, init=False, repr=False)
+    _probe_unit: int | None = field(default=None, init=False, repr=False)
 
     def blocker_policies(self) -> Mapping[str, Any]:
         """Policies to pass to `BlockerResolver`, which takes over the promotion blocker."""
@@ -783,6 +790,7 @@ class MilitaryPolicy:
         await self._garrison(game, t)
         self._note_sightings(t)
         await self._clear_camp(game, t)
+        await self._probe_suspect(game, t)
         await self._spare_units(game, t)
         await self._idle(game, t)
         self._publish_defence(t)
@@ -2720,6 +2728,111 @@ class MilitaryPolicy:
                 await self._walk_home(
                     game, t, unit, home, "flee", "alone outside with hostile units near"
                 )
+
+    # ----- suspected camp (issue 293) -----
+
+    def _probe_note(self, t: _Turn, why: str, sus: Any = None, **extra: Any) -> None:
+        """Log why no unit went to look, when the reason (or the guess) changes."""
+        key = (why, None if sus is None else (sus.x, sus.y))
+        if key == self._probe_why:
+            return
+        self._probe_why = key
+        log.info(
+            "military_probe_skip %s",
+            json.dumps(
+                {"turn": t.turn, "reason": why, "suspect": None if sus is None else sus.as_row(),
+                 **extra},
+                sort_keys=True,
+            ),
+        )  # fmt: skip
+
+    async def _probe_suspect(self, game: MilitaryGame, t: _Turn) -> None:
+        """Send one spare unit to look at a camp the threat map infers but nobody has seen.
+
+        Barbarian units keep first appearing from the same fogged area, so a camp is probably
+        there (`ThreatMap.suspected_camp`). A scout does this if we have one (settling sends it);
+        else the cheapest, fastest spare unit walks toward the guess, stopping short of it on a
+        tile under the threat limit (as the recapture march does). It looks and does not attack:
+        once the camp is in sight the camp plan takes over.
+        """
+        s = self.settings
+        if not s.probe or self.threat_map is None or not hasattr(self.threat_map, "suspected_camp"):
+            return
+        sus = self.threat_map.suspected_camp()
+        if sus is None:
+            self._probe_unit = None
+            self._probe_note(t, "no suspicion: no area keeps sending barbarian units")
+            return
+        goal = (sus.x, sus.y)
+        if any(u.unit_type == "UNIT_SCOUT" for u in t.units):
+            self._probe_note(t, "we have a scout, and settling sends it", sus)
+            return
+        terrain = getattr(self.threat_map, "terrain", None)
+        pool = [
+            u
+            for u in t.mine
+            if self._available(t, u, "probe")
+            and u.hp >= s.weights.heal_below * u.max_hp
+            and self._spare(t, u)
+            and u.unit_id not in self._recon
+            and u.unit_id not in self._explorers
+            and not self._on_camp_mission(t, u)
+        ]
+        if not pool:
+            self._probe_note(t, "no spare unit", sus)
+            return
+        pool.sort(
+            key=lambda u: (
+                u.unit_id != self._probe_unit,  # The one already walking out goes on.
+                -u.max_moves,
+                max(u.combat_strength, u.ranged_strength),
+                u.unit_id,
+            )
+        )
+        stops = []
+        for unit in pool[:3]:
+            here = hex_distance(unit.x, unit.y, *goal, s.map_width)
+            if here <= s.probe_stand:
+                continue  # Already looking.
+            line = hex_line((unit.x, unit.y), goal, s.map_width)
+            line = [p for p in line if hex_distance(*p, *goal, s.map_width) >= s.probe_stand]
+            line = line[: max(1, int(unit.moves))]
+            stop = threat = None
+            for step in reversed(line):
+                if terrain is not None and terrain.step_cost(*step, naval=False) is None:
+                    continue
+                threat = self.threat_map.threat_at(step[0], step[1], t.turn)
+                if threat <= s.probe_threat:
+                    stop = step
+                    break
+            if stop is None:
+                stops.append((unit, None, threat))
+                continue
+            stops.append((unit, stop, threat))
+            break
+        chosen = next(((u, p) for u, p, _ in stops if p is not None), None)
+        if chosen is None:
+            self._probe_note(
+                t, "no safe stop on the way (threatened, impassable, or already close)", sus,
+                tried=[u.unit_id for u, _, _ in stops],
+            )  # fmt: skip
+            return
+        unit, stop = chosen
+        result = await self._order(t, unit, "probe", game.move_unit(unit.unit_index, *stop))
+        if result is None or not move_succeeded(result):
+            self._refuse(t, unit, "probe")
+            self._probe_note(t, "the move was refused", sus, result=result or "")
+            return
+        t.acted.add(unit.unit_id)
+        self._leave(t, unit)
+        self._fortified.pop(unit.unit_id, None)
+        self._probe_unit = unit.unit_id
+        self._probe_why = None
+        self._log(
+            t, unit, "probe",
+            f"barbarians keep first appearing near {goal[0]},{goal[1]} "
+            f"({sus.arrivals} arrivals): going to look, not to attack", stop, result=result,
+        )  # fmt: skip
 
     # ----- spare units -----
 

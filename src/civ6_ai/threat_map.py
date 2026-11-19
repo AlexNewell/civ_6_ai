@@ -1015,6 +1015,7 @@ class ThreatMapHandler:
         cities = await read_cities(game, self.settings.map_width)
         units = await read_units(game, self.settings.map_width)
         self.map.see_threats(turn, await read_threats(game))
+        await self._read_suspected(game, turn, units)
         self.map.see_own(turn, units, cities)
         if self.map.due_for_scan(turn):
             self.map.mark_scanned(turn)
@@ -1037,6 +1038,25 @@ class ThreatMapHandler:
         if self._dump is not None:
             with self._dump.open("a", encoding="utf-8") as out:
                 out.write(json.dumps(self.map.record(turn, cities, units)) + "\n")
+
+    async def _read_suspected(self, game: Any, turn: int, units: Iterable[Unit]) -> None:
+        """One of ours is beside the suspected camp: read what it sees before the suspicion is
+        cleared (see `ThreatMap.see_own`), so a camp beyond the city scan is registered."""
+        sus = self.map.suspected_camp()
+        s = self.settings
+        if sus is None or not any(
+            hex_distance(u.x, u.y, sus.x, sus.y, s.map_width) <= s.suspect_look for u in units
+        ):
+            return
+        try:
+            tiles = await read_area(game, sus.x, sus.y, s.suspect_look + 1)
+        except ConnectionError:
+            raise
+        except Exception:
+            log.exception("Threat map: reading the suspected camp's area failed")
+            return
+        self.terrain.learn(tiles)
+        self.map.see_tiles(turn, tiles)
 
     async def _read_unit_tiles(self, game: Any, turn: int) -> None:
         """A hostile unit in sight stands on a tile we can see: read it for a camp now, not at

@@ -2370,8 +2370,8 @@ class MilitaryPolicy:
 
     def _assume_unseen(self, t: _Turn, camp: tuple[int, int], group: list[Threat]) -> list[Threat]:
         """The group, or one assumed defender when none is known and the camp was not in sight
-        this turn (issue 295: an unseen garrison is not an empty camp)."""
-        if group or self._camp_seen.get(camp, -1) >= t.turn:
+        since the last scan of the cities (issue 295: an unseen garrison is not an empty camp)."""
+        if group or t.turn - self._camp_seen.get(camp, -999) <= self.settings.camp_home_scan_turns:
             return group
         cs = int(self.settings.weights.camp_unseen_strength)
         return [Threat(BARBARIAN_ID, "Barbarians", "UNIT_ASSUMED_DEFENDER", *camp, 100, 100, cs, 0,
@@ -2475,8 +2475,14 @@ class MilitaryPolicy:
         s = self.settings
         best = ranked[0]
         old = self._plan_target
-        if old is None or old == best:
+        if old is None:
             self._plan_target = best
+            return best, "rank"
+        urgent = [
+            c for c in ranked if c != old and self._home_distance(t, c) <= s.camp_urgent_radius
+        ]
+        threatened = old in goals and self._home_distance(t, old) <= s.camp_urgent_radius
+        if old == best and (threatened or not urgent):
             return best, "rank"
         ranks = {f"{c[0]},{c[1]}": round(rank(c), 3) for c in ranked}
         on_it = old in goals and (
@@ -2490,15 +2496,15 @@ class MilitaryPolicy:
             known = old in self._known_camps()
             reason = "previous camp set aside or out of range" if known else "previous camp is gone"
         elif not on_it:
+            if old == best:
+                return best, "rank"
             reason = "no force on the previous camp, rank decides"
+        elif not threatened and urgent:
+            best, reason = urgent[0], "another camp now threatens a city"
         else:
-            urgent = [
-                c for c in ranked if c != old and self._home_distance(t, c) <= s.camp_urgent_radius
-            ]
-            if self._home_distance(t, old) > s.camp_urgent_radius and urgent:
-                best, reason = urgent[0], "another camp now threatens a city"
-            else:
-                return old, "kept: force is on it"
+            return old, "kept: force is on it"
+        if best == old:
+            return best, "rank"
         log.info(
             "military_camp_switch %s",
             json.dumps(

@@ -2565,3 +2565,32 @@ def test_an_unseen_garrison_is_sized_at_the_default_strength_not_zero():
     run(policy, game)
     plan = state.camp_plan
     assert plan.defender == MilitaryWeights().camp_unseen_strength and plan.needed > 0
+
+
+def test_an_urgent_camp_displaces_a_target_that_is_still_top_ranked(caplog):
+    near = tile(x=53, y=11, improvement="IMPROVEMENT_BARBARIAN_CAMP", owner_id=-1, units=[])
+    game, policy, state = two_camp_game(second=near)
+    run(policy, game)
+    policy._plan_target = (55, 7)
+    policy._committed[(55, 7)] = 100
+    # A strong guard on the near camp ranks it below the far one.
+    at_turn(game, 101, [barbarian(kind="UNIT_MAN_AT_ARMS", x=53, y=10, cs=90)])
+    with caplog.at_level(logging.INFO, logger=military_module.log.name):
+        run(policy, game)
+    assert state.camp_plan.target == (53, 11)
+    assert any("threatens a city" in r.message for r in caplog.records)
+
+
+def test_a_camp_seen_empty_stays_empty_between_scans():
+    game, policy, _ = two_camp_game()
+    run(policy, game)
+    seen = policy._camp_seen[(55, 7)]
+    scan = MilitarySettings().camp_home_scan_turns
+    cities = (city_info(city_id=1, x=50, y=7),)
+
+    def assumed(turn):
+        t = types.SimpleNamespace(turn=turn, cities=cities)
+        return policy._assume_unseen(t, (55, 7), [])
+
+    assert assumed(seen + scan) == []  # Between two scans of the cities: still empty.
+    assert len(assumed(seen + scan + 1)) == 1  # Not seen for longer: an assumed defender.

@@ -147,3 +147,22 @@ def test_no_suspicion_sends_nobody(caplog):
         run(policy, game)
     assert not [d for d in policy.decisions if d.action == "probe"]
     assert "no suspicion" in caplog.text
+
+
+def test_arrivals_across_the_seam_are_centred_on_that_side_of_the_map():
+    tm = ThreatMap()
+    tm.allies = [Ally("city", 70, 10, 10.0)]
+    feed(tm, [(20, 73, 10), (23, 0, 10), (27, 1, 9)])
+    sus = tm.suspected_camp()
+    assert sus is not None and (sus.x >= 72 or sus.x <= 5)
+
+
+def test_a_one_turn_raid_does_not_hide_a_real_trail():
+    tm = map_with_city()
+    tm.see_threats(15, [
+        hostile(x=14, y=9), hostile(kind="UNIT_SPEARMAN", x=14, y=10),
+        hostile(kind="UNIT_ARCHER", x=14, y=11), hostile(kind="UNIT_HORSEMAN", x=13, y=10),
+    ])  # fmt: skip
+    tm.sources = []
+    feed(tm, [(20, 4, 10), (23, 4, 11), (27, 3, 10)])
+    assert tm.suspected_camp() is not None

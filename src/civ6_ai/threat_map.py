@@ -868,18 +868,25 @@ class ThreatMap:
             and not any(hex_distance(a.x, a.y, c.x, c.y, w) <= s.camp_radius for c in self.camps())
         ]
         best: list[Arrival] = []
+        best_seed = None
         for seed in pool:
             group = [
                 a for a in pool if hex_distance(a.x, a.y, seed.x, seed.y, w) <= s.suspect_radius
             ]
+            if len({a.turn for a in group}) < 2 or len(group) < s.suspect_sightings:
+                continue  # A raid on one turn is no trail; it must not hide a real one.
             if len(group) > len(best):
-                best = group
-        if len(best) < s.suspect_sightings or len({a.turn for a in best}) < 2:
+                best, best_seed = group, seed
+        if best_seed is None:
             return None
-        cx = sum(a.x for a in best) / len(best)
+
+        def unwrapped(x: int) -> int:  # x as the copy nearest the seed, so a seam does not split.
+            return best_seed.x + ((x - best_seed.x + w // 2) % w - w // 2) if w else x
+
+        cx = sum(unwrapped(a.x) for a in best) / len(best)
         cy = sum(a.y for a in best) / len(best)
-        city = min(cities, key=lambda c: (hex_distance(round(cx), round(cy), *c, w), c))
-        if w:  # The arrivals may lie across the seam: use the copy of the centre nearest the city.
+        city = min(cities, key=lambda c: (hex_distance(self._wrap(round(cx)), round(cy), *c, w), c))
+        if w:  # Use the copy of the centre nearest the city.
             cx = min((cx + k * w for k in (-1, 0, 1)), key=lambda x: abs(x - city[0]))
         away = max(1.0, hex_distance(round(cx), round(cy), *city, None))
         factor = (away + s.suspect_lead) / away

@@ -179,6 +179,9 @@ class MilitaryWeights:
     # and the plan is abandoned as soon as an attack goes worse than planned.
     planned_kill_hp_after: float = 0.25
     camp_force_ratio: float = 2.0  # Our strength over theirs, to go for a camp.
+    # Issue 295. A camp whose garrison was never seen, or not lately, is not empty: it is sized
+    # against one defender of this strength until a sighting says otherwise.
+    camp_unseen_strength: float = 15.0
     camp_min_hp: float = 0.8  # Only healthy units are sent to a camp.
     # Issue 279: the force is sized by simulated combat. Attacks to kill every known defender,
     # with this share more as a margin, must fit in `camp_strike_turns` turns of one attack per
@@ -249,6 +252,8 @@ class MilitarySettings:
     # clears it when the spare units fall short (Run 20: a camp 5 tiles off for 70 turns, with
     # nothing spare, so never attacked).
     camp_goal_radius: int = 8
+    # Issue 295. A camp this near a city (or nearer) may pull the force off a camp that is farther.
+    camp_urgent_radius: int = 3
     camp_max_build: int = 4  # Units asked of production for one camp at a time.
     camp_build_turns: int = 4  # Turns counted for each unit still to be built, in the ETA.
     camp_idle_turns: int = 10  # A camp not advanced on for this long starts its count again.
@@ -724,6 +729,10 @@ class MilitaryPolicy:
     _known_last: set[tuple[int, int]] | None = field(default=None, init=False, repr=False)
     _camps_ours: int = field(default=0, init=False, repr=False)
     _committed: dict[tuple[int, int], int] = field(default_factory=dict, init=False, repr=False)
+    # Issue 295: the camp the plan chose last, kept while the force is on it; and the last turn
+    # each camp's own tile was in sight (an empty camp seen is not an unseen garrison).
+    _plan_target: tuple[int, int] | None = field(default=None, init=False, repr=False)
+    _camp_seen: dict[tuple[int, int], int] = field(default_factory=dict, init=False, repr=False)
     _losses: dict[tuple[int, int], list[int]] = field(default_factory=dict, init=False, repr=False)
     _camp_hit: dict[tuple[int, int], int] = field(default_factory=dict, init=False, repr=False)
     # The threat state (see `defence.DefenceState`), or None to play without it.
@@ -2220,7 +2229,9 @@ class MilitaryPolicy:
         )
         if where not in own:
             t.map_use["target_from_map"] = 1  # The map alone put this camp on the list.
-        defenders = self._remember(t, where, self._camp_defenders(t, where))[0]
+        defenders = self._assume_unseen(
+            t, where, self._remember(t, where, self._camp_defenders(t, where))[0]
+        )
         force = [u for u in spare if hex_distance(u.x, u.y, *where, s.map_width) <= s.camp_reach]
         if not camp_force_ok(force, defenders, s.weights, s.camp_min_units, True):
             self._committed.pop(where, None)
@@ -2357,6 +2368,25 @@ class MilitaryPolicy:
             and hex_distance(b.x, b.y, *camp, s.map_width) <= s.camp_defender_radius
         ]
 
+    def _assume_unseen(self, t: _Turn, camp: tuple[int, int], group: list[Threat]) -> list[Threat]:
+        """The group, or one assumed defender when none is known and the camp was not in sight
+        since the last scan of the cities (issue 295: an unseen garrison is not an empty camp)."""
+        if group or t.turn - self._camp_seen.get(camp, -999) <= self.settings.camp_home_scan_turns:
+            return group
+        cs = int(self.settings.weights.camp_unseen_strength)
+        return [Threat(BARBARIAN_ID, "Barbarians", "UNIT_ASSUMED_DEFENDER", *camp, 100, 100, cs, 0,
+                       self._home_distance(t, camp), True)]  # fmt: skip
+
+    def _known_defenders(self, t: _Turn, camp: tuple[int, int]) -> list[Threat]:
+        """What `_remember` would return for the camp, without touching the memory."""
+        group = remembered_defenders(
+            self._camp_memory.get(camp, []),
+            t.turn,
+            self._camp_defenders(t, camp),
+            self.settings.camp_memory_turns,
+        )[1]
+        return self._assume_unseen(t, camp, group)
+
     def _plan_camps(
         self, t: _Turn, camps: list[tuple[int, int]], spare: list[Unit]
     ) -> CampPlan | None:
@@ -2374,6 +2404,7 @@ class MilitaryPolicy:
         if not goals:
             if self.defence is not None:
                 self.defence.camp_plan = None
+            self._plan_target = None
             return None
         barbs = [b for b in t.threats if b.owner_id == BARBARIAN_ID and b.hostile]
 
@@ -2385,13 +2416,15 @@ class MilitaryPolicy:
                 if hex_distance(b.x, b.y, *camp, s.map_width) <= s.camp_search_radius
             )
             ongoing = (s.camp_goal_radius + 1 - near) + 0.5 * about
-            cost = camp_force_needed(self._camp_defenders(t, camp), w) + near
+            cost = camp_force_needed(self._known_defenders(t, camp), w) + near
             return ongoing / max(cost, 1.0)
 
         ranked = sorted(goals, key=lambda c: (-rank(c), self._home_distance(t, c), c))
-        target = ranked[0]
+        target, why = self._pick_target(t, goals, ranked, rank)
         defenders = self._camp_defenders(t, target)
-        group, strong, strong_ranged = self._remember(t, target, defenders)
+        group = self._assume_unseen(t, target, self._remember(t, target, defenders)[0])
+        strong = max((d.combat_strength for d in group), default=0.0)
+        strong_ranged = max((d.ranged_strength for d in group), default=0.0)
         force = [u for u in spare if hex_distance(u.x, u.y, *target, s.map_width) <= s.camp_reach]
         needed, have, wanted, kind = plan_camp_force(force, group, w, s)
         walk = max(
@@ -2416,9 +2449,84 @@ class MilitaryPolicy:
             self.defence.camp_plan = plan
         log.info(
             "military_camp_plan %s",
-            json.dumps({"turn": t.turn, "camps": len(goals), **asdict(plan)}, sort_keys=True),
+            json.dumps(
+                {
+                    "turn": t.turn,
+                    "camps": len(goals),
+                    "chosen_by": why,
+                    "ranks": {f"{c[0]},{c[1]}": round(rank(c), 3) for c in ranked},
+                    **asdict(plan),
+                },
+                sort_keys=True,
+            ),
         )
         return plan
+
+    def _pick_target(
+        self,
+        t: _Turn,
+        goals: list[tuple[int, int]],
+        ranked: list[tuple[int, int]],
+        rank: Any,
+    ) -> tuple[tuple[int, int], str]:
+        """The camp to clear: the one the force is on until it is gone, set aside or out of
+        range, or until another camp is a threat to a city while this one is not (issue 295).
+        Only the first call of a turn can change it; the rank picks while no force is on a camp."""
+        s = self.settings
+        best = ranked[0]
+        old = self._plan_target
+        if old is None:
+            self._plan_target = best
+            return best, "rank"
+        urgent = [
+            c for c in ranked if c != old and self._home_distance(t, c) <= s.camp_urgent_radius
+        ]
+        threatened = old in goals and self._home_distance(t, old) <= s.camp_urgent_radius
+        if old == best and (threatened or not urgent):
+            return best, "rank"
+        ranks = {f"{c[0]},{c[1]}": round(rank(c), 3) for c in ranked}
+        # A camp at a city is kept while it is being reinforced, whether or not the force is on it.
+        on_it = old in goals and (
+            threatened
+            or old in self._committed
+            or any(
+                m[0] == old and t.turn - m[1] <= s.camp_mission_turns
+                for m in self._mission.values()
+            )
+        )
+        if old not in goals:
+            known = old in self._known_camps()
+            reason = "previous camp set aside or out of range" if known else "previous camp is gone"
+        elif not on_it:
+            if old == best:
+                return best, "rank"
+            reason = "no force on the previous camp, rank decides"
+        elif not threatened and urgent:
+            best, reason = urgent[0], "another camp now threatens a city"
+            self._committed.pop(old, None)  # The force is called off the far camp.
+            self._camp_turns.pop((old, True), None)  # Its campaign clock starts over.
+            self._camp_turns.pop((old, False), None)
+            for uid in [u for u, m in self._mission.items() if m[0] == old]:
+                del self._mission[uid]
+        else:
+            return old, "kept: force is on it"
+        if best == old:
+            return best, "rank"
+        log.info(
+            "military_camp_switch %s",
+            json.dumps(
+                {
+                    "turn": t.turn,
+                    "from": list(old),
+                    "to": list(best),
+                    "reason": reason,
+                    "ranks": ranks,
+                },
+                sort_keys=True,
+            ),
+        )
+        self._plan_target = best
+        return best, reason
 
     def _note_sightings(self, t: _Turn) -> None:
         """Where barbarian land units were seen, the trail back to their camp."""
@@ -2586,6 +2694,8 @@ class MilitaryPolicy:
                     # A fogged tile shows the live state, which may hold a camp that spawned since
                     # the player last looked. Only the session's first scan stands for the player's
                     # own map; after that a camp must be seen to be learned (and is then kept).
+                    if tile.visible:
+                        self._camp_seen[tile.x, tile.y] = t.turn
                     if tile.visible or (
                         self._camp_baseline
                         and (self.threat_map is None or (tile.x, tile.y) in mapped)
@@ -2609,7 +2719,13 @@ class MilitaryPolicy:
         ours = t is not None and any(
             (d := hex_distance(*self._pos(t, u), *camp, w)) == 0 or (d == 1 and hit) for u in t.mine
         )
-        for kept in (self._camp_memory, self._committed, self._losses, self._camp_hit):
+        for kept in (
+            self._camp_memory,
+            self._committed,
+            self._losses,
+            self._camp_hit,
+            self._camp_seen,
+        ):
             kept.pop(camp, None)  # A camp that is gone leaves nothing to remember.
         for uid in [u for u, m in self._mission.items() if m[0] == camp]:
             del self._mission[uid]  # Released: the units are free for the next order.

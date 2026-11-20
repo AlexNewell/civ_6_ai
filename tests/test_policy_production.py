@@ -1568,3 +1568,73 @@ def test_a_zero_scored_settler_is_never_started_as_the_last_item():
         choose_for_city(game, c, [option("UNIT", "UNIT_SETTLER", 5)], ctx, ProductionWeights())
     )
     assert picked is None and game.set_calls == []
+
+
+# Issue 301: early production favours growth over scouts and idle garrison units.
+GARRISONED_EARLY = ProductionContext(turn=40, num_cities=2, builders=2, recon=0, army=1)
+GROWTH_MENU = [
+    option("UNIT", "UNIT_WARRIOR", 4),
+    option("DISTRICT", "DISTRICT_CAMPUS", 8),
+    option("DISTRICT", "DISTRICT_HOLY_SITE", 8),
+]
+
+
+def test_no_third_scout_before_turn_60():
+    c = city(population=3)
+    scout = option("UNIT", "UNIT_SCOUT", 3)
+    w = ProductionWeights()
+    assert score(scout, c, replace(EARLY, turn=30, scouts_built=1), w) > 0
+    assert score(scout, c, replace(EARLY, turn=30, scouts_built=2), w) == 0.0
+
+
+def test_the_policy_starts_with_no_scouts_counted():
+    assert CityProductionPolicy().scouts_built == 0
+
+
+def test_a_safe_garrisoned_city_builds_a_district_before_the_army_floor_unit():
+    c = city(population=3)
+    ranked = rank_production(c, GROWTH_MENU, GARRISONED_EARLY)
+    assert ranked[-1].item == "UNIT_WARRIOR"
+    assert ranked[0].category == "DISTRICT"
+
+
+def test_a_safe_garrisoned_city_builds_a_builder_before_the_army_floor_unit():
+    c = city(population=3)
+    ctx = replace(GARRISONED_EARLY, builders=0, army=0)
+    menu = [option("UNIT", "UNIT_WARRIOR", 4), option("UNIT", "UNIT_BUILDER", 5)]
+    assert best(c, menu, ctx) == "UNIT_BUILDER"
+
+
+def test_the_army_floor_still_wins_without_growth_to_build():
+    c = city(population=3)
+    menu = [option("UNIT", "UNIT_WARRIOR", 4), option("BUILDING", "BUILDING_MONUMENT", 5)]
+    assert best(c, menu, GARRISONED_EARLY) == "UNIT_WARRIOR"
+
+
+def test_after_turn_60_the_army_floor_is_not_held_back():
+    c = city(population=3)
+    late = replace(GARRISONED_EARLY, turn=90, army=0)
+    ranked = rank_production(c, GROWTH_MENU, late)
+    warrior = next(o for o in ranked if o.item == "UNIT_WARRIOR")
+    assert (
+        score(warrior, c, late, ProductionWeights())
+        >= max(score(o, c, late, ProductionWeights()) for o in ranked if o.category == "DISTRICT")
+        - 0.01
+        or ranked[0].item == "UNIT_WARRIOR"
+    )
+
+
+def test_a_threatened_city_still_builds_military_over_a_district():
+    c = city([threat()], population=3)
+    assert best(c, GROWTH_MENU, GARRISONED_EARLY) == "UNIT_WARRIOR"
+
+
+def test_a_city_without_a_garrison_still_builds_a_defender_first():
+    c = city(garrison_unit="", population=3)
+    assert best(c, GROWTH_MENU, GARRISONED_EARLY) == "UNIT_WARRIOR"
+
+
+def test_a_short_camp_force_still_outranks_a_district_early():
+    c = city(population=3)
+    ctx = replace(GARRISONED_EARLY, camp_units=2, camp_wants="melee")
+    assert best(c, GROWTH_MENU, ctx) == "UNIT_WARRIOR"

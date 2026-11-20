@@ -109,6 +109,16 @@ class SettlingSettings:
     defense_weight: float = 1.0
     fresh_water_bonus: float = 5.0
     coast_bonus: float = 3.0
+    # Issue 324: site-quality factors the owner named. Measured and logged only: every weight is 0
+    # so the chosen site never changes until a later issue uses them. Each acts on its raw value
+    # (see `score_site_breakdown`); the negative factors are subtracted.
+    inner_ring_weight: float = 0.0  # Per food+production point on the six tiles around the centre.
+    outer_ring_weight: float = 0.0  # Per food+production point two and three tiles out.
+    water_grade_weight: float = 0.0  # Per grade: fresh 2, coast 1, none 0.
+    centre_resource_penalty: float = 0.0  # Off when a luxury or strategic lies under the centre.
+    capital_distance_weight: float = 0.0  # Off per tile the capital is from the ideal distance.
+    capital_ideal_distance: int = 6  # Close enough to link and defend, far enough to share little.
+    overlap_penalty: float = 0.0  # Off per workable tile (radius 3) an own city already covers.
     # Safety.
     threat_radius: int = 3  # A tile this close to a hostile unit is unsafe to stand on.
     flee_radius: int = 2  # A settler this close to a hostile unit runs.
@@ -349,6 +359,76 @@ def score_site(site: SettleSite, settings: SettlingSettings) -> float:
     return score
 
 
+SITE_RADIUS = 3  # A city works tiles up to three away.
+
+
+def _overlap_tiles(
+    site: SettleSite, cities: Iterable[tuple[int, int]], map_width: int | None
+) -> int:
+    """Tiles within `SITE_RADIUS` of the site and of at least one of `cities`."""
+    centres = list(cities)
+    count = 0
+    for dy in range(-SITE_RADIUS, SITE_RADIUS + 1):
+        for dx in range(-SITE_RADIUS, SITE_RADIUS + 1):
+            x, y = site.x + dx, site.y + dy
+            if hex_distance(site.x, site.y, x, y, None) > SITE_RADIUS:
+                continue
+            if any(hex_distance(x, y, cx, cy, map_width) <= SITE_RADIUS for cx, cy in centres):
+                count += 1
+    return count
+
+
+def score_site_breakdown(
+    site: SettleSite,
+    settings: SettlingSettings,
+    own_cities: Iterable[tuple[int, int]] = (),
+    capital: tuple[int, int] | None = None,
+) -> dict[str, tuple[float, float]]:
+    """Each component of a site's value as `name: (raw, weighted)`, in a fixed order.
+
+    The first components are exactly `score_site`'s terms, so the weighted values of those sum to
+    it; the later ones (issue 324) have weight 0 by default and add nothing until set. A factor
+    whose data is missing from the site reads raw 0. `own_cities` and `capital` are (x, y).
+    """
+    s = settings
+    water_raw = {"fresh": 2.0, "coast": 1.0}.get(site.water, 0.0)
+    water_bonus = {"fresh": s.fresh_water_bonus, "coast": s.coast_bonus}.get(site.water, 0.0)
+    cities = list(own_cities)
+    capital_gap = 0.0
+    if capital is not None:
+        capital_gap = float(hex_distance(site.x, site.y, *capital, s.map_width))
+    under_centre = 1.0 if (site.centre_resource or "")[:2] in ("S:", "L:") else 0.0
+    overlap = float(_overlap_tiles(site, cities, s.map_width)) if cities else 0.0
+    parts = {
+        "food": (site.food, site.food * s.food_weight),
+        "production": (site.production, site.production * s.production_weight),
+        "luxuries": (site.luxuries, site.luxuries * s.luxury_weight),
+        "strategics": (site.strategics, site.strategics * s.strategic_weight),
+        "defense": (site.defense, site.defense * s.defense_weight),
+        "water": (water_raw, water_bonus),
+        "inner_ring": (site.inner_yield or 0, (site.inner_yield or 0) * s.inner_ring_weight),
+        "outer_ring": (site.outer_yield or 0, (site.outer_yield or 0) * s.outer_ring_weight),
+        "water_grade": (water_raw, water_raw * s.water_grade_weight),
+        "centre_resource": (under_centre, -under_centre * s.centre_resource_penalty),
+        "capital_distance": (
+            capital_gap,
+            -abs(capital_gap - s.capital_ideal_distance) * s.capital_distance_weight
+            if capital is not None
+            else 0.0,
+        ),
+        "overlap": (overlap, -overlap * s.overlap_penalty),
+    }
+    return {name: (float(raw), float(weighted)) for name, (raw, weighted) in parts.items()}
+
+
+def breakdown_total(breakdown: dict[str, tuple[float, float]]) -> float:
+    """The weighted sum, which equals `score_site` while the new weights are 0."""
+    total = 0.0
+    for _, weighted in breakdown.values():
+        total += weighted
+    return total
+
+
 @dataclass(frozen=True)
 class CandidateLog:
     x: int
@@ -367,6 +447,8 @@ class CandidateLog:
     fog_share: float = 0.0  # Unrevealed share of the far-side tiles within loyalty range.
     recent_near: bool = False  # A hostile unit, now unseen, was recently seen near the site.
     fog_risk: bool = False  # Fogged surround and a recent sighting near: needs an escort.
+    # Issue 324: the site score's components as name -> [raw, weighted], before loyalty penalties.
+    breakdown: dict[str, tuple[float, float]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -1173,6 +1255,8 @@ class SettlingPolicy:
         self._needs_look = set()  # This scan's sites that need a look.
         s = self.settings
         found = []
+        # The first own city listed stands for the capital in the distance component (logged only).
+        capital = self._own_cities[0][:2] if self._own_cities else None
         for site in exploration.settle_sites:
             site_score = score_site(site, s)
             distance = hex_distance(settler.x, settler.y, site.x, site.y, s.map_width)
@@ -1277,6 +1361,7 @@ class SettlingPolicy:
                     fog_share,
                     recent_near,
                     fog_risk,
+                    score_site_breakdown(site, s, [c[:2] for c in self._own_cities], capital),
                 )
             )
         found.sort(key=lambda c: (-c.net_score, c.distance, c.x, c.y))

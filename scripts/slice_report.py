@@ -82,3 +82,18 @@ if bot_log.exists():
 for c in run_checks(load_run([path])):
     if c.policy in ("offense", "boosts", "era score"):
         print(f"  {c.status:7} {c.name}: {c.figures()} {c.note[:110]}")
+# Issue 324: how good the sites of the cities the bot founded were, from the settle log.
+settle_log = path.with_name(f"{path.stem}_settle.jsonl")
+if settle_log.exists():
+    from civ6_ai.site_quality import founded_site_scores
+
+    decisions = [
+        json.loads(x) for x in settle_log.read_text(encoding="utf-8").splitlines() if x.strip()
+    ]
+    site_scores = founded_site_scores(decisions)
+    if site_scores:
+        print(
+            f"  city sites: {len(site_scores)} founded, mean site score "
+            f"{sum(site_scores) / len(site_scores):.1f} "
+            f"(min {min(site_scores):.1f}, max {max(site_scores):.1f})"
+        )

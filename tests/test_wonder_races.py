@@ -1,10 +1,16 @@
+import asyncio
 import logging
 
 from civ6_ai.policies.production import (
+    DEFAULT_RIVALS,
+    CityProductionPolicy,
     ProductionContext,
     ProductionWeights,
+    _raw_value,
     rank_production,
+    rivals_from_rankings,
     score,
+    wonder_alternative_value,
 )
 from civ6_ai.state import ProductionChoice
 from civ6_ai.state.reader import build_city
@@ -13,6 +19,7 @@ from civ6_ai.strategy.wonders import (
     rival_win_probability,
     should_abandon,
 )
+from civ6_ai.world_rankings import CivScore, WorldRankings
 from fixtures import civ_state as fx
 
 WONDER = "BUILDING_STONEHENGE"
@@ -114,3 +121,132 @@ def test_on_a_threatened_or_expanding_city_does_not_race():
     assert score(_menu()[0], c, _ctx(turn=40, settlers=1), w) == 0.0
     assert score(_menu()[0], c, _ctx(turn=41, threatened=frozenset({c.city_id})), w) == 0.0
     assert score(_menu()[0], c, _ctx(turn=42, threatened=frozenset({99})), w) == 0.0
+
+
+# Issue 328: the estimator's real inputs.
+def _empire(**overview_changes):
+    from civ6_ai.state import read_empire
+
+    game = fx.FakeGame(overview=fx.overview(**overview_changes))
+    return asyncio.run(read_empire(game))
+
+
+def test_the_empire_carries_the_overview_difficulty():
+    assert _empire(difficulty="Prince").difficulty == "Prince"
+    assert _empire().difficulty == ""  # Unread stays empty, which the estimator treats with care.
+
+
+def test_prince_as_the_overview_names_it_is_read_as_prince():
+    assert race(difficulty="Prince").win_probability == race(difficulty="PRINCE").win_probability
+
+
+class _Holder:
+    def __init__(self, last):
+        self.last = last
+
+
+def _rankings(*ids, ours=0):
+    return WorldRankings(ours, tuple(CivScore(i, "", 100) for i in ids))
+
+
+def test_rivals_are_the_living_majors_but_us_met_or_not():
+    # Two unmet slots (-1), two met civs, and us: four rivals.
+    holder = _Holder(_rankings(-1, -1, 5, 4, 0))
+    assert rivals_from_rankings(holder) == (4, "rankings")
+    assert rivals_from_rankings(_Holder(_rankings(0))) == (0, "rankings")  # Alone: no rival.
+
+
+def test_unread_rankings_give_the_default_and_never_zero():
+    assert rivals_from_rankings(None) == (DEFAULT_RIVALS, "default")
+    assert rivals_from_rankings(_Holder(None)) == (DEFAULT_RIVALS, "default")
+    assert rivals_from_rankings(_Holder(_rankings())) == (DEFAULT_RIVALS, "default")
+    assert DEFAULT_RIVALS > 0
+
+
+def _policy_context(weights, rankings, empire=None):
+    policy = CityProductionPolicy(weights=weights, rankings=rankings)
+    empire = empire or _empire(difficulty="Emperor")
+    return policy._context(empire, [], [], [])
+
+
+def test_on_the_context_gets_difficulty_and_rivals():
+    ctx = _policy_context(ProductionWeights(wonder_races=True), _Holder(_rankings(1, 2, 0)))
+    assert (ctx.difficulty, ctx.rivals, ctx.rivals_source) == ("Emperor", 2, "rankings")
+    assert dict(ctx.rival_progress) == {}  # Not exposed by the game: left empty.
+
+
+def test_off_reads_nothing_and_leaves_the_context_alone():
+    class Tripwire:
+        @property
+        def last(self):
+            raise AssertionError("the rankings were read with wonder_races off")
+
+    ctx = _policy_context(ProductionWeights(), Tripwire())
+    assert (ctx.difficulty, ctx.rivals, ctx.wonder_alternative) == ("", 0, 5.0)
+
+
+def _alt_menu(*extra):
+    return [_menu()[0], *extra]
+
+
+def _alt_of(options, city=None, w=None, **kw):
+    city = city or _city(production=8.0)
+    w = w or ProductionWeights(wonder_races=True)
+    return wonder_alternative_value(city, options, _ctx(), w, 5.0, **kw)
+
+
+def test_the_alternative_is_the_best_district_or_building_score_here():
+    campus = ProductionChoice("DISTRICT", "DISTRICT_CAMPUS", 54, 7)
+    monument = ProductionChoice("BUILDING", "BUILDING_MONUMENT", 60, 7)
+    unit = ProductionChoice("UNIT", "UNIT_WARRIOR", 40, 4)
+    c, w, x = _city(production=8.0), ProductionWeights(wonder_races=True), _ctx()
+    campus_value = _raw_value(campus, c, x, w)
+    monument_value = _raw_value(monument, c, x, w)
+    assert campus_value > 0 and monument_value > 0
+    best = wonder_alternative_value(c, [*_menu(), campus, unit], x, w, 5.0)
+    assert best == max(campus_value, monument_value)
+    # Units and the wonder itself never count.
+    assert wonder_alternative_value(c, [_menu()[0], unit], x, w, 5.0) == 5.0
+    # An item the game or a refusal ruled out is no alternative.
+    only = wonder_alternative_value(c, [campus, monument], x, w, 5.0, frozenset({campus.item}))
+    assert only == monument_value
+
+
+def test_with_nothing_to_build_the_fallback_is_kept():
+    assert _alt_of([]) == 5.0
+    assert _alt_of(_alt_menu()) == 5.0
+
+
+def test_a_strong_alternative_turns_a_go_into_a_no_go_and_off_ignores_it(caplog):
+    c = _city(production=8.0)
+    library = ProductionChoice("BUILDING", "BUILDING_LIBRARY", 90, 11)
+    menu = [_menu()[0], library]
+
+    def verdict(w, turn):
+        caplog.clear()
+        with caplog.at_level(logging.INFO):
+            rank_production(c, menu, _ctx(turn=turn), w)
+        return caplog.text
+
+    assert " GO (" in verdict(ProductionWeights(wonder_races=True), 20)
+    # A Library worth 90 beats the wonder's expected 8 at any win chance: no race.
+    rich = verdict(ProductionWeights(wonder_races=True, science=30.0), 21)
+    assert "NO-GO" in rich and "alt 90.0" in rich and "alt=90.0" in rich
+    # Off: no race log, and the ranking ignores the race inputs.
+    off = ProductionWeights(science=30.0)
+    assert "wonder race" not in verdict(off, 22)
+    assert rank_production(c, menu, _ctx(), off) == rank_production(
+        c, menu, _ctx(difficulty="DEITY", rivals=9), off
+    )
+
+
+def test_the_log_line_names_the_inputs_used(caplog):
+    w = ProductionWeights(wonder_races=True)
+    c = _city(production=8.0)
+    ctx = _ctx(turn=60, rivals_source="rankings", rival_progress={WONDER: (0.25,)})
+    with caplog.at_level(logging.INFO):
+        score(_menu()[0], c, ctx, w)
+    assert "difficulty=PRINCE" in caplog.text
+    assert "rivals=3 (rankings)" in caplog.text
+    assert "rival progress=0.25" in caplog.text
+    assert "alt=5.0" in caplog.text

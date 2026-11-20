@@ -187,6 +187,9 @@ class ProductionContext:
     rivals: int = 0
     rival_progress: Mapping[str, tuple[float, ...]] = field(default_factory=dict, compare=False)
     wonder_alternative: float = 5.0
+    # Where `rivals` came from, for the log: "rankings" (living majors but us, as last read) or
+    # "default" (no rankings read yet). Not a decision input.
+    rivals_source: str = field(default="", compare=False)
 
     @property
     def camp_blocks(self) -> bool:
@@ -805,6 +808,49 @@ def tall_and_safe(city: City, ctx: ProductionContext) -> bool:
     )
 
 
+# Rivals assumed when the world rankings have not been read yet (the first turns, or a failed
+# read). A standard game has about five other majors; the guess leans low but not zero, since
+# zero rivals would make every race a certain win.
+DEFAULT_RIVALS = 3
+RIVALS_FROM_RANKINGS = "rankings"
+RIVALS_DEFAULT = "default"
+
+
+def rivals_from_rankings(rankings: Any) -> tuple[int, str]:
+    """The rivals who could build a wonder, and where the count came from.
+
+    Every living major civ but us can, met or not (the AI builds wonders on its own), so this is
+    the rankings' living majors minus us. `rankings` is a `RankingsHolder` or None; its newest
+    reading is used even from an earlier turn, because the count changes rarely and the policy
+    runs before the rankings handler each turn. An empty or missing reading gives the default.
+    """
+    last = getattr(rankings, "last", None)
+    if last is None or not getattr(last, "civs", ()):
+        return DEFAULT_RIVALS, RIVALS_DEFAULT
+    return len(last.rivals), RIVALS_FROM_RANKINGS
+
+
+def wonder_alternative_value(
+    city: City,
+    options: Iterable[ProductionChoice],
+    ctx: ProductionContext,
+    w: ProductionWeights,
+    fallback: float,
+    unavailable: frozenset[str] = frozenset(),
+) -> float:
+    """What the best non-wonder district or building is worth in this city, before the discount
+    for turns (the estimator's wonder value is undiscounted too). `fallback` when none is on
+    offer or none scores above zero."""
+    best = 0.0
+    for o in options:
+        if o.category not in ("DISTRICT", "BUILDING") or o.item in WONDERS or o.is_repair:
+            continue
+        if o.item in unavailable:
+            continue  # Ruled out by the game or a refusal: it is no alternative.
+        best = max(best, _raw_value(o, city, ctx, w))
+    return best if best > 0 else fallback
+
+
 def _wonder_race_score(
     option: ProductionChoice, city: City, ctx: ProductionContext, w: ProductionWeights
 ) -> float:
@@ -826,7 +872,13 @@ def _wonder_race_score(
     if key not in _LOGGED_RACES:
         _LOGGED_RACES.add(key)
         reason = "" if tall_and_safe(city, ctx) else " (not tall and safe)"
-        log.info("%s%s", est.log_line(city.name), reason)
+        shown = ",".join(f"{p:.2f}" for p in ctx.rival_progress.get(option.item, ())) or "none"
+        inputs = (
+            f" [inputs: difficulty={ctx.difficulty or 'unread'}, rivals={ctx.rivals}"
+            f" ({ctx.rivals_source or 'set'}), rival progress={shown},"
+            f" alt={ctx.wonder_alternative:.1f}]"
+        )
+        log.info("%s%s%s", est.log_line(city.name), reason, inputs)
     return _WONDER_VALUE * w.wonders if go else 0.0
 
 
@@ -922,6 +974,19 @@ def score(
     option: ProductionChoice, city: City, ctx: ProductionContext, weights: ProductionWeights
 ) -> float:
     """What the option is worth to this city, discounted by how long it takes."""
+    value = _raw_value(option, city, ctx, weights)
+    if value <= 0:
+        return 0.0
+    if under_threat(city, ctx) and is_defence(option):
+        # A defender that arrives in time matters most, so speed counts for more than usual.
+        return value * _URGENT_SCALE / (_URGENT_SCALE + max(option.turns, 1))
+    return value * _TURN_SCALE / (_TURN_SCALE + max(option.turns, 1))
+
+
+def _raw_value(
+    option: ProductionChoice, city: City, ctx: ProductionContext, weights: ProductionWeights
+) -> float:
+    """What the option is worth before the discount for how long it takes."""
     if option.is_repair:
         value = _repair_value(option, city, ctx, weights)
     elif option.category == "UNIT":
@@ -930,12 +995,7 @@ def score(
         value = _district_score(option, city, weights, ctx)
     else:
         value = _building_score(option, city, ctx, weights)
-    if value <= 0:
-        return 0.0
-    if under_threat(city, ctx) and is_defence(option):
-        # A defender that arrives in time matters most, so speed counts for more than usual.
-        return value * _URGENT_SCALE / (_URGENT_SCALE + max(option.turns, 1))
-    return value * _TURN_SCALE / (_TURN_SCALE + max(option.turns, 1))
+    return value
 
 
 def _is_floor_unit(option: ProductionChoice) -> bool:
@@ -977,6 +1037,15 @@ def rank_production(
     weights = weights or ProductionWeights()
     options = [o for o in options if o.item != "UNIT_TRADER" or context.trade_safe]  # Issue 269.
     keep, repairs = drop_dominated(list(options), city, context, weights)
+    if weights.wonder_races and any(o.item in WONDERS for o in keep):
+        # Issue 328: the wonder is weighed against the best district or building here, not a
+        # constant. Off, this branch and its extra scoring never run.
+        context = replace(
+            context,
+            wonder_alternative=wonder_alternative_value(
+                city, keep, context, weights, context.wonder_alternative, unavailable
+            ),
+        )
     scores = {id(o): score(o, city, context, weights) for o in (*repairs, *keep)}
     if not under_threat(city, context):
         # Restoring what is already ours comes before a new district (issue 280). Under threat
@@ -1489,7 +1558,9 @@ class CityProductionPolicy:
         defence: Any = None,
         builder_demand: Any = None,
         trade_blocked: Any = None,
+        rankings: Any = None,
     ) -> None:
+        self.rankings = rankings  # A `RankingsHolder`, or None: the rivals count for wonder races.
         self.trade_blocked = (
             trade_blocked  # `SecondaryPolicy.trade_blocked` (turn -> bool), or None.
         )
@@ -1537,13 +1608,23 @@ class CityProductionPolicy:
         )
         self.expansion.target_cities = self.weights.target_cities
         growth = self.growth.update(cities, empire, self.weights.target_cities, tiles=self._tiles)
-        return replace(
+        context = replace(
             context,
             sites_ok=self.expansion.sites_ok(empire.turn),
             held_settlers=self.expansion.held_settlers,
             scouts_built=self.scouts_built,
             growth=growth,
         )
+        if self.weights.wonder_races:
+            # Issue 328: the race inputs are read only when the setting is on. The difficulty
+            # comes from the overview `build_empire` already holds. Rival progress per wonder is
+            # not exposed by the game's reads, so it stays empty (a wonder built elsewhere is
+            # already gone from the game's production list).
+            rivals, source = rivals_from_rankings(self.rankings)
+            context = replace(
+                context, difficulty=empire.difficulty, rivals=rivals, rivals_source=source
+            )
+        return context
 
     async def assign(self, game: ProductionGame) -> list[str]:
         """Choose for each idle city, and return the names of any left without a choice.

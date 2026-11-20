@@ -55,6 +55,7 @@ from civ6_ai.state import read_empire as _read_empire
 from civ6_ai.state import read_production as _read_production
 from civ6_ai.state import read_units as _read_units
 from civ6_ai.state.reader import hex_distance
+from civ6_ai.strategy.wonders import estimate_race
 
 log = logging.getLogger(__name__)
 
@@ -121,6 +122,9 @@ class ProductionWeights:
     # an army-floor unit (8 to 11) and below an ordinary settler (14), so a ready settler still
     # comes first. 0 turns it off.
     early_monument: float = 12.0
+    # Issue 323: a wonder is scored only when the race estimator (`strategy.wonders`) says go, and
+    # only in a safe, tall-leaning city. Off: the old flat wonder score, unchanged.
+    wonder_races: bool = False
 
     def __post_init__(self) -> None:
         for item in fields(self):
@@ -175,6 +179,13 @@ class ProductionContext:
     spare_jobs: int | None = None  # Jobs no builder holds; None when not known this turn.
     # Each city's growth plan (`growth.py`). Empty: food and housing items score the old way.
     growth: Mapping[int, CityGrowth] = field(default_factory=dict, compare=False)
+    # Issue 323, read only with `wonder_races`: the difficulty name ("" when unread, which the
+    # estimator treats with care), the rivals who could build a wonder, the progress fraction of
+    # each rival seen building a given wonder, and what a district is worth here instead.
+    difficulty: str = ""
+    rivals: int = 0
+    rival_progress: Mapping[str, tuple[float, ...]] = field(default_factory=dict, compare=False)
+    wonder_alternative: float = 5.0
 
     @property
     def camp_blocks(self) -> bool:
@@ -371,6 +382,7 @@ _DEFENSIVE_BUILDINGS = frozenset({"WALLS", "CASTLE", "STAR_FORT"})
 _WARY_WALLS_SCORE = 12.0
 _TRAINING_BUILDINGS = frozenset({"BARRACKS", "STABLE", "ARMORY", "MILITARY_ACADEMY"})
 _WONDER_VALUE = 8.0
+_MONUMENT_COST = 30.0  # Production the city still owes its first culture building (issue 323).
 _UNKNOWN_BUILDING = 1.0  # Anything not listed still helps a little, so it ranks last, not never.
 
 _DISTRICT_YIELDS: dict[str, tuple[float, float, float, float, float, float]] = {
@@ -778,6 +790,45 @@ def wants_early_monument(city: City, ctx: ProductionContext, w: ProductionWeight
     return not under_threat(city, ctx)
 
 
+_LOGGED_RACES: set[tuple[str, str, int]] = set()
+
+
+def tall_and_safe(city: City, ctx: ProductionContext) -> bool:
+    """Only a safe, tall-leaning city races (issue 323): no threat anywhere, no settler or camp
+    force being built, so the production is not wanted for expansion."""
+    return (
+        not under_threat(city, ctx)
+        and not ctx.threatened
+        and ctx.settlers == 0
+        and ctx.camp_units <= 0
+    )
+
+
+def _wonder_race_score(
+    option: ProductionChoice, city: City, ctx: ProductionContext, w: ProductionWeights
+) -> float:
+    """The flat wonder score when the race estimator says go in a tall, safe city, else 0."""
+    est = estimate_race(
+        option.item,
+        cost=option.cost,
+        production=city.production,
+        turn=ctx.turn,
+        difficulty=ctx.difficulty,
+        rivals=ctx.rivals,
+        alternative=ctx.wonder_alternative,
+        other_work=0.0 if "MONUMENT" in city.buildings else _MONUMENT_COST,
+        progress=tuple(ctx.rival_progress.get(option.item, ())),
+        already_started=city.building == option.item,
+    )
+    go = est.go and tall_and_safe(city, ctx)
+    key = (city.name, option.item, ctx.turn)
+    if key not in _LOGGED_RACES:
+        _LOGGED_RACES.add(key)
+        reason = "" if tall_and_safe(city, ctx) else " (not tall and safe)"
+        log.info("%s%s", est.log_line(city.name), reason)
+    return _WONDER_VALUE * w.wonders if go else 0.0
+
+
 def _building_score(
     option: ProductionChoice, city: City, ctx: ProductionContext, w: ProductionWeights
 ) -> float:
@@ -786,7 +837,11 @@ def _building_score(
         return max(w.early_monument, _yield_value(_BUILDING_YIELDS[name], w))
     if option.item in WONDERS:
         # Needs a tile, which `_start` finds when the game asks for one.
-        return 0.0 if under_threat(city, ctx) else _WONDER_VALUE * w.wonders
+        if under_threat(city, ctx):
+            return 0.0
+        if w.wonder_races:
+            return _wonder_race_score(option, city, ctx, w)
+        return _WONDER_VALUE * w.wonders
     if name in _DEFENSIVE_BUILDINGS:
         if city.city_id in ctx.threatened and not city.has_walls:
             return 26.0 + len(city.threats)  # Walls come right after the first defender.

@@ -49,7 +49,9 @@ def threat(**changes):
 
 
 EARLY = ProductionContext(turn=3, num_cities=1)
-MID = ProductionContext(turn=120, num_cities=6, builders=6, recon=1, army=9)
+# No safe site known: these tests are about buildings, not the settler, which a mid-game city
+# with room would now keep building (issue 316).
+MID = ProductionContext(turn=120, num_cities=6, builders=6, recon=1, army=9, sites_ok=False)
 
 MENU = [
     option("UNIT", "UNIT_WARRIOR", 4),
@@ -89,9 +91,9 @@ def test_the_first_scout_comes_before_a_settler():
     assert best(grown, MENU, EARLY) == "UNIT_SCOUT"
 
 
-def test_expansion_stops_at_target_and_while_a_settler_is_already_out():
+def test_expansion_stops_at_the_ceiling_and_while_a_settler_is_already_out():
     grown = city(population=4)
-    capped = ProductionContext(turn=40, num_cities=6, builders=6, recon=1, army=9)
+    capped = ProductionContext(turn=40, num_cities=12, builders=6, recon=1, army=9)
     assert best(grown, MENU, capped) != "UNIT_SETTLER"
     out = ProductionContext(turn=40, num_cities=2, settlers=1, builders=2, recon=1, army=3)
     assert best(grown, MENU, out) != "UNIT_SETTLER"
@@ -952,7 +954,7 @@ def _settler_score(ctx, **city_changes):
 
 def test_settler_priority_rises_when_behind_the_schedule():
     behind = ProductionContext(turn=100, num_cities=2, builders=2, recon=1, army=2)
-    on_pace = replace(behind, num_cities=4, army=4, builders=4)
+    on_pace = replace(behind, num_cities=6, army=6, builders=6)
     assert _settler_score(behind) > _settler_score(on_pace) > 0
     assert _settler_score(behind) > 14.0
 
@@ -971,7 +973,7 @@ def test_no_boost_without_safe_sites_a_garrison_or_a_defender_per_city():
 def test_a_second_settler_is_queued_only_when_behind():
     behind = ProductionContext(turn=100, num_cities=2, settlers=1, builders=2, recon=1, army=2)
     assert _settler_score(behind) > 0
-    on_pace = replace(behind, num_cities=4, army=4, builders=4)
+    on_pace = replace(behind, num_cities=6, army=6, builders=6)
     assert _settler_score(on_pace) == 0
     assert _settler_score(replace(behind, settlers=2)) == 0
 
@@ -1102,7 +1104,7 @@ def test_a_starving_city_prefers_a_food_building():
 
 
 def test_a_starving_city_trains_no_settler():
-    ctx = replace(MID, num_cities=2, army=9, turn=40)
+    ctx = replace(MID, num_cities=2, army=9, turn=40, sites_ok=True)
     assert score_of("UNIT_SETTLER", city(), ctx) > 0
     assert score_of("UNIT_SETTLER", starving(), ctx) == 0
 
@@ -1586,11 +1588,11 @@ def holy_score(city_, ctx):
     return score(HOLY_SITE, city_, ctx, ProductionWeights())
 
 
-def test_early_holy_site_beats_a_monument_and_the_army_floor_but_not_a_settler():
+def test_early_holy_site_ranks_below_a_settler_and_a_monument_score():
     site = holy_score(capital(), FAITH_READY)
-    monument = score(
-        option("BUILDING", "BUILDING_MONUMENT", 6, 30), capital(), FAITH_READY, ProductionWeights()
-    )
+    # The Monument is 12.0 once the early Monument bonus lands; 6 turns discounts it to 9.2.
+    assert site < 12.0 * 20.0 / 26.0
+    assert ProductionWeights().early_holy_site_score < 12.0
     settler = score(
         option("UNIT", "UNIT_SETTLER", 6, 30),
         capital(population=3),
@@ -1598,8 +1600,11 @@ def test_early_holy_site_beats_a_monument_and_the_army_floor_but_not_a_settler()
         ProductionWeights(),
     )
     assert site > holy_score(capital(), replace(FAITH_READY, holy_site_adjacency=1))
-    assert site > monument
     assert site < settler
+    raised = ProductionWeights(early_holy_site_score=16.0)
+    assert score(HOLY_SITE, capital(), FAITH_READY, raised) > site
+    far = ProductionWeights(early_holy_site_adjacency=3)
+    assert score(HOLY_SITE, capital(), FAITH_READY, far) < site
 
 
 @pytest.mark.parametrize(
@@ -1646,3 +1651,13 @@ def test_the_handler_reads_the_capital_adjacency_and_stops_once_the_pantheon_exi
     calls = game.advisor_calls
     run(policy._with_faith_site(game, capital_city, holy, ProductionContext(1, 1)))
     assert game.advisor_calls == calls
+
+
+def test_settlers_continue_past_six_cities_while_safe_sites_exist():
+    # Issue 316: the cap was a fixed 6. Now it follows the cities while a safe site is known.
+    grown = city(population=4)
+    base = dict(turn=150, num_cities=7, builders=7, recon=1, army=10)
+    assert best(grown, MENU, ProductionContext(**base, sites_ok=True)) == "UNIT_SETTLER"
+    # Safety is unchanged: no safe site, or one already in flight, builds no settler.
+    assert best(grown, MENU, ProductionContext(**base, sites_ok=False)) != "UNIT_SETTLER"
+    assert best(grown, MENU, ProductionContext(**base, settlers=2)) != "UNIT_SETTLER"

@@ -13,8 +13,10 @@ Three jobs, each deterministic. The same game state and the same weights give th
   turn is not set a third time in the same slot (Run 5 set one pair 81 times, a game call each).
   Slots of a fixed type are filled before wildcard slots,
   so a wildcard slot can't take the card a fixed slot needed. A card in a slot is never swapped,
-  with one exception (issue 300): until a pantheon is founded God King outranks every other card
-  (`god_king_priority`), for the faith to found it early; once it is founded, God King is
+  with one exception (issue 300): while no pantheon is founded and one is near (at most
+  `god_king_max_turns` away at the current faith plus God King's +1), God King outranks every
+  other card (`god_king_priority`); otherwise it keeps its normal rank, below Urban Planning,
+  because the slot is worth a production card. Once a pantheon is founded, God King is
   replaced in its slot by the best card that fits, but only on a turn a civic has just completed
   (the count rose since the last turn), the one window in which the game takes a free change.
 - Governors: every point is spent, appointing a new governor first and promoting after. A new
@@ -119,9 +121,15 @@ class GovernmentWeights:
     max_government_changes: int = 8
     policy_priorities: tuple[tuple[str, float], ...] = DEFAULT_POLICY_PRIORITIES
     default_policy: float = 1.0  # For a card with no entry above.
-    # Issue 300: the human founded a pantheon on turn 18 with God King's +1 faith in the capital,
-    # the bot on turn 72. Above every other card until a pantheon exists (the highest is 3.0).
-    god_king_priority: float = 5.0
+    # Issue 300: the human founded a pantheon on turn 18 with God King's +1 faith in the capital.
+    # But God King held the economic slot in place of Urban Planning (+1 production in every
+    # city) and cost 7 score by turn 50 in the live test. So it leads only while the pantheon is
+    # near: the turns to reach `pantheon_cost` at the current faith per turn plus God King's +1
+    # must be at most `god_king_max_turns`. Otherwise it scores its normal 2.5, below Urban
+    # Planning. It is swapped out once the pantheon is founded.
+    god_king_priority: float = 5.0  # Above every other card (the highest is 3.0) while it leads.
+    pantheon_cost: float = 25.0  # Faith a pantheon costs on a standard game.
+    god_king_max_turns: float = 12.0
     governor_priorities: tuple[tuple[str, float], ...] = DEFAULT_GOVERNOR_PRIORITIES
     default_governor: float = 1.0
     governor_focus: tuple[tuple[str, str], ...] = DEFAULT_GOVERNOR_FOCUS
@@ -196,19 +204,35 @@ def card_fits(slot: PolicySlot, card: Policy) -> bool:
 _GOD_KING = "POLICY_GOD_KING"
 
 
-def score_card(card: Policy, weights: GovernmentWeights, pantheon: bool = True) -> float:
-    """What the card is worth. `pantheon` False: none is founded yet, so God King leads."""
-    if not pantheon and card.policy_type == _GOD_KING:
+def pantheon_turns(balance: float, per_turn: float, weights: GovernmentWeights) -> float:
+    """Turns to reach the pantheon's cost with God King's +1 faith added. Infinite at no income."""
+    rate = per_turn + 1.0
+    return max(0.0, weights.pantheon_cost - balance) / rate
+
+
+def god_king_leads(balance: float, per_turn: float, weights: GovernmentWeights) -> bool:
+    """True when a pantheon is near enough that God King is worth the economic slot."""
+    return pantheon_turns(balance, per_turn, weights) <= weights.god_king_max_turns
+
+
+def score_card(card: Policy, weights: GovernmentWeights, god_king_first: bool = False) -> float:
+    """What the card is worth. `god_king_first`: no pantheon yet, and one is near."""
+    if god_king_first and card.policy_type == _GOD_KING:
         return weights.god_king_priority
     return dict(weights.policy_priorities).get(_short(card.policy_type), weights.default_policy)
 
 
 def rank_cards(
-    slot: PolicySlot, spare: list[Policy], weights: GovernmentWeights, pantheon: bool = True
+    slot: PolicySlot,
+    spare: list[Policy],
+    weights: GovernmentWeights,
+    god_king_first: bool = False,
 ) -> list[Policy]:
     """The cards that fit the slot, best first. Ties go to the card type in alphabetical order."""
     fits = [card for card in spare if card_fits(slot, card)]
-    return sorted(fits, key=lambda card: (-score_card(card, weights, pantheon), card.policy_type))
+    return sorted(
+        fits, key=lambda card: (-score_card(card, weights, god_king_first), card.policy_type)
+    )
 
 
 def god_king_swap(government: Government, weights: GovernmentWeights) -> tuple[int, Policy] | None:
@@ -240,7 +264,7 @@ async def fill_empty_slots(
     game: GovernmentGame,
     weights: GovernmentWeights,
     sets: Counter[tuple[int, str]] | None = None,
-    pantheon: bool = True,
+    god_king_first: bool = False,
 ) -> bool:
     """Fill every empty slot it can. True if none is left empty.
 
@@ -259,7 +283,7 @@ async def fill_empty_slots(
     empty = sorted(government.empty_policy_slots, key=lambda s: (s.slot_type == _WILDCARD, s.index))
     filled = 0
     for slot in empty:
-        ranked = rank_cards(slot, spare, weights, pantheon)
+        ranked = rank_cards(slot, spare, weights, god_king_first)
         fresh = [c for c in ranked if counts[(slot.index, c.policy_type)] < MAX_SETS_PER_PAIR]
         if ranked and not fresh:
             filled += 1  # Every fitting card was set enough; more calls would repeat them. This
@@ -496,8 +520,19 @@ class GovernmentPolicy:
         return False
 
     async def fill(self, game: GovernmentGame) -> bool:
-        pantheon = await self._has_pantheon(game)
-        return await fill_empty_slots(game, self.weights, self._card_sets, pantheon)
+        return await fill_empty_slots(
+            game, self.weights, self._card_sets, await self._god_king_first(game)
+        )
+
+    async def _god_king_first(self, game: GovernmentGame) -> bool:
+        """No pantheon yet and one near: God King takes the slot. Read only when a slot is empty."""
+        if await self._has_pantheon(game):
+            return False
+        if not (await read_government(game)).empty_policy_slots:
+            return False
+        balance = float((await game.get_pantheon_status()).faith_balance)
+        per_turn = sum(c.faith for c in await read_cities(game))
+        return god_king_leads(balance, per_turn, self.weights)
 
     async def run(self, game: GovernmentGame) -> None:
         failures: list[str] = []

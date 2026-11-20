@@ -9,7 +9,9 @@ from civ6_ai.policies.government import (
     GovernmentPolicy,
     GovernmentWeights,
     blocker_policies,
+    god_king_leads,
     government_candidates,
+    pantheon_turns,
     rank_cards,
 )
 from civ6_ai.state.models import Policy, PolicySlot
@@ -278,10 +280,25 @@ ECONOMIC_CARDS = [
 ]
 
 
-def test_god_king_wins_the_economic_slot_before_the_pantheon():
+def test_god_king_leads_only_when_the_pantheon_is_near():
+    w = GovernmentWeights()  # Cost 25, at most 12 turns.
+    assert pantheon_turns(10.0, 0.0, w) == 15.0  # God King's +1 is the only income.
+    assert not god_king_leads(10.0, 0.0, w)
+    assert god_king_leads(10.0, 1.0, w)  # 15 / 2 = 7.5 turns.
+    assert god_king_leads(30.0, 0.0, w)  # Already enough faith.
+    assert not god_king_leads(0.0, 0.0, w)  # 25 turns.
+
+
+def test_god_king_wins_the_economic_slot_when_the_pantheon_is_near():
     game = ScriptedGame(slots=[slot(0, "SLOT_ECONOMIC")], cards=ECONOMIC_CARDS)
     run(GovernmentPolicy().run(game))
     assert game.slots[0].current_policy == "POLICY_GOD_KING"
+
+
+def test_urban_planning_wins_the_economic_slot_when_the_pantheon_is_far():
+    game = ScriptedGame(slots=[slot(0, "SLOT_ECONOMIC")], cards=ECONOMIC_CARDS)
+    run(GovernmentPolicy(GovernmentWeights(god_king_max_turns=1.0)).run(game))
+    assert game.slots[0].current_policy == "POLICY_URBAN_PLANNING"
 
 
 def test_urban_planning_wins_the_economic_slot_after_the_pantheon():

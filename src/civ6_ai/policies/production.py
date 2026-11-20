@@ -33,7 +33,7 @@ from civ6_ai.placement import (
     classify,
 )
 from civ6_ai.policies.districts import BASE_VALUE, PLANNED_VALUE, is_planned, wants_district
-from civ6_ai.policies.expansion import ExpansionState, expected_cities
+from civ6_ai.policies.expansion import ExpansionState, expected_cities, settler_cap
 from civ6_ai.policies.game_data import (
     COMBAT_UNITS,
     REPLACES,
@@ -100,7 +100,9 @@ class ProductionWeights:
     builders: float = 1.0  # Builders, which improve tiles.
     trade: float = 1.0  # Traders, while the empire has route capacity no trader fills.
     wonders: float = 0.5
-    target_cities: int = 6  # Stop building settlers at this many cities.
+    # The ceiling on cities: settlers stop here. Below it the cap follows the schedule and the safe
+    # sites (see `settler_cap`), so it is no longer a fixed small number (issue 316).
+    target_cities: int = 12
     victory: str = "any"  # The policy document's victory target. Decides the special districts.
     # The army floor: combat units kept per city. Below it, military units score above an ordinary
     # building even when no city is short; at it, military stops scoring.
@@ -110,6 +112,14 @@ class ProductionWeights:
     camp_share: float = 0.5
     # Turns a one-city empire holds back builders to put the first settler first. 0 turns it off.
     builder_hold_turns: int = _FIRST_SETTLER_TURNS
+    # Issue 300: the human founded a pantheon on turn 18 from a Holy Site on a +2 faith tile; the
+    # bot on turn 72. The first Holy Site in the capital, on a tile of at least this adjacency and
+    # while no pantheon exists, scores `early_holy_site_score`. Live test 1 (16.0) displaced the
+    # first Monument and cost 7 score by turn 50, so it now sits below a Monument and a ready
+    # Settler (after the turn discount, a Holy Site takes about twice as long) and above the
+    # army floor's lowest picks.
+    early_holy_site_adjacency: int = 2
+    early_holy_site_score: float = 11.0
 
     def __post_init__(self) -> None:
         for item in fields(self):
@@ -364,14 +374,6 @@ _TRAINING_BUILDINGS = frozenset({"BARRACKS", "STABLE", "ARMORY", "MILITARY_ACADE
 _WONDER_VALUE = 8.0
 _UNKNOWN_BUILDING = 1.0  # Anything not listed still helps a little, so it ranks last, not never.
 
-# Issue 300: the human founded a pantheon on turn 18 from a Holy Site on a +2 faith tile; the bot
-# founded one on turn 72. Early faith is worth more than the 4.0-weight yield says, so the first
-# Holy Site in the capital, on a tile of this adjacency or better, scores a fixed value. After
-# the turn discount (a Holy Site takes about twice as long as a Monument) it still sits above a
-# Monument (12.0) and the army floor (8 to 12), and below a ready Settler (14).
-_EARLY_HOLY_SITE_ADJACENCY = 2
-_EARLY_HOLY_SITE_SCORE = 16.0
-
 _DISTRICT_YIELDS: dict[str, tuple[float, float, float, float, float, float]] = {
     "CAMPUS": (0, 0, 0, 5.0, 0, 0),
     "COMMERCIAL_HUB": (0, 0, 5.0, 0, 0, 0),
@@ -599,12 +601,13 @@ def _unit_score(
             and city.garrison_unit is not None
             and ctx.army >= ctx.num_cities
         )
-        in_flight_cap = 2 if boosted and ctx.num_cities + 2 <= w.target_cities else 1
+        cap = settler_cap(ctx.turn, ctx.num_cities, ctx.sites_ok, w.target_cities)
+        in_flight_cap = 2 if boosted and ctx.num_cities + 2 <= cap else 1
         if (
             threatened
             or is_starving(city)
             or city.pop < _SETTLER_MIN_POP
-            or ctx.num_cities + ctx.settlers >= w.target_cities
+            or ctx.num_cities + ctx.settlers >= cap
             or ctx.settlers >= in_flight_cap
             # Issue 283: a settler already waits with nowhere to go, so another adds nothing.
             or ctx.held_settlers > 0
@@ -812,9 +815,9 @@ def _district_score(
         and city.is_capital
         and not ctx.pantheon
         and not any(_base_district(d) == "HOLY_SITE" for d in ctx.districts)
-        and ctx.holy_site_adjacency >= _EARLY_HOLY_SITE_ADJACENCY
+        and ctx.holy_site_adjacency >= w.early_holy_site_adjacency
     ):
-        value = max(value, _EARLY_HOLY_SITE_SCORE)
+        value = max(value, w.early_holy_site_score)
     if name == "CAMPUS" and ctx.num_cities > 0:
         behind = max(0.0, 1.0 - ctx.science_districts / ctx.num_cities)
         value += _SCIENCE_CATCHUP * behind * w.science

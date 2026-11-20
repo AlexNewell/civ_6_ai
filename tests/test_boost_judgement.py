@@ -264,3 +264,61 @@ def test_different_districts_count_only_new_queued_types():
     assert one(option, state, again).decision is Decision.RESEARCH_NOW
     new = PlanSignals(districts_queued={"CAMPUS": 1, "HARBOR": 1})
     assert one(option, state, new).decision is Decision.DELAY
+
+
+def test_non_specialty_districts_do_not_count_as_specialty():
+    option = item("State Workforce", "Build any specialty district.", turns=15)
+    aqueduct = PlanSignals(districts_queued={"AQUEDUCT": 1, "NEIGHBORHOOD": 1})
+    assert one(option, signals=aqueduct).decision is Decision.RESEARCH_NOW
+    built = BoostState(turn=20, districts={"AQUEDUCT": 1})
+    assert one(option, built).decision is Decision.RESEARCH_NOW
+    assert one(option, signals=PlanSignals(districts_queued={"CAMPUS": 1})).decision is (
+        Decision.DELAY
+    )
+
+
+def test_non_specialty_districts_do_not_count_toward_different_districts():
+    option = item("Mathematics", "Build 2 different specialty districts.", turns=15)
+    state = BoostState(turn=20, districts={"CAMPUS": 1, "AQUEDUCT": 1})
+    only_dam = PlanSignals(districts_queued={"DAM": 1, "NEIGHBORHOOD": 1})
+    assert one(option, state, only_dam).decision is Decision.RESEARCH_NOW
+    # With the Aqueduct counted this would already be 2 and a Holy Site would be a third.
+    holy = PlanSignals(districts_queued={"HOLY_SITE": 1})
+    assert one(option, state, holy).decision is Decision.DELAY
+
+
+def test_a_signal_gap_keeps_the_delay_record():
+    option = item("Early Empire", POP6, turns=20)
+    record = DelayRecord(since_turn=10, first_eta=4)
+    gap = judge_boosts([option], BoostState(turn=14, population=4), PlanSignals())
+    assert gap[0].decision is Decision.RESEARCH_NOW
+    kept = next_history({option.item_type: record}, gap, 14)
+    assert kept[option.item_type] == record
+
+
+def test_a_flickering_signal_cannot_restart_the_wait():
+    option = item("Early Empire", POP6, turns=20)
+    state = BoostState(turn=10, population=4)
+    on, off = PlanSignals(growth_turns_per_pop=2.0), PlanSignals()
+    history = next_history({}, judge_boosts([option], state, on), 10)
+    for turn in range(11, 19):
+        signals = off if turn % 2 else on
+        state = BoostState(turn=turn, population=4)
+        j = judge_boosts([option], state, signals, history=history)
+        history = next_history(history, j, turn)
+    final = judge_boosts([option], BoostState(turn=19, population=4), on, history=history)[0]
+    assert final.decision is Decision.RESEARCH_NOW and final.gave_up  # Waited past max_delay.
+
+
+def test_a_boosted_item_drops_its_record():
+    option = item("Early Empire", POP6, boosted=True)
+    j = judge_boosts([option], BoostState(turn=14), PlanSignals())
+    assert next_history({option.item_type: DelayRecord(10, 4)}, j, 14) == {}
+
+
+def test_one_ordinary_mine_never_delays_mine_a_resource():
+    option = item("Wheel", "Mine a resource.", turns=12)
+    for resource_data in (None, {}):
+        state = BoostState(turn=20, improvements={"MINE": 1}, resource_improvements=resource_data)
+        j = one(option, state, PlanSignals(improvement_jobs={"MINE": 2}))
+        assert j.decision is Decision.RESEARCH_NOW

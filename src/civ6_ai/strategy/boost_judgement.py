@@ -253,16 +253,29 @@ def _improvement_reach(
     )
 
 
+# Districts that are not "specialty districts" for the boosts that say so. Approximate, from the
+# game's rules as recalled: the city centre, the Aqueduct line (with its unique Bath), the
+# Neighborhood line (with its unique Mbanza), the Canal and the Dam do not count.
+_NON_SPECIALTY = frozenset(
+    {"CITY_CENTER", "AQUEDUCT", "BATH", "NEIGHBORHOOD", "MBANZA", "CANAL", "DAM"}
+)
+
+
+def _specialty(counts: Mapping[str, int]) -> dict[str, int]:
+    return {t: n for t, n in counts.items() if t not in _NON_SPECIALTY}
+
+
 def _district_reach(
     spec: BoostSpec, state: BoostState, signals: PlanSignals, settings: JudgementSettings
 ) -> Reach:
+    done, waiting = _specialty(state.districts), _specialty(signals.districts_queued)
     if spec.target == ANY:
-        have, queued = sum(state.districts.values()), sum(signals.districts_queued.values())
+        have, queued = sum(done.values()), sum(waiting.values())
     elif spec.target == DIFFERENT:
-        built = {t for t, n in state.districts.items() if n > 0}
+        built = {t for t, n in done.items() if n > 0}
         have = len(built)
         # A queued type counts only when no completed district already represents it.
-        queued = sum(1 for t, n in signals.districts_queued.items() if n > 0 and t not in built)
+        queued = sum(1 for t, n in waiting.items() if n > 0 and t not in built)
     else:
         have, queued = (
             state.districts.get(spec.target, 0),
@@ -462,7 +475,7 @@ def judge_boosts(
 def next_history(
     history: Mapping[str, DelayRecord], judgements: Iterable[BoostJudgement], turn: int
 ) -> dict[str, DelayRecord]:
-    """The delay records for next turn. Items no longer offered are dropped."""
+    """The delay records for next turn. Items no longer offered, or now boosted, are dropped."""
     out: dict[str, DelayRecord] = {}
     for j in judgements:
         old = history.get(j.item_type)
@@ -472,6 +485,10 @@ def next_history(
             )
         elif j.decision is Decision.DELAY:
             out[j.item_type] = old or DelayRecord(turn, j.reach.turns or 1)
+        elif old is not None and j.reach.label is not ReachLabel.EARNED:
+            # The signal is gone for now, but the item is still offered and unboosted: keep the
+            # record, so a flickering signal can't restart the wait past the slip and delay bounds.
+            out[j.item_type] = old
     return out
 
 

@@ -48,6 +48,7 @@ from civ6_ai.policies.growth import (
     food_multiplier,
     housing_multiplier,
 )
+from civ6_ai.policies.growth_caps import at_housing_cap, decide_cap_focus, settler_delay_note
 from civ6_ai.policies.military import MilitaryWeights, camp_matchup
 from civ6_ai.state import City, Empire, ProductionChoice, Unit
 from civ6_ai.state import read_cities as _read_cities
@@ -1444,6 +1445,7 @@ class CityProductionPolicy:
         self.weights = weights or ProductionWeights()  # The strategist replaces this later.
         self.refusals = RefusalMemory()
         self.growth = GrowthPolicy()  # Target size and stance per city (1.47).
+        self._cap_focus: dict[int, str] = {}  # City -> yield favored at a cap (issue 215).
         self._tiles: dict[int, CityTiles] = {}  # Food of each city's tiles (`city_tiles.py`).
         self._tiles_age = REFRESH_TURNS  # Turns since the last read.
         self._tiles_seen: dict[int, tuple[int, bool]] = {}  # (pop, starving) at the last read.
@@ -1490,6 +1492,7 @@ class CityProductionPolicy:
         cities = await _read_cities(game)
         await self._read_tiles(game, cities)
         await self._feed_starving(game, cities)
+        await self._focus_at_caps(game, cities)
         marked = self.defence.threatened_ids if self.defence is not None else frozenset()
         short = self.defence.short_ids if self.defence is not None else None
         self._log_pillaged(cities)
@@ -1743,6 +1746,62 @@ class CityProductionPolicy:
             else:
                 self._food_focus.discard(city.city_id)
                 self._reset.add(city.city_id)
+
+    async def _focus_at_caps(self, game: ProductionGame, cities: list[City]) -> None:
+        """Issue 215: at a housing or amenity cap, favor a non-food yield; undo it below the cap.
+
+        Off unless `GrowthWeights.cap_focus`. One `set_city_focus` call per change. A city the
+        starvation rule focused is left to it. A failed call is tried again next turn.
+        """
+        w = self.growth.weights
+        if w.settler_note:
+            for city in cities:
+                note = settler_delay_note(city)
+                if note:
+                    log.info("growth %s", note)
+        if not w.cap_focus:
+            return
+        empire = None
+        weights = {
+            "science": self.weights.science,
+            "culture": self.weights.culture,
+            "gold": self.weights.gold,
+            "faith": self.weights.faith,
+        }
+        for city in cities:
+            if city.city_id in self._food_focus or is_starving(city):
+                self._cap_focus.pop(city.city_id, None)  # The food rule owns the focus now.
+                continue
+            held = self._cap_focus.get(city.city_id)
+            if held is None and not at_housing_cap(city):
+                continue  # Nothing held and not capped: the usual turn costs no read.
+            if empire is None and (held is None):
+                empire = await _read_empire(game)
+            verdict = decide_cap_focus(city, empire, enabled=True, weights=weights)
+            if verdict.focus is not None and held is None:
+                focus = verdict.focus
+            elif verdict.focus is None and held is not None:
+                focus = "default"
+            else:
+                continue
+            try:
+                result = await game.set_city_focus(city.city_id, focus)
+            except Exception as err:  # A focus is a nicety. It must never stop production.
+                log.warning("%s: set_city_focus %s failed: %s", city.name, focus, err)
+                continue
+            if _failed(str(result)):
+                log.info("%s: set_city_focus %s refused: %s", city.name, focus, str(result)[:120])
+                continue
+            log.info(
+                "growth %s",
+                verdict.reason
+                if focus != "default"
+                else f"{city.name}: below its caps again ({verdict.reason}): focus default",
+            )
+            if focus == "default":
+                self._cap_focus.pop(city.city_id, None)
+            else:
+                self._cap_focus[city.city_id] = focus
 
     def _note(self, city: City, text: str) -> None:
         if self.defence is not None:

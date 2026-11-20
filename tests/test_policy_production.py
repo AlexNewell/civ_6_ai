@@ -1574,7 +1574,6 @@ def test_a_zero_scored_settler_is_never_started_as_the_last_item():
     assert picked is None and game.set_calls == []
 
 
-<<<<<<< HEAD
 # Issue 299: a Monument in a city's first build cycle outranks the second garrison or scout unit.
 _FRESH = ProductionContext(turn=15, num_cities=1, builders=1, recon=1, army=1)
 _FRESH_MENU = [
@@ -1630,7 +1629,8 @@ def test_no_early_monument_bonus_under_threat():
 
 def built_city():
     return city(population=1, buildings=["PALACE", "MONUMENT"])
-=======
+
+
 def test_settlers_continue_past_six_cities_while_safe_sites_exist():
     # Issue 316: the cap was a fixed 6. Now it follows the cities while a safe site is known.
     grown = city(population=4)
@@ -1639,4 +1639,3 @@ def test_settlers_continue_past_six_cities_while_safe_sites_exist():
     # Safety is unchanged: no safe site, or one already in flight, builds no settler.
     assert best(grown, MENU, ProductionContext(**base, sites_ok=False)) != "UNIT_SETTLER"
     assert best(grown, MENU, ProductionContext(**base, settlers=2)) != "UNIT_SETTLER"
->>>>>>> origin/main

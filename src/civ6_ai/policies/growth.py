@@ -94,6 +94,11 @@ class GrowthWeights:
     food_hold: float = 0.4  # Food items in a city that is at its target.
     housing_idle: float = 0.3  # Housing items with the cap out of reach (the old rule's value).
     log_every: int = 25  # Turns between full plan lines. Changes are logged at once.
+    # Issue 215: at a housing or amenity cap, favor a non-food yield instead of growing into the
+    # penalty (`growth_caps.py`). Off until a live run shows the focus call moves citizens.
+    cap_focus: bool = False
+    # Log (never act on) a Settler that finishes just before its city grows.
+    settler_note: bool = False
 
 
 @dataclass(frozen=True)

@@ -48,6 +48,7 @@ from civ6_ai.policies.growth import (
     food_multiplier,
     housing_multiplier,
 )
+from civ6_ai.policies.growth_caps import at_housing_cap, decide_cap_focus, settler_delay_note
 from civ6_ai.policies.military import MilitaryWeights, camp_matchup
 from civ6_ai.state import City, Empire, ProductionChoice, Unit
 from civ6_ai.state import read_cities as _read_cities
@@ -55,6 +56,7 @@ from civ6_ai.state import read_empire as _read_empire
 from civ6_ai.state import read_production as _read_production
 from civ6_ai.state import read_units as _read_units
 from civ6_ai.state.reader import hex_distance
+from civ6_ai.strategy.wonders import estimate_race
 
 log = logging.getLogger(__name__)
 
@@ -121,6 +123,9 @@ class ProductionWeights:
     # an army-floor unit (8 to 11) and below an ordinary settler (14), so a ready settler still
     # comes first. 0 turns it off.
     early_monument: float = 12.0
+    # Issue 323: a wonder is scored only when the race estimator (`strategy.wonders`) says go, and
+    # only in a safe, tall-leaning city. Off: the old flat wonder score, unchanged.
+    wonder_races: bool = False
 
     def __post_init__(self) -> None:
         for item in fields(self):
@@ -175,6 +180,13 @@ class ProductionContext:
     spare_jobs: int | None = None  # Jobs no builder holds; None when not known this turn.
     # Each city's growth plan (`growth.py`). Empty: food and housing items score the old way.
     growth: Mapping[int, CityGrowth] = field(default_factory=dict, compare=False)
+    # Issue 323, read only with `wonder_races`: the difficulty name ("" when unread, which the
+    # estimator treats with care), the rivals who could build a wonder, the progress fraction of
+    # each rival seen building a given wonder, and what a district is worth here instead.
+    difficulty: str = ""
+    rivals: int = 0
+    rival_progress: Mapping[str, tuple[float, ...]] = field(default_factory=dict, compare=False)
+    wonder_alternative: float = 5.0
 
     @property
     def camp_blocks(self) -> bool:
@@ -371,6 +383,7 @@ _DEFENSIVE_BUILDINGS = frozenset({"WALLS", "CASTLE", "STAR_FORT"})
 _WARY_WALLS_SCORE = 12.0
 _TRAINING_BUILDINGS = frozenset({"BARRACKS", "STABLE", "ARMORY", "MILITARY_ACADEMY"})
 _WONDER_VALUE = 8.0
+_MONUMENT_COST = 30.0  # Production the city still owes its first culture building (issue 323).
 _UNKNOWN_BUILDING = 1.0  # Anything not listed still helps a little, so it ranks last, not never.
 
 _DISTRICT_YIELDS: dict[str, tuple[float, float, float, float, float, float]] = {
@@ -778,6 +791,45 @@ def wants_early_monument(city: City, ctx: ProductionContext, w: ProductionWeight
     return not under_threat(city, ctx)
 
 
+_LOGGED_RACES: set[tuple[str, str, int]] = set()
+
+
+def tall_and_safe(city: City, ctx: ProductionContext) -> bool:
+    """Only a safe, tall-leaning city races (issue 323): no threat anywhere, no settler or camp
+    force being built, so the production is not wanted for expansion."""
+    return (
+        not under_threat(city, ctx)
+        and not ctx.threatened
+        and ctx.settlers == 0
+        and ctx.camp_units <= 0
+    )
+
+
+def _wonder_race_score(
+    option: ProductionChoice, city: City, ctx: ProductionContext, w: ProductionWeights
+) -> float:
+    """The flat wonder score when the race estimator says go in a tall, safe city, else 0."""
+    est = estimate_race(
+        option.item,
+        cost=option.cost,
+        production=city.production,
+        turn=ctx.turn,
+        difficulty=ctx.difficulty,
+        rivals=ctx.rivals,
+        alternative=ctx.wonder_alternative,
+        other_work=0.0 if "MONUMENT" in city.buildings else _MONUMENT_COST,
+        progress=tuple(ctx.rival_progress.get(option.item, ())),
+        already_started=city.building == option.item,
+    )
+    go = est.go and tall_and_safe(city, ctx)
+    key = (city.name, option.item, ctx.turn)
+    if key not in _LOGGED_RACES:
+        _LOGGED_RACES.add(key)
+        reason = "" if tall_and_safe(city, ctx) else " (not tall and safe)"
+        log.info("%s%s", est.log_line(city.name), reason)
+    return _WONDER_VALUE * w.wonders if go else 0.0
+
+
 def _building_score(
     option: ProductionChoice, city: City, ctx: ProductionContext, w: ProductionWeights
 ) -> float:
@@ -786,7 +838,11 @@ def _building_score(
         return max(w.early_monument, _yield_value(_BUILDING_YIELDS[name], w))
     if option.item in WONDERS:
         # Needs a tile, which `_start` finds when the game asks for one.
-        return 0.0 if under_threat(city, ctx) else _WONDER_VALUE * w.wonders
+        if under_threat(city, ctx):
+            return 0.0
+        if w.wonder_races:
+            return _wonder_race_score(option, city, ctx, w)
+        return _WONDER_VALUE * w.wonders
     if name in _DEFENSIVE_BUILDINGS:
         if city.city_id in ctx.threatened and not city.has_walls:
             return 26.0 + len(city.threats)  # Walls come right after the first defender.
@@ -1296,6 +1352,14 @@ async def choose_for_city(
         # as the last item left; the city takes the next option or stays idle.
         if option.item == "UNIT_SETTLER" and score(option, city, context, weights) <= 0:
             continue
+        # Issue 323: a wonder the race estimator rejected is not started, even when everything
+        # above it is refused. Off, a zero-scored wonder is still tried, as before.
+        if (
+            weights.wonder_races
+            and option.item in WONDERS
+            and score(option, city, context, weights) <= 0
+        ):
+            continue
         # A remembered refusal is checked only when the item has won its place in the ranking, so
         # a changed signature by itself costs no call and gives the item no priority.
         if (
@@ -1444,6 +1508,7 @@ class CityProductionPolicy:
         self.weights = weights or ProductionWeights()  # The strategist replaces this later.
         self.refusals = RefusalMemory()
         self.growth = GrowthPolicy()  # Target size and stance per city (1.47).
+        self._cap_focus: dict[int, str] = {}  # City -> yield favored at a cap (issue 215).
         self._tiles: dict[int, CityTiles] = {}  # Food of each city's tiles (`city_tiles.py`).
         self._tiles_age = REFRESH_TURNS  # Turns since the last read.
         self._tiles_seen: dict[int, tuple[int, bool]] = {}  # (pop, starving) at the last read.
@@ -1490,6 +1555,7 @@ class CityProductionPolicy:
         cities = await _read_cities(game)
         await self._read_tiles(game, cities)
         await self._feed_starving(game, cities)
+        await self._focus_at_caps(game, cities)
         marked = self.defence.threatened_ids if self.defence is not None else frozenset()
         short = self.defence.short_ids if self.defence is not None else None
         self._log_pillaged(cities)
@@ -1743,6 +1809,61 @@ class CityProductionPolicy:
             else:
                 self._food_focus.discard(city.city_id)
                 self._reset.add(city.city_id)
+
+    async def _focus_at_caps(self, game: ProductionGame, cities: list[City]) -> None:
+        """Issue 215: at a housing or amenity cap, favor a non-food yield; undo it below the cap.
+
+        Off unless `GrowthWeights.cap_focus`. One `set_city_focus` call per change. A city the
+        starvation rule focused is left to it. A failed call is tried again next turn.
+        """
+        w = self.growth.weights
+        if w.settler_note:
+            for city in cities:
+                note = settler_delay_note(city)
+                if note:
+                    log.info("growth %s", note)
+        if not w.cap_focus:
+            return
+        empire = None
+        weights = {
+            "science": self.weights.science,
+            "culture": self.weights.culture,
+            "gold": self.weights.gold,
+        }
+        for city in cities:
+            if city.city_id in self._food_focus or is_starving(city):
+                self._cap_focus.pop(city.city_id, None)  # The food rule owns the focus now.
+                continue
+            held = self._cap_focus.get(city.city_id)
+            if held is None and not at_housing_cap(city):
+                continue  # Nothing held and not capped: the usual turn costs no read.
+            if empire is None:
+                empire = await _read_empire(game)  # One read a turn, only while a city is capped.
+            verdict = decide_cap_focus(city, empire, enabled=True, weights=weights)
+            if verdict.focus is not None and verdict.focus != held:
+                focus = verdict.focus  # New cap, or the most-needed yield changed.
+            elif verdict.focus is None and held is not None:
+                focus = "default"
+            else:
+                continue
+            try:
+                result = await game.set_city_focus(city.city_id, focus)
+            except Exception as err:  # A focus is a nicety. It must never stop production.
+                log.warning("%s: set_city_focus %s failed: %s", city.name, focus, err)
+                continue
+            if _failed(str(result)):
+                log.info("%s: set_city_focus %s refused: %s", city.name, focus, str(result)[:120])
+                continue
+            log.info(
+                "growth %s",
+                verdict.reason
+                if focus != "default"
+                else f"{city.name}: below its caps again ({verdict.reason}): focus default",
+            )
+            if focus == "default":
+                self._cap_focus.pop(city.city_id, None)
+            else:
+                self._cap_focus[city.city_id] = focus
 
     def _note(self, city: City, text: str) -> None:
         if self.defence is not None:

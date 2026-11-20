@@ -322,3 +322,97 @@ def test_policy_reads_the_overview_only_for_a_civic_in_progress():
     )
     run(ResearchPolicy().run(busy))
     assert "get_game_overview" in busy.calls
+
+
+# Boost judgement (#322).
+
+POP6 = "Grow your civilization to at least 6 population."
+
+
+def tech_with_boost(name, turns, desc):
+    return lq.TechOption(
+        name, f"TECHNOLOGY_{name.upper().replace(' ', '_')}", 50, 0, turns, False, desc, ""
+    )
+
+
+def boost_inputs(state=None, signals=None):
+    from civ6_ai.strategy.boost_judgement import BoostState, PlanSignals
+
+    async def read():
+        return state or BoostState(turn=10, population=4), signals or PlanSignals(
+            growth_turns_per_pop=2.0
+        )
+
+    return read
+
+
+def boost_techs():
+    # Alpha is quicker and has a boost close, but it is cheap, so waiting saves little.
+    return [tech_with_boost("Alpha", 4, POP6), tech_with_boost("Beta", 9, "Build a wonder.")]
+
+
+def test_boost_judgement_off_leaves_the_ranking_unchanged():
+    r = research(techs=[tech_with_boost("Alpha", 12, POP6), tech_with_boost("Beta", 9, "")])
+    off = ResearchWeights(priorities=())
+    assert off.boost_judgement is False
+    # The inputs would delay Alpha, but an off setting applies no adjustment at all.
+    policy = ResearchPolicy(off, boost_inputs())
+    assert run(policy._boost_adjustments(r)) == {}
+    assert names(choose_tech(r, off)) == ["Beta", "Alpha"]
+    on = ResearchWeights(priorities=(), boost_judgement=True)
+    assert names(choose_tech(r, on)) == names(choose_tech(r, off))  # No adjustments passed.
+
+
+def test_boost_judgement_on_delays_an_item_whose_boost_lands_soon():
+    r = research(techs=[tech_with_boost("Alpha", 12, POP6), tech_with_boost("Beta", 9, "")])
+    weights = ResearchWeights(priorities=(), boost_judgement=True)
+    assert names(choose_tech(r, ResearchWeights(priorities=())))[0] == "Beta"
+    policy = ResearchPolicy(weights, boost_inputs())
+    adjustments = run(policy._boost_adjustments(r))
+    assert adjustments == {"TECHNOLOGY_ALPHA": -weights.boost_delay_penalty}
+    assert names(choose_tech(r, weights, adjustments)) == ["Beta", "Alpha"]
+
+
+def test_boost_judgement_logs_the_reason_and_skips_a_small_saving(caplog):
+    weights = ResearchWeights(priorities=(), boost_judgement=True)
+    policy = ResearchPolicy(weights, boost_inputs())
+    # Alpha costs only 4 turns, so waiting saves 1.6 turns less 2: not worth a delay.
+    assert run(policy._boost_adjustments(research(techs=boost_techs()))) == {}
+    slow = research(techs=[tech_with_boost("Alpha", 12, POP6), tech_with_boost("Beta", 9, "")])
+    with caplog.at_level("INFO"):
+        run(policy._boost_adjustments(slow))
+    assert "delaying Alpha: boost in about 4 turns from population growth" in caplog.text
+
+
+def test_boost_judgement_gives_up_after_the_wait_limit():
+    r = research(techs=[tech_with_boost("Alpha", 12, POP6), tech_with_boost("Beta", 9, "")])
+    from civ6_ai.strategy.boost_judgement import BoostState, PlanSignals
+
+    weights = ResearchWeights(priorities=(), boost_judgement=True, boost_delay_max_turns=5)
+    policy = ResearchPolicy(weights, boost_inputs())
+    assert run(policy._boost_adjustments(r))  # Delayed on turn 10.
+    stuck = boost_inputs(BoostState(turn=16, population=4), PlanSignals(growth_turns_per_pop=2.0))
+    policy.boost_inputs = stuck
+    assert run(policy._boost_adjustments(r)) == {}  # Waited 6 turns: researches it.
+
+
+def test_boost_judgement_prefers_an_already_boosted_item():
+    boosted = lq.TechOption("Gamma", "TECHNOLOGY_GAMMA", 50, 0, 6, True, "Build a wonder.", "")
+    r = research(techs=[boosted, tech_with_boost("Beta", 6, "")])
+    weights = ResearchWeights(priorities=(), boost_judgement=True)
+    adjustments = run(ResearchPolicy(weights, boost_inputs())._boost_adjustments(r))
+    assert adjustments == {"TECHNOLOGY_GAMMA": weights.boost_prefer}
+
+
+def test_boost_judgement_on_without_inputs_changes_nothing():
+    r = research(techs=boost_techs())
+    policy = ResearchPolicy(ResearchWeights(priorities=(), boost_judgement=True))
+    assert run(policy._boost_adjustments(r)) == {}
+
+
+def test_policy_starts_the_other_item_while_one_is_delayed():
+    r = status(techs=[tech_with_boost("Alpha", 12, POP6), tech_with_boost("Beta", 9, "")])
+    game = Game(research=r)
+    weights = ResearchWeights(priorities=(), boost_judgement=True)
+    run(ResearchPolicy(weights, boost_inputs()).run(game))
+    assert "TECHNOLOGY_BETA" in game.started

@@ -86,3 +86,26 @@ def test_unknown_is_other(text):
     spec = parse_boost(text)
     assert spec.kind is K.OTHER
     assert not spec.self_triggerable
+
+
+@pytest.mark.parametrize(
+    ("text", "target"),
+    [
+        ("Build 2 Universities.", "UNIVERSITY"),
+        ("Build 3 Factories.", "FACTORY"),
+        ("Build 3 Military Academies.", "MILITARY_ACADEMY"),
+        ("Build 2 Stock Exchanges.", "STOCK_EXCHANGE"),
+        ("Build 2 Banks.", "BANK"),
+        ("Build 4 Sewers.", "SEWER"),
+        ("Build 2 Workshops.", "WORKSHOP"),
+        ("Build 2 Shipyards.", "SHIPYARD"),
+        ("Build 2 Markets.", "MARKET"),
+        ("Own 2 Privateers.", "PRIVATEER"),
+        ("Own 3 Line Infantry.", "LINE_INFANTRY"),
+        ("Own 2 Trebuchets.", "TREBUCHET"),
+        ("Own 2 Galleys.", "GALLEY"),
+        ("Build 2 Field Cannons.", "FIELD_CANNON"),
+    ],
+)
+def test_plural_names_map_to_the_singular_key(text, target):
+    assert parse_boost(text).target == target

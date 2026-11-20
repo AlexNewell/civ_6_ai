@@ -81,9 +81,12 @@ def _count(text: str) -> int:
 
 
 def _key(name: str) -> str:
-    """`Crossbowman` and `Stock Exchanges` become `CROSSBOWMAN` and `STOCK_EXCHANGE`."""
+    """`Crossbowman`, `Stock Exchanges` and `Universities` become `CROSSBOWMAN`, `STOCK_EXCHANGE`
+    and `UNIVERSITY`."""
     words = name.strip().upper().replace("-", " ").split()
-    if words and words[-1].endswith("S") and not words[-1].endswith(("SS", "US")):
+    if words and words[-1].endswith("IES") and len(words[-1]) > 4:
+        words[-1] = words[-1][:-3] + "Y"  # Universities, Factories, Military Academies.
+    elif words and words[-1].endswith("S") and not words[-1].endswith(("SS", "US")):
         words[-1] = words[-1][:-1]
     return "_".join(words)
 

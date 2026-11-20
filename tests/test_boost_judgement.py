@@ -4,6 +4,7 @@ from civ6_ai.strategy.boost_judgement import (
     BoostState,
     Decision,
     DelayRecord,
+    JudgementSettings,
     PlanSignals,
     ReachLabel,
     judge_boosts,
@@ -322,3 +323,36 @@ def test_one_ordinary_mine_never_delays_mine_a_resource():
         state = BoostState(turn=20, improvements={"MINE": 1}, resource_improvements=resource_data)
         j = one(option, state, PlanSignals(improvement_jobs={"MINE": 2}))
         assert j.decision is Decision.RESEARCH_NOW
+
+
+def test_universities_with_one_built_and_one_queued_is_on_track():
+    option = item("Printing", "Build 2 Universities.", turns=15)
+    state = BoostState(turn=20, buildings={"UNIVERSITY": 1})
+    j = one(option, state, PlanSignals(buildings_queued={"UNIVERSITY": 1}))
+    assert j.decision is Decision.DELAY
+    assert j.reach.label is ReachLabel.ON_TRACK
+
+
+def test_codex_example_one_ordinary_mine_and_no_resource_data_is_never_delay():
+    option = item("Wheel", "Mine a resource.", turns=12)
+    state = BoostState(turn=20, improvements={"MINE": 1})
+    assert one(option, state, PlanSignals()).decision is not Decision.DELAY
+    assert one(option, state, PlanSignals()).decision is Decision.RESEARCH_NOW
+
+
+def test_codex_example_alternating_signal_gives_up_and_never_restarts():
+    option = item("Early Empire", POP6, turns=20)
+    growth, none = PlanSignals(growth_turns_per_pop=2.0), PlanSignals()
+    history: dict = {}
+    delayed, gave_up_turn = [], None
+    for turn in range(10, 30):
+        state = BoostState(turn=turn, population=4)
+        j = judge_boosts([option], state, none if turn % 2 else growth, history=history)
+        history = next_history(history, j, turn)
+        if j[0].decision is Decision.DELAY:
+            delayed.append(turn)
+        if j[0].gave_up and gave_up_turn is None:
+            gave_up_turn = turn
+    assert gave_up_turn is not None
+    assert max(delayed) - min(delayed) <= JudgementSettings().max_delay
+    assert not [t for t in delayed if t > gave_up_turn]  # Never re-delayed once given up.

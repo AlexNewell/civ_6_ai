@@ -2314,3 +2314,26 @@ def test_the_nearer_site_chosen_after_waiting_is_kept_on_the_next_turn():
     assert 7 not in policy._waits  # The step ended the run of waits.
     again = play(policy)
     assert again.target == (10, 18) and "nearer site chosen after waiting" in again.reason
+
+
+def test_the_kept_site_is_honoured_when_an_escort_appears_and_the_far_route_clears():
+    # Codex on PR 320: a later turn must not undo the nearer site chosen after waiting.
+    far, near = site(14, 6, food=40), site(10, 18, food=30)
+    policy = SettlingPolicy(SettlingSettings(threat_radius=2, map_width=84))
+    policy.threat_map = _Sightings((10, 20), age=1)
+    policy._fog = {(10, 18): FogCount(10, 18, 100, 70, 6, 3, 0)}
+    policy._waits[7] = 3
+    first = make_game(
+        [settler(y=14)], cities=[alpha()], threats=[barbarian(13, 10)], sites=[far, near],
+        turn=100,
+    )  # fmt: skip
+    run(policy, first)
+    assert policy._fallback_site[7] == (10, 18)
+    escort = unit_info(unit_id=9, unit_index=9, x=10, y=14)
+    second = make_game(
+        [settler(y=14), escort], cities=[alpha()], sites=[far, near], turn=101
+    )  # The hostile is gone and an escort stands on the settler.
+    run(policy, second)
+    decision = policy.decisions[-1]
+    assert decision.target == (10, 18) and "nearer site chosen" in decision.reason
+    assert [a for a in second.actions if a[1] == 7 and a[2:] == (10, 18)]

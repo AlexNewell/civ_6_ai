@@ -1561,29 +1561,29 @@ class SettlingPolicy:
         if kept is not None and not any((c.x, c.y) == kept for c in better):
             kept = None
             self._fallback_site.pop(settler.unit_id, None)
-        if (waits >= s.max_wait_turns or kept is not None) and (
-            escort is None or better[0].path_threat
-        ):
+        free = self._unthreatened(settler, better, danger) if kept is not None else []
+        # The kept site is honoured whatever the escort and the far site's route now are, so a
+        # later turn never undoes the choice; only a route that is no longer clear drops it.
+        free = [c for c in free if (c.x, c.y) == kept]
+        if not free and waits >= s.max_wait_turns and (escort is None or better[0].path_threat):
             free = self._unthreatened(settler, better, danger)
-            if kept is not None:
-                free = [c for c in free if (c.x, c.y) == kept] or free
-            if free:
-                escort = None
-                patient_target = free[0]
-                if free[0] is not better_first:
-                    self._fallback_site[settler.unit_id] = (free[0].x, free[0].y)
-                if kept is not None and (free[0].x, free[0].y) == kept:
-                    patient_reason = "going on to the nearer site chosen after waiting"
-                elif free[0] is better_first:
-                    patient_reason = (
-                        f"waited {waits} turns for an escort, no hostile unit can reach the "
-                        "route, so going without it"
-                    )
-                else:
-                    patient_reason = (
-                        f"waited {waits} turns for the far site, so heading for the best site "
-                        "reachable without passing a threat"
-                    )
+        if free:
+            escort = None
+            patient_target = free[0]
+            if free[0] is not better_first:
+                self._fallback_site[settler.unit_id] = (free[0].x, free[0].y)
+            if kept is not None and (free[0].x, free[0].y) == kept:
+                patient_reason = "going on to the nearer site chosen after waiting"
+            elif free[0] is better_first:
+                patient_reason = (
+                    f"waited {waits} turns for an escort, no hostile unit can reach the "
+                    "route, so going without it"
+                )
+            else:
+                patient_reason = (
+                    f"waited {waits} turns for the far site, so heading for the best site "
+                    "reachable without passing a threat"
+                )
         if escort is not None and (escort.x, escort.y) in city_tiles:
             origin = (escort.x, escort.y)  # Wherever the settler is, this city loses its defender.
             if sum(1 for u in units if _land_military(u) and (u.x, u.y) == origin) == 1:

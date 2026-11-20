@@ -627,3 +627,53 @@ def test_the_second_noise_string_is_retried_too(no_pause):
 
     asyncio.run(go())
     assert game.calls == 2
+
+
+def test_parse_features_reads_a_comma_list_and_rejects_unknown_names() -> None:
+    from civ6_ai.bot import parse_features
+
+    assert parse_features("") == frozenset()
+    assert parse_features(" cap_focus, wonder_races ,") == {"cap_focus", "wonder_races"}
+    with pytest.raises(ValueError, match="wonder_race"):
+        parse_features("wonder_race")
+
+
+def test_enable_features_switches_on_each_flag_and_leaves_the_rest() -> None:
+    from civ6_ai.bot import FEATURES, enable_features
+    from civ6_ai.policies.growth import GrowthPolicy
+    from civ6_ai.policies.production import ProductionWeights
+    from civ6_ai.policies.research import ResearchWeights
+
+    class Holder:
+        def __init__(self, weights: object) -> None:
+            self.weights = weights
+
+    holders = {
+        "growth": GrowthPolicy(),
+        "production": Holder(ProductionWeights()),
+        "research": Holder(ResearchWeights()),
+    }
+    for holder_name, flag in FEATURES.values():  # Every flag exists and starts off.
+        assert getattr(holders[holder_name].weights, flag) is False
+    enable_features(holders, ["wonder_races", "boost_judgement"])
+    assert holders["production"].weights.wonder_races is True
+    assert holders["research"].weights.boost_judgement is True
+    assert holders["growth"].weights.cap_focus is False
+    assert holders["production"].weights == replace(ProductionWeights(), wonder_races=True)
+
+
+def test_build_orchestrator_switches_on_the_named_features(tmp_path):
+    orchestrator = bot.build_orchestrator(
+        WiredGame(),
+        EventBus(),
+        TurnLog(tmp_path / "g.jsonl"),
+        features=frozenset(bot.FEATURES),
+    )
+    production = next(h for h in orchestrator._handlers if isinstance(h, bot.CityProductionPolicy))
+    research = next(h for h in orchestrator._handlers if isinstance(h, bot.research.ResearchPolicy))
+    assert production.weights.wonder_races is True
+    assert production.growth.weights.cap_focus is True
+    assert research.weights.boost_judgement is True
+    plain = bot.build_orchestrator(WiredGame(), EventBus(), TurnLog(tmp_path / "h.jsonl"))
+    production = next(h for h in plain._handlers if isinstance(h, bot.CityProductionPolicy))
+    assert production.weights.wonder_races is False

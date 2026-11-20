@@ -56,3 +56,12 @@ def test_match_and_render():
     text = render_markdown(rows)
     assert "- T37 (+29s): And now see" in text
     assert "- T37 (+95s) ~: Testing resuming" in text
+
+
+def test_resume_after_midnight_lands_on_the_next_day():
+    late = datetime(2026, 11, 20, 4, 50, 0, tzinfo=UTC)  # 11:50pm at UTC-5
+    text = (
+        "[0:10] Speaker 1: before\n[11:55pm] -- Paused --\n[12:05am] -- Resumed --\n[0:05] S: after"
+    )
+    notes = parse_transcript(text, late, EASTERN)
+    assert notes[1].at == datetime(2026, 11, 20, 5, 5, 5, tzinfo=UTC)  # 12:05:05am on the 20th

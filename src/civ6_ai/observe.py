@@ -145,14 +145,16 @@ class Observer:
     async def observe_once(self) -> bool:
         """Record the current turn if it's new. Returns True when a record was written."""
         overview = await self._game.get_game_overview()
+        # When we saw the turn begin, so dictated notes can be matched to it (see notes.py).
+        # Taken before the slower reads below, which would otherwise push it later.
+        seen_at = self._now().astimezone(UTC)
         if overview.turn == self.last_turn:
             return False
         diary = await self._game.get_diary_snapshot()
         tech = await self._game.get_tech_civics()
         routes = await self._game.get_trade_routes()
         observation = build_observation(overview, diary, tech, routes)
-        # When we saw the turn begin, so dictated notes can be matched to it (see notes.py).
-        observation["observed_at"] = self._now().astimezone(UTC).isoformat()
+        observation["observed_at"] = seen_at.isoformat()
         self._turn_log.write(build_turn_record(overview, diary))
         self._append(self._observed, [observation])
         self._append(self._events, new_events(self._last, observation))

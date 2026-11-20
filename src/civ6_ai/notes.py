@@ -28,10 +28,16 @@ class Note:
     precision: str  # "second" for the first segment, "minute" after a resume.
 
 
-def _clock_on(date_of: datetime, hour: int, minute: int, meridiem: str, zone: tzinfo) -> datetime:
+def _clock_on(after: datetime, hour: int, minute: int, meridiem: str, zone: tzinfo) -> datetime:
+    """The first `hour:minute` clock time not before `after`, so a resume past midnight lands on
+    the next day. The clock time is floored to the minute, so it may sit up to a minute before
+    the true time and still count as the same day."""
     hour = hour % 12 + (12 if meridiem.lower() == "pm" else 0)
-    local_day = date_of.astimezone(zone)
-    return local_day.replace(hour=hour, minute=minute, second=0, microsecond=0).astimezone(UTC)
+    local_day = after.astimezone(zone)
+    clock = local_day.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    while clock + timedelta(minutes=1) < local_day:
+        clock += timedelta(days=1)
+    return clock.astimezone(UTC)
 
 
 def parse_transcript(text: str, start: datetime, zone: tzinfo | None = None) -> list[Note]:
@@ -45,6 +51,7 @@ def parse_transcript(text: str, start: datetime, zone: tzinfo | None = None) -> 
     zone = zone or start.astimezone().tzinfo
     assert zone is not None
     segment_start = start.astimezone(UTC)
+    latest = segment_start  # The newest time so far; a resume can't be earlier than it.
     precision = "second"
     notes: list[Note] = []
     for raw in text.splitlines():
@@ -53,7 +60,8 @@ def parse_transcript(text: str, start: datetime, zone: tzinfo | None = None) -> 
         if marker:
             if marker.group(4).lower() == "resumed":
                 hour, minute, meridiem = int(marker.group(1)), int(marker.group(2)), marker.group(3)
-                segment_start = _clock_on(segment_start, hour, minute, meridiem, zone)
+                segment_start = _clock_on(latest, hour, minute, meridiem, zone)
+                latest = max(latest, segment_start)
                 precision = "minute"
             continue
         match = _LINE.match(line)
@@ -62,6 +70,7 @@ def parse_transcript(text: str, start: datetime, zone: tzinfo | None = None) -> 
         hours, minutes, seconds, speaker, body = match.groups()
         offset = int(hours or 0) * 3600 + int(minutes) * 60 + int(seconds)
         at = segment_start + timedelta(seconds=offset)
+        latest = max(latest, at)
         notes.append(Note(at, offset, speaker.strip(), body.strip(), precision))
     return notes
 

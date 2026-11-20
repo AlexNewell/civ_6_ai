@@ -175,3 +175,20 @@ def test_observer_source_calls_nothing_that_changes_the_game():
         code = re.sub(r'""".*?"""', "", path.read_text(encoding="utf-8"), flags=re.S)
         code = re.sub(r"#.*", "", code)
         assert not re.search(forbidden, code), path.name
+
+
+def test_observed_at_is_taken_when_the_turn_is_first_seen(tmp_path: Path):
+    from datetime import UTC, datetime, timedelta
+
+    game = FakeGame()
+    clock = {"t": datetime(2026, 1, 1, tzinfo=UTC)}
+
+    async def slow_diary():
+        clock["t"] += timedelta(seconds=30)  # The slower reads take time after the overview.
+        return Diary([Player(0, 10), Player(1, 15)], list(game.cities))
+
+    game.get_diary_snapshot = slow_diary
+    observer = Observer(game, tmp_path, "human_clock", now=lambda: clock["t"])
+    asyncio.run(observer.observe_once())
+    row = json.loads((tmp_path / "human_clock_observed.jsonl").read_text().splitlines()[0])
+    assert row["observed_at"] == "2026-01-01T00:00:00+00:00"

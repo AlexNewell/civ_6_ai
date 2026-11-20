@@ -690,7 +690,7 @@ for i = 0, 62 do
             if vis:IsVisible(x, y) then
                 local okc, cap = pcall(function() return c:IsCapital() end)
                 print("KCITY|" .. i .. "|" .. x .. "|" .. y .. "|" .. c:GetPopulation() .. "|"
-                    .. ((okc and cap) and 1 or 0) .. "|1")
+                    .. ((okc and cap) and 1 or 0) .. "|1|" .. (p:IsMinor() and 1 or 0))
             end
         end
     end
@@ -705,7 +705,8 @@ for idx = 0, Map.GetPlotCount() - 1 do
     end
 end
 for o, tiles in pairs(owned) do
-    print("BORDER|" .. o .. "|" .. table.concat(tiles, ";"))
+    print("BORDER|" .. o .. "|" .. table.concat(tiles, ";") .. "|"
+        .. (Players[o]:IsMinor() and 1 or 0))
 end
 local seen = {}
 for tile in string.gmatch("%s", "[^;]+") do
@@ -768,6 +769,7 @@ class KnownCity:
     pop: int
     capital: bool
     visible: bool = True
+    minor: bool = False  # A city-state's city: it exerts no loyalty pressure.
 
 
 @dataclass(frozen=True)
@@ -789,6 +791,7 @@ class KnownMap:
     border_tiles: tuple[tuple[int, int, int], ...]  # (owner, x, y), visible now
     visible_watched: frozenset[tuple[int, int]] = frozenset()  # Asked-about tiles visible now.
     fog: tuple[FogCount, ...] = ()  # One per candidate site asked about.
+    minors: frozenset[int] = frozenset()  # Owners of visible cities or tiles that are city-states.
 
 
 def parse_known_cities(output: str) -> KnownMap:
@@ -797,7 +800,7 @@ def parse_known_cities(output: str) -> KnownMap:
     strips the `---END---` marker before returning, so that marker cannot be the check.)"""
     if "KDONE" not in output.split():
         raise ValueError("known-city read incomplete: no end marker")
-    cities, borders, watched, fog = [], [], set(), []
+    cities, borders, watched, fog, minors = [], [], set(), [], set()
     for line in output.splitlines():
         parts = line.strip().split("|")
         try:
@@ -810,12 +813,17 @@ def parse_known_cities(output: str) -> KnownMap:
                         int(parts[4]),
                         parts[5] == "1",
                         parts[6] == "1",
+                        len(parts) >= 8 and parts[7] == "1",
                     )
                 )
+                if len(parts) >= 8 and parts[7] == "1":
+                    minors.add(int(parts[1]))
             elif parts[0] == "BORDER" and len(parts) >= 3:
                 for tile in parts[2].split(";"):
                     x, y = tile.split(",")
                     borders.append((int(parts[1]), int(x), int(y)))
+                if len(parts) >= 4 and parts[3] == "1":
+                    minors.add(int(parts[1]))
             elif parts[0] == "FOG" and len(parts) >= 8:
                 fog.append(FogCount(*(int(p) for p in parts[1:8])))
             elif parts[0] == "VISIBLE" and len(parts) >= 2:
@@ -825,7 +833,9 @@ def parse_known_cities(output: str) -> KnownMap:
                         watched.add((int(x), int(y)))
         except ValueError:
             continue
-    return KnownMap(tuple(cities), tuple(borders), frozenset(watched), tuple(fog))
+    return KnownMap(
+        tuple(cities), tuple(borders), frozenset(watched), tuple(fog), frozenset(minors)
+    )
 
 
 async def read_known_cities(

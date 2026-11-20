@@ -804,6 +804,10 @@ class ResolvingGame:
             blockers = await _read_all(self._game, readers)
             if "Dismissed" in dismissed:
                 log.info("Turn %s was held, closed: %s", turn_before, dismissed[:200])
+                # STD_T1_04, turn 31: a natural wonder popup opened as the end-turn request went
+                # in and swallowed it. Closing it left our turn open with the request gone, and
+                # nothing asked again for 565 s. Treat it like an answered session.
+                self._answered_on = turn_before
             # Closed only if seen on two checks in a row, so a screen opening as a session starts
             # is left alone.
             stray = await stray_diplomacy_view_open(self._game)
@@ -856,11 +860,11 @@ class ResolvingGame:
             log.warning("Clearing a held turn failed", exc_info=True)
 
     async def _reask_after_answer(self, turn_before: int) -> None:
-        """Ask again to end a turn left open after a diplomacy answer, once per turn.
+        """Ask again to end a turn left open after an answer or a closed popup, once per turn.
 
-        Only after an answer on this turn, and only when the game's own turn number and
-        `UI.CanEndTurn` both say our turn is still open on two ticks in a row, so a turn that is
-        just changing (the old number can show briefly) is never ended unplayed.
+        Only after an answer or a closed popup on this turn, and only when the game's own turn
+        number and `UI.CanEndTurn` both say our turn is still open on two ticks in a row, so a
+        turn that is just changing (the old number can show briefly) is never ended unplayed.
         """
         if self._answered_on != turn_before or self._reasked_on == turn_before:
             return
@@ -871,7 +875,10 @@ class ResolvingGame:
             return
         self._reasked_on = turn_before
         await self._game.execute_lua(build_end_turn(), "ingame")
-        log.info("Turn %s: still open after a diplomacy answer, asked again to end it", turn_before)
+        log.info(
+            "Turn %s: still open after an answer or a closed popup, asked again to end it",
+            turn_before,
+        )
 
     async def _game_over(self) -> bool:
         """Ask the defeat check, if there is one. A check that fails counts as not over."""

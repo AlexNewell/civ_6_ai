@@ -99,10 +99,15 @@ def test_the_early_monument_bonus_does_not_inflate_its_purchase_value():
     from civ6_ai.state.reader import build_city
     from fixtures import civ_state as fx
 
-    city = build_city(fx.city_info(buildings=["PALACE"]), (), set())
+    # The fixture builds a Monument already; build something else, or value_option takes the
+    # in-progress path and every rate is 0, so the comparison proves nothing.
+    city = build_city(
+        fx.city_info(buildings=["PALACE"], currently_building="UNIT_WARRIOR"), (), set()
+    )
     ctx = ProductionContext(turn=15, num_cities=1, builders=1, recon=1, army=1)
     monument = ProductionChoice("BUILDING", "BUILDING_MONUMENT", 60, 5)
     with_bonus = v.value_option(monument, city, ctx, W)
     without = v.value_option(monument, city, ctx, ProductionWeights(early_monument=0.0))
     assert with_bonus is not None and without is not None
+    assert without.rate > 0  # A real yield rate, so equality below means something.
     assert with_bonus.rate == without.rate

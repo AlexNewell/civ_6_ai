@@ -449,6 +449,8 @@ class CandidateLog:
     fog_risk: bool = False  # Fogged surround and a recent sighting near: needs an escort.
     # Issue 324: the site score's components as name -> [raw, weighted], before loyalty penalties.
     breakdown: dict[str, tuple[float, float]] = field(default_factory=dict)
+    # The site-quality score alone: no loyalty, fog or far-city penalty (`site_score` has them).
+    quality_score: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -1343,6 +1345,7 @@ class SettlingPolicy:
                 and danger.recent_near(site.x, site.y, s.threat_radius)
             )
             path_threat = path_threat or fog_risk
+            breakdown = score_site_breakdown(site, s, [c[:2] for c in self._own_cities], capital)
             found.append(
                 CandidateLog(
                     site.x,
@@ -1361,7 +1364,8 @@ class SettlingPolicy:
                     fog_share,
                     recent_near,
                     fog_risk,
-                    score_site_breakdown(site, s, [c[:2] for c in self._own_cities], capital),
+                    breakdown,
+                    breakdown_total(breakdown),
                 )
             )
         found.sort(key=lambda c: (-c.net_score, c.distance, c.x, c.y))

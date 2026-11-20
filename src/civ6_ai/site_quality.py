@@ -4,8 +4,10 @@ Pure functions only. The survey (`SettleSite`) carries totals; the per-tile fact
 factors need (what lies under the centre, ring yields) come from a map-area read of radius 3.
 """
 
+import json
 from collections.abc import Iterable, Sequence
 from dataclasses import replace
+from pathlib import Path
 
 from civ6_ai.state.models import SettleSite, Tile
 from civ6_ai.state.reader import STANDARD_MAP_WIDTH, hex_distance
@@ -55,11 +57,27 @@ def founded_site_scores(decisions: Iterable[dict]) -> list[float]:
         if d.get("action") != "found":
             continue
         where = tuple(d["target"]) if d.get("target") else (d["x"], d["y"])
+        # `quality_score` is the site's own value; `site_score` has the loyalty and far-city
+        # penalties taken off. Logs written before the field existed fall back to `site_score`.
         match = next(
-            (c["site_score"] for c in d.get("candidates", []) if (c["x"], c["y"]) == where), None
+            (
+                c.get("quality_score", c["site_score"])
+                for c in d.get("candidates", [])
+                if (c["x"], c["y"]) == where
+            ),
+            None,
         )
         if match is None:
             match = d.get("here_score")
         if match is not None:
             scores.append(match)
     return scores
+
+
+def mean_site_score(settle_log: Path) -> tuple[int, float] | None:
+    """(cities founded, mean site score) from a `_settle.jsonl`, or None with no founded city."""
+    if not settle_log.exists():
+        return None
+    lines = settle_log.read_text(encoding="utf-8").splitlines()
+    scores = founded_site_scores(json.loads(x) for x in lines if x.strip())
+    return (len(scores), sum(scores) / len(scores)) if scores else None

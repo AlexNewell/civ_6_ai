@@ -14,6 +14,7 @@ from pathlib import Path
 from civ6_ai.metrics.civbench_gap import compare_lines, load_baselines
 from civ6_ai.metrics.history import merge_logs
 from civ6_ai.metrics.report import DEFAULT_RESAMPLES, DEFAULT_SEED, compare, format_report
+from civ6_ai.site_quality import mean_site_score
 
 
 def load_scores(paths: list[Path]) -> list[dict]:
@@ -39,6 +40,22 @@ def gap_section(label_a: str, logs_a: list[Path], label_b: str, logs_b: list[Pat
     given = ((label_a, logs_a), (label_b, logs_b))
     sets = [(label, runs(paths)) for label, paths in given if paths]
     return "\n".join(compare_lines(sets, load_baselines()))
+
+
+def site_section(label_a: str, logs_a: list[Path], label_b: str, logs_b: list[Path]) -> str:
+    """Mean site score per founded city for each set, from the runs' settle logs (issue 324)."""
+    lines = []
+    for label, logs in ((label_a, logs_a), (label_b, logs_b)):
+        found = [
+            r
+            for p in logs
+            if (r := mean_site_score(p.with_name(f"{p.stem.removesuffix('_turns')}_settle.jsonl")))
+        ]
+        if found:
+            cities = sum(n for n, _ in found)
+            mean = sum(n * m for n, m in found) / cities
+            lines.append(f"{label}: mean site score {mean:.1f} over {cities} founded cities")
+    return "\n".join(lines)
 
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -75,6 +92,8 @@ def main(argv: list[str] | None = None) -> int:
             resamples=args.resamples,
         )
         gap = gap_section(args.label_a, args.logs_a, args.label_b, args.logs_b)
+        sites = site_section(args.label_a, args.logs_a, args.label_b, args.logs_b)
+        gap = "\n".join(x for x in (gap, sites) if x)
     except (ValueError, OSError) as error:
         print(f"FAILED: {error}", file=sys.stderr)
         return 1

@@ -14,7 +14,12 @@ from civ6_ai.policies.settling import (
     score_site,
     score_site_breakdown,
 )
-from civ6_ai.site_quality import enrich_site, format_breakdown, founded_site_scores
+from civ6_ai.site_quality import (
+    enrich_site,
+    format_breakdown,
+    founded_site_scores,
+    mean_site_score,
+)
 from civ6_ai.state.models import SettleSite
 from civ6_ai.state.reader import build_tile
 from fixtures.civ_state import FakeGame, city_info, tile
@@ -163,3 +168,32 @@ def test_candidate_log_carries_the_breakdown(caplog):
     assert set(candidate["breakdown"]) >= {"food", "inner_ring", "centre_resource", "overlap"}
     assert sum(w for _, w in candidate["breakdown"].values()) == candidate["site_score"]
     _ = lq
+
+
+def test_founded_scores_ignore_the_selection_penalties(tmp_path):
+    # A 105-point site 9 tiles out was selected at 99; the quality metric must read 105.
+    decision = {
+        "action": "found",
+        "x": 9,
+        "y": 9,
+        "target": None,
+        "here_score": 99.0,
+        "candidates": [{"x": 9, "y": 9, "site_score": 99.0, "quality_score": 105.0}],
+    }
+    assert founded_site_scores([decision]) == [105.0]
+    log = tmp_path / "run_settle.jsonl"
+    log.write_text(json.dumps(decision) + "\n", encoding="utf-8")
+    assert mean_site_score(log) == (1, 105.0)
+    assert mean_site_score(tmp_path / "none.jsonl") is None
+
+
+def test_logged_quality_score_is_unpenalised(caplog):
+    from civ6_ai.policies.settling import SettlingPolicy
+    from test_policy_settling import make_game, run, settler
+    from test_policy_settling import site as settle_site
+
+    caplog.set_level("INFO")
+    run(SettlingPolicy(), make_game([settler()], sites=[settle_site(14, 10)]))
+    line = next(r.getMessage() for r in caplog.records if "settle_decision" in r.getMessage())
+    c = json.loads(line.split("settle_decision ", 1)[1])["candidates"][0]
+    assert c["quality_score"] == sum(w for _, w in c["breakdown"].values())

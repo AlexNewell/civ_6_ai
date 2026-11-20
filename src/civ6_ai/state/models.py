@@ -449,6 +449,11 @@ class SettleSite:
     defense: int
     luxuries: int
     strategics: int
+    # Issue 324. The survey carries only totals, so these come from a map-area read of the site
+    # (see `site_quality.enrich_site`); None means not read. Never used by the bot's choice.
+    centre_resource: str | None = None  # Classified like `resources`, e.g. "S:COPPER".
+    inner_yield: int | None = None  # Food plus production of the six tiles around the centre.
+    outer_yield: int | None = None  # The same for the ring two and three tiles out.
 
 
 @dataclass(frozen=True)

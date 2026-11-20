@@ -132,7 +132,7 @@ class PlanSignals:
     # Turns for the cities to grow by one population, or None when none is growing.
     growth_turns_per_pop: float | None = None
     # The same for the biggest city alone, which a "grow a city to N" boost needs. None means
-    # not given, and the all-cities rate stands in.
+    # not given, and the all-cities rate stands in. 0.0 means it is known to be stalled.
     city_growth_turns_per_pop: float | None = None
     districts_queued: Mapping[str, int] = field(default_factory=dict)
     improvement_jobs: Mapping[str, int] = field(default_factory=dict)  # Builder jobs on offer.

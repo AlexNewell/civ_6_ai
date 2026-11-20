@@ -24,7 +24,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from civ6_ai.policies.game_data import WONDERS
+from civ6_ai.policies.game_data import UNIQUE_DISTRICTS, WONDERS
 from civ6_ai.state import (
     BuilderJob,
     City,
@@ -144,6 +144,13 @@ def _unit_key(unit_type: str) -> str:
     return unit_type.removeprefix("UNIT_")
 
 
+def _district_key(district_type: str) -> str:
+    # A unique replacement (Seowon, Royal Navy Dockyard) counts as its base kind, since boosts
+    # name the base kind.
+    short = district_type.removeprefix("DISTRICT_")
+    return UNIQUE_DISTRICTS.get(short, short)
+
+
 def _is_land_combat(unit: Unit) -> bool:
     # Same test the military policy uses for the units it orders, without importing it.
     naval = ("GALLEY", "QUADRIREME", "CARAVEL", "FRIGATE", "IRONCLAD", "DESTROYER", "CRUISER")
@@ -171,7 +178,7 @@ def build_boost_state(
     buildings: Counter[str] = Counter()
     for city in cities:
         for district in city.districts:
-            kind = district.district_type.removeprefix("DISTRICT_")
+            kind = _district_key(district.district_type)
             if kind != "CITY_CENTER":
                 districts[kind] += 1
         for building in city.buildings:
@@ -204,18 +211,21 @@ def build_boost_state(
 def growth_rates(cities: Sequence[City]) -> tuple[float | None, float | None]:
     """Turns per population gained: all cities together, and the biggest city alone.
 
+    The biggest city's rate is 0.0 when it is stalled and None only when there are no cities.
+
     A city counts only when it is growing now (food surplus, a believable `turns_to_grow`).
     """
     growing = [c for c in cities if c.food_surplus > 0 and 0 < c.turns_to_grow <= MAX_GROWTH_TURNS]
     total = sum(1.0 / c.turns_to_grow for c in growing)
     overall = 1.0 / total if total > 0 else None
     if not cities:
-        return overall, None
+        return overall, None  # Nothing to measure: the city rate is not given.
     top = max(c.pop for c in cities)
     leaders = [c for c in cities if c.pop == top]
     # A tied leader that is not growing does not hold the others back: take the fastest.
     fastest = [c.turns_to_grow for c in leaders if c in growing]
-    return overall, float(min(fastest)) if fastest else None
+    # 0.0 is a known stall, distinct from None (not given), so it never borrows the overall rate.
+    return overall, float(min(fastest)) if fastest else 0.0
 
 
 def queued_by_kind(cities: Iterable[City]) -> tuple[Counter, Counter, Counter, bool]:
@@ -229,7 +239,7 @@ def queued_by_kind(cities: Iterable[City]) -> tuple[Counter, Counter, Counter, b
         if item is None:
             continue
         if item.startswith("DISTRICT_"):
-            districts[item.removeprefix("DISTRICT_")] += 1
+            districts[_district_key(item)] += 1
         elif item.startswith("UNIT_"):
             units[_unit_key(item)] += 1
         elif item in WONDERS:

@@ -219,7 +219,7 @@ def test_a_stalled_city_is_not_counted_as_growing():
         city(city_id=2, food_surplus=0.0),
         city(city_id=3, turns_to_grow=bi.MAX_GROWTH_TURNS + 1),
     ]
-    assert bi.growth_rates(stalled) == (None, None)
+    assert bi.growth_rates(stalled) == (None, 0.0)
 
 
 def test_the_city_rate_is_the_biggest_city_not_the_fastest():
@@ -229,10 +229,20 @@ def test_the_city_rate_is_the_biggest_city_not_the_fastest():
     assert overall < 2.0  # The small city grows fast, which does not help a city-size boost.
 
 
-def test_a_biggest_city_that_is_not_growing_has_no_rate():
+def test_a_biggest_city_that_is_not_growing_has_a_known_stalled_rate():
     cities = [city(population=8, food_surplus=0.0), city(city_id=2, population=3, turns_to_grow=2)]
     overall, biggest = bi.growth_rates(cities)
-    assert biggest is None and overall is not None
+    assert biggest == 0.0 and overall is not None
+
+
+def test_a_stalled_biggest_city_does_not_borrow_the_other_cities_growth():
+    cities = [city(population=4, food_surplus=0.0), city(city_id=2, population=2, turns_to_grow=2)]
+    option = ResearchOption(
+        "T", "Pottery", 60, 0, 12, False, "Grow a city to 5 population.", (), ""
+    )
+    state = build_state(cities)
+    signals = PlanSignals(*bi.growth_rates(cities))
+    assert judge_boosts([option], state, signals)[0].decision is Decision.DELAY
 
 
 def test_a_tied_leader_that_is_not_growing_does_not_hold_the_other_back():
@@ -242,6 +252,15 @@ def test_a_tied_leader_that_is_not_growing_does_not_hold_the_other_back():
 
 def test_no_cities_have_no_growth():
     assert bi.growth_rates([]) == (None, None)
+
+
+def test_unique_districts_count_as_their_base_kind():
+    state = build_state(
+        [city(districts=["DISTRICT_SEOWON@1,1", "DISTRICT_ROYAL_NAVY_DOCKYARD@2,1"])]
+    )
+    assert state.districts.get("CAMPUS") == 1 and state.districts.get("HARBOR") == 1
+    queued, *_ = bi.queued_by_kind([city(currently_building="DISTRICT_SEOWON")])
+    assert queued == {"CAMPUS": 1}
 
 
 def test_city_growth_rate_is_used_for_a_city_boost_and_the_total_for_the_rest():

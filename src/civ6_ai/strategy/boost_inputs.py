@@ -24,7 +24,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from civ6_ai.policies.game_data import UNIQUE_DISTRICTS, WONDERS
+from civ6_ai.policies.game_data import REPLACES, UNIQUE_DISTRICTS, WONDERS
 from civ6_ai.state import (
     BuilderJob,
     City,
@@ -39,7 +39,14 @@ from civ6_ai.state import (
 from civ6_ai.state.fog import BARBARIAN_ID
 from civ6_ai.state.reader import STANDARD_MAP_WIDTH
 from civ6_ai.strategy.boost_judgement import BoostState, PlanSignals
-from civ6_ai.strategy.boosts import ANY, BARBARIAN, RESOURCE_MINES, SEA_RESOURCE, name_key
+from civ6_ai.strategy.boosts import (
+    ANY,
+    BARBARIAN,
+    LAND_COMBAT,
+    RESOURCE_MINES,
+    SEA_RESOURCE,
+    name_key,
+)
 
 log = logging.getLogger(__name__)
 
@@ -154,7 +161,22 @@ def improvement_signals(jobs: Iterable[BuilderJob], claimed: frozenset[_Key]) ->
 
 
 def _unit_key(unit_type: str) -> str:
-    return unit_type.removeprefix("UNIT_")
+    # A unique unit counts as the unit it replaces, since boosts name the base unit.
+    return REPLACES.get(unit_type, unit_type).removeprefix("UNIT_")
+
+
+# Units a queue can hold that are not combat units. The queue names a type only, so the
+# `is_combat` flag an owned unit carries is not there to ask.
+_CIVILIAN_WORDS = ("SETTLER", "BUILDER", "TRADER", "MISSIONARY", "APOSTLE", "INQUISITOR", "SPY")
+_CIVILIAN_WORDS += ("GREAT_", "MILITARY_ENGINEER", "MEDIC", "GURU", "RELIC")
+
+
+def _land_combat_type(unit_type: str) -> bool:
+    naval = ("GALLEY", "QUADRIREME", "CARAVEL", "FRIGATE", "IRONCLAD", "DESTROYER", "CRUISER")
+    air = ("BATTLESHIP", "CARRIER", "SUBMARINE", "PRIVATEER", "SEADOG", "BOMBER", "FIGHTER")
+    return unit_type != SCOUT and not any(
+        word in unit_type for word in naval + air + _CIVILIAN_WORDS
+    )
 
 
 def _district_key(district_type: str) -> str:
@@ -166,13 +188,7 @@ def _district_key(district_type: str) -> str:
 
 def _is_land_combat(unit: Unit) -> bool:
     # Same test the military policy uses for the units it orders, without importing it.
-    naval = ("GALLEY", "QUADRIREME", "CARAVEL", "FRIGATE", "IRONCLAD", "DESTROYER", "CRUISER")
-    air = ("BATTLESHIP", "CARRIER", "SUBMARINE", "PRIVATEER", "SEADOG", "BOMBER", "FIGHTER")
-    return (
-        unit.is_combat
-        and unit.unit_type != SCOUT
-        and not any(word in unit.unit_type for word in naval + air)
-    )
+    return unit.is_combat and _land_combat_type(unit.unit_type)
 
 
 def build_boost_state(
@@ -260,6 +276,8 @@ def queued_by_kind(cities: Iterable[City]) -> tuple[Counter, Counter, Counter, b
             districts[_district_key(item)] += 1
         elif item.startswith("UNIT_"):
             units[_unit_key(item)] += 1
+            if _land_combat_type(item):
+                units[LAND_COMBAT] += 1  # The aggregate a "have N land combat units" boost reads.
         elif item in WONDERS:
             wonder = True
         elif item.startswith("BUILDING_"):

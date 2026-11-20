@@ -290,7 +290,7 @@ def test_queued_items_by_kind_split_wonders_from_buildings():
     districts, units, buildings, wonder = bi.queued_by_kind(cities)
     assert (dict(districts), dict(units), dict(buildings), wonder) == (
         {"CAMPUS": 1},
-        {"SLINGER": 1},
+        {"SLINGER": 1, "LAND_COMBAT": 1},
         {"TEMPLE": 1},
         True,
     )
@@ -765,3 +765,28 @@ def test_a_resource_mine_job_is_seen_by_the_mine_a_resource_boost():
     state = BoostState(turn=20, resource_improvements={})
     signals = PlanSignals(resource_improvement_jobs={"IRON_MINE": 1})
     assert judge_boosts([option], state, signals)[0].decision is Decision.DELAY
+
+
+def test_unique_units_count_as_the_unit_they_replace():
+    state = build_state(units=[unit("UNIT_NUBIAN_PITATI"), unit("UNIT_ARCHER")])
+    assert state.units == {"ARCHER": 2}
+    _, queued, _, _ = bi.queued_by_kind([city(currently_building="UNIT_NUBIAN_PITATI")])
+    assert queued == {"ARCHER": 1, "LAND_COMBAT": 1}
+
+
+def test_queued_land_combat_units_have_an_aggregate_and_civilians_do_not_count():
+    cities = [
+        city(currently_building="UNIT_SLINGER"),
+        city(city_id=2, currently_building="UNIT_BUILDER"),
+        city(city_id=3, currently_building="UNIT_GALLEY"),
+    ]
+    _, queued, _, _ = bi.queued_by_kind(cities)
+    assert queued["LAND_COMBAT"] == 1
+    option = ResearchOption(
+        "T", "Bronze", 60, 0, 12, False, "Have 8 land combat units in your military.", (), ""
+    )
+    state = BoostState(turn=20, land_combat_units=7)
+    assert (
+        judge_boosts([option], state, PlanSignals(units_queued=dict(queued)))[0].decision
+        is Decision.DELAY
+    )

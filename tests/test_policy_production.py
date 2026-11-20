@@ -1860,3 +1860,27 @@ def test_a_refused_district_stops_vetoing_the_wonder_race():
     game = ScriptedGame(refuse={"DISTRICT_COMMERCIAL_HUB": "ERR:NOPE"})
     run(choose_for_city(game, c, menu, ctx, w))
     assert game.set_calls[-1][2] == "BUILDING_STONEHENGE"
+
+
+def test_a_refused_district_leaves_the_ranking_alone_with_wonder_races_off(monkeypatch):
+    # Issue 328 (review): the refusal rerank is part of the opt-in race wiring, so a run with the
+    # flag off ranks once, as before the change.
+    import civ6_ai.policies.production as production
+
+    calls = []
+    real = production.rank_production
+
+    def counting(*args, **kwargs):
+        calls.append(args)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(production, "rank_production", counting)
+    menu = [
+        option("DISTRICT", "DISTRICT_COMMERCIAL_HUB", 20, cost=54),
+        option("BUILDING", "BUILDING_GRANARY", 20, cost=60),
+    ]
+    ctx = ProductionContext(turn=33, num_cities=2, army=9, builders=2)
+    game = ScriptedGame(refuse={"DISTRICT_COMMERCIAL_HUB": "ERR:NOPE"})
+    run(choose_for_city(game, city(production=8.0), menu, ctx, ProductionWeights()))
+    assert game.set_calls[-1][2] == "BUILDING_GRANARY"
+    assert len(calls) == 1

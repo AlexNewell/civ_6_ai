@@ -1523,7 +1523,8 @@ async def choose_for_city(
             return option
         log.info("%s can't build %s: %s", city.name, option.item, result[:120])
         refusal = is_refusal(result)
-        ranked = skip(option, ranked)  # A refused alternative must not keep vetoing a wonder.
+        if weights.wonder_races:  # Off: a refusal leaves the ranking as it was (issue 328).
+            ranked = skip(option, ranked)  # A refused alternative must not veto a wonder.
         wait, reason = 0, ""
         if refusal:
             reason, needs, signature = await _explain(reads, city, option, result)

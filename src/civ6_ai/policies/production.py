@@ -893,6 +893,7 @@ def rank_production(
     options: Iterable[ProductionChoice],
     context: ProductionContext,
     weights: ProductionWeights | None = None,
+    unavailable: frozenset[str] = frozenset(),
 ) -> list[ProductionChoice]:
     """Return the options worth building, best first. Zero-scored options come last.
 
@@ -919,7 +920,8 @@ def rank_production(
             (
                 scores[id(o)]
                 for o in keep
-                if o.category == "DISTRICT" or canonical(o.item) == "UNIT_BUILDER"
+                if (o.category == "DISTRICT" or canonical(o.item) == "UNIT_BUILDER")
+                and o.item not in unavailable  # The game or a refusal rules it out (issue 301).
             ),
             default=0.0,
         )
@@ -1215,7 +1217,25 @@ async def choose_for_city(
             return None
         ranked = [o for o in ranked if is_defence(o)]
     tried = 0
-    for option in ranked:
+    unavailable: set[str] = set()
+    options = list(options)
+
+    def skip(option: ProductionChoice, rest: list[ProductionChoice]) -> list[ProductionChoice]:
+        """The options still to try, ranked again without a growth option that cannot start.
+
+        Issue 301: a district the game will not start must not keep demoting the army floor.
+        """
+        if option.is_repair or not (
+            option.category == "DISTRICT" or canonical(option.item) == "UNIT_BUILDER"
+        ):
+            return rest
+        unavailable.add(option.item)
+        again = rank_production(city, options, context, weights, frozenset(unavailable))
+        left = {o.item for o in rest}
+        return [o for o in again if o.item in left]
+
+    while ranked:
+        option = ranked.pop(0)
         if tried >= MAX_ATTEMPTS:
             break
         # Issue 283: a settler scored 0 (one is held, no safe site, enough cities) is never built
@@ -1229,6 +1249,7 @@ async def choose_for_city(
             and memory.has(city, option.item)
             and await memory.blocked(city, option.item, context.turn, reads)
         ):
+            ranked = skip(option, ranked)
             continue
         # The game will not start a new district while the city is at its population limit, and
         # no tile changes that, so it is not tried. The cap is read once a turn for every city,
@@ -1243,6 +1264,7 @@ async def choose_for_city(
                     cap.zoned,
                     cap.allowed,
                 )
+                ranked = skip(option, ranked)
                 continue
             # The game's own verdict (`CanStartOperation`, read with the signatures) names the
             # failure; one that tiles cannot change here costs no advisor call and no refusal. It
@@ -1250,6 +1272,7 @@ async def choose_for_city(
             verdict = await reads.district_denied(city.city_id, option.item)
             if verdict is not None:
                 log.debug("%s skips %s: the game says %s", city.name, option.item, verdict)
+                ranked = skip(option, ranked)
                 continue
         tried += 1
         trace = StartTrace()

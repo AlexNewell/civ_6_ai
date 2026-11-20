@@ -1639,3 +1639,32 @@ def test_a_short_camp_force_still_outranks_a_district_early():
     c = city(population=3)
     ctx = replace(GARRISONED_EARLY, camp_units=2, camp_wants="melee")
     assert best(c, GROWTH_MENU, ctx) == "UNIT_WARRIOR"
+
+
+def test_a_district_the_city_cannot_start_does_not_demote_the_army_floor_unit():
+    # Issue 301 review: a population-capped Holy Site still lowered the Warrior under a Monument.
+    c = city(population=3)
+    menu = [
+        option("UNIT", "UNIT_WARRIOR", 4),
+        option("BUILDING", "BUILDING_MONUMENT", 5),
+        option("DISTRICT", "DISTRICT_HOLY_SITE", 8),
+    ]
+    ctx = replace(GARRISONED_EARLY, army=0)
+
+    async def capped(city_id, item):
+        return SimpleNamespace(zoned=1, allowed=1)
+
+    async def allowed(city_id, item):
+        return None
+
+    async def not_denied(city_id, item):
+        return None
+
+    def reads(cap):
+        return SimpleNamespace(district_cap=cap, district_denied=not_denied)
+
+    w = ProductionWeights()
+    blocked = run(choose_for_city(ScriptedGame(), c, menu, ctx, w, reads=reads(capped)))
+    free = run(choose_for_city(ScriptedGame(), c, menu, ctx, w, reads=reads(allowed)))
+    assert blocked.item == rank_production(c, menu[:2], ctx)[0].item
+    assert free.item == "DISTRICT_HOLY_SITE"

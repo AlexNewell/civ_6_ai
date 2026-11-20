@@ -16,19 +16,32 @@ The score of an option is the sum of:
 - finishing: up to `finishing` for progress already made.
 - stickiness: a bonus to the item in progress, so the target doesn't flip each turn.
 - commitment: for the civic in progress only, a bonus scaled by its (estimated) progress.
+- boost judgement (off by default): a penalty on an item whose boost lands soon on its own, a
+  small bonus on an item already boosted. See `strategy/boost_judgement.py` (#322).
 
 Ties go to the item type in alphabetical order.
 """
 
 import json
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Protocol
 
 from civ6_ai.blockers import Blocker, BlockerGame, BlockerType
 from civ6_ai.state import Research, read_research
 from civ6_ai.state.models import LockedResearch, ResearchOption
+from civ6_ai.strategy.boost_judgement import (
+    BoostJudgement,
+    BoostState,
+    Decision,
+    DelayRecord,
+    JudgementSettings,
+    PlanSignals,
+    ReachLabel,
+    judge_boosts,
+    next_history,
+)
 
 log = logging.getLogger(__name__)
 
@@ -68,6 +81,14 @@ class ResearchWeights:
     # Civics only: tech progress is read exactly and its order is not the problem.
     civic_commitment: float = 6.0
     priorities: tuple[tuple[str, float], ...] = DEFAULT_PRIORITIES  # Pairs, so it stays hashable.
+    # Boost judgement (#322): hold an item back while its boost lands on its own soon. Off, so
+    # the ranking is as before. A playbook level can turn it on (#321).
+    boost_judgement: bool = False
+    # Larger than any other score term (about 12 at most), so a delayed item loses to any other.
+    boost_delay_penalty: float = 15.0
+    boost_delay_max_turns: int = 8  # The longest an item is held back for its boost.
+    # Small: an already boosted item wins a close call. `eureka` already counts the saving.
+    boost_prefer: float = 1.0
 
 
 class ResearchGame(Protocol):
@@ -89,10 +110,14 @@ def score_option(
     locked: tuple[LockedResearch, ...],
     weights: ResearchWeights,
     current: str | None = None,
+    adjustment: float = 0.0,
 ) -> float:
-    """Score one option. `current` is the localised name of the item in progress."""
+    """Score one option. `current` is the localised name of the item in progress.
+
+    `adjustment` is added as is: the boost judgement's penalty or bonus, 0 when it is off.
+    """
     turns = option.turns if option.turns > 0 else _NO_TURNS
-    score = weights.speed / turns
+    score = weights.speed / turns + adjustment
     if option.boosted:
         score += weights.eureka
     for item in locked:
@@ -165,18 +190,48 @@ def rank_options(
     locked: tuple[LockedResearch, ...],
     weights: ResearchWeights,
     current: str | None = None,
+    adjustments: Mapping[str, float] | None = None,
 ) -> list[ResearchOption]:
     """Best first. Empty if nothing can be started."""
-    scored = [(-score_option(o, locked, weights, current), o.item_type, o) for o in options]
+    adjustments = adjustments or {}
+    scored = [
+        (
+            -score_option(o, locked, weights, current, adjustments.get(o.item_type, 0.0)),
+            o.item_type,
+            o,
+        )
+        for o in options
+    ]
     return [option for _, _, option in sorted(scored, key=lambda row: row[:2])]
 
 
-def choose_tech(research: Research, weights: ResearchWeights) -> list[ResearchOption]:
-    return rank_options(research.techs, research.locked_techs, weights, research.current_tech)
+def choose_tech(
+    research: Research, weights: ResearchWeights, adjustments: Mapping[str, float] | None = None
+) -> list[ResearchOption]:
+    return rank_options(
+        research.techs, research.locked_techs, weights, research.current_tech, adjustments
+    )
 
 
-def choose_civic(research: Research, weights: ResearchWeights) -> list[ResearchOption]:
-    return rank_options(research.civics, research.locked_civics, weights, research.current_civic)
+def choose_civic(
+    research: Research, weights: ResearchWeights, adjustments: Mapping[str, float] | None = None
+) -> list[ResearchOption]:
+    return rank_options(
+        research.civics, research.locked_civics, weights, research.current_civic, adjustments
+    )
+
+
+def boost_adjustments(
+    judgements: list[BoostJudgement], weights: ResearchWeights
+) -> dict[str, float]:
+    """Score adjustment per item type: a penalty for a delay, a small bonus for a boosted item."""
+    out: dict[str, float] = {}
+    for j in judgements:
+        if j.decision is Decision.DELAY:
+            out[j.item_type] = -weights.boost_delay_penalty
+        elif j.reach.label is ReachLabel.EARNED:
+            out[j.item_type] = weights.boost_prefer
+    return out
 
 
 def _succeeded(result: str) -> bool:
@@ -233,17 +288,44 @@ class ResearchPolicy:
 
     name = "research"
 
-    def __init__(self, weights: ResearchWeights | None = None) -> None:
+    def __init__(
+        self,
+        weights: ResearchWeights | None = None,
+        boost_inputs: Callable[[], Awaitable[tuple[BoostState, PlanSignals]]] | None = None,
+    ) -> None:
         self.weights = weights or ResearchWeights()
+        # Reads the game counts and plan signals for the boost judgement. Without it, or with
+        # `boost_judgement` off, the ranking is unchanged.
+        self.boost_inputs = boost_inputs
+        self._delays: dict[str, DelayRecord] = {}
+
+    async def _boost_adjustments(self, research: Research) -> dict[str, float]:
+        if not self.weights.boost_judgement or self.boost_inputs is None:
+            return {}
+        state, signals = await self.boost_inputs()
+        settings = JudgementSettings(max_delay=self.weights.boost_delay_max_turns)
+        judgements = judge_boosts(
+            research.techs + research.civics, state, signals, settings, self._delays
+        )
+        self._delays = next_history(self._delays, judgements, state.turn)
+        for j in judgements:
+            if j.decision is not Decision.RESEARCH_NOW or j.gave_up:
+                log.info("boost_judgement %s", j.reason)
+        return boost_adjustments(judgements, self.weights)
 
     async def run(self, game: ResearchGame) -> None:
         research = await read_research_with_civic_progress(game)
         log_boosts(research)
+        adjustments = await self._boost_adjustments(research)
         ok_tech = await _start_best(
-            choose_tech(research, self.weights), research.current_tech, game.set_research
+            choose_tech(research, self.weights, adjustments),
+            research.current_tech,
+            game.set_research,
         )
         ok_civic = await _start_best(
-            choose_civic(research, self.weights), research.current_civic, game.set_civic
+            choose_civic(research, self.weights, adjustments),
+            research.current_civic,
+            game.set_civic,
         )
         if not (ok_tech and ok_civic):
             raise RuntimeError("The game refused every research or civic option tried")

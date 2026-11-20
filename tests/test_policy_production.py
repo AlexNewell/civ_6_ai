@@ -80,7 +80,7 @@ def test_early_garrisoned_city_expands_once_it_can():
     grown = city(population=3, buildings=["PALACE"])
     scouted = replace(EARLY, recon=1)
     assert best(small, MENU, scouted) != "UNIT_SETTLER"
-    assert best(grown, MENU, scouted) == "UNIT_SETTLER"
+    assert best(grown, MENU, scouted) == "UNIT_SETTLER"  # Over the early Monument (issue 299).
 
 
 def test_the_first_scout_comes_before_a_settler():
@@ -106,7 +106,8 @@ def test_mid_game_city_builds_infrastructure_by_weight():
         option("BUILDING", "BUILDING_LIBRARY", 5),
     ]
     c = city(buildings=["PALACE"])
-    assert best(c, culture, MID) == "BUILDING_LIBRARY"
+    no_bonus = ProductionWeights(early_monument=0.0)  # The early Monument bonus (299) aside.
+    assert best(c, culture, MID, no_bonus) == "BUILDING_LIBRARY"
     leaning = ProductionWeights(culture=5.0, science=0.2)
     assert best(c, culture, MID, leaning) == "BUILDING_MONUMENT"
 
@@ -361,6 +362,7 @@ def test_weights_can_be_replaced_between_turns():
     ]
     infos = [fx.city_info(currently_building="nothing", buildings=["PALACE"])]
     policy = CityProductionPolicy()
+    policy.weights = replace(policy.weights, early_monument=0.0)  # Issue 299 aside.
     first = ScriptedGame(cities=infos, production=options)
     run(policy.run(first))
     policy.weights = replace(policy.weights, culture=10.0)
@@ -1568,3 +1570,60 @@ def test_a_zero_scored_settler_is_never_started_as_the_last_item():
         choose_for_city(game, c, [option("UNIT", "UNIT_SETTLER", 5)], ctx, ProductionWeights())
     )
     assert picked is None and game.set_calls == []
+
+
+# Issue 299: a Monument in a city's first build cycle outranks the second garrison or scout unit.
+_FRESH = ProductionContext(turn=15, num_cities=1, builders=1, recon=1, army=1)
+_FRESH_MENU = [
+    option("UNIT", "UNIT_WARRIOR", 4),
+    option("UNIT", "UNIT_SCOUT", 3),
+    option("UNIT", "UNIT_SLINGER", 4),
+    option("BUILDING", "BUILDING_MONUMENT", 5),
+]
+_WEIGHTS = ProductionWeights()
+
+
+def _monument_score(c, ctx=_FRESH):
+    return score(option("BUILDING", "BUILDING_MONUMENT", 5), c, ctx, _WEIGHTS)
+
+
+def test_a_fresh_city_builds_its_monument_before_a_second_unit():
+    c = city(population=1, buildings=["PALACE"])
+    assert best(c, _FRESH_MENU, _FRESH) == "BUILDING_MONUMENT"
+    # Below the army floor too (a second unit wanted).
+    assert best(c, _FRESH_MENU, replace(_FRESH, army=0)) == "BUILDING_MONUMENT"
+
+
+def test_a_ready_settler_still_beats_the_early_monument():
+    grown = city(population=3, buildings=["PALACE"])
+    menu = [option("UNIT", "UNIT_SETTLER", 5), option("BUILDING", "BUILDING_MONUMENT", 5)]
+    assert best(grown, menu, _FRESH) == "UNIT_SETTLER"
+    # No safe site: the settler scores 0 and the Monument is built.
+    assert best(grown, menu, replace(_FRESH, sites_ok=False)) == "BUILDING_MONUMENT"
+
+
+def test_no_early_bonus_once_the_city_has_a_monument():
+    bare = city(population=1, buildings=["PALACE"])
+    built = city(population=1, buildings=["PALACE", "MONUMENT"])
+    assert _monument_score(bare) > _monument_score(built)
+    assert _monument_score(built) == pytest.approx(
+        score(option("BUILDING", "BUILDING_MONUMENT", 5), built, _FRESH, _WEIGHTS)
+    )
+    assert best(built, _FRESH_MENU, _FRESH) != "BUILDING_MONUMENT"
+    # The bonus can be turned off.
+    off = ProductionWeights(early_monument=0.0)
+    assert score(option("BUILDING", "BUILDING_MONUMENT", 5), bare, _FRESH, off) == pytest.approx(
+        _monument_score(built)
+    )
+
+
+def test_no_early_monument_bonus_under_threat():
+    c = city(threats=[threat()], population=1, buildings=["PALACE"])
+    assert _monument_score(c) == pytest.approx(_monument_score(built_city()))
+    assert best(c, _FRESH_MENU, _FRESH) != "BUILDING_MONUMENT"
+    marked = replace(_FRESH, threatened=frozenset({city().city_id}))
+    assert best(city(buildings=["PALACE"]), _FRESH_MENU, marked) != "BUILDING_MONUMENT"
+
+
+def built_city():
+    return city(population=1, buildings=["PALACE", "MONUMENT"])

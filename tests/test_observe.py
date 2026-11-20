@@ -38,6 +38,39 @@ class Overview:
     turn: int
     player_id: int = 0
     civ_name: str = "Maya"
+    leader_name: str = "Leader"
+
+
+@dataclass
+class Unit:
+    unit_id: int
+    unit_type: str
+    x: int
+    y: int
+    moves_remaining: float
+    max_moves: float
+    health: int
+    max_health: int
+
+
+@dataclass
+class CityInfo:
+    city_id: int
+    name: str
+    x: int
+    y: int
+    population: int
+    districts: list[str]
+    currently_building: str = "NONE"
+
+
+@dataclass
+class Note:
+    type_name: str
+    message: str
+    turn: int
+    x: int
+    y: int
 
 
 class FakeGame:
@@ -60,6 +93,15 @@ class FakeGame:
 
     async def get_trade_routes(self):
         return {"capacity": 0}
+
+    async def get_units(self):
+        return [Unit(7, "UNIT_SETTLER", 3, 4, 2.0, 2.0, 100, 100)]
+
+    async def get_cities(self):
+        return [CityInfo(1, "Capital", 3, 4, 2, ["DISTRICT_CITY_CENTER"])], []
+
+    async def get_notifications(self):
+        return [Note("NOTIFICATION_PRODUCTION", "Pick production", self.turn, 3, 4)]
 
 
 def test_turn_record_has_standing_and_rank():
@@ -170,11 +212,17 @@ def test_resume_carries_on_without_rewriting_the_last_turn(tmp_path: Path):
 
 
 def test_observer_source_calls_nothing_that_changes_the_game():
-    names = "end_turn|dismiss_popup|load_game_save|press_escape|move_unit|set_research|found_city"
+    names = (
+        "end_turn|dismiss_popup|load_game_save|press_escape|move_unit|set_research|found_city"
+        "|save_checkpoint"  # The start save; allowed once, in the script, and checked below.
+    )
     forbidden = rf"\b({names})\("
     for path in (Path(observe.__file__), Path(__file__).parents[1] / "scripts" / "observe_game.py"):
         code = re.sub(r'""".*?"""', "", path.read_text(encoding="utf-8"), flags=re.S)
         code = re.sub(r"#.*", "", code)
+        if path.name == "observe_game.py":
+            assert code.count("save_checkpoint(") == 1  # Only the start save.
+            code = code.replace("save_checkpoint(", "")
         assert not re.search(forbidden, code), path.name
 
 
@@ -212,3 +260,57 @@ def test_a_turn_that_moves_during_the_reads_is_not_recorded(tmp_path: Path):
     assert asyncio.run(observer.observe_once())  # The next poll records turn 2 whole.
     row = json.loads((tmp_path / "human_moved.jsonl").read_text().splitlines()[0])
     assert row["turn"] == 2
+
+
+def test_row_has_units_cities_and_notifications(tmp_path: Path):
+    observer = Observer(FakeGame(), tmp_path, "human_detail")
+    asyncio.run(observer.observe_once())
+    row = json.loads((tmp_path / "human_detail_observed.jsonl").read_text().splitlines()[0])
+    assert row["units"][0]["type"] == "UNIT_SETTLER"
+    assert (row["units"][0]["x"], row["units"][0]["moves"], row["units"][0]["health"]) == (
+        3,
+        2.0,
+        100,
+    )
+    assert row["city_sites"][0]["districts"] == ["DISTRICT_CITY_CENTER"]
+    assert (row["city_sites"][0]["x"], row["city_sites"][0]["y"]) == (3, 4)
+    assert row["notifications"][0]["text"] == "Pick production"
+
+
+def test_screenshots_only_on_the_set_turns(tmp_path: Path):
+    game = FakeGame()
+    taken: list[int] = []
+    observer = Observer(game, tmp_path, "human_shots", shots=taken.append)
+    for turn in (1, 25, 26, 50):
+        game.turn = turn
+        asyncio.run(observer.observe_once())
+    assert taken == [25, 50]
+
+
+def test_header_has_seeds_save_civ_and_start_time(tmp_path: Path):
+    from datetime import UTC, datetime
+
+    sent: list[str] = []
+
+    async def execute(lua: str) -> list[str]:
+        sent.append(lua)
+        return ["OBSERVE|game_seed|123", "OBSERVE|map_seed|456", "other"]
+
+    class Game(FakeGame):
+        async def get_game_overview(self):
+            return Overview(5, civ_name="Rome", leader_name="Trajan")
+
+    path = tmp_path / "human_x_header.json"
+    started = datetime(2026, 1, 1, tzinfo=UTC)
+    asyncio.run(observe.write_header(path, Game(), execute, "HUMAN_x_T5", started))
+    header = json.loads(path.read_text())
+    assert header == {
+        "save": "HUMAN_x_T5",
+        "game_seed": "123",
+        "map_seed": "456",
+        "civ": "Rome",
+        "leader": "Trajan",
+        "turn": 5,
+        "started_at": "2026-01-01T00:00:00+00:00",
+    }
+    assert "Network.SaveGame" not in sent[0]  # The seed read only reads.

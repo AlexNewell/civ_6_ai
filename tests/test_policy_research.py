@@ -11,9 +11,11 @@ from civ6_ai.policies.research import (
     blocker_policies,
     choose_civic,
     choose_tech,
+    estimate_civic_progress,
     rank_options,
 )
 from civ6_ai.state import reader
+from civ6_ai.state.models import LockedResearch
 from fixtures import civ_state as fx
 
 NO_PRIORITIES = ResearchWeights(priorities=())
@@ -274,3 +276,49 @@ def test_boost_line_names_boosted_options_and_locked_items(caplog):
         "civics": {},
         "techs": {"Mining": [50, 0, 1], "Pottery": [50, 0, 0]},
     }
+
+
+def civic_research(turns_left):
+    """Craftsmanship (cost 26) in progress; Foreign Trade is boosted and opens a locked civic."""
+    craft = lq.CivicOption("Craftsmanship", "CIVIC_CRAFTSMANSHIP", 26, 0, turns_left, False, "", "")
+    trade = lq.CivicOption("Foreign Trade", "CIVIC_FOREIGN_TRADE", 30, 0, 15, False, "", "")
+    base = reader.build_research(status(civics=[craft, trade], current_civic="Craftsmanship"))
+    unlock = LockedResearch("CIVIC_X", "X", ("Foreign Trade",), "", True, "")
+    return replace(base, current_civic_turns=turns_left, locked_civics=(unlock,))
+
+
+def test_estimate_keeps_the_civic_nearly_done():
+    base = civic_research(2)
+    assert names(choose_civic(base, NO_PRIORITIES))[0] == "Foreign Trade"  # Progress 0: dropped.
+    fixed = estimate_civic_progress(base, 2.0)
+    crafted = next(o for o in fixed.civics if o.name == "Craftsmanship")
+    assert crafted.progress_pct == 84  # (26 - 2 * 2) / 26
+    assert names(choose_civic(fixed, NO_PRIORITIES))[0] == "Craftsmanship"
+
+
+def test_estimate_lets_a_civic_just_started_be_replaced():
+    fixed = estimate_civic_progress(civic_research(13), 2.0)  # 26 - 13 * 2: nothing done
+    crafted = next(o for o in fixed.civics if o.name == "Craftsmanship")
+    assert crafted.progress_pct == 0
+    assert names(choose_civic(fixed, NO_PRIORITIES))[0] == "Foreign Trade"
+
+
+def test_estimate_needs_the_turns_left():
+    base = civic_research(2)
+    unknown = replace(base, current_civic_turns=None)
+    assert estimate_civic_progress(unknown, 2.0) is unknown
+    assert estimate_civic_progress(base, 0.0) is base
+    assert estimate_civic_progress(replace(base, current_civic_turns=-1), 2.0).civics == base.civics
+
+
+def test_policy_reads_the_overview_only_for_a_civic_in_progress():
+    idle = Game()
+    run(ResearchPolicy().run(idle))
+    assert "get_game_overview" not in idle.calls
+    busy = Game(
+        research=replace(
+            status(civics=[civic("Alpha")], current_civic="Alpha"), current_civic_turns=5
+        )
+    )
+    run(ResearchPolicy().run(busy))
+    assert "get_game_overview" in busy.calls

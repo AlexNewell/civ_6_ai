@@ -15,6 +15,7 @@ The score of an option is the sum of:
 - priority: a per-item bonus from `ResearchWeights.priorities`.
 - finishing: up to `finishing` for progress already made.
 - stickiness: a bonus to the item in progress, so the target doesn't flip each turn.
+- commitment: for the civic in progress only, a bonus scaled by its (estimated) progress.
 
 Ties go to the item type in alphabetical order.
 """
@@ -22,7 +23,7 @@ Ties go to the item type in alphabetical order.
 import json
 import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol
 
 from civ6_ai.blockers import Blocker, BlockerGame, BlockerType
@@ -61,6 +62,11 @@ class ResearchWeights:
     unlocks: float = 1.5
     finishing: float = 2.0
     stickiness: float = 1.0
+    # Extra for the civic in progress, scaled by its estimated progress. Finishing (2.0) and
+    # stickiness (1.0) top out at 3, while a boosted prerequisite scores 4.5 or more for its
+    # unlock and eureka, so a civic 11 of 13 turns in was dropped for it (#312, PR #307 run).
+    # Civics only: tech progress is read exactly and its order is not the problem.
+    civic_commitment: float = 6.0
     priorities: tuple[tuple[str, float], ...] = DEFAULT_PRIORITIES  # Pairs, so it stays hashable.
 
 
@@ -68,6 +74,7 @@ class ResearchGame(Protocol):
     """The part of civ6-mcp's `GameState` that this policy uses."""
 
     async def get_tech_civics(self): ...
+    async def get_game_overview(self): ...
     async def set_research(self, tech_name: str) -> str: ...
     async def set_civic(self, civic_name: str) -> str: ...
 
@@ -98,7 +105,59 @@ def score_option(
     score += weights.finishing * option.progress_pct / 100
     if option.name == current:
         score += weights.stickiness
+        if option.item_type.startswith("CIVIC_"):
+            score += weights.civic_commitment * option.progress_pct / 100
     return score
+
+
+def estimate_civic_progress(research: Research, culture: float) -> Research:
+    """Fill in the progress of the civic in progress, which civ6-mcp always reads as 0.
+
+    civ6-mcp reads it with a `pcall` around `GetCulturalProgress`, which fails and leaves 0
+    (#312). Without it only the stickiness bonus held a civic in progress, so a boost on another
+    civic dropped one that was nearly done. The game's own turns left and the culture per turn
+    give the points still to find: `progress = max(0, cost - turns_left * culture)`. The turns are
+    rounded up, so the estimate errs low. Left as read when the civic isn't known, the turns
+    aren't (-1) or the culture isn't positive. Capped at 99 so a civic never scores as finished.
+    """
+    turns = research.current_civic_turns
+    if research.current_civic is None or turns is None or turns <= 0 or culture <= 0:
+        return research
+    civics = []
+    for option in research.civics:
+        if option.name == research.current_civic and option.progress_pct == 0 and option.cost > 0:
+            left = max(0.0, option.cost - turns * culture)
+            pct = max(0, min(99, int(100 * left / option.cost)))
+            option = replace(option, progress_pct=pct)
+        civics.append(option)
+    return replace(research, civics=tuple(civics))
+
+
+_estimate_logged = False
+
+
+def _needs_estimate(research: Research) -> bool:
+    turns = research.current_civic_turns
+    return bool(
+        research.current_civic is not None
+        and turns is not None
+        and turns > 0
+        and any(o.name == research.current_civic and o.progress_pct == 0 for o in research.civics)
+    )
+
+
+async def read_research_with_civic_progress(game: ResearchGame) -> Research:
+    """`read_research`, plus the civic progress estimate when it is needed (one extra read)."""
+    global _estimate_logged
+    research = await read_research(game)
+    if not _needs_estimate(research):
+        return research
+    culture = float((await game.get_game_overview()).culture_yield)
+    estimated = estimate_civic_progress(research, culture)
+    if estimated is not research and not _estimate_logged:
+        _estimate_logged = True
+        log.info("Civic progress is estimated from cost, turns left and culture (#312)")
+    return estimated
 
 
 def rank_options(
@@ -178,7 +237,7 @@ class ResearchPolicy:
         self.weights = weights or ResearchWeights()
 
     async def run(self, game: ResearchGame) -> None:
-        research = await read_research(game)
+        research = await read_research_with_civic_progress(game)
         log_boosts(research)
         ok_tech = await _start_best(
             choose_tech(research, self.weights), research.current_tech, game.set_research
@@ -204,7 +263,7 @@ def blocker_policies(
         return bool(ranked) and await _start_best(ranked, None, game.set_research)
 
     async def choose_civic_blocker(game: BlockerGame, blocker: Blocker) -> bool:
-        research = await read_research(game)
+        research = await read_research_with_civic_progress(game)
         if research.current_civic is not None:
             return True
         ranked = choose_civic(research, weights)

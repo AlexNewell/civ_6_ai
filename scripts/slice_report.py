@@ -91,3 +91,10 @@ for name, row in summarise(occurrences).items():
 for c in run_checks(load_run([path])):
     if c.policy in ("offense", "boosts", "era score"):
         print(f"  {c.status:7} {c.name}: {c.figures()} {c.note[:110]}")
+# Issue 324: how good the sites of the cities the bot founded were, from the settle log. This is
+# the site's own value, without the loyalty and far-city penalties the choice used.
+from civ6_ai.site_quality import mean_site_score  # noqa: E402
+
+site_mean = mean_site_score(path.with_name(f"{path.stem}_settle.jsonl"))
+if site_mean:
+    print(f"  city sites: {site_mean[0]} founded, mean site score {site_mean[1]:.1f}")

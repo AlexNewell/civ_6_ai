@@ -48,6 +48,7 @@ Great people are one-shot: value is `GP_UNIT_VALUE` times the class weight (the 
 `gp_*` weights) times an era factor, cut as the game's end nears (`GP_PAYBACK_TURNS`).
 """
 
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -67,6 +68,7 @@ from civ6_ai.policies.production import (
 )
 from civ6_ai.policies.secondary import _GP_WEIGHTS, SecondaryWeights
 from civ6_ai.state import City, ProductionChoice
+from civ6_ai.state.reader import STANDARD_MAP_WIDTH, hex_distance
 
 HORIZON_CAP = 60  # Turns of benefit counted at most.
 DISCOUNT = 0.03  # Per turn: a yield later is worth less (compounding, risk, the game's end).
@@ -383,6 +385,49 @@ def resource_improvable(
     return tech is not None and tech not in open_techs
 
 
+def tile_improvable(
+    resource: str | None,
+    open_techs: frozenset[str] | None,
+    has_builder: bool,
+    occupied: bool = False,
+    reserved: bool = False,
+) -> bool:
+    """`resource_improvable`, and the tile is also free to improve: nothing already stands on it
+    (an improvement, pillaged or not, or a district; `occupied`) and no district or wonder of
+    ours is planned there (`reserved`, a tile in the placement plan book), which a farm or mine
+    would only be built over."""
+    if occupied or reserved:
+        return False
+    return resource_improvable(resource, open_techs, has_builder)
+
+
+# Contested land (issue 338). A purchasable tile near a city that is not ours is one the other
+# border may take first. Borders grow with the city's culture, to about 5 tiles over a game, so
+# the radius is a middle value: near enough that growth plausibly reaches the tile soon.
+CONTESTED_RADIUS = 4  # Tiles from a foreign city (rival or city-state) that count as near.
+CONTESTED_MIN_YIELD = 2  # Estimated food + production + gold a resource-less tile needs.
+
+
+def is_contested(
+    x: int,
+    y: int,
+    terrain: str,
+    resource: str | None,
+    foreign_cities: Iterable[tuple[int, int]],
+    radius: int = CONTESTED_RADIUS,
+    map_width: int | None = STANDARD_MAP_WIDTH,
+) -> bool:
+    """Is this purchasable tile near a foreign city and worth taking before they do?
+
+    Worth taking: it has a resource, or its estimated yields (from the terrain name) total at
+    least `CONTESTED_MIN_YIELD`. A tile on a foreign city itself never appears (the game does
+    not offer it), but distance 0 still counts as near.
+    """
+    if not resource and sum(estimate_tile_yields(terrain)) < CONTESTED_MIN_YIELD:
+        return False
+    return any(hex_distance(x, y, fx, fy, map_width) <= radius for fx, fy in foreign_cities)
+
+
 @dataclass(frozen=True)
 class TileFacts:
     """A purchasable tile as the valuation sees it. `improvable` is whether the resource on it
@@ -418,6 +463,33 @@ def estimate_tile_yields(terrain: str) -> tuple[int, int, int]:
         if fragment in text:
             return yields
     return (0, 0, 0)
+
+
+def tile_facts(
+    tile: Any,
+    open_techs: frozenset[str] | None,
+    has_builder: bool,
+    occupied: bool = False,
+    reserved: bool = False,
+    foreign_cities: Iterable[tuple[int, int]] = (),
+    contested: bool = False,
+    boost_value: float = 0.0,
+) -> TileFacts:
+    """The valuation's view of a purchasable tile (civ6-mcp's `PurchasableTile`). The policy and
+    `scripts/tile_report.py` both build facts here, so the report shows what the policy sees.
+    `contested` forces the flag on (a hand-marked tile); otherwise it is read off the cities."""
+    return TileFacts(
+        tile.x,
+        tile.y,
+        tile.cost,
+        tile.terrain,
+        tile.resource,
+        tile.resource_class,
+        improvable=tile_improvable(tile.resource, open_techs, has_builder, occupied, reserved),
+        contested=contested
+        or is_contested(tile.x, tile.y, tile.terrain, tile.resource, foreign_cities),
+        boost_value=boost_value,
+    )
 
 
 def value_tile_purchase(

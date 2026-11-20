@@ -49,7 +49,9 @@ def threat(**changes):
 
 
 EARLY = ProductionContext(turn=3, num_cities=1)
-MID = ProductionContext(turn=120, num_cities=6, builders=6, recon=1, army=9)
+# No safe site known: these tests are about buildings, not the settler, which a mid-game city
+# with room would now keep building (issue 316).
+MID = ProductionContext(turn=120, num_cities=6, builders=6, recon=1, army=9, sites_ok=False)
 
 MENU = [
     option("UNIT", "UNIT_WARRIOR", 4),
@@ -89,9 +91,9 @@ def test_the_first_scout_comes_before_a_settler():
     assert best(grown, MENU, EARLY) == "UNIT_SCOUT"
 
 
-def test_expansion_stops_at_target_and_while_a_settler_is_already_out():
+def test_expansion_stops_at_the_ceiling_and_while_a_settler_is_already_out():
     grown = city(population=4)
-    capped = ProductionContext(turn=40, num_cities=6, builders=6, recon=1, army=9)
+    capped = ProductionContext(turn=40, num_cities=12, builders=6, recon=1, army=9)
     assert best(grown, MENU, capped) != "UNIT_SETTLER"
     out = ProductionContext(turn=40, num_cities=2, settlers=1, builders=2, recon=1, army=3)
     assert best(grown, MENU, out) != "UNIT_SETTLER"
@@ -952,7 +954,7 @@ def _settler_score(ctx, **city_changes):
 
 def test_settler_priority_rises_when_behind_the_schedule():
     behind = ProductionContext(turn=100, num_cities=2, builders=2, recon=1, army=2)
-    on_pace = replace(behind, num_cities=4, army=4, builders=4)
+    on_pace = replace(behind, num_cities=6, army=6, builders=6)
     assert _settler_score(behind) > _settler_score(on_pace) > 0
     assert _settler_score(behind) > 14.0
 
@@ -971,7 +973,7 @@ def test_no_boost_without_safe_sites_a_garrison_or_a_defender_per_city():
 def test_a_second_settler_is_queued_only_when_behind():
     behind = ProductionContext(turn=100, num_cities=2, settlers=1, builders=2, recon=1, army=2)
     assert _settler_score(behind) > 0
-    on_pace = replace(behind, num_cities=4, army=4, builders=4)
+    on_pace = replace(behind, num_cities=6, army=6, builders=6)
     assert _settler_score(on_pace) == 0
     assert _settler_score(replace(behind, settlers=2)) == 0
 
@@ -1102,7 +1104,7 @@ def test_a_starving_city_prefers_a_food_building():
 
 
 def test_a_starving_city_trains_no_settler():
-    ctx = replace(MID, num_cities=2, army=9, turn=40)
+    ctx = replace(MID, num_cities=2, army=9, turn=40, sites_ok=True)
     assert score_of("UNIT_SETTLER", city(), ctx) > 0
     assert score_of("UNIT_SETTLER", starving(), ctx) == 0
 
@@ -1642,29 +1644,36 @@ def test_a_short_camp_force_still_outranks_a_district_early():
 
 
 def test_a_district_the_city_cannot_start_does_not_demote_the_army_floor_unit():
-    # Issue 301 review: a population-capped Holy Site still lowered the Warrior under a Monument.
-    c = city(population=3)
+    # Issue 301 review: a capped district must not leave the Warrior under a building. No
+    # Monument is built here, so the building is really ranked against the Warrior.
+    c = city(population=3, buildings=["PALACE"])
     menu = [
         option("UNIT", "UNIT_WARRIOR", 4),
-        option("BUILDING", "BUILDING_MONUMENT", 5),
-        option("DISTRICT", "DISTRICT_HOLY_SITE", 8),
+        option("BUILDING", "BUILDING_LIBRARY", 1),
+        option("DISTRICT", "DISTRICT_HOLY_SITE", 30),
     ]
     ctx = replace(GARRISONED_EARLY, army=0)
+    w = ProductionWeights()
+    library, campus = (score(o, c, ctx, w) for o in menu[1:])
+    assert library > campus  # The slow district is worth less than the quick building.
 
     async def capped(city_id, item):
         return SimpleNamespace(zoned=1, allowed=1)
 
-    async def allowed(city_id, item):
-        return None
-
     async def not_denied(city_id, item):
         return None
 
-    def reads(cap):
-        return SimpleNamespace(district_cap=cap, district_denied=not_denied)
+    reads = SimpleNamespace(district_cap=capped, district_denied=not_denied)
+    blocked = run(choose_for_city(ScriptedGame(), c, menu, ctx, w, reads=reads))
+    assert blocked.item == "UNIT_WARRIOR"
+    assert best(c, menu, ctx) == "UNIT_WARRIOR"  # A weaker district never lowers it either.
 
-    w = ProductionWeights()
-    blocked = run(choose_for_city(ScriptedGame(), c, menu, ctx, w, reads=reads(capped)))
-    free = run(choose_for_city(ScriptedGame(), c, menu, ctx, w, reads=reads(allowed)))
-    assert blocked.item == rank_production(c, menu[:2], ctx)[0].item
-    assert free.item == "DISTRICT_HOLY_SITE"
+
+def test_settlers_continue_past_six_cities_while_safe_sites_exist():
+    # Issue 316: the cap was a fixed 6. Now it follows the cities while a safe site is known.
+    grown = city(population=4)
+    base = dict(turn=150, num_cities=7, builders=7, recon=1, army=10)
+    assert best(grown, MENU, ProductionContext(**base, sites_ok=True)) == "UNIT_SETTLER"
+    # Safety is unchanged: no safe site, or one already in flight, builds no settler.
+    assert best(grown, MENU, ProductionContext(**base, sites_ok=False)) != "UNIT_SETTLER"
+    assert best(grown, MENU, ProductionContext(**base, settlers=2)) != "UNIT_SETTLER"

@@ -33,7 +33,7 @@ from civ6_ai.placement import (
     classify,
 )
 from civ6_ai.policies.districts import BASE_VALUE, PLANNED_VALUE, is_planned, wants_district
-from civ6_ai.policies.expansion import ExpansionState, expected_cities
+from civ6_ai.policies.expansion import ExpansionState, expected_cities, settler_cap
 from civ6_ai.policies.game_data import (
     COMBAT_UNITS,
     REPLACES,
@@ -103,7 +103,9 @@ class ProductionWeights:
     builders: float = 1.0  # Builders, which improve tiles.
     trade: float = 1.0  # Traders, while the empire has route capacity no trader fills.
     wonders: float = 0.5
-    target_cities: int = 6  # Stop building settlers at this many cities.
+    # The ceiling on cities: settlers stop here. Below it the cap follows the schedule and the safe
+    # sites (see `settler_cap`), so it is no longer a fixed small number (issue 316).
+    target_cities: int = 12
     victory: str = "any"  # The policy document's victory target. Decides the special districts.
     # The army floor: combat units kept per city. Below it, military units score above an ordinary
     # building even when no city is short; at it, military stops scoring.
@@ -592,12 +594,13 @@ def _unit_score(
             and city.garrison_unit is not None
             and ctx.army >= ctx.num_cities
         )
-        in_flight_cap = 2 if boosted and ctx.num_cities + 2 <= w.target_cities else 1
+        cap = settler_cap(ctx.turn, ctx.num_cities, ctx.sites_ok, w.target_cities)
+        in_flight_cap = 2 if boosted and ctx.num_cities + 2 <= cap else 1
         if (
             threatened
             or is_starving(city)
             or city.pop < _SETTLER_MIN_POP
-            or ctx.num_cities + ctx.settlers >= w.target_cities
+            or ctx.num_cities + ctx.settlers >= cap
             or ctx.settlers >= in_flight_cap
             # Issue 283: a settler already waits with nowhere to go, so another adds nothing.
             or ctx.held_settlers > 0
@@ -928,7 +931,24 @@ def rank_production(
         if growth > 0:
             for o in keep:
                 if o.category == "UNIT" and _is_floor_unit(o) and scores[id(o)] >= growth:
-                    scores[id(o)] = growth - 0.01
+                    # The unit yields only to growth that really outranks what it was above: a
+                    # weaker district must not drop it under an ordinary building (a capped
+                    # city's Monument), which the floor was meant to beat.
+                    rivals = max(
+                        (
+                            scores[id(r)]
+                            for r in keep
+                            if r is not o
+                            and scores[id(r)] < scores[id(o)]
+                            and not (
+                                r.category == "DISTRICT" or canonical(r.item) == "UNIT_BUILDER"
+                            )
+                            and not (r.category == "UNIT" and _is_floor_unit(r))
+                        ),
+                        default=0.0,
+                    )
+                    if growth - 0.01 > rivals:
+                        scores[id(o)] = growth - 0.01
     return sorted(
         [*repairs, *keep],
         key=lambda o: (-scores[id(o)], o.category, o.item, o.repair_x or 0),

@@ -44,6 +44,15 @@
         "civilization": "CIVILIZATION_BYZANTIUM",
         "leader": "LEADER_BASIL"
       }
+    },
+    {
+      "name": "STD_T1_04",
+      "recorded": {
+        "game_seed": "194068555",
+        "map_seed": "194068556",
+        "civilization": "CIVILIZATION_ROME",
+        "leader": "LEADER_TRAJAN"
+      }
     }
   ]
 }

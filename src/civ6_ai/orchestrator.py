@@ -177,6 +177,18 @@ class TurnLog:
 # failed to end, because it costs a game read.
 DefeatCheck = Callable[[], Awaitable[bool]]
 
+# Reads the turn from the game core rather than the UI. Only asked when the UI still shows the old
+# turn after every other look, as the last check before a turn counts as blocked.
+CoreTurn = Callable[[], Awaitable[int]]
+
+CORE_TURN_LUA = 'print(Game.GetCurrentGameTurn()) print("---END---")'
+
+
+async def read_core_turn(game: object) -> int:
+    """The current turn as the game core (not the UI's Lua state) sees it."""
+    lines = await game.conn.execute_read(CORE_TURN_LUA)  # type: ignore[attr-defined]
+    return int(lines[0])
+
 
 class Orchestrator:
     def __init__(
@@ -188,7 +200,9 @@ class Orchestrator:
         call_timer: CallTimer | None = None,
         screenshots: Screenshotter | None = None,
         rankings: RankingsHolder | None = None,
+        core_turn: CoreTurn | None = None,
     ) -> None:
+        self._core_turn = core_turn
         self._rankings = rankings
         self._call_timer = call_timer
         # The newest turn a notification has shown the game reached, for a UI that reads stale.
@@ -301,6 +315,17 @@ class Orchestrator:
             # still read 1). Clearing it lets the UI catch up.
             if await self._dismiss_popup() and await self._read_turn() > turn_before:
                 return None
+            # The overview is read in the UI's Lua state, which can lag the game itself. STD_T1_03
+            # stopped on turn 13 every time this way: the UI state read 13 for over two minutes
+            # while the game core (and the screen) were on 14. The game core is the authority, and
+            # one read of it settles the question before any waiting.
+            reached = await self._core_turn_after(turn_before)
+            if reached:
+                self._confirmed_turn = reached
+                log.warning(
+                    "Turn read %d in the UI, but the game core is on %d", turn_before, reached
+                )
+                return None
             # The report said the turn advanced, so a UI that still reads the old turn may only be
             # slow. Run 4 stopped on turn 318 this way, and the next look read 319.
             retries = TURN_READ_RETRIES_REPORTED if reported else TURN_READ_RETRIES
@@ -325,6 +350,19 @@ class Orchestrator:
             if await self._defeated():
                 return StopReason.GAME_OVER  # Reads can fail once the defeat screen is up.
             raise
+
+    async def _core_turn_after(self, turn: int) -> int:
+        """The game core's turn, if it is after `turn`, else 0 (also when it can't be read)."""
+        if self._core_turn is None:
+            return 0
+        try:
+            core = await self._core_turn()
+        except ConnectionError:
+            raise
+        except Exception:
+            log.exception("Reading the game core's turn failed")
+            return 0
+        return core if core > turn else 0
 
     async def _notified_turn_after(self, turn: int) -> int:
         """The newest turn a notification was raised on, if it is after `turn`, else 0."""

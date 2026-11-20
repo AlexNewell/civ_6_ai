@@ -943,27 +943,33 @@ def rank_production(
             ),
             default=0.0,
         )
-        if growth > 0:
-            for o in keep:
-                if o.category == "UNIT" and _is_floor_unit(o) and scores[id(o)] >= growth:
-                    # The unit yields only to growth that really outranks what it was above: a
-                    # weaker district must not drop it under an ordinary building (a capped
-                    # city's Monument), which the floor was meant to beat.
-                    rivals = max(
-                        (
-                            scores[id(r)]
-                            for r in keep
-                            if r is not o
-                            and scores[id(r)] < scores[id(o)]
-                            and not (
-                                r.category == "DISTRICT" or canonical(r.item) == "UNIT_BUILDER"
-                            )
-                            and not (r.category == "UNIT" and _is_floor_unit(r))
-                        ),
-                        default=0.0,
-                    )
-                    if growth - 0.01 > rivals:
-                        scores[id(o)] = growth - 0.01
+        affected = [
+            o
+            for o in keep
+            if o.category == "UNIT" and _is_floor_unit(o) and scores[id(o)] >= growth
+        ]
+        if growth > 0 and affected:
+            top = max(scores[id(o)] for o in affected)
+            # The units yield only to growth that really outranks what the best of them was
+            # above: a weaker district must not drop it under an ordinary building (a capped
+            # city's Monument), which the floor was meant to beat.
+            rivals = max(
+                (
+                    scores[id(r)]
+                    for r in keep
+                    if scores[id(r)] < top
+                    and not (r.category == "DISTRICT" or canonical(r.item) == "UNIT_BUILDER")
+                    and not (r.category == "UNIT" and _is_floor_unit(r))
+                ),
+                default=0.0,
+            )
+            if growth - 0.01 > rivals:
+                # One common shift, so the units keep their order and gaps (a Warrior still ranks
+                # over an Archer if the district then fails to start) and the best sits just
+                # under the growth option.
+                delta = top - (growth - 0.01)
+                for o in affected:
+                    scores[id(o)] -= delta
     return sorted(
         [*repairs, *keep],
         key=lambda o: (-scores[id(o)], o.category, o.item, o.repair_x or 0),

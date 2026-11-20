@@ -1767,3 +1767,19 @@ def test_with_the_monument_built_a_campus_or_builder_outranks_the_army_floor_uni
     assert order[0] == "UNIT_BUILDER"  # The best growth option; the Warrior yields to it only.
     campus_only = [o for o in _monument_and_growth_menu() if o.item != "UNIT_BUILDER"]
     assert rank_production(c, campus_only, ctx)[0].item == "DISTRICT_CAMPUS"
+
+
+def test_demoted_army_floor_units_keep_their_order_when_the_district_fails():
+    c = city(population=3, buildings=["PALACE"], districts=["DISTRICT_CITY_CENTER@10,10"])
+    ctx = replace(GARRISONED_EARLY, army=0)
+    warrior = option("UNIT", "UNIT_WARRIOR", 3)
+    archer = option("UNIT", "UNIT_ARCHER", 12)
+    holy = option("DISTRICT", "DISTRICT_HOLY_SITE", 4)
+    w = ProductionWeights()
+    assert score(warrior, c, ctx, w) > score(archer, c, ctx, w) > score(holy, c, ctx, w)
+    demoted = [o.item for o in rank_production(c, [warrior, archer, holy], ctx)]
+    assert demoted.index("DISTRICT_HOLY_SITE") < demoted.index("UNIT_WARRIOR")
+    assert demoted.index("UNIT_WARRIOR") < demoted.index("UNIT_ARCHER")
+    # The district is skipped or fails in `_start`: the next choice is the Warrior, not the Archer.
+    after = [o.item for o in rank_production(c, [warrior, archer, holy], ctx, w, {holy.item})]
+    assert after[0] == "UNIT_WARRIOR" and after.index("UNIT_ARCHER") > 0

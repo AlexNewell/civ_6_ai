@@ -19,7 +19,9 @@ this order, until the turn's bounds or the gold run out:
    purchase logs a `valuation` line with its value, cost, ROI, the floor and its basis. When
    gold is below half of the cheapest price seen in the last three turns the lists are not read.
 3. Buy tiles, resource tiles first. A tile with no resource is bought only when it costs at most
-   half of what is left to spend.
+   half of what is left to spend. With `tile_valuation` on (issue 87) tiles are instead valued by
+   the owner's rules (`valuation.value_tile_purchase`: a yield the city lacks, an improvable
+   resource, a boost, contested land) and bought in ROI order.
 
 Reserve: `RESERVE_FLOOR` plus `RESERVE_PER_CITY` for each city, lowered by `INCOME_RELIEF` per
 gold of income (never below `RESERVE_MIN`), plus ten turns of any deficit, capped at
@@ -59,6 +61,7 @@ from typing import Any, Protocol
 
 from civ6_ai.placement import PlanBook, last_turn_for
 from civ6_ai.policies import valuation
+from civ6_ai.policies.builder import is_builder
 from civ6_ai.policies.game_data import COMBAT_UNITS, UPGRADES
 from civ6_ai.policies.military import holds_tile
 from civ6_ai.policies.production import (
@@ -81,6 +84,7 @@ from civ6_ai.state import read_area as _read_area
 from civ6_ai.state import read_cities as _read_cities
 from civ6_ai.state import read_empire as _read_empire
 from civ6_ai.state import read_production as _read_production
+from civ6_ai.state import read_research as _read_research
 from civ6_ai.state import read_threats as _read_threats
 from civ6_ai.state import read_units as _read_units
 from civ6_ai.state.reader import hex_distance
@@ -137,6 +141,7 @@ class GoldGame(Protocol):
     async def patronize_great_person(self, individual_id: int, yield_type: str = ...) -> str: ...
     async def get_great_people(self) -> list[Any]: ...
     async def get_purchasable_tiles(self, city_id: int) -> Any: ...
+    async def get_tech_civics(self) -> Any: ...
     async def purchase_tile(self, city_id: int, x: int, y: int) -> str: ...
     async def move_unit(self, unit_index: int, target_x: int, target_y: int) -> str: ...
 
@@ -292,7 +297,13 @@ class GoldPolicy:
         plans: PlanBook | None = None,
         builder_demand: Any = None,
         expansion: Any = None,
+        tile_valuation: bool = False,
     ) -> None:
+        # Issue 87: value tile buys by the owner's rules (`valuation.value_tile_purchase`) and
+        # buy them in ROI order. Off by default: tiles then follow the old resource-first order.
+        self.tile_valuation = tile_valuation
+        self.contested_tiles: set[tuple[int, int]] = set()  # Set by whatever sees rival borders.
+        self.boost_values: dict[tuple[int, int], float] = {}  # Boost work (issue 322) fills this.
         self.builder_demand = builder_demand  # `builder.BuilderDemand`, or None.
         self.expansion = expansion  # `expansion.ExpansionState`, or None (issue 284).
         self._stack = StackBlocks()  # Purchases a unit on the city tile blocks.
@@ -343,7 +354,7 @@ class GoldPolicy:
         await self._upgrade(game, turn, units, notes, cities)
         await self._plan_tiles(game, turn, empire.turn, notes)
         await self._buy(game, turn, empire, cities, units, notes)
-        await self._tiles(game, turn, cities, notes)
+        await self._tiles(game, turn, cities, notes, units)
         # Forget the allowance of a target no longer being saved for.
         self._delay = {k: v for k, v in self._delay.items() if k == turn.key}
         spent = budget - turn.budget
@@ -1051,7 +1062,124 @@ class GoldPolicy:
             ):
                 notes.append(f"saving for the {target.item} tile in {target.city_name}")
 
-    async def _tiles(self, game: GoldGame, turn: _Turn, cities: list[City], notes: list[str]):
+    async def _tiles_by_value(
+        self, game: GoldGame, turn: _Turn, cities: list[City], notes: list[str], units=()
+    ) -> None:
+        """Tile buys by the owner's rules (issue 87): one more candidate list, bought by ROI.
+
+        Runs after upgrades, planned tiles and purchases, from the budget they left (the reserve
+        and any threatened city's defence were settled before), and obeys the saving target.
+        """
+        weights = self.weights
+        has_builder = any(is_builder(u.unit_type) for u in units)
+        open_techs: frozenset[str] | None = None  # Read once, and only if a resource tile shows.
+        read_techs = False
+        candidates: list[tuple[tuple, City, Any, valuation.Priced, valuation.TileValue]] = []
+        for city in cities:
+            if turn.refused_out:
+                break
+            try:
+                tiles = await game.get_purchasable_tiles(city.city_id)
+            except ConnectionError:
+                raise
+            except Exception:
+                log.exception("Tile read failed for %s", city.name)
+                continue
+            if not isinstance(tiles, list):
+                continue
+            for tile in tiles:
+                if tile.cost <= 0:
+                    continue
+                spot = (tile.x, tile.y)
+                if tile.resource and not read_techs:
+                    read_techs = True
+                    open_techs = await self._open_techs(game)
+                facts = valuation.TileFacts(
+                    tile.x,
+                    tile.y,
+                    tile.cost,
+                    tile.terrain,
+                    tile.resource,
+                    tile.resource_class,
+                    improvable=valuation.resource_improvable(
+                        tile.resource, open_techs, has_builder
+                    ),
+                    contested=spot in self.contested_tiles,
+                    boost_value=self.boost_values.get(spot, 0.0),
+                )
+                worth = valuation.value_tile_purchase(facts, city, weights)
+                if worth is None:
+                    continue
+                label = f"{city.name} tile ({tile.x},{tile.y})"
+                priced = valuation.price(label, tile.cost, worth.valuation, turn.now, turn.last)
+                candidates.append(
+                    ((worth.priority, -priced.roi, tile.cost), city, tile, priced, worth)
+                )
+        bought_cities: set[int] = set()
+        for _, city, tile, priced, worth in sorted(candidates, key=lambda c: c[0]):
+            if turn.tiles >= MAX_TILES or turn.refused_out or turn.budget <= 0:
+                break
+            if city.city_id in bought_cities:
+                continue
+            audit = f"value={priced.value:.0f} cost={priced.cost} roi={priced.roi:.2f}"
+            bar = valuation.floor(turn.budget, turn.income)
+            if priced.cost > turn.budget:
+                log.info(
+                    "tile_buy %s skipped: costs %d, %d to spend (%s)",
+                    priced.label,
+                    priced.cost,
+                    turn.budget,
+                    worth.reason,
+                )
+                continue
+            if priced.roi < bar and worth.priority != 0:
+                log.info(
+                    "tile_buy %s skipped: roi %.2f < floor %.2f (%s)",
+                    priced.label,
+                    priced.roi,
+                    bar,
+                    worth.reason,
+                )
+                continue
+            if turn.target is not None and priced.cost > turn.slack:
+                log.info("tile_buy %s waits for %s", priced.label, turn.target)
+                continue
+            result = await self._call(game.purchase_tile(city.city_id, tile.x, tile.y))
+            if _ok(result, "TILE_PURCHASED"):
+                turn.spend(priced.cost)
+                turn.tiles += 1
+                bought_cities.add(city.city_id)
+                log.info("tile_buy %s bought %s: %s", priced.label, audit, worth.reason)
+            else:
+                turn.refusals += 1
+                log.info("tile_buy %s refused: %s", priced.label, str(result)[:120])
+        if turn.tiles == 0:
+            notes.append("no tile worth buying by the tile rules")
+
+    @staticmethod
+    async def _open_techs(game: GoldGame) -> frozenset[str] | None:
+        """Techs not yet researched (available or locked), or None when the read fails."""
+        try:
+            research = await _read_research(game)
+        except ConnectionError:
+            raise
+        except Exception:
+            log.exception("Research read failed for the tile rules")
+            return None
+        return frozenset(
+            [valuation.tech_name(t.item_type) for t in research.techs]
+            + [valuation.tech_name(t.item_type) for t in research.locked_techs]
+        )
+
+    async def _tiles(
+        self, game: GoldGame, turn: _Turn, cities: list[City], notes: list[str], units=()
+    ):
+        if self.tile_valuation:
+            if turn.target is not None and turn.slack <= 0:
+                notes.append(f"tiles wait while saving toward {turn.target}")
+                return
+            await self._tiles_by_value(game, turn, cities, notes, units)
+            return
         for city in cities:
             if turn.tiles >= MAX_TILES or turn.refused_out or turn.budget <= 0:
                 return

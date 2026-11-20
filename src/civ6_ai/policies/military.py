@@ -257,6 +257,14 @@ class MilitarySettings:
     camp_max_build: int = 4  # Units asked of production for one camp at a time.
     camp_build_turns: int = 4  # Turns counted for each unit still to be built, in the ETA.
     camp_idle_turns: int = 10  # A camp not advanced on for this long starts its count again.
+    # Issue 306: a unit about to fortify (in a threatened city, or beside it) first takes a kill.
+    # Run STD_T1_03 turn 13: both units fortified while a 22-HP barbarian Warrior stood 2 tiles
+    # from the city, because the fortify rule is reached without any odds being looked at.
+    finish_attacker: bool = True
+    # Expected damage over the target's health that counts as a likely kill (1.0: the middle of
+    # the roll kills it, though a low roll might not). A sure kill needs no margin.
+    finish_margin: float = 1.0
+    finish_free_damage: float = 20.0  # A ranged shot that takes nothing back is worth this much.
     city_strike_range: int = 2  # civ6-mcp: "city attack range is 2".
     fallback_tiles: int = (
         2  # Other tiles tried for a unit whose move was refused, before it fortifies.
@@ -2806,6 +2814,97 @@ class MilitaryPolicy:
         line = hex_line((unit.x, unit.y), camp, width)
         return line[-2] if len(line) >= 2 else None
 
+    # ----- finishing an attacker before fortifying (issue 306) -----
+
+    def _finish_choice(
+        self, t: _Turn, unit: Unit, city: City, garrison: bool
+    ) -> tuple[AttackOdds, Target, tuple[int, int]] | None:
+        """The attack a unit about to fortify should take first, as (odds, target, stage tile).
+
+        The stage tile is where the unit attacks from: its own tile, or for a covering unit with
+        moves to spare, a free tile beside both the target and the city. A garrison never leaves
+        its city tile. Taken: a sure kill, a likely kill (expected damage at least the target's
+        health times `finish_margin`) that the unit survives on a bad roll, or a ranged shot that
+        takes nothing back and does meaningful damage. A melee unit never starts an even fight.
+        """
+        s = self.settings
+        w = s.weights
+        width = s.map_width
+        here = self._pos(t, unit)
+        floor = self._floor_for(t, unit)
+        taken_tiles = {self._pos(t, u) for u in t.units if u.unit_id != unit.unit_id}
+        taken_tiles |= {(th.x, th.y) for th in t.threats} | t.blocked
+        best = None
+        for threat in t.threats:
+            where = (threat.x, threat.y)
+            if not threat.hostile or where in t.dead:
+                continue
+            if hex_distance(*where, city.x, city.y, width) > s.defend_radius:
+                continue
+            reach = hex_distance(*here, *where, width)
+            in_reach = any((tg.x, tg.y) == where for tg in unit.targets)
+            if reach <= 1 and not in_reach:
+                continue  # Next to it but the game lists no attack: trust the game.
+            stage = here if in_reach else None
+            if stage is None and not garrison:
+                options = [
+                    p for p in neighbours(*where, width)
+                    if p not in taken_tiles
+                    and hex_distance(*p, city.x, city.y, width) == 1
+                    and hex_distance(*here, *p, width) < unit.moves  # A move is left to attack.
+                ]  # fmt: skip
+                stage = min(
+                    options, key=lambda p: (hex_distance(*here, *p, width), p), default=None
+                )
+            if stage is None:
+                continue
+            live = self._live(t, Target(threat.unit_type, threat.x, threat.y, threat.hp))
+            defender = self._defender_at(t, where)
+            odds = assess_attack(unit, live, defender, w, floor, width) if defender else None
+            if odds is None:
+                continue
+            likely = odds.dealt >= live.hp * s.finish_margin
+            free = (
+                unit.ranged_strength > 0 and odds.taken == 0 and odds.dealt >= s.finish_free_damage
+            )
+            safe = (
+                odds.hp_after >= (w.min_hp_after_attack if floor is None else floor) * unit.max_hp
+            )
+            if not (((odds.sure_kill or likely) and safe) or free):
+                continue
+            key = (-odds.rank, stage != here, where)
+            if best is None or key < best[0]:
+                best = (key, odds, live, stage)
+        return None if best is None else (best[1], best[2], best[3])
+
+    async def _finish_first(self, game: MilitaryGame, t: _Turn, unit: Unit, city: City) -> bool:
+        """Take a kill (or a free shot) before fortifying. True if the unit attacked."""
+        if not self.settings.finish_attacker or not self._available(t, unit, "attack"):
+            return False
+        garrison = (unit.x, unit.y) == (city.x, city.y)
+        choice = self._finish_choice(t, unit, city, garrison)
+        if choice is None:
+            return False
+        odds, target, stage = choice
+        if stage != self._pos(t, unit):
+            if not self._available(t, unit, "move"):
+                return False
+            result = await self._order(t, unit, "move", game.move_unit(unit.unit_index, *stage))
+            if (
+                result is None
+                or not move_succeeded(result)
+                or self._reached(result, stage) != stage
+            ):
+                self._refuse(t, unit, "move")
+                self._learn_full_tile(t, result)
+                return False
+            self._fortified.pop(unit.unit_id, None)
+            self._log(t, unit, "move", "stepping next to a nearly dead attacker to finish it",
+                      stage, result=result)  # fmt: skip
+        return await self._strike(
+            game, t, unit, target, odds, "finishing an attacker before fortifying"
+        )
+
     # ----- idle units -----
 
     async def _idle(self, game: MilitaryGame, t: _Turn) -> None:
@@ -2818,6 +2917,8 @@ class MilitaryPolicy:
                 if (city.is_threatened or self._state_threatened(city)) and (
                     self._fortified.get(unit.unit_id) != (unit.x, unit.y)
                 ):
+                    if await self._finish_first(game, t, unit, city):
+                        continue
                     result = await self._order(t, unit, "idle", game.fortify_unit(unit.unit_index))
                     if result is not None and action_succeeded(result):
                         t.acted.add(unit.unit_id)
@@ -2831,6 +2932,8 @@ class MilitaryPolicy:
             beside = self._covering(t, unit)
             if beside is not None:  # Holding a threatened city from beside it: stay and dig in.
                 if self._fortified.get(unit.unit_id) != self._pos(t, unit):
+                    if await self._finish_first(game, t, unit, beside):
+                        continue
                     result = await self._order(t, unit, "idle", game.fortify_unit(unit.unit_index))
                     if result is not None and action_succeeded(result):
                         t.acted.add(unit.unit_id)

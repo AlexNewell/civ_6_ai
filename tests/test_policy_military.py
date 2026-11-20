@@ -2623,3 +2623,86 @@ def test_an_urgent_redirect_restarts_the_far_camps_campaign_clock():
     run(policy, game)
     assert state.camp_plan.target == (53, 11)
     assert (55, 7) not in {k[0] for k in policy._camp_turns}
+
+
+# ----- covering and garrison units finish an attacker before fortifying (issue 306) -----
+
+
+def covering_policy(**settings):
+    from civ6_ai.policies.defence import DefenceState
+
+    policy = MilitaryPolicy(MilitarySettings(**settings), defence=DefenceState())
+    policy._state_threatened = lambda city: True  # The city is under threat this turn.
+    return policy
+
+
+def home():
+    return warrior(uid=5, x=10, y=10)  # The city's own defender.
+
+
+def slinger(uid=2, x=10, y=11, **changes):
+    return archer(uid=uid, x=x, y=y, combat_strength=5, ranged_strength=15, **changes)
+
+
+def test_a_covering_slinger_steps_up_and_shoots_a_nearly_dead_warrior_before_fortifying():
+    game = MilitaryGame([home(), slinger()], [barbarian(x=12, y=10, hp=22)])
+    policy = covering_policy()
+    run(policy, game)
+    assert game.orders("move") == [("move", 2, 11, 10)]  # Still beside the city.
+    assert game.orders("attack") == [("attack", 2, 12, 10)]
+    assert ("fortify", 2) not in game.orders("fortify")  # The garrison still digs in.
+    assert any(d.reason == "finishing an attacker before fortifying" for d in policy.decisions)
+
+
+def test_a_covering_slinger_in_reach_shoots_without_moving():
+    game = MilitaryGame([home(), slinger(targets=[target(x=11, y=10, hp=22)])], [barbarian(hp=22)])
+    run(covering_policy(), game)
+    assert game.orders("attack") == [("attack", 2, 11, 10)]
+    assert not game.orders("move")
+
+
+def test_a_covering_warrior_does_not_melee_a_full_health_warrior_and_fortifies():
+    game = MilitaryGame([home(), warrior(uid=1, x=10, y=11)], [barbarian(x=12, y=10)])
+    run(covering_policy(), game)
+    assert not game.orders("attack")
+    assert not game.orders("move")
+    assert ("fortify", 1) in game.orders("fortify")
+
+
+def test_a_covering_warrior_finishes_a_nearly_dead_warrior_it_is_sure_to_kill():
+    game = MilitaryGame([home(), warrior(uid=1, x=10, y=11)], [barbarian(x=12, y=10, hp=10)])
+    run(covering_policy(), game)
+    assert game.orders("attack") == [("attack", 1, 12, 10)]
+
+
+def test_a_likely_kill_needs_the_margin_and_a_free_shot_needs_meaningful_damage():
+    # A 31-damage shot at 33 hp is no sure kill (low roll 25). The in-reach attack step may take
+    # it anyway as a free shot, so the finishing rule is judged on its own here.
+    game = MilitaryGame([home(), warrior(uid=1, x=10, y=11)], [barbarian(x=12, y=10, hp=30)])
+    policy = covering_policy()
+    run(policy, game)
+    assert not game.orders("attack")  # 30 hp at CS 8 against CS 14: damage is about 20.
+
+
+def test_a_garrison_never_leaves_the_city_tile_to_attack():
+    game = MilitaryGame([slinger(x=10, y=10)], [barbarian(x=12, y=10, hp=22)])
+    run(covering_policy(), game)
+    assert not game.orders("move")
+    assert not game.orders("attack")  # Two tiles off and not in reach from the city tile.
+    assert ("fortify", 2) in game.orders("fortify")
+
+
+def test_a_garrison_with_a_target_in_reach_shoots_from_the_city_tile():
+    game = MilitaryGame(
+        [slinger(x=10, y=10, targets=[target(x=11, y=10, hp=22)])], [barbarian(hp=22)]
+    )
+    run(covering_policy(), game)
+    assert not game.orders("move")
+    assert game.orders("attack") == [("attack", 2, 11, 10)]
+
+
+def test_finishing_can_be_turned_off():
+    game = MilitaryGame([home(), slinger()], [barbarian(x=12, y=10, hp=22)])
+    run(covering_policy(finish_attacker=False), game)
+    assert not game.orders("attack")
+    assert game.orders("fortify")

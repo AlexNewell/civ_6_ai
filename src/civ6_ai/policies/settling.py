@@ -772,6 +772,8 @@ class SettlingPolicy:
         default_factory=dict, init=False, repr=False
     )
     _rival_capitals: set[tuple[int, int]] = field(default_factory=set, init=False, repr=False)
+    # Owners seen to be city-states. Their cities count for spacing, never for loyalty pressure.
+    _minor_owners: set[int] = field(default_factory=set, init=False, repr=False)
     # Foreign-owned tiles seen, by tile to owner; the evidence behind border phantoms.
     _border_memory: dict[tuple[int, int], int] = field(default_factory=dict, init=False, repr=False)
     _phantoms: list[tuple[int, int, int]] = field(default_factory=list, init=False, repr=False)
@@ -918,8 +920,16 @@ class SettlingPolicy:
 
     def _pressure_sources(self) -> list[tuple]:
         """Rival cities for the loyalty estimate: the remembered ones plus border phantoms.
-        Phantoms are evidence, not cities: spacing and the log use `_rival_cities` alone."""
-        return self._rival_cities + self._phantoms
+        Phantoms are evidence, not cities: spacing and the log use `_rival_cities` alone.
+
+        City-state cities are left out: the game's loyalty pressure comes from civilizations'
+        cities only (issue 314: a new city 4 tiles from a pop-5 city-state capital held +21 a
+        turn, and counting that city as a rival refused every site on the map)."""
+        return [
+            city
+            for city in self._rival_cities
+            if self._rival_memory.get((city[0], city[1]), (None,))[0] not in self._minor_owners
+        ] + self._phantoms
 
     async def _read_known(self, game: SettlingGame, needed: bool):
         """Cities and borders on tiles visible now, in one Lua call; None if skipped or failed.
@@ -944,6 +954,7 @@ class SettlingPolicy:
             return None
 
     def _merge_known(self, known, own_tiles: set[tuple[int, int]]) -> None:
+        self._minor_owners |= known.minors
         city_tiles = set()
         for city in known.cities:
             if (city.x, city.y) in own_tiles:
@@ -982,7 +993,7 @@ class SettlingPolicy:
         radius = s.loyalty_border_explain_radius
         clusters: list[tuple[int, list[tuple[int, int]]]] = []
         for (x, y), owner in sorted(self._border_memory.items()):
-            if (x, y) in own_tiles:
+            if (x, y) in own_tiles or owner in self._minor_owners:
                 continue
             cities = by_owner.get(owner, [])
             if any(hex_distance(x, y, cx, cy, s.map_width) <= radius for cx, cy in cities):

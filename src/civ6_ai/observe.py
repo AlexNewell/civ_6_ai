@@ -8,13 +8,18 @@ Each new turn it writes two files next to each other in `runs/`:
 - `<name>.jsonl`: one `TurnRecord` per turn (score, cities, rival scores...), so the existing
   scoring and comparison scripts read it like an AI run.
 - `<name>_observed.jsonl`: the full diary snapshot (every player, every city) plus research,
-  civic and trade-route state, for the human-vs-AI write-up.
+  civic and trade-route state, our units, our city sites (position and districts) and the turn's
+  notifications, for the human-vs-AI write-up.
+
+Optional extras: passive screenshots at set turns (`Observer(shots=...)`, never moving the
+camera) and a `<name>_header.json` run header (`write_header`). The one write the observer may
+make is the start save, done by `scripts/observe_game.py`.
 """
 
 import asyncio
 import json
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, is_dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,6 +27,18 @@ from typing import Any, Protocol
 
 from civ6_ai.orchestrator import TurnLog, TurnRecord
 
+SHOT_TURNS = (25, 50, 75, 100, 125, 150)
+SEED_PREFIX = "OBSERVE|"
+# Reads the two seeds, like scripts/check_saves.py. Prints only.
+SEED_LUA = """
+local function emit(key, read)
+  local ok, value = pcall(read)
+  print("{prefix}" .. key .. "|" .. (ok and tostring(value) or "ERROR"))
+end
+emit("game_seed", function() return GameConfiguration.GetValue("GAME_SYNC_RANDOM_SEED") end)
+emit("map_seed", function() return MapConfiguration.GetValue("RANDOM_SEED") end)
+print("{sentinel}")
+"""
 POLL_SECONDS = 1.5
 MAX_FAILURES = 30  # In a row, about a minute, before the watcher gives up.
 _RETRYABLE = (OSError, ValueError, TimeoutError)  # ConnectionError is an OSError.
@@ -32,6 +49,9 @@ class ObserverGame(Protocol):
     async def get_diary_snapshot(self) -> Any: ...
     async def get_tech_civics(self) -> Any: ...
     async def get_trade_routes(self) -> Any: ...
+    async def get_units(self) -> Any: ...
+    async def get_cities(self) -> Any: ...
+    async def get_notifications(self) -> Any: ...
 
 
 def to_plain(value: Any) -> Any:
@@ -78,7 +98,88 @@ def build_turn_record(overview: Any, diary: Any, us: int | None = None) -> TurnR
     )
 
 
-def build_observation(overview: Any, diary: Any, tech: Any, routes: Any) -> dict[str, Any]:
+def build_unit_rows(units: Any) -> list[dict[str, Any]]:
+    """Our units: type, tile, moves and health. The game's unit read has no orders field."""
+    return [
+        {
+            "id": u.unit_id,
+            "type": u.unit_type,
+            "x": u.x,
+            "y": u.y,
+            "moves": u.moves_remaining,
+            "max_moves": u.max_moves,
+            "health": u.health,
+            "max_health": u.max_health,
+        }
+        for u in units or []
+    ]
+
+
+def build_city_rows(cities: Any) -> list[dict[str, Any]]:
+    """Our cities' position and districts (`get_cities` returns (cities, notes))."""
+    if isinstance(cities, tuple):
+        cities = cities[0]
+    return [
+        {
+            "id": c.city_id,
+            "name": c.name,
+            "x": c.x,
+            "y": c.y,
+            "population": c.population,
+            "districts": list(c.districts),
+            "building": c.currently_building,
+        }
+        for c in cities or []
+    ]
+
+
+def build_notification_rows(notifications: Any) -> list[dict[str, Any]]:
+    return [
+        {"type": n.type_name, "text": n.message, "turn": n.turn, "x": n.x, "y": n.y}
+        for n in notifications or []
+    ]
+
+
+def parse_seeds(lines: list[str]) -> dict[str, str]:
+    pairs = (x.removeprefix(SEED_PREFIX).split("|", 1) for x in lines if x.startswith(SEED_PREFIX))
+    return {key: value for key, value in pairs}
+
+
+async def write_header(
+    path: Path,
+    game: Any,
+    execute: Callable[[str], Awaitable[list[str]]],
+    save_name: str | None,
+    started: datetime,
+) -> dict[str, Any]:
+    """Write the run header: save name, seeds, civ, leader, turn and start time."""
+    from civ_mcp.lua import SENTINEL
+
+    overview = await game.get_game_overview()
+    seeds = parse_seeds(await execute(SEED_LUA.format(prefix=SEED_PREFIX, sentinel=SENTINEL)))
+    header = {
+        "save": save_name,
+        "game_seed": seeds.get("game_seed"),
+        "map_seed": seeds.get("map_seed"),
+        "civ": getattr(overview, "civ_name", None),
+        "leader": getattr(overview, "leader_name", None),
+        "turn": overview.turn,
+        "started_at": started.astimezone(UTC).isoformat(),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(header, indent=2) + "\n", encoding="utf-8")
+    return header
+
+
+def build_observation(
+    overview: Any,
+    diary: Any,
+    tech: Any,
+    routes: Any,
+    units: Any = None,
+    cities: Any = None,
+    notifications: Any = None,
+) -> dict[str, Any]:
     """Everything worth comparing with an AI run, for one turn, as plain JSON values."""
     return {
         "turn": overview.turn,
@@ -93,6 +194,9 @@ def build_observation(overview: Any, diary: Any, tech: Any, routes: Any) -> dict
         "cities": to_plain(getattr(diary, "cities", [])),
         "tech_civics": to_plain(tech),
         "trade_routes": to_plain(routes),
+        "units": build_unit_rows(units),
+        "city_sites": build_city_rows(cities),
+        "notifications": build_notification_rows(notifications),
     }
 
 
@@ -127,8 +231,11 @@ class Observer:
         directory: Path,
         name: str,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
+        shots: Callable[[int], Any] | None = None,
     ) -> None:
         self._now = now
+        # Takes a screenshot for a turn; called only on SHOT_TURNS. Never moves the camera.
+        self._shots = shots
         self._game = game
         self._turn_log = TurnLog(directory / f"{name}.jsonl")
         self._observed = directory / f"{name}_observed.jsonl"
@@ -153,17 +260,22 @@ class Observer:
         diary = await self._game.get_diary_snapshot()
         tech = await self._game.get_tech_civics()
         routes = await self._game.get_trade_routes()
+        units = await self._game.get_units()
+        cities = await self._game.get_cities()
+        notifications = await self._game.get_notifications()
         # The player may end the turn while those reads run, and they would then mix two turns.
         # Drop the snapshot if the turn moved; the next poll records the new turn whole.
         if (await self._game.get_game_overview()).turn != overview.turn:
             return False
-        observation = build_observation(overview, diary, tech, routes)
+        observation = build_observation(overview, diary, tech, routes, units, cities, notifications)
         observation["observed_at"] = seen_at.isoformat()
         self._turn_log.write(build_turn_record(overview, diary))
         self._append(self._observed, [observation])
         self._append(self._events, new_events(self._last, observation))
         self._last = observation
         self.last_turn = overview.turn
+        if self._shots is not None and overview.turn in SHOT_TURNS:
+            self._shots(overview.turn)
         return True
 
     @staticmethod

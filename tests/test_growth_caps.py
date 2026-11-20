@@ -119,3 +119,25 @@ def test_policy_logs_the_settler_note(caplog):
     with caplog.at_level(logging.INFO):
         run(_policy(settler_note=True).assign(game))
     assert any("delaying it" in r.message for r in caplog.records)
+
+
+def test_faith_balance_is_never_compared_with_income():
+    empire = run(read_empire(fx.FakeGame()))
+    empire = replace(empire, science=30.0, culture=20.0, gold_per_turn=25.0, faith=0.0)
+    idle = city(population=7, housing=7.0, currently_building="nothing")
+    assert most_needed_yield(idle, empire) != "faith"
+
+
+def test_policy_hook_updates_the_held_focus_when_the_desired_yield_changes():
+    idle = dict(population=7, housing=7.0, currently_building="nothing")
+    game = FocusGame(cities=[fx.city_info(**idle)])
+    policy = _policy(cap_focus=True)
+    run(policy.assign(game))
+    first = game.focus_calls[-1][1]
+    assert first != "production"  # Idle city: an empire yield.
+    game.data["cities"] = [fx.city_info(population=7, housing=7.0, **BUSY)]
+    run(policy.assign(game))
+    assert game.focus_calls[-1] == (65536, "production")
+    assert len(game.focus_calls) == 2
+    run(policy.assign(game))
+    assert len(game.focus_calls) == 2  # Unchanged: no repeat call.

@@ -1766,7 +1766,6 @@ class CityProductionPolicy:
             "science": self.weights.science,
             "culture": self.weights.culture,
             "gold": self.weights.gold,
-            "faith": self.weights.faith,
         }
         for city in cities:
             if city.city_id in self._food_focus or is_starving(city):
@@ -1775,11 +1774,11 @@ class CityProductionPolicy:
             held = self._cap_focus.get(city.city_id)
             if held is None and not at_housing_cap(city):
                 continue  # Nothing held and not capped: the usual turn costs no read.
-            if empire is None and (held is None):
-                empire = await _read_empire(game)
+            if empire is None:
+                empire = await _read_empire(game)  # One read a turn, only while a city is capped.
             verdict = decide_cap_focus(city, empire, enabled=True, weights=weights)
-            if verdict.focus is not None and held is None:
-                focus = verdict.focus
+            if verdict.focus is not None and verdict.focus != held:
+                focus = verdict.focus  # New cap, or the most-needed yield changed.
             elif verdict.focus is None and held is not None:
                 focus = "default"
             else:

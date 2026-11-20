@@ -20,9 +20,9 @@ from dataclasses import dataclass
 
 from civ6_ai.state import City, Empire
 
-# Typical size of each yield next to science, so "lowest" compares like with like. Faith runs far
-# below the others in a normal empire, so without this it would always look the most needed.
-_TYPICAL = {"science": 1.0, "culture": 0.8, "gold": 1.2, "faith": 0.3}
+# Typical size of each yield next to science, so "lowest" compares like with like. Faith is left
+# out: the empire read gives its balance, not an income, so it cannot be compared with these.
+_TYPICAL = {"science": 1.0, "culture": 0.8, "gold": 1.2}
 _SETTLER = "UNIT_SETTLER"
 SETTLER_WINDOW = 3  # Turns before growth in which a finishing settler is worth a note.
 
@@ -51,7 +51,7 @@ def most_needed_yield(
 ) -> str:
     """The yield to favor: production while the city is mid-build, else the empire's lowest.
 
-    The empire's science, culture, gold per turn and faith are compared after scaling by how much
+    The empire's science, culture and gold per turn are compared after scaling by how much
     each is worth (`weights`, e.g. the production weights) and its typical size.
     """
     if city.building is not None and city.build_turns_left > 1:
@@ -63,7 +63,6 @@ def most_needed_yield(
         "science": empire.science,
         "culture": empire.culture,
         "gold": empire.gold_per_turn,
-        "faith": empire.faith,
     }
 
     def need(name: str) -> float:

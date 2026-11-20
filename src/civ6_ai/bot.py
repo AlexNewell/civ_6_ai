@@ -46,7 +46,8 @@ import inspect
 import json
 import logging
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -89,6 +90,36 @@ from civ6_ai.victory_threat import VictoryThreatLog, VictoryWatch
 from civ6_ai.world_rankings import RankingsHolder, WorldRankingsLog
 
 SETTLING_LOGGER = "civ6_ai.policies.settling"
+
+# Off-by-default behaviour a live run can switch on by name (`run_game.py --enable`), so an A/B
+# needs no code edit. Each name maps to the policy holding the flag and the flag's field. New
+# behaviour lands off until a live run checks it; this is how that run turns it on.
+FEATURES: dict[str, tuple[str, str]] = {
+    "cap_focus": ("growth", "cap_focus"),  # Issue 215 (PR 326).
+    "settler_note": ("growth", "settler_note"),  # Log-only companion of cap_focus.
+    "wonder_races": ("production", "wonder_races"),  # Issue 323 (PR 327).
+    # boost_judgement (PR 343) joins once its live inputs are wired (PR 351): without them the
+    # flag changes nothing, and an A/B run would read as a null result.
+}
+
+
+def parse_features(text: str) -> frozenset[str]:
+    """The feature names in a comma list. Raises `ValueError` naming any unknown one."""
+    names = frozenset(name.strip() for name in text.split(",") if name.strip())
+    if unknown := sorted(names - FEATURES.keys()):
+        raise ValueError(f"unknown feature {unknown}; known: {sorted(FEATURES)}")
+    return names
+
+
+def enable_features(holders: dict[str, Any], names: Iterable[str]) -> None:
+    """Set each named feature's flag on its holder's `weights` (a frozen dataclass, so replaced)."""
+    for name in sorted(names):
+        holder_name, flag = FEATURES[name]
+        holder = holders[holder_name]
+        holder.weights = replace(holder.weights, **{flag: True})
+        LOGGER.info("feature enabled: %s (%s.weights.%s)", name, holder_name, flag)
+
+
 _DECISION_PREFIX = "settle_decision "
 
 # Reads that more than one handler makes each turn. They can be shared until something changes the
@@ -269,6 +300,7 @@ def build_orchestrator(
     use_threat_map: bool = True,
     playbooks: Handler | None = None,
     tile_valuation: bool = False,
+    features: Iterable[str] = (),
 ) -> Orchestrator:
     """Wire the handlers to a game. `game` is civ6-mcp's `GameState`, or a fake with its reads.
 
@@ -292,6 +324,8 @@ def build_orchestrator(
     document. With none, no playbook exists (issue 244).
     `tile_valuation=True` buys tiles by the owner's rules (issue 87, inputs in 338) instead of the
     resource-first order. Off by default until a live run has checked it.
+    `features` names off-by-default flags to switch on (see `FEATURES`). A policy document that
+    replaces a policy's weights later drops them, so don't combine the two in one run.
     """
     defence = DefenceState()  # Which cities are threatened this turn, shared by three policies.
     expansion = ExpansionState()  # Settling fills it. Production and the log line read it.
@@ -321,6 +355,10 @@ def build_orchestrator(
         builder_demand=builder_demand,
         expansion=production.expansion,
         tile_valuation=tile_valuation,
+    )
+    enable_features(
+        {"growth": production.growth, "production": production, "research": research_policy},
+        features,
     )
     gold.foreign_cities = settling.foreign_city_tiles  # Contested tiles (issue 338).
     gold.map_width = settling.settings.map_width  # The same width the survey measures with.

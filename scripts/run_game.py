@@ -18,7 +18,7 @@ from pathlib import Path
 from civ_mcp.connection import GameConnection
 from civ_mcp.game_state import GameState
 
-from civ6_ai.bot import SettleDecisionLog, build_orchestrator
+from civ6_ai.bot import FEATURES, SettleDecisionLog, build_orchestrator, parse_features
 from civ6_ai.build_ledger import BuildLedger, earlier_event_files
 from civ6_ai.city_attack import fix_city_attack
 from civ6_ai.city_focus import fix_set_yield_focus
@@ -93,6 +93,7 @@ async def play_game(
     shots_every_turn: bool = False,
     use_threat_map: bool = True,
     tile_valuation: bool = False,
+    features: frozenset[str] = frozenset(),
 ) -> GameRun | None:
     """Play `turns` turns in the open game. None if it is not a standard save (or `expect_save`).
 
@@ -189,6 +190,7 @@ async def play_game(
             threat_map_dump=ROOT / "runs" / f"{name}_{stamp}_threatmap.jsonl",
             use_threat_map=use_threat_map,
             tile_valuation=tile_valuation,
+            features=features,
         )
         if shots_every_turn:
             # No cap: a run reviewed by eye wants every turn. Kept apart from the triage shots.
@@ -259,6 +261,7 @@ async def run(
     shots_every_turn: bool = False,
     use_threat_map: bool = True,
     tile_valuation: bool = False,
+    features: frozenset[str] = frozenset(),
 ) -> int:
     if load:
         try:
@@ -275,6 +278,7 @@ async def run(
         shots_every_turn=shots_every_turn,
         use_threat_map=use_threat_map,
         tile_valuation=tile_valuation,
+        features=features,
     )
     if played is None:
         return 1
@@ -351,10 +355,17 @@ def main() -> int:
         action="store_true",
         help="buy tiles by the owner's rules (issues 87, 338) instead of the old order",
     )
+    parser.add_argument(
+        "--enable",
+        default="",
+        metavar="NAME[,NAME]",
+        help=f"switch on off-by-default behaviour for an A/B run; one of {sorted(FEATURES)}",
+    )
     args = parser.parse_args()
     try:
         kinds = parse_kinds(args.probe)
         save_at = [int(t) for t in args.save_at.split(",") if t.strip()]
+        features = parse_features(args.enable)
     except ValueError as error:
         parser.error(str(error))
     return asyncio.run(
@@ -367,6 +378,7 @@ def main() -> int:
             args.shots_every_turn,
             not args.no_threat_map,
             args.tile_valuation,
+            features,
         )
     )
 

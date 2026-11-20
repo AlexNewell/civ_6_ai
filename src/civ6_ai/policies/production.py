@@ -851,6 +851,28 @@ def wonder_alternative_value(
     return best if best > 0 else fallback
 
 
+def race_context(
+    city: City,
+    keep: Iterable[ProductionChoice],
+    context: ProductionContext,
+    weights: ProductionWeights,
+    unavailable: frozenset[str] = frozenset(),
+) -> ProductionContext:
+    """The context with this city's wonder alternative filled in (issue 328), or the same one.
+
+    Ranking, the log line and the wonder guard in `choose_for_city` all score with this one, so
+    a wonder the ranking approved is not rejected by a guard using the constant. Off, or with no
+    wonder on offer, nothing is computed and the context is returned unchanged.
+    """
+    keep = list(keep)
+    if not weights.wonder_races or not any(o.item in WONDERS for o in keep):
+        return context
+    alt = wonder_alternative_value(
+        city, keep, context, weights, context.wonder_alternative, unavailable
+    )
+    return replace(context, wonder_alternative=alt)
+
+
 def _wonder_race_score(
     option: ProductionChoice, city: City, ctx: ProductionContext, w: ProductionWeights
 ) -> float:
@@ -1037,15 +1059,7 @@ def rank_production(
     weights = weights or ProductionWeights()
     options = [o for o in options if o.item != "UNIT_TRADER" or context.trade_safe]  # Issue 269.
     keep, repairs = drop_dominated(list(options), city, context, weights)
-    if weights.wonder_races and any(o.item in WONDERS for o in keep):
-        # Issue 328: the wonder is weighed against the best district or building here, not a
-        # constant. Off, this branch and its extra scoring never run.
-        context = replace(
-            context,
-            wonder_alternative=wonder_alternative_value(
-                city, keep, context, weights, context.wonder_alternative, unavailable
-            ),
-        )
+    context = race_context(city, keep, context, weights, unavailable)
     scores = {id(o): score(o, city, context, weights) for o in (*repairs, *keep)}
     if not under_threat(city, context):
         # Restoring what is already ours comes before a new district (issue 280). Under threat
@@ -1380,6 +1394,12 @@ async def choose_for_city(
     `emit` receives a `ProductionSet` or `ProductionRefused` for each attempt. `reads` supplies the
     placement signatures and diagnoses (see `placement`), and `planner` the chained tile buys.
     """
+    options = list(options)
+    if weights.wonder_races:
+        # The same filter and dominance pass as `rank_production`, so the alternative is one value.
+        usable = [o for o in options if o.item != "UNIT_TRADER" or context.trade_safe]
+        kept, _ = drop_dominated(list(usable), city, context, weights)
+        context = race_context(city, kept, context, weights)
     ranked = rank_production(city, options, context, weights)
     if ranked:
         log.info(
@@ -1397,7 +1417,6 @@ async def choose_for_city(
         ranked = [o for o in ranked if is_defence(o)]
     tried = 0
     unavailable: set[str] = set()
-    options = list(options)
 
     def skip(option: ProductionChoice, rest: list[ProductionChoice]) -> list[ProductionChoice]:
         """The options still to try, ranked again without a growth option that cannot start.

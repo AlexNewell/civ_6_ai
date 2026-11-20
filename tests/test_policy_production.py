@@ -1796,3 +1796,24 @@ def test_a_rejected_wonder_race_is_not_started_when_everything_above_it_is_refus
     off = ScriptedGame(refuse={"UNIT_BUILDER": "ERR:NOPE"})
     run(choose_for_city(off, c, menu, ctx, ProductionWeights()))
     assert any(call[2] == "BUILDING_STONEHENGE" for call in off.set_calls)
+
+
+def test_a_wonder_the_ranking_approved_is_started_with_the_same_alternative():
+    # Issue 328 (review): expected value 5.41 beats a Granary's 1.0 but not the old constant
+    # 5.0 (needs 5.75), so a guard scoring with the unchanged context rejected a ranked wonder.
+    c = city(production=8.0)
+    menu = [
+        option("BUILDING", "BUILDING_STONEHENGE", 20, cost=180),
+        option("BUILDING", "BUILDING_GRANARY", 20, cost=60),
+    ]
+    ctx = ProductionContext(
+        turn=33, num_cities=2, army=9, builders=2, difficulty="PRINCE", rivals=4
+    )
+    w = ProductionWeights(wonder_races=True)
+    assert rank_production(c, menu, ctx, w)[0].item == "BUILDING_STONEHENGE"
+    game = ScriptedGame()
+    run(choose_for_city(game, c, menu, ctx, w))
+    assert game.set_calls and game.set_calls[0][2] == "BUILDING_STONEHENGE"
+    off = ScriptedGame()
+    run(choose_for_city(off, c, menu, ctx, ProductionWeights()))
+    assert off.set_calls

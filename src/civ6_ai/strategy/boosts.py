@@ -107,6 +107,11 @@ _IMPROVEMENT_WORDS = {
     "CAMP": "CAMP",
     "FISHING_BOAT": "FISHING_BOATS",
 }
+# Strategic resources whose mine a boost names, as the boost's target: "Build an Iron Mine".
+# The game's improvement is a plain mine, so the job's resource tells them apart.
+RESOURCE_MINES = {"IRON": "IRON_MINE", "NITER": "NITER_MINE", "COAL": "COAL_MINE"}
+
+
 _DISTRICT_WORDS = {
     "ENCAMPMENT": "ENCAMPMENT",
     "AQUEDUCT": "AQUEDUCT",

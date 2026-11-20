@@ -38,6 +38,7 @@ from civ6_ai.strategy.boosts import (
     DIFFERENT,
     LAND_COMBAT,
     PANTHEON,
+    RESOURCE_MINES,
     SEA_RESOURCE,
     BoostKind,
     BoostSpec,
@@ -252,9 +253,11 @@ def _improvement_reach(
         jobs = signals.improvement_jobs.get(SEA_RESOURCE, 0)
         sites = signals.improvement_sites.get(SEA_RESOURCE, ())
     else:
-        have = state.improvements.get(spec.target, 0)
-        jobs = signals.improvement_jobs.get(spec.target, 0)
-        sites = signals.improvement_sites.get(spec.target, ())
+        # A plain "Mine" boost also counts the resource mines, which are kept under their own keys.
+        keys = (spec.target, *RESOURCE_MINES.values()) if spec.target == "MINE" else (spec.target,)
+        have = sum(state.improvements.get(k, 0) for k in keys)
+        jobs = sum(signals.improvement_jobs.get(k, 0) for k in keys)
+        sites = tuple(s for k in keys for s in signals.improvement_sites.get(k, ()))
     need = spec.count - have
     action = None
     if sites:

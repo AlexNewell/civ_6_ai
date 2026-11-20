@@ -721,3 +721,31 @@ def test_bot_provider_reads_through_the_shared_game(tmp_path):
     run(research.boost_inputs())
     assert all(c.startswith("get_") for c in game.calls)  # Reads only, never an action.
     assert len(game.calls) >= calls
+
+
+# ----- review fixes: resource mines, one job per nudge -----
+
+
+def test_an_iron_mine_job_counts_as_an_iron_mine_not_a_plain_mine():
+    iron = job("IMPROVEMENT_MINE", resource="IRON")
+    open_ = bi.improvement_signals([iron], frozenset())
+    assert open_.sites == {"IRON_MINE": ("the iron near Rome",)}
+    assert bi.job_matches(iron, "IRON_MINE", "the iron near Rome")
+    assert bi.job_matches(iron, "MINE", "the iron near Rome")
+    assert not bi.job_matches(iron, "NITER_MINE", "the iron near Rome")
+    claimed = bi.improvement_signals([iron], frozenset({(10, 11, "IMPROVEMENT_MINE")}))
+    assert claimed.jobs == {"IRON_MINE": 1}  # Once, so the total does not double count.
+
+
+def test_an_iron_mine_boost_sees_the_iron_job_and_a_plain_mine_boost_does_too():
+    state = BoostState(turn=20)
+    signals = PlanSignals(improvement_jobs={"IRON_MINE": 1})
+    for text in ("Build an Iron Mine.", "Build a Mine."):
+        option = ResearchOption("T", "Bronze Working", 60, 0, 12, False, text, (), "")
+        assert judge_boosts([option], state, signals)[0].decision is Decision.DELAY
+
+
+def test_one_nudge_picks_one_job_not_every_job_that_reads_the_same():
+    jobs = [job(x=10, y=11), job(x=12, y=11), job(x=13, y=11)]
+    policy = builder_with(True, [nudge(site="the stone near Rome")])
+    assert len(policy._nudged_jobs(jobs, 3)) == 1

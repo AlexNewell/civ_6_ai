@@ -39,7 +39,7 @@ from civ6_ai.state import (
 from civ6_ai.state.fog import BARBARIAN_ID
 from civ6_ai.state.reader import STANDARD_MAP_WIDTH
 from civ6_ai.strategy.boost_judgement import BoostState, PlanSignals
-from civ6_ai.strategy.boosts import ANY, BARBARIAN, SEA_RESOURCE, name_key
+from civ6_ai.strategy.boosts import ANY, BARBARIAN, RESOURCE_MINES, SEA_RESOURCE, name_key
 
 log = logging.getLogger(__name__)
 
@@ -66,6 +66,17 @@ def improvement_key(improvement: str) -> str:
     return improvement.removeprefix("IMPROVEMENT_")
 
 
+def job_key(job: BuilderJob) -> str:
+    """What a job counts as: its improvement, or the resource mine for a mine on that resource.
+
+    A job counts under one key only, so the "improve N tiles" total never counts it twice.
+    """
+    key = improvement_key(job.improvement)
+    if key == "MINE" and job.resource:
+        return RESOURCE_MINES.get(job.resource.removeprefix("RESOURCE_"), key)
+    return key
+
+
 def job_site(job: BuilderJob) -> str:
     """How a job reads in a nudge: `the stone near Rome`, or `a tile near Rome`."""
     what = f"the {job.resource.lower().replace('_', ' ')}" if job.resource else "a tile"
@@ -76,11 +87,13 @@ def job_matches(job: BuilderJob, target: str, site: str) -> bool:
     """True when `job` is what an improvement nudge (its `target` and `site`) means."""
     if job.is_repair or job_site(job) != site:
         return False
-    key = improvement_key(job.improvement)
+    key = job_key(job)
     if target == ANY:
         return True
     if target == SEA_RESOURCE:
         return key in SEA_IMPROVEMENTS
+    if target == "MINE":
+        return key == "MINE" or key in RESOURCE_MINES.values()
     return key == target
 
 
@@ -116,7 +129,7 @@ def improvement_signals(jobs: Iterable[BuilderJob], claimed: frozenset[_Key]) ->
     open_: dict[str, list[str]] = {}
     open_res: dict[str, list[str]] = {}
     for job in _one_per_tile(jobs, claimed):
-        key = improvement_key(job.improvement)
+        key = job_key(job)
         if key in SEA_IMPROVEMENTS:
             key = SEA_RESOURCE
         if (job.x, job.y, job.improvement) in claimed:

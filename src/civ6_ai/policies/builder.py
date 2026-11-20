@@ -28,7 +28,7 @@ from civ6_ai.policies.game_data import REPLACES
 from civ6_ai.state import BuilderJob, GameReads, Threat, Unit, read_builder_jobs, read_threats
 from civ6_ai.state import read_units as _read_units
 from civ6_ai.state.reader import STANDARD_MAP_WIDTH, hex_distance
-from civ6_ai.strategy.boost_inputs import improvement_key, job_matches
+from civ6_ai.strategy.boost_inputs import job_key, job_matches
 from civ6_ai.strategy.boost_judgement import Nudge
 
 log = logging.getLogger(__name__)
@@ -243,7 +243,17 @@ class BuilderPolicy:
         if not self.settings.use_boost_nudges or self.nudges is None:
             return set()
         wanted = [n for n in self.nudges(turn) if n.policy == "builder" and n.site]
-        return {_key(j) for j in jobs if any(job_matches(j, n.target, n.site) for n in wanted)}
+        nudged: set[_Key] = set()
+        for nudge in wanted:
+            # One nudge is one detour: the first matching job in a stable order, not every
+            # job that reads the same ("a tile near Rome").
+            matching = sorted(
+                (j for j in jobs if job_matches(j, nudge.target, nudge.site)),
+                key=lambda j: (j.x, j.y, j.improvement),
+            )
+            if matching:
+                nudged.add(_key(matching[0]))
+        return nudged
 
     def _bonus(self, job: BuilderJob) -> float:
         return self.settings.weights.nudge_bonus if _key(job) in self._nudged else 0.0
@@ -402,7 +412,7 @@ class BuilderPolicy:
         if key in self._built_keys:
             return
         self._built_keys.add(key)
-        kind = improvement_key(job.improvement)
+        kind = job_key(job)
         self.built[kind] = self.built.get(kind, 0) + 1
         if job.resource:
             self.built_on_resource[kind] = self.built_on_resource.get(kind, 0) + 1

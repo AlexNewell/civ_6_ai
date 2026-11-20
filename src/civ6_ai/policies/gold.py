@@ -88,7 +88,7 @@ from civ6_ai.state import read_production as _read_production
 from civ6_ai.state import read_research as _read_research
 from civ6_ai.state import read_threats as _read_threats
 from civ6_ai.state import read_units as _read_units
-from civ6_ai.state.reader import hex_distance
+from civ6_ai.state.reader import STANDARD_MAP_WIDTH, hex_distance
 
 log = logging.getLogger(__name__)
 
@@ -308,6 +308,8 @@ class GoldPolicy:
         # `SettlingPolicy.foreign_city_tiles` (issue 338). A purchasable tile near one that is
         # worth taking counts as contested (`valuation.is_contested`).
         self.foreign_cities: Callable[[], list[tuple[int, int]]] | None = None
+        # The map's width for distances (wraps east-west); the bot sets the settling policy's.
+        self.map_width: int | None = STANDARD_MAP_WIDTH
         self.boost_values: dict[tuple[int, int], float] = {}  # Boost work (issue 322) fills this.
         self.builder_demand = builder_demand  # `builder.BuilderDemand`, or None.
         self.expansion = expansion  # `expansion.ExpansionState`, or None (issue 284).
@@ -1111,6 +1113,7 @@ class GoldPolicy:
                     occupied=spot in (occupied or ()),
                     reserved=spot in reserved,
                     foreign_cities=foreign,
+                    map_width=self.map_width,
                     contested=spot in self.contested_tiles,
                     boost_value=self.boost_values.get(spot, 0.0),
                 )

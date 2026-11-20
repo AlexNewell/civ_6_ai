@@ -12,6 +12,7 @@ from typing import Any
 from civ6_ai.policies import valuation
 from civ6_ai.policies.production import ProductionWeights
 from civ6_ai.state import City
+from civ6_ai.state.reader import STANDARD_MAP_WIDTH
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,7 @@ def tile_rows(
     reserved: frozenset[tuple[int, int]] = frozenset(),
     foreign_cities: Sequence[tuple[int, int]] = (),
     boost_values: dict[tuple[int, int], float] | None = None,
+    map_width: int | None = STANDARD_MAP_WIDTH,
 ) -> list[TileRow]:
     """One row per purchasable tile of the city, best first: valued tiles by priority then ROI,
     then those no rule applies to, cheapest first."""
@@ -56,6 +58,7 @@ def tile_rows(
             reserved=spot in reserved,
             foreign_cities=foreign_cities,
             boost_value=(boost_values or {}).get(spot, 0.0),
+            map_width=map_width,
         )
         yields = valuation.estimate_tile_yields(tile.terrain)
         worth = valuation.value_tile_purchase(facts, city, weights)
@@ -105,7 +108,7 @@ def format_rows(city: City, rows: Sequence[TileRow]) -> str:
 async def report_game(
     game: Any,
     foreign_cities: Sequence[tuple[int, int]] = (),
-    map_width: int | None = None,
+    map_width: int | None = STANDARD_MAP_WIDTH,
 ) -> str:
     """The report for every city of the open game. `game` is civ6-mcp's `GameState` or a fake.
 
@@ -115,13 +118,11 @@ async def report_game(
     from civ6_ai.placement import last_turn_for
     from civ6_ai.policies.builder import is_builder
     from civ6_ai.state import read_area, read_cities, read_empire, read_research, read_units
-    from civ6_ai.state.reader import STANDARD_MAP_WIDTH
 
-    width = map_width or STANDARD_MAP_WIDTH
     empire = await read_empire(game)
     last = last_turn_for(empire.game_speed, empire.max_turns)
-    cities = await read_cities(game, width)
-    has_builder = any(is_builder(u.unit_type) for u in await read_units(game, width))
+    cities = await read_cities(game, map_width)
+    has_builder = any(is_builder(u.unit_type) for u in await read_units(game, map_width))
     research = await read_research(game)
     open_techs = frozenset(
         valuation.tech_name(t.item_type) for t in [*research.techs, *research.locked_techs]
@@ -142,6 +143,7 @@ async def report_game(
             has_builder,
             occupied,
             foreign_cities=foreign_cities,
+            map_width=map_width,
         )
         blocks.append(format_rows(city, rows))
     return "\n\n".join(blocks)

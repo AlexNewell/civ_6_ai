@@ -323,6 +323,7 @@ def build_orchestrator(
         tile_valuation=tile_valuation,
     )
     gold.foreign_cities = settling.foreign_city_tiles  # Contested tiles (issue 338).
+    gold.map_width = settling.settings.map_width  # The same width the survey measures with.
     tables = [
         production.blocker_policies(),
         research.blocker_policies(),

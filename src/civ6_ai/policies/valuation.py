@@ -474,6 +474,7 @@ def tile_facts(
     foreign_cities: Iterable[tuple[int, int]] = (),
     contested: bool = False,
     boost_value: float = 0.0,
+    map_width: int | None = STANDARD_MAP_WIDTH,
 ) -> TileFacts:
     """The valuation's view of a purchasable tile (civ6-mcp's `PurchasableTile`). The policy and
     `scripts/tile_report.py` both build facts here, so the report shows what the policy sees.
@@ -487,7 +488,9 @@ def tile_facts(
         tile.resource_class,
         improvable=tile_improvable(tile.resource, open_techs, has_builder, occupied, reserved),
         contested=contested
-        or is_contested(tile.x, tile.y, tile.terrain, tile.resource, foreign_cities),
+        or is_contested(
+            tile.x, tile.y, tile.terrain, tile.resource, foreign_cities, map_width=map_width
+        ),
         boost_value=boost_value,
     )
 

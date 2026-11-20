@@ -376,3 +376,43 @@ def test_report_game_reads_the_open_game_without_buying():
     text = asyncio.run(report_game(game, [(5, 10)]))
     assert "Alpha" in text and "WINE" in text and "contested" in text
     assert game.actions == []
+
+
+def test_the_configured_map_width_reaches_the_contested_distance():
+    # Width 56: (1, 10) and (54, 10) are 3 tiles apart, but 53 on the standard 74-wide map.
+    assert v.is_contested(1, 10, "TERRAIN_GRASS", None, [(54, 10)], map_width=56)
+    assert not v.is_contested(1, 10, "TERRAIN_GRASS", None, [(54, 10)])
+    spot = ptile(1, 60, "Plains")
+    assert v.tile_facts(spot, None, False, foreign_cities=[(54, 10)], map_width=56).contested
+    assert not v.tile_facts(spot, None, False, foreign_cities=[(54, 10)]).contested
+    rows = tile_rows(make_city(), [spot], W, 100, 330, foreign_cities=[(54, 10)], map_width=56)
+    assert rows[0].priority == 3
+    game = contest_game()
+    policy = GoldPolicy(tile_valuation=True)
+    policy.foreign_cities = lambda: [(54, 10)]
+    policy.map_width = 56
+    asyncio.run(policy.run(game))
+    assert tiles_bought(game) == [("tile", 65536, 1, 10)]
+    wide = contest_game()
+    policy = GoldPolicy(tile_valuation=True)
+    policy.foreign_cities = lambda: [(54, 10)]
+    asyncio.run(policy.run(wide))
+    assert tiles_bought(wide) == []
+
+
+def test_the_bot_gives_gold_the_settling_map_width():
+    import tempfile
+    from pathlib import Path
+
+    from civ6_ai import bot
+    from civ6_ai.monitors import EventBus
+    from civ6_ai.orchestrator import TurnLog
+
+    with tempfile.TemporaryDirectory() as tmp:
+        orchestrator = bot.build_orchestrator(
+            GoldGame(), EventBus(), TurnLog(Path(tmp) / "g.jsonl")
+        )
+    handlers = orchestrator._handlers
+    gold_policy = next(h for h in handlers if isinstance(h, GoldPolicy))
+    settling = next(h for h in handlers if isinstance(h, SettlingPolicy))
+    assert gold_policy.map_width == settling.settings.map_width

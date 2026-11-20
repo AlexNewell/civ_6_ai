@@ -153,6 +153,10 @@ class Observer:
         diary = await self._game.get_diary_snapshot()
         tech = await self._game.get_tech_civics()
         routes = await self._game.get_trade_routes()
+        # The player may end the turn while those reads run, and they would then mix two turns.
+        # Drop the snapshot if the turn moved; the next poll records the new turn whole.
+        if (await self._game.get_game_overview()).turn != overview.turn:
+            return False
         observation = build_observation(overview, diary, tech, routes)
         observation["observed_at"] = seen_at.isoformat()
         self._turn_log.write(build_turn_record(overview, diary))

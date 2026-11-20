@@ -110,11 +110,12 @@ def test_observer_writes_one_record_per_new_turn(tmp_path: Path):
 def test_watch_retries_a_garbled_read_and_keeps_going(tmp_path: Path):
     game = FakeGame()
     real = game.get_game_overview
-    calls = {"n": 0}
+    failed = {"done": False}
 
     async def flaky():
-        calls["n"] += 1
-        if calls["n"] == 2:
+        # The first read after turn 1 is recorded comes back garbled, once.
+        if observer.last_turn == 1 and not failed["done"]:
+            failed["done"] = True
             raise ValueError("Overview response has 1 fields: PlotInfo::OnCitySelectionChanged")
         return await real()
 
@@ -123,7 +124,7 @@ def test_watch_retries_a_garbled_read_and_keeps_going(tmp_path: Path):
     logs: list[str] = []
 
     async def sleep(_):
-        if calls["n"] == 1:
+        if observer.last_turn == 1:
             game.turn = 2  # The turn changes while the next read is about to fail.
 
     asyncio.run(observer.watch(until_turn=2, sleep=sleep, log=logs.append))
@@ -192,3 +193,22 @@ def test_observed_at_is_taken_when_the_turn_is_first_seen(tmp_path: Path):
     asyncio.run(observer.observe_once())
     row = json.loads((tmp_path / "human_clock_observed.jsonl").read_text().splitlines()[0])
     assert row["observed_at"] == "2026-01-01T00:00:00+00:00"
+
+
+def test_a_turn_that_moves_during_the_reads_is_not_recorded(tmp_path: Path):
+    game = FakeGame()
+    real_routes = game.get_trade_routes
+
+    async def routes_then_end_turn():
+        result = await real_routes()
+        game.turn += 1  # The player ends the turn while the observer is reading.
+        return result
+
+    game.get_trade_routes = routes_then_end_turn
+    observer = Observer(game, tmp_path, "human_moved")
+    assert not asyncio.run(observer.observe_once())
+    assert not (tmp_path / "human_moved.jsonl").exists()
+    game.get_trade_routes = real_routes
+    assert asyncio.run(observer.observe_once())  # The next poll records turn 2 whole.
+    row = json.loads((tmp_path / "human_moved.jsonl").read_text().splitlines()[0])
+    assert row["turn"] == 2

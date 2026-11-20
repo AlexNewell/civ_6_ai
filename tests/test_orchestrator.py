@@ -282,6 +282,56 @@ def test_an_old_notification_does_not_vouch_for_a_later_stuck_turn(tmp_path):
     assert len(turn_log.records) == 2
 
 
+def test_a_game_core_on_the_next_turn_shows_the_turn_moved(tmp_path, monkeypatch):
+    # STD_T1_03 turn 13: the UI's Lua state read 13 for minutes; the game core read 14.
+    monkeypatch.setattr(orchestrator, "TURN_READ_RETRY_SECONDS", 0)
+    game = SlowUiGame(stale_reads=99)
+
+    async def core_turn():
+        return game.turn
+
+    turn_log = TurnLog(tmp_path / "runs" / "game.jsonl")
+    reason = asyncio.run(Orchestrator(game, [DoNothing()], turn_log, core_turn=core_turn).play(2))
+    assert reason is StopReason.TURN_LIMIT
+    assert [record.stop_reason for record in turn_log.records] == [None, None]
+
+
+def test_a_game_core_still_on_the_old_turn_is_a_block(tmp_path, monkeypatch):
+    monkeypatch.setattr(orchestrator, "TURN_READ_RETRY_SECONDS", 0)
+    game = SlowUiGame(stale_reads=99)
+
+    async def core_turn():
+        return game.turn - 1  # The core agrees the turn did not move.
+
+    turn_log = TurnLog(tmp_path / "runs" / "game.jsonl")
+    reason = asyncio.run(Orchestrator(game, [DoNothing()], turn_log, core_turn=core_turn).play(2))
+    assert reason is StopReason.BLOCKED
+
+
+def test_a_failed_core_read_is_a_block_not_a_crash(tmp_path, monkeypatch):
+    monkeypatch.setattr(orchestrator, "TURN_READ_RETRY_SECONDS", 0)
+
+    async def core_turn():
+        raise ValueError("garbled")
+
+    turn_log = TurnLog(tmp_path / "runs" / "game.jsonl")
+    reason = asyncio.run(
+        Orchestrator(SlowUiGame(stale_reads=99), [DoNothing()], turn_log, core_turn=core_turn).play(
+            2
+        )
+    )
+    assert reason is StopReason.BLOCKED
+
+
+def test_read_core_turn_asks_the_game_core():
+    class Conn:
+        async def execute_read(self, lua):
+            assert "GetCurrentGameTurn" in lua
+            return ["14"]
+
+    assert asyncio.run(orchestrator.read_core_turn(SimpleNamespace(conn=Conn()))) == 14
+
+
 def test_advance_reported_reads_the_turn_summary_line():
     assert orchestrator.advance_reported("Turn 291 -> 292\nScore: 5", 291)
     assert orchestrator.advance_reported("Events\nTurn 291 -> 292", 291)

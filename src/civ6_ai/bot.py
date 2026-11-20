@@ -64,7 +64,7 @@ from civ6_ai.monitors import (
     ThreatMonitor,
     VictoryMonitor,
 )
-from civ6_ai.orchestrator import Handler, Orchestrator, TurnLog
+from civ6_ai.orchestrator import Handler, Orchestrator, TurnLog, read_core_turn
 from civ6_ai.policies import research
 from civ6_ai.policies.builder import BuilderDemand, BuilderPolicy
 from civ6_ai.policies.defence import DefencePolicy, DefenceReport, DefenceState
@@ -392,4 +392,5 @@ def build_orchestrator(
         call_timer=timer,
         screenshots=screenshots,
         rankings=rankings,
+        core_turn=partial(read_core_turn, game),
     )

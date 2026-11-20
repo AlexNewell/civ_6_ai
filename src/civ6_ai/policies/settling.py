@@ -1002,6 +1002,13 @@ class SettlingPolicy:
         ]
         return seen
 
+    def foreign_city_tiles(self) -> list[tuple[int, int]]:
+        """Every remembered city that is not ours, rival and city-state alike, as (x, y).
+
+        Unlike `_pressure_sources` this keeps the city-states (their borders take tiles too, though
+        they exert no loyalty pressure) and leaves out the border phantoms (not real cities)."""
+        return sorted(self._rival_memory)
+
     def _pressure_sources(self) -> list[tuple]:
         """Rival cities for the loyalty estimate: the remembered ones plus border phantoms.
         Phantoms are evidence, not cities: spacing and the log use `_rival_cities` alone.

@@ -268,6 +268,7 @@ def build_orchestrator(
     threat_map_dump: Path | None = None,
     use_threat_map: bool = True,
     playbooks: Handler | None = None,
+    tile_valuation: bool = False,
 ) -> Orchestrator:
     """Wire the handlers to a game. `game` is civ6-mcp's `GameState`, or a fake with its reads.
 
@@ -289,6 +290,8 @@ def build_orchestrator(
     for running the same save with and without it.
     `playbooks` is a `PlaybookRunner` (see `strategy.playbook_runner`), run after the policy
     document. With none, no playbook exists (issue 244).
+    `tile_valuation=True` buys tiles by the owner's rules (issue 87, inputs in 338) instead of the
+    resource-first order. Off by default until a live run has checked it.
     """
     defence = DefenceState()  # Which cities are threatened this turn, shared by three policies.
     expansion = ExpansionState()  # Settling fills it. Production and the log line read it.
@@ -317,7 +320,10 @@ def build_orchestrator(
         plans=production.planner.book,
         builder_demand=builder_demand,
         expansion=production.expansion,
+        tile_valuation=tile_valuation,
     )
+    gold.foreign_cities = settling.foreign_city_tiles  # Contested tiles (issue 338).
+    gold.map_width = settling.settings.map_width  # The same width the survey measures with.
     tables = [
         production.blocker_policies(),
         research.blocker_policies(),

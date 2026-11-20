@@ -342,6 +342,43 @@ _TERRAIN_YIELDS = (
 )
 
 
+# The tech each resource's improvement needs, for the common ancient and classical resources.
+# APPROXIMATE: built by hand (the game's tables are readable only in Lua), so a resource missing
+# here, or a tech name wrong, reads as not improvable, the safe way to be wrong.
+_NEEDS_POTTERY = ("WHEAT", "RICE", "MAIZE", "BANANAS", "CITRUS", "COCOA", "COFFEE", "COTTON")
+_NEEDS_POTTERY += ("DYES", "INCENSE", "SILK", "SPICES", "SUGAR", "TEA", "TOBACCO", "WINE")
+_NEEDS_HUSBANDRY = ("CATTLE", "SHEEP", "HORSES", "DEER", "FURS", "TRUFFLES", "IVORY", "MEAT")
+_NEEDS_MINING = ("IRON", "COPPER", "STONE", "MARBLE", "GYPSUM", "SALT", "JADE", "SILVER")
+_NEEDS_MINING += ("DIAMONDS", "AMBER", "MERCURY")
+RESOURCE_TECH: dict[str, str] = {
+    **dict.fromkeys(_NEEDS_POTTERY, "POTTERY"),
+    **dict.fromkeys(_NEEDS_HUSBANDRY, "ANIMAL_HUSBANDRY"),
+    **dict.fromkeys(_NEEDS_MINING, "MINING"),
+    **dict.fromkeys(("FISH", "CRABS", "WHALES", "PEARLS"), "SAILING"),
+}
+
+
+def tech_name(item_type: str) -> str:
+    """`TECH_MINING` or `TECHNOLOGY_MINING` as `MINING`."""
+    return item_type.upper().removeprefix("TECHNOLOGY_").removeprefix("TECH_")
+
+
+def resource_improvable(
+    resource: str | None, open_techs: frozenset[str] | None, has_builder: bool
+) -> bool:
+    """Can the empire improve this resource now? Needs a Builder and the improvement's tech.
+
+    `open_techs` (bare names, see `tech_name`) are the techs still to research (available or
+    locked: the read lists techs two eras ahead, and every tech in `RESOURCE_TECH` is earlier
+    than that), so a table tech missing from it is done. None (the research read failed) or an
+    unknown resource gives False.
+    """
+    if not has_builder or open_techs is None or not resource:
+        return False
+    tech = RESOURCE_TECH.get(resource.upper().removeprefix("RESOURCE_"))
+    return tech is not None and tech not in open_techs
+
+
 @dataclass(frozen=True)
 class TileFacts:
     """A purchasable tile as the valuation sees it. `improvable` is whether the resource on it
@@ -355,7 +392,7 @@ class TileFacts:
     terrain: str = ""
     resource: str | None = None
     resource_class: str | None = None
-    improvable: bool = True
+    improvable: bool = False  # Conservative: only `resource_improvable` says otherwise.
     contested: bool = False
     boost_value: float = 0.0
 

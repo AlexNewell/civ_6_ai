@@ -39,13 +39,17 @@ def test_a_one_food_tile_does_not_fix_a_food_lack():
 
 def test_an_improvable_resource_tile_is_valued_and_an_unimprovable_one_is_not():
     city = make_city(food_surplus=4.0)
-    yes = v.value_tile_purchase(tile("Plains", resource="WINE", cls="luxury"), city, W)
+    yes = v.value_tile_purchase(
+        tile("Plains", resource="WINE", cls="luxury", improvable=True), city, W
+    )
     no = v.value_tile_purchase(
         tile("Plains", resource="WINE", cls="luxury", improvable=False), city, W
     )
     assert yes is not None and yes.priority == 2 and "can be improved" in yes.reason
     assert no is None
-    strategic = v.value_tile_purchase(tile("Plains", resource="IRON", cls="strategic"), city, W)
+    strategic = v.value_tile_purchase(
+        tile("Plains", resource="IRON", cls="strategic", improvable=True), city, W
+    )
     assert strategic is not None and strategic.valuation.rate > 0
 
 
@@ -150,6 +154,48 @@ def test_a_saving_target_and_defence_still_dominate():
     run(threatened, tile_valuation=True, defence=defence)
     kinds = [a[0] for a in threatened.actions]
     assert "buy" in kinds and "tile" not in kinds
+
+
+def builder_unit():
+    return fx.unit_info(unit_id=7, unit_index=7, unit_type="UNIT_BUILDER", name="Builder")
+
+
+def resource_game(resource="WINE", units=None):
+    # The research fixture leaves Mining open and Pottery and Animal Husbandry researched.
+    return GoldGame(
+        gold_amount=500,
+        production=[],
+        units=[builder_unit()] if units is None else units,
+        tiles={65536: [ptile(1, 60, "Plains", resource, "luxury")]},
+        cities=[fx.city_info(), fx.city_info(city_id=65537, name="B", x=30, y=20)],
+    )
+
+
+def test_resource_tile_with_the_tech_researched_is_bought_for_its_improvement():
+    game = resource_game("WINE")  # Wine needs Pottery, which is done.
+    run(game, tile_valuation=True)
+    assert tiles_bought(game) == [("tile", 65536, 1, 10)]
+
+
+def test_resource_tile_whose_tech_is_missing_is_not_bought():
+    game = resource_game("IRON")  # Iron needs Mining, still to research in the fixture.
+    run(game, tile_valuation=True)
+    assert tiles_bought(game) == []
+
+
+def test_resource_tile_without_a_builder_or_an_unknown_resource_is_not_bought():
+    no_builder = resource_game("WINE", units=[])
+    run(no_builder, tile_valuation=True)
+    assert tiles_bought(no_builder) == []
+    unknown = resource_game("MYSTERY")
+    run(unknown, tile_valuation=True)
+    assert tiles_bought(unknown) == []
+
+
+def test_resource_improvable_is_conservative_when_the_research_read_is_missing():
+    assert not v.resource_improvable("WINE", None, True)
+    assert v.resource_improvable("RESOURCE_WINE", frozenset({"MINING"}), True)
+    assert not v.resource_improvable("IRON", frozenset({"MINING"}), True)
 
 
 def test_contested_and_boost_hooks_reach_the_policy():

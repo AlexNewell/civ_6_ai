@@ -61,6 +61,7 @@ from typing import Any, Protocol
 
 from civ6_ai.placement import PlanBook, last_turn_for
 from civ6_ai.policies import valuation
+from civ6_ai.policies.builder import is_builder
 from civ6_ai.policies.game_data import COMBAT_UNITS, UPGRADES
 from civ6_ai.policies.military import holds_tile
 from civ6_ai.policies.production import (
@@ -83,6 +84,7 @@ from civ6_ai.state import read_area as _read_area
 from civ6_ai.state import read_cities as _read_cities
 from civ6_ai.state import read_empire as _read_empire
 from civ6_ai.state import read_production as _read_production
+from civ6_ai.state import read_research as _read_research
 from civ6_ai.state import read_threats as _read_threats
 from civ6_ai.state import read_units as _read_units
 from civ6_ai.state.reader import hex_distance
@@ -139,6 +141,7 @@ class GoldGame(Protocol):
     async def patronize_great_person(self, individual_id: int, yield_type: str = ...) -> str: ...
     async def get_great_people(self) -> list[Any]: ...
     async def get_purchasable_tiles(self, city_id: int) -> Any: ...
+    async def get_tech_civics(self) -> Any: ...
     async def purchase_tile(self, city_id: int, x: int, y: int) -> str: ...
     async def move_unit(self, unit_index: int, target_x: int, target_y: int) -> str: ...
 
@@ -351,7 +354,7 @@ class GoldPolicy:
         await self._upgrade(game, turn, units, notes, cities)
         await self._plan_tiles(game, turn, empire.turn, notes)
         await self._buy(game, turn, empire, cities, units, notes)
-        await self._tiles(game, turn, cities, notes)
+        await self._tiles(game, turn, cities, notes, units)
         # Forget the allowance of a target no longer being saved for.
         self._delay = {k: v for k, v in self._delay.items() if k == turn.key}
         spent = budget - turn.budget
@@ -1060,7 +1063,7 @@ class GoldPolicy:
                 notes.append(f"saving for the {target.item} tile in {target.city_name}")
 
     async def _tiles_by_value(
-        self, game: GoldGame, turn: _Turn, cities: list[City], notes: list[str]
+        self, game: GoldGame, turn: _Turn, cities: list[City], notes: list[str], units=()
     ) -> None:
         """Tile buys by the owner's rules (issue 87): one more candidate list, bought by ROI.
 
@@ -1068,6 +1071,9 @@ class GoldPolicy:
         and any threatened city's defence were settled before), and obeys the saving target.
         """
         weights = self.weights
+        has_builder = any(is_builder(u.unit_type) for u in units)
+        open_techs: frozenset[str] | None = None  # Read once, and only if a resource tile shows.
+        read_techs = False
         candidates: list[tuple[tuple, City, Any, valuation.Priced, valuation.TileValue]] = []
         for city in cities:
             if turn.refused_out:
@@ -1085,6 +1091,9 @@ class GoldPolicy:
                 if tile.cost <= 0:
                     continue
                 spot = (tile.x, tile.y)
+                if tile.resource and not read_techs:
+                    read_techs = True
+                    open_techs = await self._open_techs(game)
                 facts = valuation.TileFacts(
                     tile.x,
                     tile.y,
@@ -1092,6 +1101,9 @@ class GoldPolicy:
                     tile.terrain,
                     tile.resource,
                     tile.resource_class,
+                    improvable=valuation.resource_improvable(
+                        tile.resource, open_techs, has_builder
+                    ),
                     contested=spot in self.contested_tiles,
                     boost_value=self.boost_values.get(spot, 0.0),
                 )
@@ -1144,12 +1156,29 @@ class GoldPolicy:
         if turn.tiles == 0:
             notes.append("no tile worth buying by the tile rules")
 
-    async def _tiles(self, game: GoldGame, turn: _Turn, cities: list[City], notes: list[str]):
+    @staticmethod
+    async def _open_techs(game: GoldGame) -> frozenset[str] | None:
+        """Techs not yet researched (available or locked), or None when the read fails."""
+        try:
+            research = await _read_research(game)
+        except ConnectionError:
+            raise
+        except Exception:
+            log.exception("Research read failed for the tile rules")
+            return None
+        return frozenset(
+            [valuation.tech_name(t.item_type) for t in research.techs]
+            + [valuation.tech_name(t.item_type) for t in research.locked_techs]
+        )
+
+    async def _tiles(
+        self, game: GoldGame, turn: _Turn, cities: list[City], notes: list[str], units=()
+    ):
         if self.tile_valuation:
             if turn.target is not None and turn.slack <= 0:
                 notes.append(f"tiles wait while saving toward {turn.target}")
                 return
-            await self._tiles_by_value(game, turn, cities, notes)
+            await self._tiles_by_value(game, turn, cities, notes, units)
             return
         for city in cities:
             if turn.tiles >= MAX_TILES or turn.refused_out or turn.budget <= 0:

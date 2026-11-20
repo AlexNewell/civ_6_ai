@@ -1817,3 +1817,28 @@ def test_a_wonder_the_ranking_approved_is_started_with_the_same_alternative():
     off = ScriptedGame()
     run(choose_for_city(off, c, menu, ctx, ProductionWeights()))
     assert off.set_calls
+
+
+def test_an_unavailable_district_refreshes_the_race_alternative_for_the_guard():
+    # Issue 328 (review): a Commercial Hub worth 5.0 makes the race NO-GO;
+    # when the game will not start it, the alternative is the Granary and the wonder is GO.
+    c = city(production=8.0)
+    hub = option("DISTRICT", "DISTRICT_COMMERCIAL_HUB", 20, cost=54)
+    menu = [hub, option("BUILDING", "BUILDING_STONEHENGE", 20, cost=180)]
+    menu.append(option("BUILDING", "BUILDING_GRANARY", 20, cost=60))
+    ctx = ProductionContext(
+        turn=33, num_cities=2, army=9, builders=2, difficulty="PRINCE", rivals=4
+    )
+    w = ProductionWeights(wonder_races=True)
+    assert rank_production(c, menu, ctx, w)[0].item == "DISTRICT_COMMERCIAL_HUB"
+
+    async def capped(city_id, item):
+        return SimpleNamespace(zoned=1, allowed=1)  # At the population limit: the hub is skipped.
+
+    reads = SimpleNamespace(district_cap=capped, district_denied=capped)
+    game = ScriptedGame()
+    run(choose_for_city(game, c, menu, ctx, w, reads=reads))
+    assert any(call[2] == "BUILDING_STONEHENGE" for call in game.set_calls)
+    off = ScriptedGame()
+    run(choose_for_city(off, c, menu, ctx, ProductionWeights(), reads=reads))
+    assert off.set_calls

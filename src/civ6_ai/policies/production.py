@@ -1395,11 +1395,18 @@ async def choose_for_city(
     placement signatures and diagnoses (see `placement`), and `planner` the chained tile buys.
     """
     options = list(options)
-    if weights.wonder_races:
-        # The same filter and dominance pass as `rank_production`, so the alternative is one value.
-        usable = [o for o in options if o.item != "UNIT_TRADER" or context.trade_safe]
-        kept, _ = drop_dominated(list(usable), city, context, weights)
-        context = race_context(city, kept, context, weights)
+    base_context = context
+
+    def with_race(gone: frozenset[str] = frozenset()) -> ProductionContext:
+        """The context with the race alternative, over the same filter and dominance pass as
+        `rank_production` and without the items in `gone`, so ranking, log and guard agree."""
+        if not weights.wonder_races:
+            return base_context
+        usable = [o for o in options if o.item != "UNIT_TRADER" or base_context.trade_safe]
+        kept, _ = drop_dominated(list(usable), city, base_context, weights)
+        return race_context(city, kept, base_context, weights, gone)
+
+    context = with_race()
     ranked = rank_production(city, options, context, weights)
     if ranked:
         log.info(
@@ -1427,7 +1434,9 @@ async def choose_for_city(
             option.category == "DISTRICT" or canonical(option.item) == "UNIT_BUILDER"
         ):
             return rest
+        nonlocal context
         unavailable.add(option.item)
+        context = with_race(frozenset(unavailable))  # The guard below scores with this one.
         again = rank_production(city, options, context, weights, frozenset(unavailable))
         left = {o.item for o in rest}
         return [o for o in again if o.item in left]

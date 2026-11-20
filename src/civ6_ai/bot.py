@@ -83,6 +83,8 @@ from civ6_ai.policies.wars import WarPolicy
 from civ6_ai.screenshots import Screenshotter
 from civ6_ai.state.reader import IncompleteRead, check_cities_complete
 from civ6_ai.strategy.apply import PolicyDocumentHandler
+from civ6_ai.strategy.boost_inputs import BoostInputs
+from civ6_ai.strategy.boost_judgement import NudgeBoard
 from civ6_ai.strategy.tasks import TaskDB, TaskHandler
 from civ6_ai.threat_map import ThreatMapHandler
 from civ6_ai.victory_threat import VictoryThreatLog, VictoryWatch
@@ -311,7 +313,16 @@ def build_orchestrator(
     victory_watch = VictoryWatch()
     rankings = RankingsHolder()  # Every living civ's score (issue 256).
     diplomacy = DiplomacyPolicy(threats=victory_watch.threat_ids)
-    research_policy = research.ResearchPolicy()
+    # The boost judgement's inputs and nudges (#344). Both are used only when
+    # `ResearchWeights.boost_judgement` is on: the provider is not called otherwise, so the extra
+    # code reads nothing. The game it reads is the shared one built below.
+    nudge_board = NudgeBoard()
+    builder = BuilderPolicy(demand=builder_demand, nudges=nudge_board.current)
+    shared_game: list[Any] = []
+    research_policy = research.ResearchPolicy(
+        boost_inputs=BoostInputs(game=lambda: shared_game[0], builder=builder, military=military),
+        nudge_board=nudge_board,
+    )
     gold = GoldPolicy(
         defence=defence,
         plans=production.planner.book,
@@ -377,7 +388,7 @@ def build_orchestrator(
         government,
         production,
         gold,
-        BuilderPolicy(demand=builder_demand),
+        builder,
         secondary,
         FaithPolicy(defence=defence, builder_demand=builder_demand),
         DefenceReport(defence),
@@ -388,6 +399,7 @@ def build_orchestrator(
     ]
     timer = CallTimer(game)  # Under SharedReads, so it times real calls and not remembered ones.
     shared = ResolvingGame(SharedReads(timer), resolver, defeat_check=partial(is_defeated, game))
+    shared_game.append(shared)
     return Orchestrator(
         shared,
         handlers,

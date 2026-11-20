@@ -91,6 +91,8 @@ def _key(name: str) -> str:
     return "_".join(words)
 
 
+name_key = _key  # For a policy that must match a tech or civic name against a boost's target.
+
 # Improvements the Builder places. A plural or an article is stripped by `_key`.
 _IMPROVEMENT_WORDS = {
     "QUARRY": "QUARRY",

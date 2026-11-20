@@ -1842,3 +1842,21 @@ def test_an_unavailable_district_refreshes_the_race_alternative_for_the_guard():
     off = ScriptedGame()
     run(choose_for_city(off, c, menu, ctx, ProductionWeights(), reads=reads))
     assert off.set_calls
+
+
+def test_a_refused_district_stops_vetoing_the_wonder_race():
+    # Issue 328 (review): the Hub is refused at start (not by the cap check); the wonder must
+    # then be judged against the Granary, not the Hub that cannot be built.
+    c = city(production=8.0)
+    menu = [
+        option("DISTRICT", "DISTRICT_COMMERCIAL_HUB", 20, cost=54),
+        option("BUILDING", "BUILDING_STONEHENGE", 20, cost=180),
+        option("BUILDING", "BUILDING_GRANARY", 20, cost=60),
+    ]
+    ctx = ProductionContext(
+        turn=33, num_cities=2, army=9, builders=2, difficulty="PRINCE", rivals=4
+    )
+    w = ProductionWeights(wonder_races=True)
+    game = ScriptedGame(refuse={"DISTRICT_COMMERCIAL_HUB": "ERR:NOPE"})
+    run(choose_for_city(game, c, menu, ctx, w))
+    assert game.set_calls[-1][2] == "BUILDING_STONEHENGE"

@@ -1430,8 +1430,12 @@ async def choose_for_city(
 
         Issue 301: a district the game will not start must not keep demoting the army floor.
         """
+        # With wonder races on, a refused building is no alternative either (issue 328).
+        races = (
+            weights.wonder_races and option.category == "BUILDING" and option.item not in WONDERS
+        )
         if option.is_repair or not (
-            option.category == "DISTRICT" or canonical(option.item) == "UNIT_BUILDER"
+            option.category == "DISTRICT" or canonical(option.item) == "UNIT_BUILDER" or races
         ):
             return rest
         nonlocal context
@@ -1519,6 +1523,7 @@ async def choose_for_city(
             return option
         log.info("%s can't build %s: %s", city.name, option.item, result[:120])
         refusal = is_refusal(result)
+        ranked = skip(option, ranked)  # A refused alternative must not keep vetoing a wonder.
         wait, reason = 0, ""
         if refusal:
             reason, needs, signature = await _explain(reads, city, option, result)

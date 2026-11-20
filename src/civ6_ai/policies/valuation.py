@@ -194,7 +194,10 @@ def value_option(
 ) -> Valuation | None:
     """What buying this option is worth, or None when production scores it as worth nothing."""
     # Production's own value, undiscounted by build time (a purchase has no build time).
-    raw = score(replace(option, turns=0), city, ctx, weights)
+    # The early Monument bonus (issue 299) only ranks builds; as a per-turn rate it would make a
+    # Monument look several times better than its +2 culture, so it is left out here.
+    plain = replace(weights, early_monument=0.0)
+    raw = score(replace(option, turns=0), city, ctx, plain)
     if raw <= 0:
         return None
     if under_threat(city, ctx) and is_defence(option):

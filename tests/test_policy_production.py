@@ -1574,6 +1574,103 @@ def test_a_zero_scored_settler_is_never_started_as_the_last_item():
     assert picked is None and game.set_calls == []
 
 
+# Issue 301: early production favours growth over scouts and idle garrison units.
+GARRISONED_EARLY = ProductionContext(turn=40, num_cities=2, builders=2, recon=0, army=1)
+GROWTH_MENU = [
+    option("UNIT", "UNIT_WARRIOR", 4),
+    option("DISTRICT", "DISTRICT_CAMPUS", 8),
+    option("DISTRICT", "DISTRICT_HOLY_SITE", 8),
+]
+
+
+def test_no_third_scout_before_turn_60():
+    c = city(population=3)
+    scout = option("UNIT", "UNIT_SCOUT", 3)
+    w = ProductionWeights()
+    assert score(scout, c, replace(EARLY, turn=30, scouts_built=1), w) > 0
+    assert score(scout, c, replace(EARLY, turn=30, scouts_built=2), w) == 0.0
+
+
+def test_the_policy_starts_with_no_scouts_counted():
+    assert CityProductionPolicy().scouts_built == 0
+
+
+def test_a_safe_garrisoned_city_builds_a_district_before_the_army_floor_unit():
+    c = city(population=3)
+    ranked = rank_production(c, GROWTH_MENU, GARRISONED_EARLY)
+    assert ranked[-1].item == "UNIT_WARRIOR"
+    assert ranked[0].category == "DISTRICT"
+
+
+def test_a_safe_garrisoned_city_builds_a_builder_before_the_army_floor_unit():
+    c = city(population=3)
+    ctx = replace(GARRISONED_EARLY, builders=0, army=0)
+    menu = [option("UNIT", "UNIT_WARRIOR", 4), option("UNIT", "UNIT_BUILDER", 5)]
+    assert best(c, menu, ctx) == "UNIT_BUILDER"
+
+
+def test_the_army_floor_still_wins_without_growth_to_build():
+    c = city(population=3)
+    menu = [option("UNIT", "UNIT_WARRIOR", 4), option("BUILDING", "BUILDING_MONUMENT", 5)]
+    assert best(c, menu, GARRISONED_EARLY) == "UNIT_WARRIOR"
+
+
+def test_after_turn_60_the_army_floor_is_not_held_back():
+    from civ6_ai.policies.production import _growth_before_garrison
+
+    c = city(population=3)
+    assert _growth_before_garrison(c, GARRISONED_EARLY)
+    late = replace(GARRISONED_EARLY, turn=90)
+    assert not _growth_before_garrison(c, late)
+    # Late, the ranking is the plain score order: nothing is pulled down under a district.
+    ranked = rank_production(c, GROWTH_MENU, late)
+    weights = ProductionWeights()
+    scores = [score(o, c, late, weights) for o in ranked]
+    assert scores == sorted(scores, reverse=True)
+
+
+def test_a_threatened_city_still_builds_military_over_a_district():
+    c = city([threat()], population=3)
+    assert best(c, GROWTH_MENU, GARRISONED_EARLY) == "UNIT_WARRIOR"
+
+
+def test_a_city_without_a_garrison_still_builds_a_defender_first():
+    c = city(garrison_unit="", population=3)
+    assert best(c, GROWTH_MENU, GARRISONED_EARLY) == "UNIT_WARRIOR"
+
+
+def test_a_short_camp_force_still_outranks_a_district_early():
+    c = city(population=3)
+    ctx = replace(GARRISONED_EARLY, camp_units=2, camp_wants="melee")
+    assert best(c, GROWTH_MENU, ctx) == "UNIT_WARRIOR"
+
+
+def test_a_district_the_city_cannot_start_does_not_demote_the_army_floor_unit():
+    # Issue 301 review: a capped district must not leave the Warrior under a building. No
+    # Monument is built here, so the building is really ranked against the Warrior.
+    c = city(population=3, buildings=["PALACE"])
+    menu = [
+        option("UNIT", "UNIT_WARRIOR", 4),
+        option("BUILDING", "BUILDING_LIBRARY", 1),
+        option("DISTRICT", "DISTRICT_HOLY_SITE", 30),
+    ]
+    ctx = replace(GARRISONED_EARLY, army=0)
+    w = ProductionWeights()
+    library, campus = (score(o, c, ctx, w) for o in menu[1:])
+    assert library > campus  # The slow district is worth less than the quick building.
+
+    async def capped(city_id, item):
+        return SimpleNamespace(zoned=1, allowed=1)
+
+    async def not_denied(city_id, item):
+        return None
+
+    reads = SimpleNamespace(district_cap=capped, district_denied=not_denied)
+    blocked = run(choose_for_city(ScriptedGame(), c, menu, ctx, w, reads=reads))
+    assert blocked.item == "UNIT_WARRIOR"
+    assert best(c, menu, ctx) == "UNIT_WARRIOR"  # A weaker district never lowers it either.
+
+
 # Issue 299: a Monument in a city's first build cycle outranks the second garrison or scout unit.
 _FRESH = ProductionContext(turn=15, num_cities=1, builders=1, recon=1, army=1)
 _FRESH_MENU = [
@@ -1639,3 +1736,50 @@ def test_settlers_continue_past_six_cities_while_safe_sites_exist():
     # Safety is unchanged: no safe site, or one already in flight, builds no settler.
     assert best(grown, MENU, ProductionContext(**base, sites_ok=False)) != "UNIT_SETTLER"
     assert best(grown, MENU, ProductionContext(**base, settlers=2)) != "UNIT_SETTLER"
+
+
+def _monument_and_growth_menu():
+    return [
+        option("UNIT", "UNIT_WARRIOR", 4),
+        option("BUILDING", "BUILDING_MONUMENT", 5),
+        option("DISTRICT", "DISTRICT_CAMPUS", 4),
+        option("UNIT", "UNIT_BUILDER", 5),
+    ]
+
+
+def test_the_army_floor_yields_only_to_growth_that_outranks_the_early_monument():
+    # Issues 299 and 301 together: a safe garrisoned city with no Monument yet. The Monument
+    # bonus (12.0) puts it over a Campus and a Builder, and the floor unit must not fall under it.
+    centre = ["DISTRICT_CITY_CENTER@10,10"]
+    c = city(population=3, buildings=["PALACE"], districts=centre)
+    ctx = replace(GARRISONED_EARLY, army=0, builders=0)
+    order = [o.item for o in rank_production(c, _monument_and_growth_menu(), ctx)]
+    assert order.index("UNIT_WARRIOR") < order.index("BUILDING_MONUMENT")
+    assert order.index("BUILDING_MONUMENT") < order.index("DISTRICT_CAMPUS")
+    assert order.index("BUILDING_MONUMENT") < order.index("UNIT_BUILDER")
+
+
+def test_with_the_monument_built_a_campus_or_builder_outranks_the_army_floor_unit():
+    centre = ["DISTRICT_CITY_CENTER@10,10"]
+    c = city(population=3, buildings=["PALACE", "MONUMENT"], districts=centre)
+    ctx = replace(GARRISONED_EARLY, army=0, builders=0)
+    order = [o.item for o in rank_production(c, _monument_and_growth_menu(), ctx)]
+    assert order[0] == "UNIT_BUILDER"  # The best growth option; the Warrior yields to it only.
+    campus_only = [o for o in _monument_and_growth_menu() if o.item != "UNIT_BUILDER"]
+    assert rank_production(c, campus_only, ctx)[0].item == "DISTRICT_CAMPUS"
+
+
+def test_demoted_army_floor_units_keep_their_order_when_the_district_fails():
+    c = city(population=3, buildings=["PALACE"], districts=["DISTRICT_CITY_CENTER@10,10"])
+    ctx = replace(GARRISONED_EARLY, army=0)
+    warrior = option("UNIT", "UNIT_WARRIOR", 3)
+    archer = option("UNIT", "UNIT_ARCHER", 12)
+    holy = option("DISTRICT", "DISTRICT_HOLY_SITE", 4)
+    w = ProductionWeights()
+    assert score(warrior, c, ctx, w) > score(archer, c, ctx, w) > score(holy, c, ctx, w)
+    demoted = [o.item for o in rank_production(c, [warrior, archer, holy], ctx)]
+    assert demoted.index("DISTRICT_HOLY_SITE") < demoted.index("UNIT_WARRIOR")
+    assert demoted.index("UNIT_WARRIOR") < demoted.index("UNIT_ARCHER")
+    # The district is skipped or fails in `_start`: the next choice is the Warrior, not the Archer.
+    after = [o.item for o in rank_production(c, [warrior, archer, holy], ctx, w, {holy.item})]
+    assert after[0] == "UNIT_WARRIOR" and after.index("UNIT_ARCHER") > 0

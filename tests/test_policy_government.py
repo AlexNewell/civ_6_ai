@@ -299,22 +299,51 @@ def test_god_king_is_kept_while_no_pantheon_exists():
     assert not game.actions
 
 
-def test_god_king_is_swapped_for_the_best_card_once_the_pantheon_exists():
+def test_god_king_is_not_swapped_mid_civic_even_with_a_pantheon():
     game = ScriptedGame(slots=[slot(0, "SLOT_ECONOMIC", "POLICY_GOD_KING")], cards=ECONOMIC_CARDS)
     policy = GovernmentPolicy()
     run(policy.run(game))
     game.has_pantheon = True
     run(policy.run(game))
+    run(policy.run(game))
+    assert not game.actions
+
+
+def test_god_king_is_swapped_on_the_turn_a_civic_completes():
+    game = ScriptedGame(slots=[slot(0, "SLOT_ECONOMIC", "POLICY_GOD_KING")], cards=ECONOMIC_CARDS)
+    policy = GovernmentPolicy()
+    run(policy.run(game))
+    game.has_pantheon = True
+    run(policy.run(game))
+    game.civics += 1
+    run(policy.run(game))
     assert game.actions == [("policies", {0: "POLICY_URBAN_PLANNING"})]
+    game.civics += 1
     run(policy.run(game))
     assert len(game.actions) == 1  # God King is gone, so nothing more to swap.
 
 
-def test_a_refused_swap_is_tried_again_only_after_another_civic():
+def test_a_civic_completed_before_the_pantheon_waits_for_the_next_one():
+    game = ScriptedGame(slots=[slot(0, "SLOT_ECONOMIC", "POLICY_GOD_KING")], cards=ECONOMIC_CARDS)
+    policy = GovernmentPolicy()
+    run(policy.run(game))
+    game.civics += 1
+    run(policy.run(game))  # The civic completes, but no pantheon yet.
+    game.has_pantheon = True
+    run(policy.run(game))
+    assert not game.actions
+    game.civics += 1
+    run(policy.run(game))
+    assert game.actions == [("policies", {0: "POLICY_URBAN_PLANNING"})]
+
+
+def test_a_refused_swap_is_not_repeated_until_the_next_civic():
     game = ScriptedGame(slots=[slot(0, "SLOT_ECONOMIC", "POLICY_GOD_KING")], cards=ECONOMIC_CARDS)
     game.has_pantheon = True
     game.refuse["POLICY_URBAN_PLANNING"] = "ERR:NOT_ALLOWED"
     policy = GovernmentPolicy()
+    run(policy.run(game))
+    game.civics += 1
     run(policy.run(game))
     run(policy.run(game))
     assert len(game.actions) == 1
@@ -329,7 +358,10 @@ def test_god_king_stays_when_no_card_beats_it():
         cards=[info("POLICY_GOD_KING", "SLOT_ECONOMIC"), info("POLICY_FOO", "SLOT_ECONOMIC")],
     )
     game.has_pantheon = True
-    run(GovernmentPolicy().run(game))
+    policy = GovernmentPolicy()
+    run(policy.run(game))
+    game.civics += 1
+    run(policy.run(game))
     assert not game.actions
 
 

@@ -15,8 +15,8 @@ Three jobs, each deterministic. The same game state and the same weights give th
   so a wildcard slot can't take the card a fixed slot needed. A card in a slot is never swapped,
   with one exception (issue 300): until a pantheon is founded God King outranks every other card
   (`god_king_priority`), for the faith to found it early; once it is founded, God King is
-  replaced in its slot by the best card that fits, once per completed civic (the game accepts
-  a change then, and a refusal is not repeated).
+  replaced in its slot by the best card that fits, but only on a turn a civic has just completed
+  (the count rose since the last turn), the one window in which the game takes a free change.
 - Governors: every point is spent, appointing a new governor first and promoting after. A new
   governor is placed in the best free city for its role. A placed governor never moves, because
   moving restarts the time it takes to establish.
@@ -419,7 +419,7 @@ class GovernmentPolicy:
         self._unappointable: set[str] = set()
         self._card_sets: Counter[tuple[int, str]] = Counter()
         self._pantheon_found = False  # Once True it stays, so the game is asked no more.
-        self._swap_civics = -1  # Civics done at the last God King swap try; one try per civic.
+        self._civics_seen: int | None = None  # Civics done when last read, for the swap window.
         self._governor_assigns: Counter[tuple[str, int]] = Counter()
 
     async def change_government(self, game: GovernmentGame) -> bool:
@@ -469,19 +469,24 @@ class GovernmentPolicy:
     async def swap_god_king(self, game: GovernmentGame) -> bool:
         """Once the pantheon is founded, replace God King with the best other card.
 
-        Tried once per completed civic, because the game takes a swap then. True when nothing is
-        left to do (no God King, or it was replaced), so a refusal reads as unfinished.
+        The game takes a free card change only in the window after a civic completes, so the swap
+        is tried only on a turn the completed-civic count has risen since the last turn it was
+        read. The count is read every turn while God King is slotted, so a rise is seen when it
+        happens. True when nothing is left to do or the swap waits for its window; False when the
+        game refused it.
         """
+        government = await read_government(game)
+        if not any(s.policy == _GOD_KING for s in government.policy_slots):
+            return True
+        civics = (await read_research(game)).civics_done
+        before, self._civics_seen = self._civics_seen, civics
+        if before is None or civics <= before:
+            return True  # No civic completed this turn: no free window.
         if not await self._has_pantheon(game):
             return True
-        government = await read_government(game)
         swap = god_king_swap(government, self.weights)
         if swap is None:
             return True
-        civics = (await read_research(game)).civics_done
-        if civics == self._swap_civics:
-            return True  # Tried at this civic count already.
-        self._swap_civics = civics
         index, card = swap
         result = await game.set_policies({index: card.policy_type})
         if _policies_set(result):

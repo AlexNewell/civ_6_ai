@@ -267,6 +267,7 @@ def build_orchestrator(
     probes: Any = None,
     threat_map_dump: Path | None = None,
     use_threat_map: bool = True,
+    playbooks: Handler | None = None,
 ) -> Orchestrator:
     """Wire the handlers to a game. `game` is civ6-mcp's `GameState`, or a fake with its reads.
 
@@ -286,6 +287,8 @@ def build_orchestrator(
     `threat_map_dump` is a file the threat map appends one line per turn to (see `threat_map`).
     `use_threat_map=False` keeps the map and its dump but leaves the policies not reading it,
     for running the same save with and without it.
+    `playbooks` is a `PlaybookRunner` (see `strategy.playbook_runner`), run after the policy
+    document. With none, no playbook exists (issue 244).
     """
     defence = DefenceState()  # Which cities are threatened this turn, shared by three policies.
     expansion = ExpansionState()  # Settling fills it. Production and the log line read it.
@@ -352,6 +355,7 @@ def build_orchestrator(
             if policy_document is not None
             else []
         ),
+        *([playbooks] if playbooks is not None else []),  # After the document it builds on (244).
         *(
             [TaskHandler(task_db if isinstance(task_db, TaskDB) else TaskDB(task_db), bus)]
             if task_db is not None

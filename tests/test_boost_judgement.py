@@ -370,3 +370,49 @@ def test_one_remaining_kill_still_nudges():
     state = BoostState(turn=20, kills={"BARBARIAN": 2})
     j = one(option, state, PlanSignals(kill_offers={"BARBARIAN": 3}))
     assert j.decision is Decision.NUDGE
+
+
+def test_queued_campus_keeps_the_delay_while_it_is_built_on_schedule():
+    option = item("State Workforce", "Build any specialty district.", turns=20)
+    signals = PlanSignals(districts_queued={"CAMPUS": 1})
+    history: dict = {}
+    for turn in range(20, 28):
+        j = judge_boosts([option], BoostState(turn=turn), signals, history=history)
+        assert j[0].decision is Decision.DELAY, turn  # No give-up at turn 23.
+        history = next_history(history, j, turn)
+    assert j[0].reach.turns == 1  # The countdown, not a constant 8.
+
+
+def test_stuck_campus_still_gives_up_at_the_wait_limit():
+    option = item("State Workforce", "Build any specialty district.", turns=20)
+    signals = PlanSignals(districts_queued={"CAMPUS": 1})
+    history: dict = {}
+    last = None
+    for turn in range(20, 30):
+        last = judge_boosts([option], BoostState(turn=turn), signals, history=history)
+        history = next_history(history, last, turn)
+    assert last[0].decision is Decision.RESEARCH_NOW and last[0].gave_up
+
+
+def test_removed_campus_stops_the_delay_at_once():
+    option = item("State Workforce", "Build any specialty district.", turns=20)
+    start = judge_boosts([option], BoostState(turn=20), PlanSignals(districts_queued={"CAMPUS": 1}))
+    history = next_history({}, start, 20)
+    gone = judge_boosts([option], BoostState(turn=23), PlanSignals(), history=history)
+    assert gone[0].decision is Decision.RESEARCH_NOW
+
+
+def test_a_static_estimate_that_grows_counts_as_a_slip():
+    option = item("Shipbuilding", "Own 2 Galleys.", turns=30)
+    first = judge_boosts(
+        [option],
+        BoostState(turn=20, units={"GALLEY": 1}),
+        PlanSignals(units_queued={"GALLEY": 1}),
+    )
+    assert first[0].decision is Decision.DELAY  # One more galley: about 6 turns.
+    history = next_history({}, first, 20)
+    # A galley is lost: two are now needed, so the fixed estimate doubles to 12 turns.
+    later = judge_boosts(
+        [option], BoostState(turn=21), PlanSignals(units_queued={"GALLEY": 2}), history=history
+    )
+    assert later[0].gave_up and "slipped" in later[0].reason

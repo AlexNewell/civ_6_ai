@@ -24,7 +24,7 @@ research policy turns the decisions into a score adjustment behind `boost_judgem
 
 import math
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 
 from civ6_ai.state.models import ResearchOption
@@ -156,6 +156,9 @@ class Reach:
     fit: bool = False
     nudge: str | None = None  # The action that would cause it, for a cheap-to-cause boost.
     policy: str | None = None  # Which policy would carry out the nudge.
+    # True when `turns` is a fixed estimate per queued action, not read from progress. It does not
+    # shrink as the action proceeds, so the slip check counts down from when it was first seen.
+    static: bool = False
 
 
 @dataclass(frozen=True)
@@ -211,7 +214,7 @@ def _counted(
     if eta > settings.horizon:
         return _no("too far")
     if planned >= need:
-        return Reach(ReachLabel.ON_TRACK, eta, source, True)
+        return Reach(ReachLabel.ON_TRACK, eta, source, True, static=True)
     missing = need - planned
     if nudge is not None and missing <= settings.max_nudge_count:
         return Reach(ReachLabel.CHEAP, eta, source, fit, nudge, policy)
@@ -359,7 +362,7 @@ def _other_reach(
             return Reach(ReachLabel.ON_TRACK, 1, "a meeting already made", True)
         eta = need * settings.meeting_turns
         if signals.exploring and eta <= settings.horizon:
-            return Reach(ReachLabel.ON_TRACK, eta, "exploring", True)
+            return Reach(ReachLabel.ON_TRACK, eta, "exploring", True, static=True)
         return _no("not exploring")
     if kind is BoostKind.FOUND:
         if spec.target == PANTHEON:
@@ -372,11 +375,15 @@ def _other_reach(
             if state.has_coastal_city:
                 return Reach(ReachLabel.ON_TRACK, 1, "a coastal city", True)
             if signals.coastal_city_planned:
-                return Reach(ReachLabel.ON_TRACK, settings.settle_turns, "a planned city", True)
+                return Reach(
+                    ReachLabel.ON_TRACK, settings.settle_turns, "a planned city", True, static=True
+                )
         return _no("not planned")
     if kind is BoostKind.WONDER:
         if signals.wonder_queued:
-            return Reach(ReachLabel.ON_TRACK, settings.wonder_turns, "a queued wonder", True)
+            return Reach(
+                ReachLabel.ON_TRACK, settings.wonder_turns, "a queued wonder", True, static=True
+            )
         return _no("no wonder queued")
     if kind is BoostKind.ADOPT:
         turns = signals.research_turns.get(spec.target)
@@ -421,17 +428,25 @@ def _judge_one(
     eta = reach.turns or 1
 
     if reach.label is ReachLabel.ON_TRACK:
-        value = saved - settings.delay_cost_per_turn * eta
         if record is not None:
             waited = max(0, state.turn - record.since_turn)
             if waited >= settings.max_delay:
                 return done(reach, f"researching {option.name}: waited {waited} turns", True)
-            if eta > record.first_eta - waited + settings.slip_tolerance:
+            if reach.static:
+                # A fixed estimate is on schedule while it stays at or under the first one. It
+                # slips only when it grows (more actions needed); progress counts it down.
+                slipped = eta > record.first_eta + settings.slip_tolerance
+                eta = max(1, min(eta, record.first_eta) - waited)
+                reach = replace(reach, turns=eta)
+            else:
+                slipped = eta > record.first_eta - waited + settings.slip_tolerance
+            if slipped:
                 return done(
                     reach,
                     f"researching {option.name}: boost slipped to about {eta} turns",
                     True,
                 )
+        value = saved - settings.delay_cost_per_turn * eta
         if eta > settings.max_delay:
             return done(reach, f"researching {option.name}: boost in about {eta} turns is too far")
         if value < settings.min_value:

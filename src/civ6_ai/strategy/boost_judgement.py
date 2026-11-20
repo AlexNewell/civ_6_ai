@@ -319,6 +319,8 @@ def _reach(
         need = spec.count - state.kills.get(spec.target, 0)
         if need <= 0:
             return Reach(ReachLabel.ON_TRACK, 1, "a kill already made", True)
+        if need > settings.max_nudge_count:
+            return _no("too many kills missing")  # A nudge is one small detour, not several.
         offers = signals.kill_offers.get(spec.target, 0)
         if offers >= need:
             what = (

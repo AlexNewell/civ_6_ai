@@ -356,3 +356,17 @@ def test_codex_example_alternating_signal_gives_up_and_never_restarts():
     assert gave_up_turn is not None
     assert max(delayed) - min(delayed) <= JudgementSettings().max_delay
     assert not [t for t in delayed if t > gave_up_turn]  # Never re-delayed once given up.
+
+
+def test_three_barbarian_kills_with_three_offers_is_not_a_single_kill_nudge():
+    option = item("Bronze Working", "Kill 3 Barbarians.")
+    j = one(option, BoostState(turn=20), PlanSignals(kill_offers={"BARBARIAN": 3}))
+    assert j.decision is Decision.RESEARCH_NOW
+    assert nudges([j]) == ()
+
+
+def test_one_remaining_kill_still_nudges():
+    option = item("Bronze Working", "Kill 3 Barbarians.")
+    state = BoostState(turn=20, kills={"BARBARIAN": 2})
+    j = one(option, state, PlanSignals(kill_offers={"BARBARIAN": 3}))
+    assert j.decision is Decision.NUDGE

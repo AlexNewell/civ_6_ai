@@ -56,6 +56,7 @@ cost, so the reserve holds even if a later read is stale.
 
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
@@ -87,7 +88,7 @@ from civ6_ai.state import read_production as _read_production
 from civ6_ai.state import read_research as _read_research
 from civ6_ai.state import read_threats as _read_threats
 from civ6_ai.state import read_units as _read_units
-from civ6_ai.state.reader import hex_distance
+from civ6_ai.state.reader import STANDARD_MAP_WIDTH, hex_distance
 
 log = logging.getLogger(__name__)
 
@@ -302,7 +303,13 @@ class GoldPolicy:
         # Issue 87: value tile buys by the owner's rules (`valuation.value_tile_purchase`) and
         # buy them in ROI order. Off by default: tiles then follow the old resource-first order.
         self.tile_valuation = tile_valuation
-        self.contested_tiles: set[tuple[int, int]] = set()  # Set by whatever sees rival borders.
+        self.contested_tiles: set[tuple[int, int]] = set()  # Tiles marked contested by hand.
+        # Foreign (rival and city-state) city tiles, as a callable so it is read fresh each turn:
+        # `SettlingPolicy.foreign_city_tiles` (issue 338). A purchasable tile near one that is
+        # worth taking counts as contested (`valuation.is_contested`).
+        self.foreign_cities: Callable[[], list[tuple[int, int]]] | None = None
+        # The map's width for distances (wraps east-west); the bot sets the settling policy's.
+        self.map_width: int | None = STANDARD_MAP_WIDTH
         self.boost_values: dict[tuple[int, int], float] = {}  # Boost work (issue 322) fills this.
         self.builder_demand = builder_demand  # `builder.BuilderDemand`, or None.
         self.expansion = expansion  # `expansion.ExpansionState`, or None (issue 284).
@@ -1075,6 +1082,8 @@ class GoldPolicy:
         open_techs: frozenset[str] | None = None  # Read once, and only if a resource tile shows.
         read_techs = False
         candidates: list[tuple[tuple, City, Any, valuation.Priced, valuation.TileValue]] = []
+        foreign = list(self.foreign_cities()) if self.foreign_cities is not None else []
+        reserved = {(t.x, t.y) for t in self.plans.current(turn.now)}  # Planned districts.
         for city in cities:
             if turn.refused_out:
                 break
@@ -1087,23 +1096,24 @@ class GoldPolicy:
                 continue
             if not isinstance(tiles, list):
                 continue
+            occupied: set[tuple[int, int]] | None = None  # Read once per city, if a resource shows.
             for tile in tiles:
                 if tile.cost <= 0:
                     continue
                 spot = (tile.x, tile.y)
+                if tile.resource and occupied is None:
+                    occupied = await self._occupied_tiles(game, city)
                 if tile.resource and not read_techs:
                     read_techs = True
                     open_techs = await self._open_techs(game)
-                facts = valuation.TileFacts(
-                    tile.x,
-                    tile.y,
-                    tile.cost,
-                    tile.terrain,
-                    tile.resource,
-                    tile.resource_class,
-                    improvable=valuation.resource_improvable(
-                        tile.resource, open_techs, has_builder
-                    ),
+                facts = valuation.tile_facts(
+                    tile,
+                    open_techs,
+                    has_builder,
+                    occupied=spot in (occupied or ()),
+                    reserved=spot in reserved,
+                    foreign_cities=foreign,
+                    map_width=self.map_width,
                     contested=spot in self.contested_tiles,
                     boost_value=self.boost_values.get(spot, 0.0),
                 )
@@ -1155,6 +1165,19 @@ class GoldPolicy:
                 log.info("tile_buy %s refused: %s", priced.label, str(result)[:120])
         if turn.tiles == 0:
             notes.append("no tile worth buying by the tile rules")
+
+    @staticmethod
+    async def _occupied_tiles(game: GoldGame, city: City) -> set[tuple[int, int]]:
+        """Tiles around the city with an improvement or a district already on them. A failed
+        read gives the empty set (no tile known to be occupied), which only costs a refused buy."""
+        try:
+            area = await _read_area(game, city.x, city.y, 3)
+        except ConnectionError:
+            raise
+        except Exception as error:
+            log.warning("Area read failed for %s tile rules: %r", city.name, error)
+            return set()
+        return {(t.x, t.y) for t in area if t.improvement or t.district}
 
     @staticmethod
     async def _open_techs(game: GoldGame) -> frozenset[str] | None:

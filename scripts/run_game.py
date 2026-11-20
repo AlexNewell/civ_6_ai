@@ -92,6 +92,7 @@ async def play_game(
     save_at: Sequence[int] = (),
     shots_every_turn: bool = False,
     use_threat_map: bool = True,
+    tile_valuation: bool = False,
 ) -> GameRun | None:
     """Play `turns` turns in the open game. None if it is not a standard save (or `expect_save`).
 
@@ -187,6 +188,7 @@ async def play_game(
             probes=probes,
             threat_map_dump=ROOT / "runs" / f"{name}_{stamp}_threatmap.jsonl",
             use_threat_map=use_threat_map,
+            tile_valuation=tile_valuation,
         )
         if shots_every_turn:
             # No cap: a run reviewed by eye wants every turn. Kept apart from the triage shots.
@@ -256,6 +258,7 @@ async def run(
     save_at: Sequence[int] = (),
     shots_every_turn: bool = False,
     use_threat_map: bool = True,
+    tile_valuation: bool = False,
 ) -> int:
     if load:
         try:
@@ -271,6 +274,7 @@ async def run(
         save_at=save_at,
         shots_every_turn=shots_every_turn,
         use_threat_map=use_threat_map,
+        tile_valuation=tile_valuation,
     )
     if played is None:
         return 1
@@ -342,6 +346,11 @@ def main() -> int:
         action="store_true",
         help="keep the threat map's dump but leave the policies not reading it (a control run)",
     )
+    parser.add_argument(
+        "--tile-valuation",
+        action="store_true",
+        help="buy tiles by the owner's rules (issues 87, 338) instead of the old order",
+    )
     args = parser.parse_args()
     try:
         kinds = parse_kinds(args.probe)
@@ -357,6 +366,7 @@ def main() -> int:
             save_at,
             args.shots_every_turn,
             not args.no_threat_map,
+            args.tile_valuation,
         )
     )
 

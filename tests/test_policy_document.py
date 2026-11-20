@@ -236,7 +236,9 @@ MENU = [
 
 def best_build(weights, num_cities=4):
     city = build_city(fx.city_info(population=5, buildings=["PALACE"]), (), set())
-    ctx = ProductionContext(turn=60, num_cities=num_cities, builders=4, recon=1, army=6)
+    ctx = ProductionContext(
+        turn=60, num_cities=num_cities, builders=4, recon=1, army=max(6, 2 * num_cities)
+    )
     return rank_production(city, MENU, ctx, weights)[0].item
 
 
@@ -248,10 +250,11 @@ def test_city_target_changes_whether_a_settler_is_built():
 
 
 def test_posture_changes_the_city_target_behaviour():
-    # Four cities: the default target of six still wants a settler, a defensive posture does not.
-    assert best_build(resolve(DEFAULT_DOCUMENT).production) == "UNIT_SETTLER"
+    # Ten cities: the default ceiling of twelve still wants a settler, a defensive posture (ten)
+    # does not.
+    assert best_build(resolve(DEFAULT_DOCUMENT).production, num_cities=10) == "UNIT_SETTLER"
     defend = resolve(PolicyDocument(posture=Posture.DEFEND)).production
-    assert best_build(defend) != "UNIT_SETTLER"
+    assert best_build(defend, num_cities=10) != "UNIT_SETTLER"
 
 
 def test_a_research_weight_changes_the_tech_chosen():

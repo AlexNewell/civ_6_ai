@@ -1,8 +1,9 @@
 """The expansion target and its per-turn log line (roadmap item 1.41).
 
-Cities and what is in them make up most of the score gap, so the bot aims for `TARGET_CITIES`
-living cities by `TARGET_TURN`. `expected_cities` is the straight-line schedule towards that, and a
-city count below it is "behind". Production reads `ExpansionState` to raise the settler priority
+Cities and what is in them make up most of the score gap, so the bot follows `SCHEDULE`, a
+front-loaded list of (turn, cities) points, up to a ceiling `TARGET_CITIES`. `expected_cities`
+reads it and a city count below it is "behind"; `settler_cap` says how many cities settlers may
+reach. Production reads `ExpansionState` to raise the settler priority
 while behind and safe sites exist. Settling fills the state when it surveys the map.
 
 `ExpansionLog` is a turn handler that writes one line a turn for live checking. It runs first in
@@ -11,7 +12,6 @@ and cost no game call. Site figures are therefore from the last survey, at most 
 """
 
 import logging
-import math
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -19,17 +19,63 @@ from civ6_ai.state import read_cities
 
 log = logging.getLogger(__name__)
 
-TARGET_CITIES = 6
-TARGET_TURN = 150
+# Where the schedule comes from (issue 316): a strong human on the same map held 2 cities at turn
+# 28, 3 at 48, 4 at 60, 9 at 100 and 15 at 140. The old straight line to 6 by turn 150 expected only
+# 2 cities at turn 58, so the bot was never "behind" while it was far behind a human. These points
+# sit well under the human's late numbers (the bot defends and settles more carefully) but ahead of
+# the CivBench medians at turn 100 (4.0 to 4.6 cities). Each point is (turn, cities held by then).
+# Between points the expectation steps: it holds the earlier value until the next turn is reached.
+SCHEDULE: tuple[tuple[int, int], ...] = (
+    (0, 1),
+    (25, 2),
+    (45, 3),
+    (60, 4),
+    (90, 6),
+    (120, 8),
+    (150, 9),
+)
+# The long-run ceiling on cities (and the default `target_cities`). The policy document can lower
+# or raise it. Settlers stop here whatever the schedule says.
+TARGET_CITIES = 12
 STALE_TURNS = 10  # A survey older than this says nothing about sites.
 SETTLER = "UNIT_SETTLER"
 
 
-def expected_cities(turn: int, target: int = TARGET_CITIES, by_turn: int = TARGET_TURN) -> int:
-    """Cities we should hold by `turn`: one at the start, rising in a line to `target`."""
-    if turn >= by_turn:
-        return target
-    return min(target, 1 + math.floor((target - 1) * max(turn, 0) / by_turn))
+def expected_cities(
+    turn: int,
+    ceiling: int = TARGET_CITIES,
+    schedule: tuple[tuple[int, int], ...] = SCHEDULE,
+) -> int:
+    """Cities we should hold by `turn`: the last schedule point reached, never above `ceiling`.
+
+    Past the last point the figure stays there; the ceiling only ever lowers it.
+    """
+    expected = 1
+    for from_turn, cities in schedule:
+        if turn >= from_turn:
+            expected = cities
+    return max(1, min(ceiling, expected))
+
+
+def settler_cap(
+    turn: int,
+    cities: int,
+    sites_ok: bool,
+    ceiling: int = TARGET_CITIES,
+    schedule: tuple[tuple[int, int], ...] = SCHEDULE,
+) -> int:
+    """Most cities (held plus settlers in flight) before a settler stops being built.
+
+    The schedule plus one lets the bot run a city ahead of it. While a safe site is known the cap
+    also stays one above the cities held, so the schedule never stops a bot that is finding room
+    (the old fixed 6 did, at turn 150 and beyond). With no safe site only the schedule's cap
+    applies. The ceiling bounds both. This only raises how many settlers may be built; safety
+    (threat, sites, escorts) is checked elsewhere and is not relaxed by it.
+    """
+    cap = expected_cities(turn, ceiling, schedule) + 1
+    if sites_ok:
+        cap = max(cap, cities + 1)
+    return min(ceiling, cap)
 
 
 @dataclass
@@ -60,13 +106,12 @@ def expansion_line(
     settlers_building: int,
     state: ExpansionState,
     target: int = TARGET_CITIES,
-    by_turn: int = TARGET_TURN,
 ) -> str:
-    expected = expected_cities(turn, target, by_turn)
+    expected = expected_cities(turn, target)
     best = "unknown" if state.best_site_score is None else f"{state.best_site_score:.0f}"
     age = "none" if state.survey_turn is None else str(turn - state.survey_turn)
     return (
-        f"expansion: turn={turn} cities={cities} target={target}@{by_turn} "
+        f"expansion: turn={turn} cities={cities} ceiling={target} "
         f"expected={expected} behind={max(0, expected - cities)} "
         f"settlers_building={settlers_building} settlers_map={state.settlers_on_map} "
         f"safe_sites={state.safe_sites} best_site={best} survey_age={age}"

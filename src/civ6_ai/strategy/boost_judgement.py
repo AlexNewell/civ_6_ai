@@ -238,12 +238,14 @@ def _target_name(target: str) -> str:
 def _improvement_reach(
     spec: BoostSpec, state: BoostState, signals: PlanSignals, settings: JudgementSettings
 ) -> Reach:
+    # A plain "Mine" boost also counts the resource mines, which are kept under their own keys.
+    keys = (spec.target, *RESOURCE_MINES.values()) if spec.target == "MINE" else (spec.target,)
     if spec.on_resource:
         if state.resource_improvements is None:
             return _no("resource data not read")
-        have = state.resource_improvements.get(spec.target, 0)
-        jobs = signals.resource_improvement_jobs.get(spec.target, 0)
-        sites = signals.resource_improvement_sites.get(spec.target, ())
+        have = sum(state.resource_improvements.get(k, 0) for k in keys)
+        jobs = sum(signals.resource_improvement_jobs.get(k, 0) for k in keys)
+        sites = tuple(s for k in keys for s in signals.resource_improvement_sites.get(k, ()))
     elif spec.target == ANY:
         have = sum(state.improvements.values())
         jobs = sum(signals.improvement_jobs.values())
@@ -253,8 +255,6 @@ def _improvement_reach(
         jobs = signals.improvement_jobs.get(SEA_RESOURCE, 0)
         sites = signals.improvement_sites.get(SEA_RESOURCE, ())
     else:
-        # A plain "Mine" boost also counts the resource mines, which are kept under their own keys.
-        keys = (spec.target, *RESOURCE_MINES.values()) if spec.target == "MINE" else (spec.target,)
         have = sum(state.improvements.get(k, 0) for k in keys)
         jobs = sum(signals.improvement_jobs.get(k, 0) for k in keys)
         sites = tuple(s for k in keys for s in signals.improvement_sites.get(k, ()))

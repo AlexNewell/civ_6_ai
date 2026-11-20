@@ -190,9 +190,14 @@ def build_boost_state(
     districts: Counter[str] = Counter()
     buildings: Counter[str] = Counter()
     for city in cities:
+        # A district being built is already on the tile list. It is queued, not done, and a
+        # city holds one of each kind, so the kind it is building is left out of the done count.
+        building = (
+            _district_key(city.building) if (city.building or "").startswith("DISTRICT_") else None
+        )
         for district in city.districts:
             kind = _district_key(district.district_type)
-            if kind != "CITY_CENTER":
+            if kind != "CITY_CENTER" and kind != building:
                 districts[kind] += 1
         for building in city.buildings:
             buildings[building.removeprefix("BUILDING_")] += 1

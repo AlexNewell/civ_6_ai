@@ -749,3 +749,19 @@ def test_one_nudge_picks_one_job_not_every_job_that_reads_the_same():
     jobs = [job(x=10, y=11), job(x=12, y=11), job(x=13, y=11)]
     policy = builder_with(True, [nudge(site="the stone near Rome")])
     assert len(policy._nudged_jobs(jobs, 3)) == 1
+
+
+def test_a_district_being_built_is_not_counted_as_done():
+    building = city(districts=["DISTRICT_CAMPUS@2,1"], currently_building="DISTRICT_CAMPUS")
+    done = city(city_id=2, districts=["DISTRICT_CAMPUS@4,1"], currently_building="UNIT_SLINGER")
+    state = build_state([building, done])
+    assert state.districts.get("CAMPUS") == 1
+    seowon = city(districts=["DISTRICT_SEOWON@2,1"], currently_building="DISTRICT_SEOWON")
+    assert "CAMPUS" not in build_state([seowon]).districts
+
+
+def test_a_resource_mine_job_is_seen_by_the_mine_a_resource_boost():
+    option = ResearchOption("T", "Wheel", 60, 0, 12, False, "Mine a resource.", (), "")
+    state = BoostState(turn=20, resource_improvements={})
+    signals = PlanSignals(resource_improvement_jobs={"IRON_MINE": 1})
+    assert judge_boosts([option], state, signals)[0].decision is Decision.DELAY

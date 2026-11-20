@@ -1568,3 +1568,80 @@ def test_a_zero_scored_settler_is_never_started_as_the_last_item():
         choose_for_city(game, c, [option("UNIT", "UNIT_SETTLER", 5)], ctx, ProductionWeights())
     )
     assert picked is None and game.set_calls == []
+
+
+# --- Early Holy Site (issue 300) ----------------------------------------------------------------
+
+HOLY_SITE = option("DISTRICT", "DISTRICT_HOLY_SITE", 11, 54)
+FAITH_READY = ProductionContext(
+    turn=15, num_cities=1, pantheon=False, holy_site_adjacency=2, recon=1, army=2
+)
+
+
+def capital(**changes):
+    return city(buildings=["PALACE"], **changes)
+
+
+def holy_score(city_, ctx):
+    return score(HOLY_SITE, city_, ctx, ProductionWeights())
+
+
+def test_early_holy_site_beats_a_monument_and_the_army_floor_but_not_a_settler():
+    site = holy_score(capital(), FAITH_READY)
+    monument = score(
+        option("BUILDING", "BUILDING_MONUMENT", 6, 30), capital(), FAITH_READY, ProductionWeights()
+    )
+    settler = score(
+        option("UNIT", "UNIT_SETTLER", 6, 30),
+        capital(population=3),
+        FAITH_READY,
+        ProductionWeights(),
+    )
+    assert site > holy_score(capital(), replace(FAITH_READY, holy_site_adjacency=1))
+    assert site > monument
+    assert site < settler
+
+
+@pytest.mark.parametrize(
+    "ctx_changes",
+    [
+        {"holy_site_adjacency": 1},
+        {"holy_site_adjacency": 0},
+        {"pantheon": True},
+        {"districts": frozenset({"HOLY_SITE"})},
+    ],
+)
+def test_no_early_holy_site_bonus_outside_its_conditions(ctx_changes):
+    plain = holy_score(capital(), replace(FAITH_READY, pantheon=True, holy_site_adjacency=0))
+    assert holy_score(capital(), replace(FAITH_READY, **ctx_changes)) == plain
+
+
+def test_no_early_holy_site_bonus_outside_the_capital():
+    plain = holy_score(city(buildings=[]), replace(FAITH_READY, pantheon=True))
+    assert holy_score(city(buildings=[]), FAITH_READY) == plain
+
+
+def test_the_handler_reads_the_capital_adjacency_and_stops_once_the_pantheon_exists():
+    class Game(ScriptedGame):
+        founded = False
+        advisor_calls = 0
+
+        async def get_pantheon_status(self):
+            return replace(fx.pantheon(), has_pantheon=self.founded)
+
+        async def get_district_advisor(self, city_id, district_type):
+            self.advisor_calls += 1
+            return self.districts
+
+    policy = CityProductionPolicy()
+    game = Game(cities=idle_cities())
+    holy = [HOLY_SITE]
+    capital_city = build_city(fx.city_info(buildings=["PALACE"]), (), set())
+    ctx = run(policy._with_faith_site(game, capital_city, holy, ProductionContext(1, 1)))
+    assert ctx.holy_site_adjacency == 3 and not ctx.pantheon
+    game.founded = True
+    ctx = run(policy._with_faith_site(game, capital_city, holy, ProductionContext(1, 1)))
+    assert ctx.pantheon and ctx.holy_site_adjacency == 0
+    calls = game.advisor_calls
+    run(policy._with_faith_site(game, capital_city, holy, ProductionContext(1, 1)))
+    assert game.advisor_calls == calls

@@ -50,6 +50,10 @@ class ScriptedGame(fx.FakeGame):
         self.actions: list[tuple] = []
         self.civics = 3
         self.can_appoint = True
+        self.has_pantheon = False
+
+    async def get_pantheon_status(self):
+        return replace(fx.pantheon(), has_pantheon=self.has_pantheon)
 
     async def get_policies(self):
         return lq.GovernmentStatus(
@@ -256,12 +260,77 @@ def test_fills_each_empty_slot_with_the_best_fitting_card():
             info("POLICY_AGOGE", "SLOT_MILITARY"),
         ],
     )
+    game.has_pantheon = True
     run(GovernmentPolicy().run(game))
     assert [s.current_policy for s in game.slots] == [
         "POLICY_DISCIPLINE",
         "POLICY_URBAN_PLANNING",
         "POLICY_AGOGE",
     ]
+
+
+# --- God King until the pantheon (issue 300) ----------------------------------------------------
+
+ECONOMIC_CARDS = [
+    info("POLICY_URBAN_PLANNING", "SLOT_ECONOMIC"),
+    info("POLICY_GOD_KING", "SLOT_ECONOMIC"),
+    info("POLICY_LAND_SURVEYORS", "SLOT_ECONOMIC"),
+]
+
+
+def test_god_king_wins_the_economic_slot_before_the_pantheon():
+    game = ScriptedGame(slots=[slot(0, "SLOT_ECONOMIC")], cards=ECONOMIC_CARDS)
+    run(GovernmentPolicy().run(game))
+    assert game.slots[0].current_policy == "POLICY_GOD_KING"
+
+
+def test_urban_planning_wins_the_economic_slot_after_the_pantheon():
+    game = ScriptedGame(slots=[slot(0, "SLOT_ECONOMIC")], cards=ECONOMIC_CARDS)
+    game.has_pantheon = True
+    run(GovernmentPolicy().run(game))
+    assert game.slots[0].current_policy == "POLICY_URBAN_PLANNING"
+
+
+def test_god_king_is_kept_while_no_pantheon_exists():
+    game = ScriptedGame(slots=[slot(0, "SLOT_ECONOMIC", "POLICY_GOD_KING")], cards=ECONOMIC_CARDS)
+    policy = GovernmentPolicy()
+    run(policy.run(game))
+    run(policy.run(game))
+    assert not game.actions
+
+
+def test_god_king_is_swapped_for_the_best_card_once_the_pantheon_exists():
+    game = ScriptedGame(slots=[slot(0, "SLOT_ECONOMIC", "POLICY_GOD_KING")], cards=ECONOMIC_CARDS)
+    policy = GovernmentPolicy()
+    run(policy.run(game))
+    game.has_pantheon = True
+    run(policy.run(game))
+    assert game.actions == [("policies", {0: "POLICY_URBAN_PLANNING"})]
+    run(policy.run(game))
+    assert len(game.actions) == 1  # God King is gone, so nothing more to swap.
+
+
+def test_a_refused_swap_is_tried_again_only_after_another_civic():
+    game = ScriptedGame(slots=[slot(0, "SLOT_ECONOMIC", "POLICY_GOD_KING")], cards=ECONOMIC_CARDS)
+    game.has_pantheon = True
+    game.refuse["POLICY_URBAN_PLANNING"] = "ERR:NOT_ALLOWED"
+    policy = GovernmentPolicy()
+    run(policy.run(game))
+    run(policy.run(game))
+    assert len(game.actions) == 1
+    game.civics += 1
+    run(policy.run(game))
+    assert len(game.actions) == 2
+
+
+def test_god_king_stays_when_no_card_beats_it():
+    game = ScriptedGame(
+        slots=[slot(0, "SLOT_ECONOMIC", "POLICY_GOD_KING")],
+        cards=[info("POLICY_GOD_KING", "SLOT_ECONOMIC"), info("POLICY_FOO", "SLOT_ECONOMIC")],
+    )
+    game.has_pantheon = True
+    run(GovernmentPolicy().run(game))
+    assert not game.actions
 
 
 def test_wildcard_slot_does_not_take_the_card_a_fixed_slot_needs():

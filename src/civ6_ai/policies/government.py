@@ -12,7 +12,11 @@ Three jobs, each deterministic. The same game state and the same weights give th
   so one refused card strands nothing. A card the game accepted but that was gone again the next
   turn is not set a third time in the same slot (Run 5 set one pair 81 times, a game call each).
   Slots of a fixed type are filled before wildcard slots,
-  so a wildcard slot can't take the card a fixed slot needed. A card in a slot is never swapped.
+  so a wildcard slot can't take the card a fixed slot needed. A card in a slot is never swapped,
+  with one exception (issue 300): until a pantheon is founded God King outranks every other card
+  (`god_king_priority`), for the faith to found it early; once it is founded, God King is
+  replaced in its slot by the best card that fits, once per completed civic (the game accepts
+  a change then, and a refusal is not repeated).
 - Governors: every point is spent, appointing a new governor first and promoting after. A new
   governor is placed in the best free city for its role. A placed governor never moves, because
   moving restarts the time it takes to establish.
@@ -115,6 +119,9 @@ class GovernmentWeights:
     max_government_changes: int = 8
     policy_priorities: tuple[tuple[str, float], ...] = DEFAULT_POLICY_PRIORITIES
     default_policy: float = 1.0  # For a card with no entry above.
+    # Issue 300: the human founded a pantheon on turn 18 with God King's +1 faith in the capital,
+    # the bot on turn 72. Above every other card until a pantheon exists (the highest is 3.0).
+    god_king_priority: float = 5.0
     governor_priorities: tuple[tuple[str, float], ...] = DEFAULT_GOVERNOR_PRIORITIES
     default_governor: float = 1.0
     governor_focus: tuple[tuple[str, str], ...] = DEFAULT_GOVERNOR_FOCUS
@@ -142,6 +149,7 @@ class GovernmentGame(Protocol):
     async def get_tech_civics(self) -> Any: ...
     async def get_policies(self) -> Any: ...
     async def get_governors(self) -> Any: ...
+    async def get_pantheon_status(self) -> Any: ...
     async def get_cities(self) -> Any: ...
     async def get_threat_scan(self) -> Any: ...
     async def get_diplomacy(self) -> Any: ...
@@ -185,14 +193,39 @@ def card_fits(slot: PolicySlot, card: Policy) -> bool:
     return slot.slot_type == _WILDCARD or slot.slot_type == card.slot_type
 
 
-def score_card(card: Policy, weights: GovernmentWeights) -> float:
+_GOD_KING = "POLICY_GOD_KING"
+
+
+def score_card(card: Policy, weights: GovernmentWeights, pantheon: bool = True) -> float:
+    """What the card is worth. `pantheon` False: none is founded yet, so God King leads."""
+    if not pantheon and card.policy_type == _GOD_KING:
+        return weights.god_king_priority
     return dict(weights.policy_priorities).get(_short(card.policy_type), weights.default_policy)
 
 
-def rank_cards(slot: PolicySlot, spare: list[Policy], weights: GovernmentWeights) -> list[Policy]:
+def rank_cards(
+    slot: PolicySlot, spare: list[Policy], weights: GovernmentWeights, pantheon: bool = True
+) -> list[Policy]:
     """The cards that fit the slot, best first. Ties go to the card type in alphabetical order."""
     fits = [card for card in spare if card_fits(slot, card)]
-    return sorted(fits, key=lambda card: (-score_card(card, weights), card.policy_type))
+    return sorted(fits, key=lambda card: (-score_card(card, weights, pantheon), card.policy_type))
+
+
+def god_king_swap(government: Government, weights: GovernmentWeights) -> tuple[int, Policy] | None:
+    """After the pantheon: the slot holding God King and the card that should replace it.
+
+    None when God King is not slotted or no spare card that fits scores above it.
+    """
+    held = next((s for s in government.policy_slots if s.policy == _GOD_KING), None)
+    if held is None:
+        return None
+    slotted = {s.policy for s in government.policy_slots if s.policy is not None}
+    spare = [c for c in government.unlocked_policies if c.policy_type not in slotted]
+    ranked = rank_cards(held, spare, weights)
+    current = dict(weights.policy_priorities).get("GOD_KING", weights.default_policy)
+    if ranked and score_card(ranked[0], weights) > current:
+        return held.index, ranked[0]
+    return None
 
 
 def _policies_set(result: str) -> bool:
@@ -204,7 +237,10 @@ def _policies_set(result: str) -> bool:
 
 
 async def fill_empty_slots(
-    game: GovernmentGame, weights: GovernmentWeights, sets: Counter[tuple[int, str]] | None = None
+    game: GovernmentGame,
+    weights: GovernmentWeights,
+    sets: Counter[tuple[int, str]] | None = None,
+    pantheon: bool = True,
 ) -> bool:
     """Fill every empty slot it can. True if none is left empty.
 
@@ -223,7 +259,7 @@ async def fill_empty_slots(
     empty = sorted(government.empty_policy_slots, key=lambda s: (s.slot_type == _WILDCARD, s.index))
     filled = 0
     for slot in empty:
-        ranked = rank_cards(slot, spare, weights)
+        ranked = rank_cards(slot, spare, weights, pantheon)
         fresh = [c for c in ranked if counts[(slot.index, c.policy_type)] < MAX_SETS_PER_PAIR]
         if ranked and not fresh:
             filled += 1  # Every fitting card was set enough; more calls would repeat them. This
@@ -382,6 +418,8 @@ class GovernmentPolicy:
         # Governors whose appointment the game accepted without spending the point.
         self._unappointable: set[str] = set()
         self._card_sets: Counter[tuple[int, str]] = Counter()
+        self._pantheon_found = False  # Once True it stays, so the game is asked no more.
+        self._swap_civics = -1  # Civics done at the last God King swap try; one try per civic.
         self._governor_assigns: Counter[tuple[str, int]] = Counter()
 
     async def change_government(self, game: GovernmentGame) -> bool:
@@ -423,11 +461,45 @@ class GovernmentPolicy:
                 break
         return False
 
+    async def _has_pantheon(self, game: GovernmentGame) -> bool:
+        if not self._pantheon_found:
+            self._pantheon_found = bool((await game.get_pantheon_status()).has_pantheon)
+        return self._pantheon_found
+
+    async def swap_god_king(self, game: GovernmentGame) -> bool:
+        """Once the pantheon is founded, replace God King with the best other card.
+
+        Tried once per completed civic, because the game takes a swap then. True when nothing is
+        left to do (no God King, or it was replaced), so a refusal reads as unfinished.
+        """
+        if not await self._has_pantheon(game):
+            return True
+        government = await read_government(game)
+        swap = god_king_swap(government, self.weights)
+        if swap is None:
+            return True
+        civics = (await read_research(game)).civics_done
+        if civics == self._swap_civics:
+            return True  # Tried at this civic count already.
+        self._swap_civics = civics
+        index, card = swap
+        result = await game.set_policies({index: card.policy_type})
+        if _policies_set(result):
+            log.info("Pantheon founded: slot %s swaps God King for %s", index, card.policy_type)
+            return True
+        log.warning("The game refused %s in place of God King: %s", card.policy_type, result)
+        return False
+
+    async def fill(self, game: GovernmentGame) -> bool:
+        pantheon = await self._has_pantheon(game)
+        return await fill_empty_slots(game, self.weights, self._card_sets, pantheon)
+
     async def run(self, game: GovernmentGame) -> None:
         failures: list[str] = []
         changed = False
         steps: list[tuple[str, Callable[[], Awaitable[bool]]]] = [
-            ("policy cards", lambda: fill_empty_slots(game, self.weights, self._card_sets)),
+            ("god king swap", lambda: self.swap_god_king(game)),
+            ("policy cards", lambda: self.fill(game)),
             (
                 "governor points",
                 lambda: spend_governor_points(game, self.weights, self._unappointable),
@@ -445,7 +517,7 @@ class GovernmentPolicy:
             log.exception("Changing government failed")
             failures.append("government")
         if changed:
-            steps = steps[1:]  # The slots still show the old government until next turn.
+            steps = steps[2:]  # The slots still show the old government until next turn.
         for label, step in steps:
             try:
                 if not await step():
@@ -462,7 +534,7 @@ class GovernmentPolicy:
         """Policies for `BlockerResolver`. Use the same instance as the turn handler."""
 
         async def fill(game: Any, blocker: Blocker) -> bool:
-            return await fill_empty_slots(game, self.weights, self._card_sets)
+            return await self.fill(game)
 
         async def appoint(game: Any, blocker: Blocker) -> bool:
             return await spend_governor_points(game, self.weights, self._unappointable)

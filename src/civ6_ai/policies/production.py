@@ -153,6 +153,11 @@ class ProductionContext:
     # barbarian): melee and ranged strength. The army floor picks units by their match against it.
     hostile: float = 0.0
     hostile_ranged: float = 0.0
+    # Issue 300: the best adjacency a Holy Site could have in the capital, read from the district
+    # advisor while no pantheon is founded and no Holy Site exists; 0 when not read or none fits.
+    # `pantheon` defaults True so a context built without the read never asks for the bonus.
+    pantheon: bool = True
+    holy_site_adjacency: int = 0
     sites_ok: bool = True  # False when settling found no safe site to send a settler to.
     # Issue 283: settlers on the map that settling held this turn (no site, or no safe route and
     # no escort). While one waits, another settler could do no more than it.
@@ -358,6 +363,14 @@ _WARY_WALLS_SCORE = 12.0
 _TRAINING_BUILDINGS = frozenset({"BARRACKS", "STABLE", "ARMORY", "MILITARY_ACADEMY"})
 _WONDER_VALUE = 8.0
 _UNKNOWN_BUILDING = 1.0  # Anything not listed still helps a little, so it ranks last, not never.
+
+# Issue 300: the human founded a pantheon on turn 18 from a Holy Site on a +2 faith tile; the bot
+# founded one on turn 72. Early faith is worth more than the 4.0-weight yield says, so the first
+# Holy Site in the capital, on a tile of this adjacency or better, scores a fixed value. After
+# the turn discount (a Holy Site takes about twice as long as a Monument) it still sits above a
+# Monument (12.0) and the army floor (8 to 12), and below a ready Settler (14).
+_EARLY_HOLY_SITE_ADJACENCY = 2
+_EARLY_HOLY_SITE_SCORE = 16.0
 
 _DISTRICT_YIELDS: dict[str, tuple[float, float, float, float, float, float]] = {
     "CAMPUS": (0, 0, 0, 5.0, 0, 0),
@@ -794,6 +807,14 @@ def _district_score(
     if profile is None:
         return _UNKNOWN_BUILDING * 2.0
     value = _yield_value(profile, w)
+    if (
+        name == "HOLY_SITE"
+        and city.is_capital
+        and not ctx.pantheon
+        and "HOLY_SITE" not in ctx.districts
+        and ctx.holy_site_adjacency >= _EARLY_HOLY_SITE_ADJACENCY
+    ):
+        value = max(value, _EARLY_HOLY_SITE_SCORE)
     if name == "CAMPUS" and ctx.num_cities > 0:
         behind = max(0.0, 1.0 - ctx.science_districts / ctx.num_cities)
         value += _SCIENCE_CATCHUP * behind * w.science
@@ -1324,6 +1345,7 @@ class CityProductionPolicy:
             emit=self._emit
         )  # Chained tile buys. Its `book` is the gold policy's saving list.
         self.expansion = expansion if expansion is not None else ExpansionState()
+        self._pantheon_found = False  # Issue 300: once True the Holy Site bonus is never read.
 
     async def run(self, game: ProductionGame) -> None:
         unfinished = await self.assign(game)
@@ -1467,11 +1489,12 @@ class CityProductionPolicy:
         unfinished = []
         for city in sorted(idle, key=lambda c: (not under_threat(c, context), c.city_id)):
             options = await _read_production(game, city.city_id)
+            city_context = await self._with_faith_site(game, city, options, context)
             picked = await choose_for_city(
                 game,
                 city,
                 options,
-                context,
+                city_context,
                 self.weights,
                 memory=self.refusals,
                 emit=self._emit,
@@ -1484,6 +1507,47 @@ class CityProductionPolicy:
                 context = context.after_choosing(picked.item)
                 self._note(city, f"production: chose {picked.item}")
         return unfinished
+
+    async def _with_faith_site(
+        self,
+        game: ProductionGame,
+        city: City,
+        options: list[ProductionChoice],
+        context: ProductionContext,
+    ) -> ProductionContext:
+        """Issue 300: add the capital's best Holy Site adjacency while a pantheon is still wanted.
+
+        Asked only for an idle capital that is offered a Holy Site, before any pantheon and with
+        no Holy Site built or begun; a founded pantheon is remembered, so it is read once.
+        """
+        if (
+            self._pantheon_found
+            or not city.is_capital
+            or "HOLY_SITE" in context.districts
+            or not any(
+                o.category == "DISTRICT" and _base_district(o.item) == "HOLY_SITE" for o in options
+            )
+        ):
+            return context
+        try:
+            if (await game.get_pantheon_status()).has_pantheon:
+                self._pantheon_found = True
+                return context
+            item = next(
+                o.item
+                for o in options
+                if o.category == "DISTRICT" and _base_district(o.item) == "HOLY_SITE"
+            )
+            placements = await game.get_district_advisor(city.city_id, item)
+        except ConnectionError:
+            raise
+        except Exception:
+            log.exception("Reading the Holy Site placement failed")
+            return context
+        if not isinstance(placements, list) or not placements:
+            return context
+        best = max(p.total_adjacency for p in placements)
+        return replace(context, pantheon=False, holy_site_adjacency=best)
 
     def _log_pillaged(self, cities: list[City]) -> None:
         """Log what is pillaged in each city when it changes, and each item repaired."""

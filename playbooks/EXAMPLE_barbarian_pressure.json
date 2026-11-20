@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "name": "barbarian_pressure",
+  "playbook_version": "0.0.1-example",
+  "example": true,
+  "description": "EXAMPLE, NOT SHIPPED. Shows the format on heavy barbarian pressure: watch a camp near a city, hold more army when it stays, switch to a defend posture when a city is in danger. Numbers are illustrative, not tuned. The loader skips files marked example.",
+  "trigger": {"when": {"signal": "camps_near_city", "op": ">=", "value": 1}, "hold": 2},
+  "raise_hold": 2,
+  "lower_hold": 4,
+  "min_dwell": 2,
+  "levels": [
+    {
+      "name": "watch",
+      "urgency": 1,
+      "nudges": [{"setting": "production.army_per_city", "step": 0.15, "min": 1.0, "max": 2.5}],
+      "raise_when": {"any": [
+        {"signal": "camps_near_city", "op": ">=", "value": 2},
+        {"signal": "city_danger_max", "op": ">=", "value": 20}
+      ]}
+    },
+    {
+      "name": "contain",
+      "urgency": 2,
+      "nudges": [
+        {"setting": "production.army_per_city", "step": 0.4, "min": 1.0, "max": 3.0},
+        {"setting": "production.target_cities", "step": -0.25, "min": 3, "max": 12}
+      ],
+      "raise_when": {"signal": "city_danger_max", "op": ">=", "value": 60},
+      "lower_when": {"all": [
+        {"signal": "camps_near_city", "op": "<=", "value": 1},
+        {"signal": "city_danger_max", "op": "<", "value": 10}
+      ]}
+    },
+    {
+      "name": "clear",
+      "urgency": 3,
+      "settings": {"posture": "defend"},
+      "nudges": [{"setting": "production.army_per_city", "step": 0.6, "min": 1.5, "max": 3.5}],
+      "lower_when": {"signal": "city_danger_max", "op": "<", "value": 30}
+    }
+  ],
+  "end": {"when": {"signal": "camps_near_city", "op": "==", "value": 0}, "hold": 5},
+  "outcome_signals": ["camps_near_city", "city_danger_max", "hostile_units_near"]
+}

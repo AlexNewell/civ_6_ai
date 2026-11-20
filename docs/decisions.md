@@ -79,6 +79,21 @@ Issue 2.1. `src/civ6_ai/strategy/policy_document.py` defines how strategy steers
 - An invalid document is rejected whole, with every problem listed, and the weights in force stay. Partial application was ruled out because a half-applied document is hard to reason about.
 - `PolicyDocumentHandler` (`strategy/apply.py`) is a turn-loop handler that runs right after `Monitors`. It re-reads one file when its modified time or size changes. `build_orchestrator(policy_document=path)` adds it. With no path nothing changes. The blocker resolver's fallback policies keep their defaults.
 
+## Playbooks
+
+Issue 244. `src/civ6_ai/strategy/playbook.py` and `playbook_runner.py`; the design is in [playbooks.md](playbooks.md). A playbook is a versioned JSON file: a trigger, urgency levels, raise and lower rules with a hold, and an end condition. It is off unless the runner is built with `enabled=True`, and it makes no model calls.
+
+**How playbooks combine** (`combine`, tested in `tests/test_playbooks.py`):
+
+1. The posture comes first: the base policy document (victory, posture, `target_cities`, weights) is the starting point.
+2. Each active playbook then applies its current level on top. Where two levels set the same field, the **higher urgency wins**. A tie goes to the occurrence that **started earlier** (then the playbook name, so the result is deterministic).
+3. Fields that only one level sets always apply, so non-clashing playbooks add up.
+4. **Explicit `weights` and `target_cities` in the policy document win over everything**, including nudges.
+5. Nudges (bounded relative steps) apply last, on the resolved weights. For one setting only the winning level's nudge counts, and the result is clamped to its `min` and `max`.
+6. With nothing active the result is exactly `resolve(base)`, so a quiet playbook runner changes nothing.
+
+Why: a situation that is more urgent should override a calmer one, and the earlier occurrence has already shaped the game. The document stays the one place the strategist or a person can pin a value.
+
 ## Task database
 
 Issue 2.2. `src/civ6_ai/strategy/tasks.py` turns the strategist's intentions into tracked work, with no model call.

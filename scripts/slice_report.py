@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from civ6_ai.effectiveness import load_run, run_checks
+from civ6_ai.strategy.playbook_runner import read_occurrences, summarise
 
 path = Path(sys.argv[1])
 rows = [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines()]
@@ -79,6 +80,14 @@ if bot_log.exists():
             f"camps gone {sum(o.get('camps_gone', 0) for o in offense)}, "
             f"barbarian kills {sum(o.get('kills_barb', 0) for o in offense)}"
         )
+# Playbook occurrences (issue 244), when the run had playbooks on.
+occurrences = read_occurrences(path.with_name(f"{path.stem}_playbooks.jsonl"))
+for name, row in summarise(occurrences).items():
+    mean = row["mean_turns_to_resolve"]
+    print(
+        f"  playbook {name}: {row['occurrences']} occurrences, {row['resolved']} resolved, "
+        f"mean turns to resolve {'n/a' if mean is None else f'{mean:.1f}'}, peaks {row['peaks']}"
+    )
 for c in run_checks(load_run([path])):
     if c.policy in ("offense", "boosts", "era score"):
         print(f"  {c.status:7} {c.name}: {c.figures()} {c.note[:110]}")

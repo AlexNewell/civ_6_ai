@@ -19,7 +19,9 @@ this order, until the turn's bounds or the gold run out:
    purchase logs a `valuation` line with its value, cost, ROI, the floor and its basis. When
    gold is below half of the cheapest price seen in the last three turns the lists are not read.
 3. Buy tiles, resource tiles first. A tile with no resource is bought only when it costs at most
-   half of what is left to spend.
+   half of what is left to spend. With `tile_valuation` on (issue 87) tiles are instead valued by
+   the owner's rules (`valuation.value_tile_purchase`: a yield the city lacks, an improvable
+   resource, a boost, contested land) and bought in ROI order.
 
 Reserve: `RESERVE_FLOOR` plus `RESERVE_PER_CITY` for each city, lowered by `INCOME_RELIEF` per
 gold of income (never below `RESERVE_MIN`), plus ten turns of any deficit, capped at
@@ -292,7 +294,13 @@ class GoldPolicy:
         plans: PlanBook | None = None,
         builder_demand: Any = None,
         expansion: Any = None,
+        tile_valuation: bool = False,
     ) -> None:
+        # Issue 87: value tile buys by the owner's rules (`valuation.value_tile_purchase`) and
+        # buy them in ROI order. Off by default: tiles then follow the old resource-first order.
+        self.tile_valuation = tile_valuation
+        self.contested_tiles: set[tuple[int, int]] = set()  # Set by whatever sees rival borders.
+        self.boost_values: dict[tuple[int, int], float] = {}  # Boost work (issue 322) fills this.
         self.builder_demand = builder_demand  # `builder.BuilderDemand`, or None.
         self.expansion = expansion  # `expansion.ExpansionState`, or None (issue 284).
         self._stack = StackBlocks()  # Purchases a unit on the city tile blocks.
@@ -1051,7 +1059,98 @@ class GoldPolicy:
             ):
                 notes.append(f"saving for the {target.item} tile in {target.city_name}")
 
+    async def _tiles_by_value(
+        self, game: GoldGame, turn: _Turn, cities: list[City], notes: list[str]
+    ) -> None:
+        """Tile buys by the owner's rules (issue 87): one more candidate list, bought by ROI.
+
+        Runs after upgrades, planned tiles and purchases, from the budget they left (the reserve
+        and any threatened city's defence were settled before), and obeys the saving target.
+        """
+        weights = self.weights
+        candidates: list[tuple[tuple, City, Any, valuation.Priced, valuation.TileValue]] = []
+        for city in cities:
+            if turn.refused_out:
+                break
+            try:
+                tiles = await game.get_purchasable_tiles(city.city_id)
+            except ConnectionError:
+                raise
+            except Exception:
+                log.exception("Tile read failed for %s", city.name)
+                continue
+            if not isinstance(tiles, list):
+                continue
+            for tile in tiles:
+                if tile.cost <= 0:
+                    continue
+                spot = (tile.x, tile.y)
+                facts = valuation.TileFacts(
+                    tile.x,
+                    tile.y,
+                    tile.cost,
+                    tile.terrain,
+                    tile.resource,
+                    tile.resource_class,
+                    contested=spot in self.contested_tiles,
+                    boost_value=self.boost_values.get(spot, 0.0),
+                )
+                worth = valuation.value_tile_purchase(facts, city, weights)
+                if worth is None:
+                    continue
+                label = f"{city.name} tile ({tile.x},{tile.y})"
+                priced = valuation.price(label, tile.cost, worth.valuation, turn.now, turn.last)
+                candidates.append(
+                    ((worth.priority, -priced.roi, tile.cost), city, tile, priced, worth)
+                )
+        bought_cities: set[int] = set()
+        for _, city, tile, priced, worth in sorted(candidates, key=lambda c: c[0]):
+            if turn.tiles >= MAX_TILES or turn.refused_out or turn.budget <= 0:
+                break
+            if city.city_id in bought_cities:
+                continue
+            audit = f"value={priced.value:.0f} cost={priced.cost} roi={priced.roi:.2f}"
+            bar = valuation.floor(turn.budget, turn.income)
+            if priced.cost > turn.budget:
+                log.info(
+                    "tile_buy %s skipped: costs %d, %d to spend (%s)",
+                    priced.label,
+                    priced.cost,
+                    turn.budget,
+                    worth.reason,
+                )
+                continue
+            if priced.roi < bar and worth.priority != 0:
+                log.info(
+                    "tile_buy %s skipped: roi %.2f < floor %.2f (%s)",
+                    priced.label,
+                    priced.roi,
+                    bar,
+                    worth.reason,
+                )
+                continue
+            if turn.target is not None and priced.cost > turn.slack:
+                log.info("tile_buy %s waits for %s", priced.label, turn.target)
+                continue
+            result = await self._call(game.purchase_tile(city.city_id, tile.x, tile.y))
+            if _ok(result, "TILE_PURCHASED"):
+                turn.spend(priced.cost)
+                turn.tiles += 1
+                bought_cities.add(city.city_id)
+                log.info("tile_buy %s bought %s: %s", priced.label, audit, worth.reason)
+            else:
+                turn.refusals += 1
+                log.info("tile_buy %s refused: %s", priced.label, str(result)[:120])
+        if turn.tiles == 0:
+            notes.append("no tile worth buying by the tile rules")
+
     async def _tiles(self, game: GoldGame, turn: _Turn, cities: list[City], notes: list[str]):
+        if self.tile_valuation:
+            if turn.target is not None and turn.slack <= 0:
+                notes.append(f"tiles wait while saving toward {turn.target}")
+                return
+            await self._tiles_by_value(game, turn, cities, notes)
+            return
         for city in cities:
             if turn.tiles >= MAX_TILES or turn.refused_out or turn.budget <= 0:
                 return

@@ -303,3 +303,121 @@ def pick_target(
         if best is None or key > (best[0], -best[1].cost):
             best = (later.roi, later, wait)
     return None if best is None else (best[1], best[2])
+
+
+# Tile purchases (issue 87). The owner's rules from the first observed human game: buy a tile that
+# supplies a yield the city lacks (food for a city without a good food source, with or without a
+# resource), buy a strategic or luxury resource tile that can be improved and yields well, buy a
+# tile that completes a boost (a per-tile value handed in by the boost work, issue 322), and
+# sometimes buy to secure valuable land before a rival or a city-state's borders take it.
+# The purchasable-tile read gives terrain, resource and class but no yields, so the yields are an
+# estimate from the terrain name (`_TERRAIN_YIELDS`) and the resource class.
+TILE_FOOD_LOW = 2.0  # A city making less food surplus than this lacks a food source.
+TILE_PRODUCTION_LOW = 3.0  # ... and one making less production lacks a production source.
+TILE_LACK_MULT = 2.0  # A yield the city lacks counts this many times over.
+TILE_PLAIN_SHARE = (
+    0.25  # A tile giving only yields the city has is worth this share (it has others).
+)
+TILE_FOOD_STRONG = 2  # Food a tile needs to fix a lack (a 1 food tile does not).
+TILE_RESOURCE_BONUS = {"bonus": (1, 0, 0), "strategic": (0, 1, 0), "luxury": (0, 0, 2)}
+TILE_AMENITY_RATE = 1.5  # A luxury also adds an amenity to the empire, per turn.
+TILE_STRATEGIC_RATE = 1.0  # A strategic's own value per turn once improved (units, upgrades).
+TILE_CONTESTED_RATE = 0.4  # Per turn for land a rival or city-state border would take; lower
+# than the yield rules on purpose: owner says this is worth it only sometimes.
+TILE_CONTESTED_MIN = 1.0  # Weighted base yield a contested tile needs to count as valuable.
+
+# (food, production, gold) by terrain name fragment; the first fragment found wins.
+_TERRAIN_YIELDS = (
+    ("MOUNTAIN", (0, 0, 0)),
+    ("SNOW", (0, 0, 0)),
+    ("DESERT", (0, 0, 0)),
+    ("OCEAN", (1, 0, 0)),
+    ("COAST", (1, 0, 1)),
+    ("TUNDRA", (1, 0, 0)),
+    ("GRASS_HILLS", (2, 1, 0)),
+    ("PLAINS_HILLS", (1, 2, 0)),
+    ("HILLS", (0, 2, 0)),
+    ("GRASS", (2, 0, 0)),
+    ("PLAINS", (1, 1, 0)),
+)
+
+
+@dataclass(frozen=True)
+class TileFacts:
+    """A purchasable tile as the valuation sees it. `improvable` is whether the resource on it
+    can be improved now (a tech or builder gap makes it false); `contested` is set when a rival
+    or a city-state border could take it; `boost_value` is the one-off value of a boost it
+    completes (issue 322), zero until that work supplies it."""
+
+    x: int
+    y: int
+    cost: int
+    terrain: str = ""
+    resource: str | None = None
+    resource_class: str | None = None
+    improvable: bool = True
+    contested: bool = False
+    boost_value: float = 0.0
+
+
+@dataclass(frozen=True)
+class TileValue:
+    """What a tile is worth: a valuation comparable with `value_option`'s, a priority (lower is
+    better: 0 boost, 1 lacking yield, 2 resource, 3 contested, 4 other) and the reason."""
+
+    valuation: Valuation
+    priority: int
+    reason: str
+
+
+def estimate_tile_yields(terrain: str) -> tuple[int, int, int]:
+    """(food, production, gold) guessed from the terrain name; (0, 0, 0) when unknown."""
+    text = (terrain or "").upper()
+    for fragment, yields in _TERRAIN_YIELDS:
+        if fragment in text:
+            return yields
+    return (0, 0, 0)
+
+
+def value_tile_purchase(
+    tile: TileFacts, city: City, weights: ProductionWeights
+) -> TileValue | None:
+    """What buying this tile for `city` is worth per turn (see the module's tile rules), or None."""
+    food, prod, gold = estimate_tile_yields(tile.terrain)
+    reasons: list[str] = []
+    priority = 4  # No rule applies yet.
+    weighted = food * weights.food + prod * weights.production + gold * weights.gold
+    lacks_food = city.food_surplus < TILE_FOOD_LOW and food >= TILE_FOOD_STRONG
+    lacks_prod = city.production < TILE_PRODUCTION_LOW and prod >= 1
+    rate = weighted * TILE_PLAIN_SHARE
+    if lacks_food:
+        rate += food * weights.food * (TILE_LACK_MULT - TILE_PLAIN_SHARE)
+        reasons.append(f"city lacks food (surplus {city.food_surplus:.1f}), tile gives {food}")
+        priority = 1
+    if lacks_prod:
+        rate += prod * weights.production * (TILE_LACK_MULT - TILE_PLAIN_SHARE)
+        reasons.append(f"city lacks production ({city.production:.1f}), tile gives {prod}")
+        priority = min(priority, 1)
+    cls = tile.resource_class
+    if tile.resource and cls in TILE_RESOURCE_BONUS and tile.improvable:
+        bf, bp, bg = TILE_RESOURCE_BONUS[cls]
+        gain = bf * weights.food + bp * weights.production + bg * weights.gold
+        gain += {"luxury": TILE_AMENITY_RATE, "strategic": TILE_STRATEGIC_RATE}.get(cls, 0.0)
+        # A resource tile is worked at once, so it counts in full, not at the plain share.
+        rate += weighted * (1.0 - TILE_PLAIN_SHARE) + gain
+        reasons.append(f"{cls} resource {tile.resource} can be improved")
+        priority = min(priority, 2)
+    elif tile.resource:
+        reasons.append(f"{cls or 'resource'} {tile.resource} cannot be improved yet")
+    if tile.contested and (tile.resource or weighted >= TILE_CONTESTED_MIN):
+        rate += TILE_CONTESTED_RATE
+        reasons.append("contested: a rival or city-state border could take it")
+        priority = min(priority, 3)
+    fixed = max(tile.boost_value, 0.0)
+    if fixed > 0:
+        reasons.append(f"completes a boost worth {fixed:.0f}")
+        priority = 0
+    if priority == 4 or (rate <= 0 and fixed <= 0):
+        return None  # None of the owner's rules applies: a plain tile is not worth gold.
+    reason = "; ".join(reasons)
+    return TileValue(Valuation(rate, fixed, f"tile: {reason}"), priority, reason)

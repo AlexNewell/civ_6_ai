@@ -2110,3 +2110,47 @@ def test_backing_off_one_route_leaves_another_site_open():
     run(policy, game)
     assert game.actions
     assert all("fled" not in d.reason for d in policy.decisions)
+
+
+# ----- city-states exert no loyalty pressure (issue 314) -----
+
+# STD_T1_04 at turn 30: our capital (67,22) pop 4 and one revealed city, the city-state capital
+# Jerusalem (63,11) pop 5. The human founded Ostia in the north (near (67,11)) and Aquileia
+# (about (65,18)); both held 100 loyalty at +21 to +24 a turn.
+STD04_OWN = [(67, 22, 4, True)]
+STD04_CITY_STATE = [(63, 11, 5, True)]
+STD04_SITES = {"Ostia": (67, 11), "Aquileia": (65, 18)}
+
+
+def test_std_t1_04_city_state_counted_as_a_rival_refused_every_site():
+    """The old model: the city-state as a rival capital made Ostia (4 tiles off it) flip."""
+    s = SettlingSettings(map_width=74)
+    assert (
+        safe_loyalty_rate(*STD04_SITES["Ostia"], STD04_OWN, STD04_CITY_STATE, s)
+        < s.loyalty_reject_safe
+    )
+
+
+def test_std_t1_04_sites_hold_with_no_city_state_pressure():
+    s = SettlingSettings(map_width=74)
+    for site in STD04_SITES.values():
+        assert safe_loyalty_rate(*site, STD04_OWN, [], s) == pytest.approx(
+            s.loyalty_rate_cap - s.loyalty_new_city_drag
+        )  # +17, near the +21 to +24 the human saw.
+
+
+def test_known_read_flags_city_state_cities_and_borders():
+    from civ6_ai.state.reader import parse_known_cities
+
+    known = parse_known_cities("KCITY|8|63|11|5|1|1|1\nBORDER|14|72,10|1\nBORDER|5|1,1|0\nKDONE")
+    assert known.cities[0].minor and known.minors == {8, 14}
+
+
+def test_city_state_cities_and_borders_do_not_press_but_still_space():
+    output = "KCITY|8|63|11|5|1|1|1\nBORDER|14|70,5;71,5|1\nVISIBLE|\nKDONE"
+    policy = SettlingPolicy()
+    run(policy, lua_game(output))
+    assert (63, 11, 5, True) in policy._rival_cities  # Kept for spacing.
+    assert (63, 11, 5, True) not in policy._pressure_sources()  # No pressure.
+    assert all(c[0] != 63 for c in policy._pressure_sources())
+    assert policy._phantoms == []

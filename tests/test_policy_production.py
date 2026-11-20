@@ -1612,16 +1612,17 @@ def test_the_army_floor_still_wins_without_growth_to_build():
 
 
 def test_after_turn_60_the_army_floor_is_not_held_back():
+    from civ6_ai.policies.production import _growth_before_garrison
+
     c = city(population=3)
-    late = replace(GARRISONED_EARLY, turn=90, army=0)
+    assert _growth_before_garrison(c, GARRISONED_EARLY)
+    late = replace(GARRISONED_EARLY, turn=90)
+    assert not _growth_before_garrison(c, late)
+    # Late, the ranking is the plain score order: nothing is pulled down under a district.
     ranked = rank_production(c, GROWTH_MENU, late)
-    warrior = next(o for o in ranked if o.item == "UNIT_WARRIOR")
-    assert (
-        score(warrior, c, late, ProductionWeights())
-        >= max(score(o, c, late, ProductionWeights()) for o in ranked if o.category == "DISTRICT")
-        - 0.01
-        or ranked[0].item == "UNIT_WARRIOR"
-    )
+    weights = ProductionWeights()
+    scores = [score(o, c, late, weights) for o in ranked]
+    assert scores == sorted(scores, reverse=True)
 
 
 def test_a_threatened_city_still_builds_military_over_a_district():

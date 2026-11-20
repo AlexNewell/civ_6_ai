@@ -2706,3 +2706,42 @@ def test_finishing_can_be_turned_off():
     run(covering_policy(finish_attacker=False), game)
     assert not game.orders("attack")
     assert game.orders("fortify")
+
+
+def test_the_finishing_move_is_recorded_so_a_second_unit_does_not_take_the_same_tile():
+    game = MilitaryGame(
+        [home(), slinger(uid=2, x=10, y=11), slinger(uid=3, x=10, y=9)],
+        [barbarian(x=12, y=10, hp=22)],
+    )
+    policy = covering_policy()
+    run(policy, game)
+    stages = [m[2:] for m in game.orders("move")]
+    assert len(stages) == len(set(stages))
+
+
+def test_a_partial_finishing_move_is_recorded_where_the_unit_stands():
+    game = MilitaryGame([home(), slinger()], [barbarian(x=12, y=10, hp=22)])
+    game.replies["move"] = "MOVING_TO|11,10|from:10,11|now_at:10,11|BLOCKED"
+    policy = covering_policy()
+    run(policy, game)
+    assert not game.orders("attack")
+    assert policy._fortified.get(2) in (None, (10, 11))
+
+
+def test_a_finishing_melee_attack_is_verified_by_a_read_after_the_idle_step(caplog):
+    # The melee reply shows pre-combat health, so only the read-back says the target survived.
+    game = MilitaryGame([home(), warrior(uid=1, x=10, y=11)], [barbarian(x=12, y=10, hp=10)])
+    plain = game.attack_unit
+    survivor = [barbarian(x=12, y=10, hp=4)]
+
+    async def attack(unit_index, x, y):
+        result = await plain(unit_index, x, y)
+        game.data["threats"] = survivor
+        return result
+
+    game.attack_unit = attack
+    with caplog.at_level(logging.INFO):
+        run(covering_policy(), game)
+    assert game.orders("attack") == [("attack", 1, 12, 10)]
+    (row,) = offense_rows(caplog)
+    assert row["kills_barb"] == 0

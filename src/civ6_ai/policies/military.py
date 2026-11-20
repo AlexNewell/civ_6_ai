@@ -810,6 +810,7 @@ class MilitaryPolicy:
         await self._probe_suspect(game, t)
         await self._spare_units(game, t)
         await self._idle(game, t)
+        await self._verify_melee(game, t)  # A finishing melee attack of the idle step (issue 306).
         self._publish_defence(t)
         self._log_offense(t)
 
@@ -1539,6 +1540,7 @@ class MilitaryPolicy:
                 t.dead.discard(where)
                 t.killed.discard(where)
                 t.target_hp[where] = max(th.hp for th in left)
+        t.melee_hit.clear()  # Judged; a later melee hit this turn is judged on its own.
 
     def _defender_at(self, t: _Turn, where: tuple[int, int]) -> Threat | None:
         defenders = [d for d in t.threats if (d.x, d.y) == where and d.hostile]
@@ -2890,15 +2892,15 @@ class MilitaryPolicy:
             if not self._available(t, unit, "move"):
                 return False
             result = await self._order(t, unit, "move", game.move_unit(unit.unit_index, *stage))
-            if (
-                result is None
-                or not move_succeeded(result)
-                or self._reached(result, stage) != stage
-            ):
+            moved = result is not None and move_succeeded(result)
+            reached = self._reached(result, stage) if moved else None
+            if reached is not None and reached != self._pos(t, unit):
+                t.placed[unit.unit_id] = reached  # Even a partial move: it stands there now.
+                self._fortified.pop(unit.unit_id, None)
+            if reached != stage:
                 self._refuse(t, unit, "move")
                 self._learn_full_tile(t, result)
                 return False
-            self._fortified.pop(unit.unit_id, None)
             self._log(t, unit, "move", "stepping next to a nearly dead attacker to finish it",
                       stage, result=result)  # fmt: skip
         return await self._strike(

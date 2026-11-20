@@ -317,3 +317,25 @@ def test_no_new_request_after_an_answer_when_the_game_turn_has_moved():
     resolver = BlockerResolver({BlockerType.DIPLOMACY_SESSION: _answer})
     assert asyncio.run(ResolvingGame(game, resolver).end_turn()) == TIMED_OUT
     assert "ask again" not in game.calls
+
+
+class SwallowedRequest(HeldGame):
+    """STD_T1_04, turn 31: a popup swallowed the request. Closing it left our turn open."""
+
+    async def dismiss_popup(self):
+        if self.popup:
+            self.popup = False
+            return "Dismissed: cinematic_camera, NaturalWonderPopup"  # Nothing carries on.
+        return "No popups to dismiss."
+
+
+def test_a_turn_left_open_after_a_closed_popup_is_asked_again_once():
+    game = SwallowedRequest(popup=True)
+    assert end_turn(game) == ADVANCED
+    assert game.calls == ["end_turn", "ask again"]
+
+
+def test_no_new_request_after_a_closed_popup_while_the_turn_cannot_be_ended():
+    game = SwallowedRequest(popup=True, can_end=False)
+    assert end_turn(game) == TIMED_OUT
+    assert "ask again" not in game.calls

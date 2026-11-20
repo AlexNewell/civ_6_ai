@@ -38,6 +38,7 @@ from civ6_ai.strategy.boosts import (
     DIFFERENT,
     LAND_COMBAT,
     PANTHEON,
+    RESOURCE_MINES,
     SEA_RESOURCE,
     BoostKind,
     BoostSpec,
@@ -131,6 +132,9 @@ class PlanSignals:
 
     # Turns for the cities to grow by one population, or None when none is growing.
     growth_turns_per_pop: float | None = None
+    # The same for the biggest city alone, which a "grow a city to N" boost needs. None means
+    # not given, and the all-cities rate stands in. 0.0 means it is known to be stalled.
+    city_growth_turns_per_pop: float | None = None
     districts_queued: Mapping[str, int] = field(default_factory=dict)
     improvement_jobs: Mapping[str, int] = field(default_factory=dict)  # Builder jobs on offer.
     # Where a nudge could place one, by improvement: `QUARRY: ("the stone near Rome",)`.
@@ -159,6 +163,10 @@ class Reach:
     # True when `turns` is a fixed estimate per queued action, not read from progress. It does not
     # shrink as the action proceeds, so the slip check counts down from when it was first seen.
     static: bool = False
+    # For an improvement nudge: what to build (`QUARRY`, `ANY`, `SEA_RESOURCE`) and the site label
+    # from `PlanSignals`, so the builder can tell which of its jobs the nudge means.
+    target: str = ""
+    site: str = ""
 
 
 @dataclass(frozen=True)
@@ -191,6 +199,8 @@ class Nudge:
     action: str
     policy: str
     value: float
+    target: str = ""  # See `Reach.target`.
+    site: str = ""
 
 
 def _no(reason: str = "") -> Reach:
@@ -228,12 +238,14 @@ def _target_name(target: str) -> str:
 def _improvement_reach(
     spec: BoostSpec, state: BoostState, signals: PlanSignals, settings: JudgementSettings
 ) -> Reach:
+    # A plain "Mine" boost also counts the resource mines, which are kept under their own keys.
+    keys = (spec.target, *RESOURCE_MINES.values()) if spec.target == "MINE" else (spec.target,)
     if spec.on_resource:
         if state.resource_improvements is None:
             return _no("resource data not read")
-        have = state.resource_improvements.get(spec.target, 0)
-        jobs = signals.resource_improvement_jobs.get(spec.target, 0)
-        sites = signals.resource_improvement_sites.get(spec.target, ())
+        have = sum(state.resource_improvements.get(k, 0) for k in keys)
+        jobs = sum(signals.resource_improvement_jobs.get(k, 0) for k in keys)
+        sites = tuple(s for k in keys for s in signals.resource_improvement_sites.get(k, ()))
     elif spec.target == ANY:
         have = sum(state.improvements.values())
         jobs = sum(signals.improvement_jobs.values())
@@ -243,17 +255,20 @@ def _improvement_reach(
         jobs = signals.improvement_jobs.get(SEA_RESOURCE, 0)
         sites = signals.improvement_sites.get(SEA_RESOURCE, ())
     else:
-        have = state.improvements.get(spec.target, 0)
-        jobs = signals.improvement_jobs.get(spec.target, 0)
-        sites = signals.improvement_sites.get(spec.target, ())
+        have = sum(state.improvements.get(k, 0) for k in keys)
+        jobs = sum(signals.improvement_jobs.get(k, 0) for k in keys)
+        sites = tuple(s for k in keys for s in signals.improvement_sites.get(k, ()))
     need = spec.count - have
     action = None
     if sites:
         what = "an improvement" if spec.target == ANY else f"a {_target_name(spec.target)}"
         action = f"build {what} on {sites[0]}"
-    return _counted(
+    reach = _counted(
         need, jobs, settings.improvement_turns, settings, "a builder job", "builder", action, True
     )
+    if reach.nudge is not None:
+        reach = replace(reach, target=spec.target, site=sites[0])
+    return reach
 
 
 # Districts that are not "specialty districts" for the boosts that say so. Approximate, from the
@@ -342,6 +357,8 @@ def _reach(
         if need <= 0:
             return Reach(ReachLabel.ON_TRACK, 1, "population growth", True)
         rate = signals.growth_turns_per_pop
+        if spec.target == CITY and signals.city_growth_turns_per_pop is not None:
+            rate = signals.city_growth_turns_per_pop
         if rate is None or rate <= 0:
             return _no("no growth")
         eta = max(1, math.ceil(need * rate))
@@ -512,8 +529,32 @@ def next_history(
 def nudges(judgements: Iterable[BoostJudgement]) -> tuple[Nudge, ...]:
     """The nudge decisions, biggest saving first, as suggestions a policy could take up."""
     found = [
-        Nudge(j.item_type, j.name, j.reach.nudge or "", j.reach.policy or "", j.value)
+        Nudge(
+            j.item_type,
+            j.name,
+            j.reach.nudge or "",
+            j.reach.policy or "",
+            j.value,
+            j.reach.target,
+            j.reach.site,
+        )  # fmt: skip
         for j in judgements
         if j.decision is Decision.NUDGE
     ]
     return tuple(sorted(found, key=lambda n: (-n.value, n.item_type)))
+
+
+@dataclass
+class NudgeBoard:
+    """The latest nudges, shared between the research policy that judges and the policies that
+    carry them out. Nudges go stale: a reader takes only the ones published this turn or last."""
+
+    turn: int = -1
+    items: tuple[Nudge, ...] = ()
+
+    def publish(self, turn: int, items: Iterable[Nudge]) -> None:
+        self.turn, self.items = turn, tuple(items)
+
+    def current(self, turn: int, max_age: int = 1) -> tuple[Nudge, ...]:
+        """The nudges published at most `max_age` turns before `turn`, else none."""
+        return self.items if 0 <= turn - self.turn <= max_age else ()

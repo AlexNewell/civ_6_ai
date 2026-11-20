@@ -687,6 +687,13 @@ class MilitaryPolicy:
     decisions: list[MilitaryDecision] = field(default_factory=list)
     # Per unit, kept across turns and pruned each turn against the units that still exist.
     _resting: dict[int, tuple[int, int]] = field(default_factory=dict, init=False, repr=False)
+    # Kills made so far, for the boost judgement (#344): by the killer's unit type without its
+    # `UNIT_` prefix (`SLINGER`), plus `BARBARIAN` for barbarian units and `BARBARIAN_OUTPOST`
+    # for camps we cleared. Each tile's kill is counted once per turn.
+    kills: dict[str, int] = field(default_factory=dict, init=False, repr=False)
+    _kills_counted: set[tuple[int, tuple[int, int]]] = field(
+        default_factory=set, init=False, repr=False
+    )
     # Units sent exploring, with where each stood when last seen. One that has not moved since is
     # done (the game's explorer stops when nothing is left to find) and is free to be used again.
     _explorers: dict[int, tuple[int, int]] = field(default_factory=dict, init=False, repr=False)
@@ -1209,11 +1216,36 @@ class MilitaryPolicy:
             "map_use": {**t.map_use, "missions_released": self._released},
             "map_on": self.threat_map is not None,
         }
+        self._count_kills(t, barb_tiles)
         self._released = 0
         self._camps_gone = 0
         self._recaptured = self._captured = 0
         self._camps_ours = 0
         log.info("military_offense %s", json.dumps(line, sort_keys=True))
+
+    def _count_kills(self, t: _Turn, barb_tiles: set[tuple[int, int]]) -> None:
+        """Add this turn's kills to `kills`: the killer's type, and barbarians and camps."""
+        self._kills_counted = {k for k in self._kills_counted if k[0] == t.turn}
+        types = {u.unit_id: u.unit_type.removeprefix("UNIT_") for u in t.units}
+        for where in sorted(t.killed):
+            if (t.turn, where) in self._kills_counted:
+                continue  # Military ran twice this turn, or the tile was counted already.
+            self._kills_counted.add((t.turn, where))
+            if where in barb_tiles:
+                self.kills["BARBARIAN"] = self.kills.get("BARBARIAN", 0) + 1
+            # The last landed attack on the tile made the kill. A city strike has no unit type.
+            hits = [
+                d for d in self.decisions
+                if d.turn == t.turn and d.action == "attack" and d.target == where
+                and "refused" not in d.reason and "refused" not in d.result
+            ]  # fmt: skip
+            killer = types.get(hits[-1].unit_id) if hits else None
+            if killer:
+                self.kills[killer] = self.kills.get(killer, 0) + 1
+        if self._camps_ours:
+            self.kills["BARBARIAN_OUTPOST"] = (
+                self.kills.get("BARBARIAN_OUTPOST", 0) + self._camps_ours
+            )
 
     # ----- bookkeeping -----
 

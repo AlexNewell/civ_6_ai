@@ -84,6 +84,8 @@ from civ6_ai.policies.wars import WarPolicy
 from civ6_ai.screenshots import Screenshotter
 from civ6_ai.state.reader import IncompleteRead, check_cities_complete
 from civ6_ai.strategy.apply import PolicyDocumentHandler
+from civ6_ai.strategy.boost_inputs import BoostInputs
+from civ6_ai.strategy.boost_judgement import NudgeBoard
 from civ6_ai.strategy.tasks import TaskDB, TaskHandler
 from civ6_ai.threat_map import ThreatMapHandler
 from civ6_ai.victory_threat import VictoryThreatLog, VictoryWatch
@@ -98,8 +100,7 @@ FEATURES: dict[str, tuple[str, str]] = {
     "cap_focus": ("growth", "cap_focus"),  # Issue 215 (PR 326).
     "settler_note": ("growth", "settler_note"),  # Log-only companion of cap_focus.
     "wonder_races": ("production", "wonder_races"),  # Issue 323 (PR 327).
-    # boost_judgement (PR 343) joins once its live inputs are wired (PR 351): without them the
-    # flag changes nothing, and an A/B run would read as a null result.
+    "boost_judgement": ("research", "boost_judgement"),  # Issue 302 (PR 343), inputs in PR 351.
 }
 
 
@@ -352,7 +353,16 @@ def build_orchestrator(
         defence.map = threat_map_handler.map  # The same map decides who is short (issue 264).
     victory_watch = VictoryWatch()
     diplomacy = DiplomacyPolicy(threats=victory_watch.threat_ids)
-    research_policy = research.ResearchPolicy()
+    # The boost judgement's inputs and nudges (#344). Both are used only when
+    # `ResearchWeights.boost_judgement` is on: the provider is not called otherwise, so the extra
+    # code reads nothing. The game it reads is the shared one built below.
+    nudge_board = NudgeBoard()
+    builder = BuilderPolicy(demand=builder_demand, nudges=nudge_board.current)
+    shared_game: list[Any] = []
+    research_policy = research.ResearchPolicy(
+        boost_inputs=BoostInputs(game=lambda: shared_game[0], builder=builder, military=military),
+        nudge_board=nudge_board,
+    )
     gold = GoldPolicy(
         defence=defence,
         plans=production.planner.book,
@@ -425,7 +435,7 @@ def build_orchestrator(
         government,
         production,
         gold,
-        BuilderPolicy(demand=builder_demand),
+        builder,
         secondary,
         FaithPolicy(defence=defence, builder_demand=builder_demand),
         DefenceReport(defence),
@@ -436,6 +446,7 @@ def build_orchestrator(
     ]
     timer = CallTimer(game)  # Under SharedReads, so it times real calls and not remembered ones.
     shared = ResolvingGame(SharedReads(timer), resolver, defeat_check=partial(is_defeated, game))
+    shared_game.append(shared)
     return Orchestrator(
         shared,
         handlers,

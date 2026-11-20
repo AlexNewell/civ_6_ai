@@ -19,7 +19,7 @@ import json
 import logging
 import math
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Protocol
 
@@ -28,6 +28,8 @@ from civ6_ai.policies.game_data import REPLACES
 from civ6_ai.state import BuilderJob, GameReads, Threat, Unit, read_builder_jobs, read_threats
 from civ6_ai.state import read_units as _read_units
 from civ6_ai.state.reader import STANDARD_MAP_WIDTH, hex_distance
+from civ6_ai.strategy.boost_inputs import job_key, job_matches
+from civ6_ai.strategy.boost_judgement import Nudge
 
 log = logging.getLogger(__name__)
 
@@ -73,6 +75,10 @@ class BuilderWeights:
     bonus: float = 10.0
     turn_cost: float = 4.0  # Score given up for each turn spent walking to the job.
     sticky: float = 15.0  # A builder already on a job is kept there unless something beats this.
+    # Added to a job a boost nudge asks for (#344). Flat, never summed over several nudges, and
+    # sized so a plain job (20) rises to 60, level with a bonus-resource job (60) but under any
+    # luxury (90), strategic resource (140) or repair (135) job: a boost can't starve the economy.
+    nudge_bonus: float = 40.0
 
 
 @dataclass(frozen=True)
@@ -90,6 +96,9 @@ class BuilderSettings:
     max_work_turns: int = 15  # Turns spent on one job before it is given up.
     max_hold_turns: int = 5  # Turns an idle builder keeps its claim while the job is unsafe.
     map_width: int | None = STANDARD_MAP_WIDTH
+    # Take up the research policy's boost nudges (#344). Off, so nothing changes until a run
+    # shows it pays. Needs `ResearchWeights.boost_judgement` on, which is what makes nudges.
+    use_boost_nudges: bool = False
 
 
 def score_job(job: BuilderJob, distance: int, max_moves: float, weights: BuilderWeights) -> float:
@@ -150,6 +159,19 @@ class BuilderPolicy:
     name: str = "builder"
     demand: BuilderDemand = field(default_factory=BuilderDemand)
     decisions: list[BuilderDecision] = field(default_factory=list)
+    # Where the boost nudges come from (a `NudgeBoard.current`-style callable taking the turn).
+    # With none, or `use_boost_nudges` off, no job gets the bonus.
+    nudges: Callable[[int], Sequence[Nudge]] | None = None
+    # For the boost judgement (#344): improvements this policy has set a builder to, by type
+    # without the prefix, and those on a resource tile. Counted once per tile and improvement.
+    built: dict[str, int] = field(default_factory=dict)
+    built_on_resource: dict[str, int] = field(default_factory=dict)
+    # The buildable jobs read on `jobs_turn` and the keys builders held at the end of that turn.
+    open_jobs: list[BuilderJob] = field(default_factory=list)
+    claimed: frozenset = field(default_factory=frozenset)
+    jobs_turn: int | None = None
+    _built_keys: set = field(default_factory=set, init=False, repr=False)
+    _nudged: set = field(default_factory=set, init=False, repr=False)
     _claims: dict[int, _Key] = field(default_factory=dict, init=False, repr=False)
     _failures: dict[_Key, int] = field(default_factory=dict, init=False, repr=False)
     _set_aside: dict[_Key, int] = field(default_factory=dict, init=False, repr=False)
@@ -170,6 +192,8 @@ class BuilderPolicy:
         jobs = [j for j in await read_builder_jobs(game) if self._buildable(j, turn)]
         threats = await read_threats(game)
         self._forget_finished_jobs(jobs, turn)
+        self.open_jobs, self.jobs_turn = list(jobs), turn
+        self._nudged = self._nudged_jobs(jobs, turn)
         # A builder that is mid-job but out of moves still holds its job.
         free_ids = {u.unit_id for u in free}
         held = {key[:2] for uid, key in self._claims.items() if uid not in free_ids}
@@ -181,6 +205,10 @@ class BuilderPolicy:
             elif (job.x, job.y) not in held:
                 available.setdefault((job.x, job.y), job)
         await self._assign(game, free, available, turn, unsafe)
+        # A job worked this turn is counted in `built`, so it is no longer on offer or held: the
+        # judgement would count it twice, as built and as a job under way.
+        self.open_jobs = [j for j in self.open_jobs if _key(j) not in self._built_keys]
+        self.claimed = frozenset(self._claims.values()) - self._built_keys
 
     # ----- bookkeeping -----
 
@@ -210,9 +238,36 @@ class BuilderPolicy:
             for t in threats
         )
 
+    def _nudged_jobs(self, jobs: Iterable[BuilderJob], turn: int) -> set[_Key]:
+        """Jobs the current boost nudges mean. Empty unless the setting is on."""
+        if not self.settings.use_boost_nudges or self.nudges is None:
+            return set()
+        wanted = [n for n in self.nudges(turn) if n.policy == "builder" and n.site]
+        nudged: set[_Key] = set()
+        # A job a builder already holds is the plan, not an addition, so a nudge skips it.
+        held = set(self._claims.values())
+        for nudge in wanted:
+            # One nudge is one detour: the first matching job in a stable order, not every
+            # job that reads the same ("a tile near Rome").
+            matching = sorted(
+                (
+                    j
+                    for j in jobs
+                    if _key(j) not in held and job_matches(j, nudge.target, nudge.site)
+                ),
+                key=lambda j: (j.x, j.y, j.improvement),
+            )
+            if matching:
+                nudged.add(_key(matching[0]))
+        return nudged
+
+    def _bonus(self, job: BuilderJob) -> float:
+        return self.settings.weights.nudge_bonus if _key(job) in self._nudged else 0.0
+
     def _job_order(self, job: BuilderJob) -> tuple:
         """Sort key that keeps one job per tile deterministic: the best raw score wins."""
-        return -score_job(job, 0, 1.0, self.settings.weights), job.improvement, job.x, job.y
+        raw = score_job(job, 0, 1.0, self.settings.weights) + self._bonus(job)
+        return -raw, job.improvement, job.x, job.y
 
     # ----- assignment -----
 
@@ -237,7 +292,7 @@ class BuilderPolicy:
                     if (unit.unit_id, tile) in tried:
                         continue
                     distance = hex_distance(unit.x, unit.y, job.x, job.y, s.map_width)
-                    value = score_job(job, distance, unit.max_moves, s.weights)
+                    value = score_job(job, distance, unit.max_moves, s.weights) + self._bonus(job)
                     if self._claims.get(unit.unit_id) == _key(job):
                         value += s.weights.sticky
                     rank = (-value, job.x, job.y, unit.unit_id)
@@ -332,6 +387,8 @@ class BuilderPolicy:
             self._claims[unit.unit_id] = key
             self._holds.pop(unit.unit_id, None)
             self._failures.pop(key, None)
+            if action == "improve":
+                self._count_built(job, key)
             record(action, "working on the job", result)
             return True
         if "no moves remaining" in result.lower():
@@ -355,6 +412,16 @@ class BuilderPolicy:
         self._fail(key, turn)
         record("failed", "improvement refused", result)
         return False
+
+    def _count_built(self, job: BuilderJob, key: _Key) -> None:
+        """Count an improvement once per tile and type: builders keep working a job over turns."""
+        if key in self._built_keys:
+            return
+        self._built_keys.add(key)
+        kind = job_key(job)
+        self.built[kind] = self.built.get(kind, 0) + 1
+        if job.resource:
+            self.built_on_resource[kind] = self.built_on_resource.get(kind, 0) + 1
 
     def _turns(self, table: dict, unit_id: int, key: _Key, turn: int) -> int:
         """Count the turns a builder has spent on a job, once per turn however often it is asked."""

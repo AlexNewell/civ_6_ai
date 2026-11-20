@@ -24,7 +24,7 @@ Ties go to the item type in alphabetical order.
 
 import json
 import logging
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from typing import Protocol
 
@@ -37,10 +37,12 @@ from civ6_ai.strategy.boost_judgement import (
     Decision,
     DelayRecord,
     JudgementSettings,
+    NudgeBoard,
     PlanSignals,
     ReachLabel,
     judge_boosts,
     next_history,
+    nudges,
 )
 
 log = logging.getLogger(__name__)
@@ -221,6 +223,21 @@ def choose_civic(
     )
 
 
+def horizon_line(judgements: Iterable[BoostJudgement], turn: int) -> dict:
+    """Each item whose boost the bot could cause and that is not out of reach, one entry each.
+
+    `item: [reach label, turns to the boost or null, decision, value]`. Items already boosted,
+    with no boost the bot can cause, or with the boost unlikely are left out, so the line is the
+    near horizon only and short.
+    """
+    items = {
+        j.name: [j.reach.label.value, j.reach.turns, j.decision.value, round(j.value, 1)]
+        for j in judgements
+        if j.reach.label not in (ReachLabel.UNLIKELY, ReachLabel.EARNED)
+    }
+    return {"turn": turn, "items": items}
+
+
 def boost_adjustments(
     judgements: list[BoostJudgement], weights: ResearchWeights
 ) -> dict[str, float]:
@@ -292,17 +309,27 @@ class ResearchPolicy:
         self,
         weights: ResearchWeights | None = None,
         boost_inputs: Callable[[], Awaitable[tuple[BoostState, PlanSignals]]] | None = None,
+        nudge_board: NudgeBoard | None = None,
     ) -> None:
         self.weights = weights or ResearchWeights()
         # Reads the game counts and plan signals for the boost judgement. Without it, or with
         # `boost_judgement` off, the ranking is unchanged.
         self.boost_inputs = boost_inputs
+        # Where the nudges go for other policies to take up (#344). None means they are dropped.
+        self.nudge_board = nudge_board
         self._delays: dict[str, DelayRecord] = {}
 
     async def _boost_adjustments(self, research: Research) -> dict[str, float]:
         if not self.weights.boost_judgement or self.boost_inputs is None:
             return {}
-        state, signals = await self.boost_inputs()
+        try:
+            state, signals = await self.boost_inputs()
+        except ConnectionError:
+            raise
+        except Exception:
+            # A failed extra read must never cost the turn its research choice.
+            log.exception("Reading the boost judgement inputs failed")
+            return {}
         settings = JudgementSettings(max_delay=self.weights.boost_delay_max_turns)
         judgements = judge_boosts(
             research.techs + research.civics, state, signals, settings, self._delays
@@ -311,6 +338,10 @@ class ResearchPolicy:
         for j in judgements:
             if j.decision is not Decision.RESEARCH_NOW or j.gave_up:
                 log.info("boost_judgement %s", j.reason)
+        line = horizon_line(judgements, state.turn)
+        log.info("boost_horizon %s", json.dumps(line, sort_keys=True))
+        if self.nudge_board is not None:
+            self.nudge_board.publish(state.turn, nudges(judgements))
         return boost_adjustments(judgements, self.weights)
 
     async def run(self, game: ResearchGame) -> None:

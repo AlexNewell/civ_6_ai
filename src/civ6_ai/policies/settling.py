@@ -784,6 +784,8 @@ class SettlingPolicy:
     # already counted this turn.
     _waits: dict[int, int] = field(default_factory=dict, init=False, repr=False)
     _wait_counted: set[int] = field(default_factory=set, init=False, repr=False)
+    # Each settler's count before this turn's first wait was counted, so a flee can undo it.
+    _wait_before: dict[int, int | None] = field(default_factory=dict, init=False, repr=False)
     # The site a settler turned to after waiting too long, kept until it founds or loses it, so it
     # does not swing back to the far site on the next turn (live: seven turns lost doing that).
     _fallback_site: dict[int, tuple[int, int]] = field(default_factory=dict, init=False, repr=False)
@@ -822,6 +824,7 @@ class SettlingPolicy:
         self._founded = set()
         self._held_now = set()
         self._wait_counted = set()
+        self._wait_before = {}
         self.expansion.held_settlers = 0
         self._scout_alive = any(u.unit_type == SCOUT for u in units)
         self._fog_can = getattr(game, "execute_lua", None) is not None
@@ -1629,7 +1632,18 @@ class SettlingPolicy:
         ):
             if unit_id not in self._wait_counted:
                 self._wait_counted.add(unit_id)
+                self._wait_before[unit_id] = self._waits.get(unit_id)
                 self._waits[unit_id] = self._waits.get(unit_id, 0) + 1
+        elif action == "flee":
+            # A flee neither counts nor resets, and is the turn's final outcome: undo the count
+            # of a refused first city (`hold`) that an accepted second city then overrode.
+            if unit_id in self._wait_counted and unit_id in self._wait_before:
+                self._wait_counted.discard(unit_id)
+                before = self._wait_before.pop(unit_id)
+                if before is None:
+                    self._waits.pop(unit_id, None)
+                else:
+                    self._waits[unit_id] = before
         elif action in ("found", "move", "escort_move") and unit_id not in self._wait_counted:
             self._waits.pop(unit_id, None)
 

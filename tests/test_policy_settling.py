@@ -2337,3 +2337,44 @@ def test_the_kept_site_is_honoured_when_an_escort_appears_and_the_far_route_clea
     decision = policy.decisions[-1]
     assert decision.target == (10, 18) and "nearer site chosen" in decision.reason
     assert [a for a in second.actions if a[1] == 7 and a[2:] == (10, 18)]
+
+
+def test_a_flee_after_a_refused_first_city_leaves_the_wait_count_unchanged():
+    # Bugbot on PR 320: the refused city records a hold, then the second city accepts the flee.
+    policy = SettlingPolicy(SettlingSettings(map_width=84))
+    policy._waits[7] = 2
+    cities = [city_info(x=10, y=10, buildings=[]), city_info(x=14, y=14, buildings=[])]
+    game = make_game(
+        [settler(x=11, y=11)], cities=cities, threats=[barbarian(12, 12)],
+        sites=[site(16, 10, food=40)], turn=100,
+    )  # fmt: skip
+    real = game.move_unit
+    calls = []
+
+    async def first_refused(unit_index, x, y):
+        calls.append((x, y))
+        if len(calls) == 1:
+            return "Error: CANNOT_MOVE"
+        return await real(unit_index, x, y)
+
+    game.move_unit = first_refused
+    run(policy, game)
+    actions = [d.action for d in policy.decisions]
+    assert actions[-2:] == ["hold", "flee"], actions
+    assert policy._waits[7] == 2
+    # With none counted before, the run stays empty.
+    fresh = SettlingPolicy(SettlingSettings(map_width=84))
+    calls.clear()
+    game2 = make_game(
+        [settler(x=11, y=11)], cities=cities, threats=[barbarian(12, 12)],
+        sites=[site(16, 10, food=40)], turn=100,
+    )  # fmt: skip
+    real2 = game2.move_unit
+
+    async def refused_first(unit_index, x, y):
+        calls.append((x, y))
+        return "Error: CANNOT_MOVE" if len(calls) == 1 else await real2(unit_index, x, y)
+
+    game2.move_unit = refused_first
+    run(fresh, game2)
+    assert 7 not in fresh._waits

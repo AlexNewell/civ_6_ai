@@ -811,7 +811,7 @@ def _district_score(
         name == "HOLY_SITE"
         and city.is_capital
         and not ctx.pantheon
-        and "HOLY_SITE" not in ctx.districts
+        and not any(_base_district(d) == "HOLY_SITE" for d in ctx.districts)
         and ctx.holy_site_adjacency >= _EARLY_HOLY_SITE_ADJACENCY
     ):
         value = max(value, _EARLY_HOLY_SITE_SCORE)
@@ -1523,7 +1523,7 @@ class CityProductionPolicy:
         if (
             self._pantheon_found
             or not city.is_capital
-            or "HOLY_SITE" in context.districts
+            or any(_base_district(d) == "HOLY_SITE" for d in context.districts)
             or not any(
                 o.category == "DISTRICT" and _base_district(o.item) == "HOLY_SITE" for o in options
             )

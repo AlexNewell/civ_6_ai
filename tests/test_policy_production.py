@@ -1609,6 +1609,7 @@ def test_early_holy_site_beats_a_monument_and_the_army_floor_but_not_a_settler()
         {"holy_site_adjacency": 0},
         {"pantheon": True},
         {"districts": frozenset({"HOLY_SITE"})},
+        {"districts": frozenset({"LAVRA"})},  # Russia's unique Holy Site.
     ],
 )
 def test_no_early_holy_site_bonus_outside_its_conditions(ctx_changes):

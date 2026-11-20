@@ -790,3 +790,18 @@ def test_queued_land_combat_units_have_an_aggregate_and_civilians_do_not_count()
         judge_boosts([option], state, PlanSignals(units_queued=dict(queued)))[0].decision
         is Decision.DELAY
     )
+
+
+def test_naval_units_are_not_land_combat_even_when_unique():
+    for kind in ("UNIT_PHOENICIA_BIREME", "UNIT_INDONESIAN_JONG", "UNIT_BUILDER", "UNIT_GALLEY"):
+        _, queued, _, _ = bi.queued_by_kind([city(currently_building=kind)])
+        assert "LAND_COMBAT" not in queued, kind
+        assert build_state(units=[unit(kind)]).land_combat_units == 0, kind
+    assert build_state(units=[unit("UNIT_NUBIAN_PITATI")]).land_combat_units == 1
+
+
+def test_a_nudge_skips_a_job_a_builder_already_holds():
+    jobs = [job(x=10, y=11), job(x=12, y=11)]
+    policy = builder_with(True, [nudge(site="the stone near Rome")])
+    policy._claims = {7: (10, 11, "IMPROVEMENT_QUARRY")}
+    assert policy._nudged_jobs(jobs, 3) == {(12, 11, "IMPROVEMENT_QUARRY")}

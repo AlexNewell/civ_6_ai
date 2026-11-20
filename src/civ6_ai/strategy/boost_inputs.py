@@ -24,7 +24,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from civ6_ai.policies.game_data import REPLACES, UNIQUE_DISTRICTS, WONDERS
+from civ6_ai.policies.game_data import COMBAT_UNITS, REPLACES, UNIQUE_DISTRICTS, WONDERS
 from civ6_ai.state import (
     BuilderJob,
     City,
@@ -165,18 +165,13 @@ def _unit_key(unit_type: str) -> str:
     return REPLACES.get(unit_type, unit_type).removeprefix("UNIT_")
 
 
-# Units a queue can hold that are not combat units. The queue names a type only, so the
-# `is_combat` flag an owned unit carries is not there to ask.
-_CIVILIAN_WORDS = ("SETTLER", "BUILDER", "TRADER", "MISSIONARY", "APOSTLE", "INQUISITOR", "SPY")
-_CIVILIAN_WORDS += ("GREAT_", "MILITARY_ENGINEER", "MEDIC", "GURU", "RELIC")
-
-
 def _land_combat_type(unit_type: str) -> bool:
-    naval = ("GALLEY", "QUADRIREME", "CARAVEL", "FRIGATE", "IRONCLAD", "DESTROYER", "CRUISER")
-    air = ("BATTLESHIP", "CARRIER", "SUBMARINE", "PRIVATEER", "SEADOG", "BOMBER", "FIGHTER")
-    return unit_type != SCOUT and not any(
-        word in unit_type for word in naval + air + _CIVILIAN_WORDS
-    )
+    """Land combat by the game data's combat-unit table, after a unique unit is mapped to its base.
+
+    Naval, air and civilian units are not in the table, so a Bireme (a Galley) is not land.
+    """
+    base = REPLACES.get(unit_type, unit_type)
+    return base != SCOUT and base in COMBAT_UNITS
 
 
 def _district_key(district_type: str) -> str:

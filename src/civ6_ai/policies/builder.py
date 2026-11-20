@@ -244,11 +244,17 @@ class BuilderPolicy:
             return set()
         wanted = [n for n in self.nudges(turn) if n.policy == "builder" and n.site]
         nudged: set[_Key] = set()
+        # A job a builder already holds is the plan, not an addition, so a nudge skips it.
+        held = set(self._claims.values())
         for nudge in wanted:
             # One nudge is one detour: the first matching job in a stable order, not every
             # job that reads the same ("a tile near Rome").
             matching = sorted(
-                (j for j in jobs if job_matches(j, nudge.target, nudge.site)),
+                (
+                    j
+                    for j in jobs
+                    if _key(j) not in held and job_matches(j, nudge.target, nudge.site)
+                ),
                 key=lambda j: (j.x, j.y, j.improvement),
             )
             if matching:

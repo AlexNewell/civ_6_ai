@@ -171,9 +171,9 @@ def parse_condition(raw: object, where: str, problems: list[str], depth: int = 0
         if extra:
             problems.append(f"{where}: unknown fields {extra}")
         signal, op, value = raw.get("signal"), raw.get("op"), raw.get("value")
-        if signal not in KNOWN_SIGNALS:
+        if not isinstance(signal, str) or signal not in KNOWN_SIGNALS:
             problems.append(f"{where}.signal: {signal!r} is not one of {sorted(KNOWN_SIGNALS)}")
-        if op not in _OPS:
+        if not isinstance(op, str) or op not in _OPS:
             problems.append(f"{where}.op: {op!r} is not one of {sorted(_OPS)}")
         if not _is_number(value) or not math.isfinite(value):
             problems.append(f"{where}.value: must be a finite number")
@@ -502,6 +502,8 @@ def combine(base: PolicyDocument, active: Sequence[ActiveLevel] = ()) -> Resolve
             nudges[nudge.setting] = nudge  # A later (higher priority) level replaces.
     if base.expansion.target_cities is not None:
         target = base.expansion.target_cities
+        for domain in ("production", "gold"):  # A level's weight must not undo the pinned target.
+            merged.get(domain, {}).pop("target_cities", None)
     for domain, pairs in base.weights:
         merged.setdefault(domain, {}).update(pairs)
     document = replace(

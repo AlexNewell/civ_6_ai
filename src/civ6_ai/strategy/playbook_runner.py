@@ -110,6 +110,7 @@ class PlaybookRunner:
         self.closed: list[Occurrence] = []
         self._applied: tuple | None = None  # What was last applied, to apply only on a change.
         self._last_turn: int | None = None
+        self._written = ""  # The records file as last written, so a write happens only on change.
         self._streaks: dict[str, int] = {}  # Consecutive turns each trigger has held.
 
     async def run(self, game: Any) -> None:
@@ -128,8 +129,8 @@ class PlaybookRunner:
         changed = False
         for playbook in self.playbooks:
             changed |= self._advance(playbook, readings)
-        if changed:
-            self._write_records()
+        if changed or self.open:
+            self._write_records()  # Open occurrences' signals move without any transition.
         self._apply()
 
     def _advance(self, playbook: Playbook, readings: Readings) -> bool:
@@ -199,10 +200,14 @@ class PlaybookRunner:
         everything = [*self.closed, *self.open.values()]
         everything.sort(key=lambda o: (o.start_turn, o.playbook.name))
         text = "".join(json.dumps(o.to_record(), sort_keys=True) + "\n" for o in everything)
+        if text == self._written:
+            return
         try:
             self._records.write_text(text, encoding="utf-8")
         except OSError:
             log.warning("Playbook records could not be written to %s", self._records)
+            return
+        self._written = text
 
 
 # ----- records -----

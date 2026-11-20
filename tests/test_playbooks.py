@@ -546,3 +546,32 @@ def test_the_example_playbook_top_level_combines():
     got = combine(DEFAULT_DOCUMENT, [ActiveLevel(pb.name, pb.levels[2], 1)])
     assert got.production.army_per_city <= 3.5
     assert got.production.expansion < resolve(DEFAULT_DOCUMENT).production.expansion
+
+
+def test_signal_changes_persist_without_a_transition(tmp_path):
+    path = tmp_path / "p.jsonl"
+    runner, _ = runner_for(make(outcome_signals=["city_danger_max"]), records=path)
+    feed(runner, 1, camps_near_city=1, city_danger_max=10)
+    feed(runner, 2, camps_near_city=1, city_danger_max=40)  # Below the raise line: no move.
+    (record,) = read_occurrences(path)
+    assert record.levels == (("low", 1),)
+    assert record.outcome["signals"]["city_danger_max"] == {"start": 10, "max": 40, "end": 40}
+
+
+def test_pinned_base_target_beats_a_level_target_weight():
+    base = parse_policy_document({"expansion": {"target_cities": 6}})
+    lvl = level("a", 5, settings={"weights": {"production": {"target_cities": 3}}})
+    got = combine(base, [ActiveLevel("a", lvl, 1)])
+    assert got.production.target_cities == 6 and got.gold.target_cities == 6
+    free = combine(DEFAULT_DOCUMENT, [ActiveLevel("a", lvl, 1)])
+    assert free.production.target_cities == 3  # Unpinned, the level's weight still applies.
+
+
+@pytest.mark.parametrize("field", ["signal", "op"])
+def test_non_string_signal_or_op_is_a_refusal_not_a_crash(field, tmp_path):
+    bad = {"signal": "turn", "op": ">", "value": 1, field: []}
+    assert has(problems_of(make(trigger={"when": bad})), f"{field}:")
+    (tmp_path / "bad.json").write_text(json.dumps(make(trigger={"when": bad})), encoding="utf-8")
+    (tmp_path / "good.json").write_text(json.dumps(make(name="ok")), encoding="utf-8")
+    found, refused = load_playbooks(tmp_path)
+    assert [p.name for p in found] == ["ok"] and "bad.json" in refused

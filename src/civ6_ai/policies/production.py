@@ -50,6 +50,7 @@ from civ6_ai.policies.growth import (
 )
 from civ6_ai.policies.growth_caps import at_housing_cap, decide_cap_focus, settler_delay_note
 from civ6_ai.policies.military import MilitaryWeights, camp_matchup
+from civ6_ai.replacements import READ_TRIES, apply_replacements, read_replacements
 from civ6_ai.state import City, Empire, ProductionChoice, Unit
 from civ6_ai.state import read_cities as _read_cities
 from civ6_ai.state import read_empire as _read_empire
@@ -1617,6 +1618,8 @@ class CityProductionPolicy:
         self._cap_focus: dict[int, str] = {}  # City -> yield favored at a cap (issue 215).
         self._tiles: dict[int, CityTiles] = {}  # Food of each city's tiles (`city_tiles.py`).
         self._tiles_age = REFRESH_TURNS  # Turns since the last read.
+        self._replace_tries = 0  # Reads of the game's replacement tables tried.
+        self._replace_done = False
         self._tiles_seen: dict[int, tuple[int, bool]] = {}  # (pop, starving) at the last read.
         self.planner = Planner(
             emit=self._emit
@@ -1669,6 +1672,7 @@ class CityProductionPolicy:
         already building a defender or walls is left alone, so a switch never repeats.
         """
         cities = await _read_cities(game)
+        await self._read_replacements(game)
         await self._read_tiles(game, cities)
         await self._feed_starving(game, cities)
         await self._focus_at_caps(game, cities)
@@ -1858,6 +1862,30 @@ class CityProductionPolicy:
         if self.defence is not None and self.defence.any:
             return 0
         return int(empire.gold) - reserve_for(empire.num_cities, empire.gold_per_turn)
+
+    async def _read_replacements(self, game: ProductionGame) -> None:
+        """Read the game's unique replacements once per game and merge them over the hand tables
+        (issue 354). A failed read is retried up to `READ_TRIES` times, then the hand tables
+        stand."""
+        execute = getattr(game, "execute_lua", None)
+        if self._replace_done or execute is None or self._replace_tries >= READ_TRIES:
+            return
+        self._replace_tries += 1
+        try:
+            read = await read_replacements(game)
+        except ConnectionError:
+            raise
+        except Exception as err:
+            log.warning("Replacement read failed, keeping the hand tables: %s", err)
+            return
+        apply_replacements(read)
+        self._replace_done = True
+        log.info(
+            "Replacements read from the game: %d buildings, %d districts, %d units",
+            len(read.buildings),
+            len(read.districts),
+            len(read.units),
+        )
 
     async def _read_tiles(self, game: ProductionGame, cities: list[City]) -> None:
         """Refresh the per-city tile foods: every `REFRESH_TURNS`, or when a city's size changed or

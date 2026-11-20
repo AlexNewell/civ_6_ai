@@ -1181,6 +1181,8 @@ class TileGame(FocusGame):
         self.lua_calls = 0
 
     async def execute_lua(self, code, context="gamecore"):
+        if "BuildingReplaces" in code:  # The once-per-game replacement read (issue 354).
+            return "RPDONE"
         self.lua_calls += 1
         return self.reply
 
@@ -1894,3 +1896,26 @@ def test_a_refused_district_leaves_the_ranking_alone_with_wonder_races_off(monke
     run(choose_for_city(game, city(production=8.0), menu, ctx, ProductionWeights()))
     assert game.set_calls[-1][2] == "BUILDING_GRANARY"
     assert len(calls) == 1
+
+
+def test_replacements_are_read_once_per_game_and_logged(caplog, monkeypatch):
+    from civ6_ai.policies import game_data
+
+    monkeypatch.setattr(game_data, "UNIQUE_BUILDINGS", dict(game_data.UNIQUE_BUILDINGS))
+
+    class ReplaceGame(FocusGame):
+        reads = 0
+
+        async def execute_lua(self, code, context="gamecore"):
+            if "BuildingReplaces" not in code:
+                return "CTDONE"
+            ReplaceGame.reads += 1
+            return "BR|BUILDING_PRASAT|BUILDING_TEMPLE\nRPDONE"
+
+    game = ReplaceGame(cities=[fx.city_info()])
+    policy = CityProductionPolicy()
+    with caplog.at_level("INFO"):
+        for _ in range(3):
+            run(policy.assign(game))
+    assert ReplaceGame.reads == 1
+    assert "1 buildings" in caplog.text

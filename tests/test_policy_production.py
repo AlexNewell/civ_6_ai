@@ -1844,7 +1844,13 @@ def test_an_unavailable_district_refreshes_the_race_alternative_for_the_guard():
     assert off.set_calls
 
 
-def test_a_refused_district_stops_vetoing_the_wonder_race():
+def test_a_refused_district_stops_vetoing_the_wonder_race(caplog):
+    import logging
+
+    from civ6_ai.policies.production import _LOGGED_RACES
+
+    _LOGGED_RACES.clear()  # Logged once per key for the process; start this test clean.
+
     # Issue 328 (review): the Hub is refused at start (not by the cap check); the wonder must
     # then be judged against the Granary, not the Hub that cannot be built.
     c = city(production=8.0)
@@ -1858,8 +1864,12 @@ def test_a_refused_district_stops_vetoing_the_wonder_race():
     )
     w = ProductionWeights(wonder_races=True)
     game = ScriptedGame(refuse={"DISTRICT_COMMERCIAL_HUB": "ERR:NOPE"})
-    run(choose_for_city(game, c, menu, ctx, w))
+    with caplog.at_level(logging.INFO):
+        run(choose_for_city(game, c, menu, ctx, w))
     assert game.set_calls[-1][2] == "BUILDING_STONEHENGE"
+    race = [m for m in caplog.messages if m.startswith("wonder race")]
+    assert "NO-GO" in race[0] and "GO" in race[-1] and "NO-GO" not in race[-1]
+    assert "alt 1.0" in race[-1]
 
 
 def test_a_refused_district_leaves_the_ranking_alone_with_wonder_races_off(monkeypatch):

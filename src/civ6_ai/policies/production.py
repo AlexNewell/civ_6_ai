@@ -794,7 +794,7 @@ def wants_early_monument(city: City, ctx: ProductionContext, w: ProductionWeight
     return not under_threat(city, ctx)
 
 
-_LOGGED_RACES: set[tuple[str, str, int]] = set()
+_LOGGED_RACES: set[tuple[str, str, int, float]] = set()
 
 
 def tall_and_safe(city: City, ctx: ProductionContext) -> bool:
@@ -890,7 +890,8 @@ def _wonder_race_score(
         already_started=city.building == option.item,
     )
     go = est.go and tall_and_safe(city, ctx)
-    key = (city.name, option.item, ctx.turn)
+    # The alternative is in the key: a reranked verdict (an item ruled out) is a new line.
+    key = (city.name, option.item, ctx.turn, round(ctx.wonder_alternative, 2))
     if key not in _LOGGED_RACES:
         _LOGGED_RACES.add(key)
         reason = "" if tall_and_safe(city, ctx) else " (not tall and safe)"

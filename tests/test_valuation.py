@@ -91,3 +91,18 @@ def test_a_great_person_target_is_valued_when_it_is_reached_not_today():
     item = v.price("gp", 600, worth, 315, 330)
     target, _ = v.pick_target([item], 0, 100.0, 315, 330)
     assert target.value < item.value
+
+
+def test_the_early_monument_bonus_does_not_inflate_its_purchase_value():
+    from civ6_ai.policies.production import ProductionContext
+    from civ6_ai.state import ProductionChoice
+    from civ6_ai.state.reader import build_city
+    from fixtures import civ_state as fx
+
+    city = build_city(fx.city_info(buildings=["PALACE"]), (), set())
+    ctx = ProductionContext(turn=15, num_cities=1, builders=1, recon=1, army=1)
+    monument = ProductionChoice("BUILDING", "BUILDING_MONUMENT", 60, 5)
+    with_bonus = v.value_option(monument, city, ctx, W)
+    without = v.value_option(monument, city, ctx, ProductionWeights(early_monument=0.0))
+    assert with_bonus is not None and without is not None
+    assert with_bonus.rate == without.rate

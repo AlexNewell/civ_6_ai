@@ -115,3 +115,34 @@ def test_envoys_lower_score() -> None:
     with_envoys = CityStateCandidate("B", False, False, 0, 5, our_envoys=2)
     ranked = rank_targets([with_envoys, base])
     assert ranked[0].name == "A"
+
+
+def test_empty_current_force_wins_zero() -> None:
+    est = estimate_force(TargetCity(strength=22), current={})
+    assert est.win_probability == 0.0
+    assert est.required
+
+
+def test_rams_are_support_not_attackers() -> None:
+    walled = TargetCity(strength=24, has_walls=True)
+    assert win_probability(walled, Force.of({"battering_ram": 3}))[0] == 0.0
+    one = win_probability(walled, Force.of({"legion": 2, "battering_ram": 1}))
+    three = win_probability(walled, Force.of({"legion": 2, "battering_ram": 3}))
+    assert one == three
+    assert estimate_force(walled).required.get("battering_ram", 0) <= 1
+
+
+def test_unwalled_city_does_not_shoot() -> None:
+    open_city = TargetCity(strength=40)
+    walled = TargetCity(strength=40, has_walls=True, wall_hp=0)
+    force = Force.of({"legion": 3})
+    assert win_probability(open_city, force)[2] < win_probability(walled, force)[2]
+
+
+def test_capture_needs_surviving_melee_attack() -> None:
+    from civ6_ai.strategy.siege import AttackUnit
+
+    legion = AttackUnit("legion", 40, "melee", hp=1)
+    archer = AttackUnit("archer", 60, "ranged")
+    city = TargetCity(strength=40, hp=1)
+    assert win_probability(city, Force((archer, legion)), max_turns=1)[0] == 0.0

@@ -27,6 +27,9 @@ DAMAGE_RANDOM_HIGH = 1.2
 # Share of an attack's damage that lands on the walls while they stand. Melee barely scratches
 # them, ranged does about half, siege units (ram, catapult) do full damage. APPROXIMATE.
 WALL_FACTOR = {"melee": 0.15, "ranged": 0.5, "siege": 1.0}
+# A battering ram is support: it has no attack of its own, but with one beside them melee units
+# hit the walls at full strength. More than one ram adds nothing. APPROXIMATE.
+WALL_FACTOR_MELEE_WITH_RAM = 1.0
 
 DEFAULT_CITY_HP = 200
 DEFAULT_WALL_HP = 100  # Ancient walls; later walls are stronger and need a larger value.
@@ -36,14 +39,23 @@ DEFAULT_MAX_TURNS = 10  # Turns before reinforcements or peace are assumed to sp
 DEFAULT_TRIALS = 120  # Simulations per candidate force. Enough for 80% to be stable and fast.
 DEFAULT_SEED = 303
 MAX_MELEE = 8  # Search bounds; a force larger than this is reported infeasible ("leave it").
-MAX_SIEGE = 4
+MAX_SIEGE = 4  # Catapult-like attackers; a ram is capped at 1 because more add nothing.
 MAX_RANGED = 4
-_ORDER = ("siege", "ranged", "melee")  # Siege opens the walls, ranged softens, melee captures.
+_ORDER = (
+    "siege",
+    "ranged",
+    "melee",
+    "ram",
+)  # Siege opens the walls, ranged softens, melee captures.
 
 
 @dataclass(frozen=True)
 class AttackUnit:
-    """One attacker. `kind` is melee, ranged or siege; only melee can walk in and capture."""
+    """One attacker. `kind` is melee, ranged, siege or ram.
+
+    Only melee can walk in and capture. A `ram` is support: no attack of its own, it lets melee
+    units damage walls at full strength.
+    """
 
     name: str
     strength: float
@@ -59,7 +71,7 @@ UNIT_STATS: dict[str, AttackUnit] = {
     "legion": AttackUnit("legion", 40, "melee", cost=110),
     "archer": AttackUnit("archer", 25, "ranged", cost=60),
     "catapult": AttackUnit("catapult", 35, "siege", cost=120),
-    "battering_ram": AttackUnit("battering_ram", 35, "siege", cost=100),
+    "battering_ram": AttackUnit("battering_ram", 35, "ram", cost=100),
 }
 
 
@@ -123,10 +135,6 @@ def _damage(rng: random.Random, attacker: float, defender: float) -> float:
     return DAMAGE_BASE * math.exp(DAMAGE_SLOPE * (attacker - defender)) * factor
 
 
-def _can_capture(hp: dict[int, float], units: tuple[AttackUnit, ...]) -> bool:
-    return any(h > 0 and units[i].kind == "melee" for i, h in hp.items())
-
-
 def _simulate(
     city: TargetCity, units: tuple[AttackUnit, ...], max_turns: int, rng: random.Random
 ) -> tuple[int | None, int]:
@@ -135,8 +143,13 @@ def _simulate(
     hp = {i: float(u.hp) for i, u in enumerate(units)}
     city_hp = float(city.hp)
     wall_hp = float(city.wall_hp) if city.has_walls else 0.0
-    shooters = 1 + sum(1 for g in city.garrison if g.ranged)  # The city and its ranged garrison.
-    order = sorted(hp, key=lambda k: (_ORDER.index(units[k].kind), k))
+    has_ram = any(u.kind == "ram" for u in units)
+    # The city shoots only with walls (as MilitaryPolicy._city_can_strike); ranged garrison always.
+    shooters = (1 if city.has_walls else 0) + sum(1 for g in city.garrison if g.ranged)
+    order = sorted(
+        (i for i, u in enumerate(units) if u.kind != "ram"),
+        key=lambda k: (_ORDER.index(units[k].kind), k),
+    )
     for turn in range(1, max_turns + 1):
         for i in order:
             if hp[i] <= 0:
@@ -144,22 +157,23 @@ def _simulate(
             u = units[i]
             dmg = _damage(rng, u.strength, defence)
             if wall_hp > 0:
-                wall_hp -= dmg * WALL_FACTOR[u.kind]
+                factor = WALL_FACTOR_MELEE_WITH_RAM if u.kind == "melee" and has_ram else None
+                wall_hp -= dmg * (WALL_FACTOR[u.kind] if factor is None else factor)
             else:
                 city_hp -= dmg
             if u.kind == "melee":  # Melee takes the blow back; ranged and siege are not hit.
                 hp[i] -= _damage(rng, defence, u.strength)
-            if city_hp <= 0 and _can_capture(hp, units):
-                return turn, sum(1 for h in hp.values() if h <= 0)
-        for _ in range(shooters):  # The city and its ranged garrison shoot the weakest attacker.
+                # Capture needs a melee attack that empties the city and leaves its attacker alive.
+                if city_hp <= 0 and wall_hp <= 0 and hp[i] > 0:
+                    return turn, sum(1 for h in hp.values() if h <= 0)
+        for _ in range(shooters):  # Defenders shoot the weakest attacker.
             alive = [k for k in hp if hp[k] > 0]
             if not alive:
                 break
             target = min(alive, key=lambda k: (hp[k], k))
             hp[target] -= _damage(rng, defence, units[target].strength)
-        lost = sum(1 for h in hp.values() if h <= 0)
-        if not _can_capture(hp, units):
-            return None, lost
+        if not any(h > 0 and units[k].kind == "melee" for k, h in hp.items()):
+            return None, sum(1 for h in hp.values() if h <= 0)
         city_hp = min(float(city.hp), city_hp + CITY_REGEN_PER_TURN)
     return None, sum(1 for h in hp.values() if h <= 0)
 
@@ -214,14 +228,15 @@ def estimate_force(
     else:
         reasons.append("no walls: a ram is not needed")
     current_p = None
-    if current:
+    if current is not None:
         current_p = win_probability(city, Force.of(current), max_turns, trials, seed)[0]
         reasons.append(f"current force wins {current_p:.0%} within {max_turns} turns")
 
+    max_siege = 1 if UNIT_STATS[siege_type].kind == "ram" else MAX_SIEGE
     candidates: list[tuple[int, int, dict[str, int]]] = []
     for m in range(1, MAX_MELEE + 1):
         # Siege units only open walls; against an open city a melee unit does the job better.
-        for s in range(MAX_SIEGE + 1 if city.has_walls else 1):
+        for s in range(max_siege + 1 if city.has_walls else 1):
             for r in range(MAX_RANGED + 1):
                 counts = {melee_type: m, siege_type: s, ranged_type: r}
                 cost = sum(UNIT_STATS[n].cost * c for n, c in counts.items())

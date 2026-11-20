@@ -79,6 +79,9 @@ _CAMP_MATCHUP_SCORE = 8.0  # The most the matchup adds to a camp unit's score.
 _MATCHUP_WEIGHTS = MilitaryWeights()
 _CAMP_CITY_REACH = 14  # Matches `MilitarySettings.camp_reach`.
 _EARLY_TURNS = 60  # Turns in which a city with no garrison should get one first.
+# Issue 301: the newest run queued 4 Scouts by turn 60 (a lost scout reset `recon` to 0 and the
+# 15.0 score came back). Two cover the map; past that the early turns go to growth.
+_MAX_EARLY_SCOUTS = 2
 
 
 @dataclass(frozen=True)
@@ -137,6 +140,9 @@ class ProductionContext:
     builders: int = 0
     settlers: int = 0
     recon: int = 0
+    # Issue 301: Scouts this policy has queued over the game so far, kept by the policy because
+    # `recon` forgets a scout the moment it dies. Zero when not known (a test, a fresh process).
+    scouts_built: int = 0
     army: int = 0
     traders: int = 0  # Traders that exist, on a route or not, plus those being built.
     trade_capacity: int = 0  # Routes the empire can run at once.
@@ -643,7 +649,10 @@ def _unit_score(
     if kind == "UNIT_SCOUT":
         # With nothing exploring, the settling policy sees no sites (live: a settler sat idle from
         # turn 30 on a 30-tile map), so the first scout outranks a settler.
-        return 15.0 if ctx.recon == 0 and ctx.turn <= _EARLY_TURNS else 0.0
+        # Issue 301: a lost scout is replaced once, not forever.
+        if ctx.recon == 0 and ctx.turn <= _EARLY_TURNS and ctx.scouts_built < _MAX_EARLY_SCOUTS:
+            return 15.0
+        return 0.0
     # Military. Strength comes from the game's own numbers, so the best unit offered wins.
     stats = COMBAT_UNITS.get(item)
     if stats is None:
@@ -873,11 +882,36 @@ def score(
     return value * _TURN_SCALE / (_TURN_SCALE + max(option.turns, 1))
 
 
+def _is_floor_unit(option: ProductionChoice) -> bool:
+    """A land combat unit: the kind the army floor scores. Civilian and recon units are not."""
+    stats = COMBAT_UNITS.get(option.item)
+    return stats is not None and stats[4] != "RECON" and defence_strength(option.item) > 0
+
+
+def _growth_before_garrison(city: City, ctx: ProductionContext) -> bool:
+    """Early, garrisoned, and nothing hostile near: the army floor may yield to growth.
+
+    Left out on purpose, so their rules stay as they are: a city without a garrison (its first
+    defender comes first), a threatened or pressed city, any known hostile unit, and a camp force
+    that is short (issues 268 and 284).
+    """
+    return (
+        ctx.turn <= _EARLY_TURNS
+        and city.garrison_unit is not None
+        and not under_threat(city, ctx)
+        and not is_pressed(city, ctx)
+        and ctx.camp_units <= 0
+        and ctx.hostile <= 0
+        and ctx.hostile_ranged <= 0
+    )
+
+
 def rank_production(
     city: City,
     options: Iterable[ProductionChoice],
     context: ProductionContext,
     weights: ProductionWeights | None = None,
+    unavailable: frozenset[str] = frozenset(),
 ) -> list[ProductionChoice]:
     """Return the options worth building, best first. Zero-scored options come last.
 
@@ -896,6 +930,46 @@ def rank_production(
             for o in keep:
                 if o.category == "DISTRICT" and scores[id(o)] >= top:
                     scores[id(o)] = top - 0.01
+    if _growth_before_garrison(city, context):
+        # Issue 301: a garrisoned, quiet city early on put the army floor (8 + up to 4 + the
+        # matchup) over a Campus or a Builder, and the bot reached turn 60 with one district to
+        # the human's five. The floor unit now waits for a district or Builder that scores.
+        growth = max(
+            (
+                scores[id(o)]
+                for o in keep
+                if (o.category == "DISTRICT" or canonical(o.item) == "UNIT_BUILDER")
+                and o.item not in unavailable  # The game or a refusal rules it out (issue 301).
+            ),
+            default=0.0,
+        )
+        affected = [
+            o
+            for o in keep
+            if o.category == "UNIT" and _is_floor_unit(o) and scores[id(o)] >= growth
+        ]
+        if growth > 0 and affected:
+            top = max(scores[id(o)] for o in affected)
+            # The units yield only to growth that really outranks what the best of them was
+            # above: a weaker district must not drop it under an ordinary building (a capped
+            # city's Monument), which the floor was meant to beat.
+            rivals = max(
+                (
+                    scores[id(r)]
+                    for r in keep
+                    if scores[id(r)] < top
+                    and not (r.category == "DISTRICT" or canonical(r.item) == "UNIT_BUILDER")
+                    and not (r.category == "UNIT" and _is_floor_unit(r))
+                ),
+                default=0.0,
+            )
+            if growth - 0.01 > rivals:
+                # One common shift, so the units keep their order and gaps (a Warrior still ranks
+                # over an Archer if the district then fails to start) and the best sits just
+                # under the growth option.
+                delta = top - (growth - 0.01)
+                for o in affected:
+                    scores[id(o)] -= delta
     return sorted(
         [*repairs, *keep],
         key=lambda o: (-scores[id(o)], o.category, o.item, o.repair_x or 0),
@@ -1197,7 +1271,25 @@ async def choose_for_city(
             return None
         ranked = [o for o in ranked if is_defence(o)]
     tried = 0
-    for option in ranked:
+    unavailable: set[str] = set()
+    options = list(options)
+
+    def skip(option: ProductionChoice, rest: list[ProductionChoice]) -> list[ProductionChoice]:
+        """The options still to try, ranked again without a growth option that cannot start.
+
+        Issue 301: a district the game will not start must not keep demoting the army floor.
+        """
+        if option.is_repair or not (
+            option.category == "DISTRICT" or canonical(option.item) == "UNIT_BUILDER"
+        ):
+            return rest
+        unavailable.add(option.item)
+        again = rank_production(city, options, context, weights, frozenset(unavailable))
+        left = {o.item for o in rest}
+        return [o for o in again if o.item in left]
+
+    while ranked:
+        option = ranked.pop(0)
         if tried >= MAX_ATTEMPTS:
             break
         # Issue 283: a settler scored 0 (one is held, no safe site, enough cities) is never built
@@ -1211,6 +1303,7 @@ async def choose_for_city(
             and memory.has(city, option.item)
             and await memory.blocked(city, option.item, context.turn, reads)
         ):
+            ranked = skip(option, ranked)
             continue
         # The game will not start a new district while the city is at its population limit, and
         # no tile changes that, so it is not tried. The cap is read once a turn for every city,
@@ -1225,6 +1318,7 @@ async def choose_for_city(
                     cap.zoned,
                     cap.allowed,
                 )
+                ranked = skip(option, ranked)
                 continue
             # The game's own verdict (`CanStartOperation`, read with the signatures) names the
             # failure; one that tiles cannot change here costs no advisor call and no refusal. It
@@ -1232,6 +1326,7 @@ async def choose_for_city(
             verdict = await reads.district_denied(city.city_id, option.item)
             if verdict is not None:
                 log.debug("%s skips %s: the game says %s", city.name, option.item, verdict)
+                ranked = skip(option, ranked)
                 continue
         tried += 1
         trace = StartTrace()
@@ -1335,6 +1430,7 @@ class CityProductionPolicy:
             trade_blocked  # `SecondaryPolicy.trade_blocked` (turn -> bool), or None.
         )
         self.builder_demand = builder_demand  # `builder.BuilderDemand`, or None.
+        self.scouts_built = 0  # Scouts queued so far; caps the early rebuilds (issue 301).
         self._food_focus: set[int] = set()  # Cities this policy set to a food focus.
         self._reset: set[int] = set()  # Cities returned to default, which may starve again.
         self._kept: set[int] = set()  # Cities that starved again after a reset: focus stays.
@@ -1380,6 +1476,7 @@ class CityProductionPolicy:
             context,
             sites_ok=self.expansion.sites_ok(empire.turn),
             held_settlers=self.expansion.held_settlers,
+            scouts_built=self.scouts_built,
             growth=growth,
         )
 
@@ -1513,6 +1610,9 @@ class CityProductionPolicy:
                 unfinished.append(city.name)
             else:
                 context = context.after_choosing(picked.item)
+                if canonical(picked.item) == "UNIT_SCOUT":
+                    self.scouts_built += 1
+                    context = replace(context, scouts_built=self.scouts_built)
                 self._note(city, f"production: chose {picked.item}")
         return unfinished
 

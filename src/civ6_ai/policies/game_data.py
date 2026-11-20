@@ -322,3 +322,19 @@ UNIQUE_DISTRICTS: dict[str, str] = {
     "STREET_CARNIVAL": "ENTERTAINMENT_COMPLEX",  # Brazil.
     "BASILIKOI_PAIDES": "ENCAMPMENT",  # Macedon.
 }
+
+
+# Unique buildings count as the base building they replace, like the districts above. Keyed by
+# the name without its `BUILDING_` prefix. From the game's rules as recalled, not read from its
+# data: only the replacements that are certain are listed, so a missing civilization is a gap.
+UNIQUE_BUILDINGS: dict[str, str] = {
+    "MADRASA": "UNIVERSITY",  # Arabia.
+    "STAVE_CHURCH": "TEMPLE",  # Norway.
+    "SUKIENNICE": "MARKET",  # Poland.
+    "GRAND_BAZAAR": "BANK",  # Ottomans.
+    "ELECTRONICS_FACTORY": "FACTORY",  # Japan.
+}
+
+# Unique improvements. None replaces a base improvement in the game (each is its own improvement
+# with its own tile rules), so nothing maps here. Kept so `base_kind` has one table per kind.
+UNIQUE_IMPROVEMENTS: dict[str, str] = {}

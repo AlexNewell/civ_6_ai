@@ -24,7 +24,14 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from civ6_ai.policies.game_data import COMBAT_UNITS, REPLACES, UNIQUE_DISTRICTS, WONDERS
+from civ6_ai.policies.game_data import (
+    COMBAT_UNITS,
+    REPLACES,
+    UNIQUE_BUILDINGS,
+    UNIQUE_DISTRICTS,
+    UNIQUE_IMPROVEMENTS,
+    WONDERS,
+)
 from civ6_ai.state import (
     BuilderJob,
     City,
@@ -70,7 +77,7 @@ _Key = tuple[int, int, str]
 
 
 def improvement_key(improvement: str) -> str:
-    return improvement.removeprefix("IMPROVEMENT_")
+    return base_kind(improvement)
 
 
 def job_key(job: BuilderJob) -> str:
@@ -160,9 +167,31 @@ def improvement_signals(jobs: Iterable[BuilderJob], claimed: frozenset[_Key]) ->
 # ----- state -----
 
 
+_PREFIXES = ("UNIT_", "DISTRICT_", "BUILDING_", "IMPROVEMENT_")
+
+
+def base_kind(item: str) -> str:
+    """An item's name without its prefix, a unique replacement mapped to the base it replaces.
+
+    Boosts name the base district, unit, building or improvement, so every count goes through
+    here: a Seowon is a Campus, a Pitati an Archer, a Madrasa a University.
+    """
+    for prefix in _PREFIXES:
+        if item.startswith(prefix):
+            short = item.removeprefix(prefix)
+            if prefix == "UNIT_":
+                return REPLACES.get(item, item).removeprefix(prefix)
+            table = {
+                "DISTRICT_": UNIQUE_DISTRICTS,
+                "BUILDING_": UNIQUE_BUILDINGS,
+                "IMPROVEMENT_": UNIQUE_IMPROVEMENTS,
+            }[prefix]
+            return table.get(short, short)
+    return item
+
+
 def _unit_key(unit_type: str) -> str:
-    # A unique unit counts as the unit it replaces, since boosts name the base unit.
-    return REPLACES.get(unit_type, unit_type).removeprefix("UNIT_")
+    return base_kind(unit_type)
 
 
 def _land_combat_type(unit_type: str) -> bool:
@@ -175,10 +204,7 @@ def _land_combat_type(unit_type: str) -> bool:
 
 
 def _district_key(district_type: str) -> str:
-    # A unique replacement (Seowon, Royal Navy Dockyard) counts as its base kind, since boosts
-    # name the base kind.
-    short = district_type.removeprefix("DISTRICT_")
-    return UNIQUE_DISTRICTS.get(short, short)
+    return base_kind(district_type)
 
 
 def _is_land_combat(unit: Unit) -> bool:
@@ -211,7 +237,9 @@ def build_boost_state(
             if kind != "CITY_CENTER" and kind != building:
                 districts[kind] += 1
         for building in city.buildings:
-            buildings[building.removeprefix("BUILDING_")] += 1
+            buildings[base_kind("BUILDING_" + building.removeprefix("BUILDING_"))] += (
+                1  # Read unprefixed.
+            )
     unit_counts = Counter(_unit_key(u.unit_type) for u in units)
     improvements = dict(built or {})
     return BoostState(
@@ -276,7 +304,7 @@ def queued_by_kind(cities: Iterable[City]) -> tuple[Counter, Counter, Counter, b
         elif item in WONDERS:
             wonder = True
         elif item.startswith("BUILDING_"):
-            buildings[item.removeprefix("BUILDING_")] += 1
+            buildings[base_kind(item)] += 1
     return districts, units, buildings, wonder
 
 

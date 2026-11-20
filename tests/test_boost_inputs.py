@@ -805,3 +805,25 @@ def test_a_nudge_skips_a_job_a_builder_already_holds():
     policy = builder_with(True, [nudge(site="the stone near Rome")])
     policy._claims = {7: (10, 11, "IMPROVEMENT_QUARRY")}
     assert policy._nudged_jobs(jobs, 3) == {(12, 11, "IMPROVEMENT_QUARRY")}
+
+
+@pytest.mark.parametrize(
+    ("item", "base"),
+    [
+        ("DISTRICT_SEOWON", "CAMPUS"),
+        ("UNIT_NUBIAN_PITATI", "ARCHER"),
+        ("BUILDING_MADRASA", "UNIVERSITY"),
+        ("BUILDING_STAVE_CHURCH", "TEMPLE"),
+        ("IMPROVEMENT_MINE", "MINE"),  # No unique improvement replaces a base one.
+        ("BUILDING_LIBRARY", "LIBRARY"),
+    ],
+)
+def test_base_kind_maps_a_unique_replacement_to_its_base(item, base):
+    assert bi.base_kind(item) == base
+
+
+def test_unique_buildings_count_as_their_base_when_done_and_queued():
+    done = build_state([city(buildings=["BUILDING_MADRASA", "BUILDING_STAVE_CHURCH"])])
+    assert done.buildings["UNIVERSITY"] == 1 and done.buildings["TEMPLE"] == 1
+    _, _, queued, _ = bi.queued_by_kind([city(currently_building="BUILDING_STAVE_CHURCH")])
+    assert queued == {"TEMPLE": 1}

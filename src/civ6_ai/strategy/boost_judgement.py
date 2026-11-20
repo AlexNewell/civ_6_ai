@@ -112,6 +112,9 @@ class BoostState:
     )  # `CAMPUS: 1`, city centres left out.
     improvements: Mapping[str, int] = field(default_factory=dict)  # `QUARRY: 1`.
     sea_resources_improved: int = 0
+    # Improvements built on a tile with a resource, by type. None when not read: boosts that
+    # need a resource ("Mine a resource") are then not predicted, as ordinary mines don't count.
+    resource_improvements: Mapping[str, int] | None = None
     buildings: Mapping[str, int] = field(default_factory=dict)
     units: Mapping[str, int] = field(default_factory=dict)  # `SLINGER: 2`.
     land_combat_units: int = 0
@@ -132,6 +135,9 @@ class PlanSignals:
     improvement_jobs: Mapping[str, int] = field(default_factory=dict)  # Builder jobs on offer.
     # Where a nudge could place one, by improvement: `QUARRY: ("the stone near Rome",)`.
     improvement_sites: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    # The same two, counting only jobs and sites on a tile with a resource.
+    resource_improvement_jobs: Mapping[str, int] = field(default_factory=dict)
+    resource_improvement_sites: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     units_queued: Mapping[str, int] = field(default_factory=dict)
     buildings_queued: Mapping[str, int] = field(default_factory=dict)
     kill_offers: Mapping[str, int] = field(default_factory=dict)  # Kills the units could make.
@@ -219,7 +225,13 @@ def _target_name(target: str) -> str:
 def _improvement_reach(
     spec: BoostSpec, state: BoostState, signals: PlanSignals, settings: JudgementSettings
 ) -> Reach:
-    if spec.target == ANY:
+    if spec.on_resource:
+        if state.resource_improvements is None:
+            return _no("resource data not read")
+        have = state.resource_improvements.get(spec.target, 0)
+        jobs = signals.resource_improvement_jobs.get(spec.target, 0)
+        sites = signals.resource_improvement_sites.get(spec.target, ())
+    elif spec.target == ANY:
         have = sum(state.improvements.values())
         jobs = sum(signals.improvement_jobs.values())
         sites = tuple(s for group in signals.improvement_sites.values() for s in group)
@@ -247,8 +259,10 @@ def _district_reach(
     if spec.target == ANY:
         have, queued = sum(state.districts.values()), sum(signals.districts_queued.values())
     elif spec.target == DIFFERENT:
-        have = sum(1 for n in state.districts.values() if n > 0)
-        queued = sum(1 for n in signals.districts_queued.values() if n > 0)
+        built = {t for t, n in state.districts.items() if n > 0}
+        have = len(built)
+        # A queued type counts only when no completed district already represents it.
+        queued = sum(1 for t, n in signals.districts_queued.items() if n > 0 and t not in built)
     else:
         have, queued = (
             state.districts.get(spec.target, 0),

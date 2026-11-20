@@ -235,3 +235,32 @@ def test_pantheon_and_meeting_boosts():
     meet = item("Writing", "Meet another civilization.", turns=12)
     assert one(meet, signals=PlanSignals(exploring=True)).decision is Decision.DELAY
     assert one(meet).decision is Decision.RESEARCH_NOW
+
+
+def test_mine_a_resource_ignores_ordinary_mines():
+    option = item("Wheel", "Mine a resource.", turns=12)
+    plain = BoostState(turn=20, improvements={"MINE": 1})
+    assert one(option, plain).decision is Decision.RESEARCH_NOW  # Resource data not read.
+    state = BoostState(turn=20, improvements={"MINE": 1}, resource_improvements={})
+    ordinary = PlanSignals(improvement_jobs={"MINE": 1}, improvement_sites={"MINE": ("a hill",)})
+    assert one(option, state, ordinary).decision is Decision.RESEARCH_NOW
+
+
+def test_mine_a_resource_uses_resource_jobs_and_sites():
+    option = item("Wheel", "Mine a resource.", turns=12)
+    state = BoostState(turn=20, resource_improvements={})
+    job = PlanSignals(resource_improvement_jobs={"MINE": 1})
+    assert one(option, state, job).decision is Decision.DELAY
+    site = PlanSignals(resource_improvement_sites={"MINE": ("the copper near Rome",)})
+    j = one(option, state, site)
+    assert j.decision is Decision.NUDGE
+    assert j.reach.nudge == "build a mine on the copper near Rome"
+
+
+def test_different_districts_count_only_new_queued_types():
+    option = item("Mathematics", "Build 3 different specialty districts.", turns=15)
+    state = BoostState(turn=20, districts={"CAMPUS": 1, "HOLY_SITE": 1})
+    again = PlanSignals(districts_queued={"CAMPUS": 1})  # Still only two distinct types.
+    assert one(option, state, again).decision is Decision.RESEARCH_NOW
+    new = PlanSignals(districts_queued={"CAMPUS": 1, "HARBOR": 1})
+    assert one(option, state, new).decision is Decision.DELAY

@@ -242,7 +242,9 @@ def test_a_stalled_biggest_city_does_not_borrow_the_other_cities_growth():
     )
     state = build_state(cities)
     signals = PlanSignals(*bi.growth_rates(cities))
-    assert judge_boosts([option], state, signals)[0].decision is Decision.DELAY
+    assert (
+        judge_boosts([option], state, signals)[0].decision is Decision.RESEARCH_NOW
+    )  # Not approaching, so no wait.
 
 
 def test_a_tied_leader_that_is_not_growing_does_not_hold_the_other_back():

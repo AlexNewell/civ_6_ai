@@ -100,8 +100,7 @@ FEATURES: dict[str, tuple[str, str]] = {
     "cap_focus": ("growth", "cap_focus"),  # Issue 215 (PR 326).
     "settler_note": ("growth", "settler_note"),  # Log-only companion of cap_focus.
     "wonder_races": ("production", "wonder_races"),  # Issue 323 (PR 327).
-    # boost_judgement (PR 343) joins once its live inputs are wired (PR 351): without them the
-    # flag changes nothing, and an A/B run would read as a null result.
+    "boost_judgement": ("research", "boost_judgement"),  # Issue 302 (PR 343), inputs in PR 351.
 }
 
 

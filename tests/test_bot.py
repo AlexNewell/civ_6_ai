@@ -653,12 +653,14 @@ def test_enable_features_switches_on_each_flag_and_leaves_the_rest() -> None:
         "production": Holder(ProductionWeights()),
         "research": Holder(ResearchWeights()),
     }
-    assert "boost_judgement" not in FEATURES  # Needs its live inputs first (PR 351).
+    assert FEATURES["boost_judgement"] == ("research", "boost_judgement")
     for holder_name, flag in FEATURES.values():  # Every flag exists and starts off.
         assert getattr(holders[holder_name].weights, flag) is False
     enable_features(holders, ["wonder_races"])
     assert holders["production"].weights.wonder_races is True
     assert holders["research"].weights.boost_judgement is False
+    enable_features(holders, ["boost_judgement"])
+    assert holders["research"].weights.boost_judgement is True
     assert holders["growth"].weights.cap_focus is False
     assert holders["production"].weights == replace(ProductionWeights(), wonder_races=True)
 
@@ -673,6 +675,8 @@ def test_build_orchestrator_switches_on_the_named_features(tmp_path):
     production = next(h for h in orchestrator._handlers if isinstance(h, bot.CityProductionPolicy))
     assert production.weights.wonder_races is True
     assert production.growth.weights.cap_focus is True
+    research = next(h for h in orchestrator._handlers if type(h).__name__ == "ResearchPolicy")
+    assert research.weights.boost_judgement is True
     plain = bot.build_orchestrator(WiredGame(), EventBus(), TurnLog(tmp_path / "h.jsonl"))
     production = next(h for h in plain._handlers if isinstance(h, bot.CityProductionPolicy))
     assert production.weights.wonder_races is False

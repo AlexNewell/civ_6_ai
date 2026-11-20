@@ -668,3 +668,40 @@ def test_pinned_target_wins_through_every_level_path(via, domain):
         )
     got = combine(base, [ActiveLevel("a", lvl, 1)])
     assert got.production.target_cities == 6 and got.gold.target_cities == 6
+
+
+def test_codex_example_pinned_target_6_level_weight_3_end_to_end():
+    # The reported case: base pins 6, an active level sets production.target_cities=3.
+    base = parse_policy_document({"expansion": {"target_cities": 6}})
+    lvl = level("a", 5, settings={"weights": {"production": {"target_cities": 3}}})
+    got = combine(base, [ActiveLevel("a", lvl, 1)])
+    # What production and gold actually read after combine (which calls resolve internally).
+    assert got.production.target_cities == 6
+    assert got.gold.target_cities == 6
+
+
+def test_document_handler_refresh_does_not_erase_the_active_playbook(tmp_path):
+    from civ6_ai.strategy.apply import PolicyDocumentHandler
+
+    path = tmp_path / "doc.json"
+    path.write_text('{"posture": "balanced"}', encoding="utf-8")
+    policy = FakePolicy()
+    handler = PolicyDocumentHandler(path, production=policy)
+    pb_data = make()
+    pb_data["levels"][0]["nudges"] = [army(step=0.5)]
+    runner = PlaybookRunner(
+        [parse_playbook(pb_data)],
+        None,
+        enabled=True,
+        base_document=lambda: handler.document,
+        production=policy,
+    )
+    handler.refresh()
+    feed(runner, 1, camps_near_city=1)
+    with_playbook = policy.weights
+    assert with_playbook.army_per_city == 2.0
+    path.write_text('{"posture":  "balanced"}', encoding="utf-8")  # Rewritten, same document.
+    assert handler.refresh()
+    assert policy.weights.army_per_city != 2.0  # The handler put the plain base back.
+    feed(runner, 2, camps_near_city=1)
+    assert policy.weights == with_playbook

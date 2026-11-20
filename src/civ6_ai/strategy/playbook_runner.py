@@ -189,7 +189,12 @@ class PlaybookRunner:
         active = self.active()
         base = self._base()
         signature = (tuple(active), base)
-        if signature == self._applied or (self._applied is None and not active):
+        if self._applied is None and not active:
+            return
+        # While a playbook is active, apply every turn: the policy document handler reapplies the
+        # plain base whenever its file is rewritten, even to the same document, and would erase
+        # the levels' settings. With none active, apply only on a change.
+        if signature == self._applied and not active:
             return
         self._applied = signature
         apply_resolved(combine(base, active), **self._policies)

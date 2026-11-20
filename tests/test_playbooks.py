@@ -1,6 +1,7 @@
 """Playbooks: the parser, the runner and the combining rule (issue 244)."""
 
 import asyncio
+import contextlib
 import copy
 import json
 from pathlib import Path
@@ -575,3 +576,95 @@ def test_non_string_signal_or_op_is_a_refusal_not_a_crash(field, tmp_path):
     (tmp_path / "good.json").write_text(json.dumps(make(name="ok")), encoding="utf-8")
     found, refused = load_playbooks(tmp_path)
     assert [p.name for p in found] == ["ok"] and "bad.json" in refused
+
+
+WEIRD = [[], {}, [[]], {"a": 1}, None, True, 1.5, float("inf"), float("nan"), -3, "x", ""]
+
+
+def _paths():
+    """Every field of a valid playbook, as a function that plants a value at it."""
+
+    def top(key):
+        return lambda data, v: data.__setitem__(key, v)
+
+    def level_field(key):
+        return lambda data, v: data["levels"][0].__setitem__(key, v)
+
+    def nudge_field(key):
+        def plant(data, v):
+            data["levels"][0]["nudges"] = [army()]
+            data["levels"][0]["nudges"][0][key] = v
+
+        return plant
+
+    def cond(key):
+        return lambda data, v: data["trigger"]["when"].__setitem__(key, v)
+
+    out = {
+        f"top.{k}": top(k)
+        for k in (
+            "version",
+            "name",
+            "playbook_version",
+            "example",
+            "description",
+            "trigger",
+            "levels",
+            "raise_hold",
+            "lower_hold",
+            "min_dwell",
+            "end",
+            "outcome_signals",
+        )
+    }
+    out |= {
+        f"level.{k}": level_field(k)
+        for k in ("name", "urgency", "settings", "nudges", "raise_when", "lower_when")
+    }
+    out |= {f"nudge.{k}": nudge_field(k) for k in ("setting", "step", "min", "max")}
+    out |= {f"cond.{k}": cond(k) for k in ("signal", "op", "value")}
+    out["outcome.item"] = lambda data, v: data.__setitem__("outcome_signals", [v])
+    out["trigger.hold"] = lambda data, v: data["trigger"].__setitem__("hold", v)
+    out["end.hold"] = lambda data, v: data["end"].__setitem__("hold", v)
+    out["all.child"] = lambda data, v: data["trigger"].__setitem__("when", {"all": [v]})
+    out["settings.weights"] = lambda data, v: data["levels"][0].__setitem__(
+        "settings", {"weights": v}
+    )
+    out["settings.domain"] = lambda data, v: data["levels"][0].__setitem__(
+        "settings", {"weights": {"production": v}}
+    )
+    out["settings.posture"] = lambda data, v: data["levels"][0].__setitem__(
+        "settings", {"posture": v}
+    )
+    return out
+
+
+@pytest.mark.parametrize("path", sorted(_paths()))
+@pytest.mark.parametrize("value", WEIRD, ids=repr)
+def test_malformed_values_never_raise_anything_but_playbook_error(path, value):
+    data = make()
+    _paths()[path](data, copy.deepcopy(value))
+    with contextlib.suppress(PlaybookError):  # A refusal is fine, and so is a value that is valid.
+        parse_playbook(data)
+
+
+def test_outcome_signal_of_a_non_string_is_listed(tmp_path):
+    assert has(problems_of(make(outcome_signals=[[]])), "outcome_signals")
+    (tmp_path / "bad.json").write_text(json.dumps(make(outcome_signals=[{}])), encoding="utf-8")
+    (tmp_path / "good.json").write_text(json.dumps(make(name="ok")), encoding="utf-8")
+    found, refused = load_playbooks(tmp_path)
+    assert [p.name for p in found] == ["ok"] and "bad.json" in refused
+
+
+@pytest.mark.parametrize("via", ["settings", "nudges"])
+@pytest.mark.parametrize("domain", ["production", "gold"])
+def test_pinned_target_wins_through_every_level_path(via, domain):
+    base = parse_policy_document({"expansion": {"target_cities": 6}})
+    if via == "settings":
+        lvl = level("a", 5, settings={"weights": {domain: {"target_cities": 3}}})
+    else:
+        lvl = level(
+            "a", 5, nudges=[army(setting=f"{domain}.target_cities", step=-0.5, min=1, max=9)]
+        )
+    got = combine(base, [ActiveLevel("a", lvl, 1)])
+    assert got.production.target_cities == 6 and got.gold.target_cities == 6

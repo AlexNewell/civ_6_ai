@@ -158,6 +158,10 @@ def _is_number(value: object) -> bool:
     return isinstance(value, int | float) and not isinstance(value, bool)
 
 
+def _is_whole(value: object) -> bool:
+    return _is_number(value) and math.isfinite(value) and value == int(value)
+
+
 def parse_condition(raw: object, where: str, problems: list[str], depth: int = 0) -> Condition:
     """A condition from JSON: a comparison, or all/any/not over conditions. Never evaluated text."""
     if not isinstance(raw, Mapping):
@@ -234,7 +238,7 @@ def condition_signals(condition: Condition) -> set[str]:
 
 
 def _check_hold(value: object, where: str, problems: list[str], minimum: int) -> int:
-    if not _is_number(value) or value != int(value) or not minimum <= value <= MAX_HOLD_TURNS:
+    if not _is_whole(value) or not minimum <= value <= MAX_HOLD_TURNS:
         problems.append(f"{where}: must be a whole number of turns, {minimum} to {MAX_HOLD_TURNS}")
         return minimum
     return int(value)
@@ -296,7 +300,7 @@ def _check_level(raw: object, where: str, problems: list[str]) -> Level | None:
     name, urgency = raw.get("name"), raw.get("urgency")
     if not isinstance(name, str) or not name:
         problems.append(f"{where}.name: must be a non-empty string")
-    if not _is_number(urgency) or urgency != int(urgency) or urgency < 1:
+    if not _is_whole(urgency) or urgency < 1:
         problems.append(f"{where}.urgency: must be a whole number from 1")
         urgency = 0
     settings, sets = DEFAULT_DOCUMENT, frozenset()
@@ -397,7 +401,9 @@ def parse_playbook(data: object) -> Playbook:
     }
     levels = _check_levels(data["levels"], problems) if "levels" in data else []
     outcome = data.get("outcome_signals", [])
-    if not isinstance(outcome, list) or any(item not in KNOWN_SIGNALS for item in outcome):
+    if not isinstance(outcome, list) or any(
+        not isinstance(item, str) or item not in KNOWN_SIGNALS for item in outcome
+    ):
         problems.append(f"outcome_signals: must be a list drawn from {sorted(KNOWN_SIGNALS)}")
         outcome = []
     if problems:

@@ -171,8 +171,21 @@ def resource_game(resource="WINE", units=None):
     )
 
 
+def test_plantation_resource_needs_irrigation_not_pottery():
+    # `open_techs` lists what is still to research.
+    irrigation_open = frozenset({"IRRIGATION"})  # Pottery done, Irrigation not.
+    pottery_open = frozenset({"POTTERY"})  # Irrigation done, Pottery not.
+    for resource in ("WINE", "TEA", "SUGAR", "COTTON", "DYES", "SILK", "SPICES", "INCENSE"):
+        assert not v.resource_improvable(resource, irrigation_open, True)
+        assert v.resource_improvable(resource, pottery_open, True)
+    assert v.resource_improvable("WHEAT", irrigation_open, True)
+    assert not v.resource_improvable("WHEAT", pottery_open, True)
+    for unsure in ("DEER", "FURS", "TRUFFLES", "IVORY", "NITER", "COAL"):
+        assert not v.resource_improvable(unsure, frozenset(), True)
+
+
 def test_resource_tile_with_the_tech_researched_is_bought_for_its_improvement():
-    game = resource_game("WINE")  # Wine needs Pottery, which is done.
+    game = resource_game("HORSES")  # Pasture needs Animal Husbandry, which is done.
     run(game, tile_valuation=True)
     assert tiles_bought(game) == [("tile", 65536, 1, 10)]
 

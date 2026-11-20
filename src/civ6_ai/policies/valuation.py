@@ -345,15 +345,19 @@ _TERRAIN_YIELDS = (
 # The tech each resource's improvement needs, for the common ancient and classical resources.
 # APPROXIMATE: built by hand (the game's tables are readable only in Lua), so a resource missing
 # here, or a tech name wrong, reads as not improvable, the safe way to be wrong.
-_NEEDS_POTTERY = ("WHEAT", "RICE", "MAIZE", "BANANAS", "CITRUS", "COCOA", "COFFEE", "COTTON")
-_NEEDS_POTTERY += ("DYES", "INCENSE", "SILK", "SPICES", "SUGAR", "TEA", "TOBACCO", "WINE")
-_NEEDS_HUSBANDRY = ("CATTLE", "SHEEP", "HORSES", "DEER", "FURS", "TRUFFLES", "IVORY", "MEAT")
-_NEEDS_MINING = ("IRON", "COPPER", "STONE", "MARBLE", "GYPSUM", "SALT", "JADE", "SILVER")
-_NEEDS_MINING += ("DIAMONDS", "AMBER", "MERCURY")
+_FARMS = ("WHEAT", "RICE", "MAIZE")  # Farm: Pottery.
+_PLANTATIONS = ("BANANAS", "CITRUS", "COCOA", "COFFEE", "COTTON", "DYES", "INCENSE", "SILK")
+_PLANTATIONS += ("SPICES", "SUGAR", "TEA", "TOBACCO", "WINE")  # Plantation: Irrigation.
+_PASTURES = ("CATTLE", "SHEEP", "HORSES")  # Pasture: Animal Husbandry.
+_MINES = ("IRON", "COPPER", "SALT", "JADE", "SILVER", "DIAMONDS", "AMBER", "MERCURY")  # Mine.
+_QUARRIES = ("STONE", "MARBLE", "GYPSUM")  # Quarry: Mining.
+# Left out as unsure of the improvement's tech (so never improvable): camp resources (deer, furs,
+# truffles, ivory), niter, coal, oil, aluminum, uranium.
 RESOURCE_TECH: dict[str, str] = {
-    **dict.fromkeys(_NEEDS_POTTERY, "POTTERY"),
-    **dict.fromkeys(_NEEDS_HUSBANDRY, "ANIMAL_HUSBANDRY"),
-    **dict.fromkeys(_NEEDS_MINING, "MINING"),
+    **dict.fromkeys(_FARMS, "POTTERY"),
+    **dict.fromkeys(_PLANTATIONS, "IRRIGATION"),
+    **dict.fromkeys(_PASTURES, "ANIMAL_HUSBANDRY"),
+    **dict.fromkeys(_MINES + _QUARRIES, "MINING"),
     **dict.fromkeys(("FISH", "CRABS", "WHALES", "PEARLS"), "SAILING"),
 }
 

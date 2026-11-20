@@ -402,6 +402,7 @@ def build_empire(
         golden_threshold=overview.era_golden_threshold,
         game_speed=overview.game_speed,
         max_turns=overview.max_turns,
+        difficulty=str(getattr(overview, "difficulty", "") or ""),
         government=government.government_type,
         policy_slots=tuple(
             PolicySlot(slot.slot_index, slot.slot_type, _policy_in(slot))

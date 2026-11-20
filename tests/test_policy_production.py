@@ -1796,3 +1796,101 @@ def test_a_rejected_wonder_race_is_not_started_when_everything_above_it_is_refus
     off = ScriptedGame(refuse={"UNIT_BUILDER": "ERR:NOPE"})
     run(choose_for_city(off, c, menu, ctx, ProductionWeights()))
     assert any(call[2] == "BUILDING_STONEHENGE" for call in off.set_calls)
+
+
+def test_a_wonder_the_ranking_approved_is_started_with_the_same_alternative():
+    # Issue 328 (review): expected value 5.41 beats a Granary's 1.0 but not the old constant
+    # 5.0 (needs 5.75), so a guard scoring with the unchanged context rejected a ranked wonder.
+    c = city(production=8.0)
+    menu = [
+        option("BUILDING", "BUILDING_STONEHENGE", 20, cost=180),
+        option("BUILDING", "BUILDING_GRANARY", 20, cost=60),
+    ]
+    ctx = ProductionContext(
+        turn=33, num_cities=2, army=9, builders=2, difficulty="PRINCE", rivals=4
+    )
+    w = ProductionWeights(wonder_races=True)
+    assert rank_production(c, menu, ctx, w)[0].item == "BUILDING_STONEHENGE"
+    game = ScriptedGame()
+    run(choose_for_city(game, c, menu, ctx, w))
+    assert game.set_calls and game.set_calls[0][2] == "BUILDING_STONEHENGE"
+    off = ScriptedGame()
+    run(choose_for_city(off, c, menu, ctx, ProductionWeights()))
+    assert off.set_calls
+
+
+def test_an_unavailable_district_refreshes_the_race_alternative_for_the_guard():
+    # Issue 328 (review): a Commercial Hub worth 5.0 makes the race NO-GO;
+    # when the game will not start it, the alternative is the Granary and the wonder is GO.
+    c = city(production=8.0)
+    hub = option("DISTRICT", "DISTRICT_COMMERCIAL_HUB", 20, cost=54)
+    menu = [hub, option("BUILDING", "BUILDING_STONEHENGE", 20, cost=180)]
+    menu.append(option("BUILDING", "BUILDING_GRANARY", 20, cost=60))
+    ctx = ProductionContext(
+        turn=33, num_cities=2, army=9, builders=2, difficulty="PRINCE", rivals=4
+    )
+    w = ProductionWeights(wonder_races=True)
+    assert rank_production(c, menu, ctx, w)[0].item == "DISTRICT_COMMERCIAL_HUB"
+
+    async def capped(city_id, item):
+        return SimpleNamespace(zoned=1, allowed=1)  # At the population limit: the hub is skipped.
+
+    reads = SimpleNamespace(district_cap=capped, district_denied=capped)
+    game = ScriptedGame()
+    run(choose_for_city(game, c, menu, ctx, w, reads=reads))
+    assert any(call[2] == "BUILDING_STONEHENGE" for call in game.set_calls)
+    off = ScriptedGame()
+    run(choose_for_city(off, c, menu, ctx, ProductionWeights(), reads=reads))
+    assert off.set_calls
+
+
+def test_a_refused_district_stops_vetoing_the_wonder_race(caplog):
+    import logging
+
+    from civ6_ai.policies.production import _LOGGED_RACES
+
+    _LOGGED_RACES.clear()  # Logged once per key for the process; start this test clean.
+
+    # Issue 328 (review): the Hub is refused at start (not by the cap check); the wonder must
+    # then be judged against the Granary, not the Hub that cannot be built.
+    c = city(production=8.0)
+    menu = [
+        option("DISTRICT", "DISTRICT_COMMERCIAL_HUB", 20, cost=54),
+        option("BUILDING", "BUILDING_STONEHENGE", 20, cost=180),
+        option("BUILDING", "BUILDING_GRANARY", 20, cost=60),
+    ]
+    ctx = ProductionContext(
+        turn=33, num_cities=2, army=9, builders=2, difficulty="PRINCE", rivals=4
+    )
+    w = ProductionWeights(wonder_races=True)
+    game = ScriptedGame(refuse={"DISTRICT_COMMERCIAL_HUB": "ERR:NOPE"})
+    with caplog.at_level(logging.INFO):
+        run(choose_for_city(game, c, menu, ctx, w))
+    assert game.set_calls[-1][2] == "BUILDING_STONEHENGE"
+    race = [m for m in caplog.messages if m.startswith("wonder race")]
+    assert "NO-GO" in race[0] and "GO" in race[-1] and "NO-GO" not in race[-1]
+    assert "alt 1.0" in race[-1]
+
+
+def test_a_refused_district_leaves_the_ranking_alone_with_wonder_races_off(monkeypatch):
+    # Issue 328 (review): the refusal rerank is part of the opt-in race wiring, so a run with the
+    # flag off ranks once, as before the change.
+    import civ6_ai.policies.production as production
+
+    calls = []
+    real = production.rank_production
+
+    def counting(*args, **kwargs):
+        calls.append(args)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(production, "rank_production", counting)
+    menu = [
+        option("DISTRICT", "DISTRICT_COMMERCIAL_HUB", 20, cost=54),
+        option("BUILDING", "BUILDING_GRANARY", 20, cost=60),
+    ]
+    ctx = ProductionContext(turn=33, num_cities=2, army=9, builders=2)
+    game = ScriptedGame(refuse={"DISTRICT_COMMERCIAL_HUB": "ERR:NOPE"})
+    run(choose_for_city(game, city(production=8.0), menu, ctx, ProductionWeights()))
+    assert game.set_calls[-1][2] == "BUILDING_GRANARY"
+    assert len(calls) == 1

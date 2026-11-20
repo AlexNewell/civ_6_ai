@@ -330,8 +330,13 @@ def build_orchestrator(
     defence = DefenceState()  # Which cities are threatened this turn, shared by three policies.
     expansion = ExpansionState()  # Settling fills it. Production and the log line read it.
     builder_demand = BuilderDemand()  # What the builders left undone, which production reads.
+    rankings = RankingsHolder()  # Every living civ's score (issue 256).
     production = CityProductionPolicy(
-        bus=bus, expansion=expansion, defence=defence, builder_demand=builder_demand
+        bus=bus,
+        expansion=expansion,
+        defence=defence,
+        builder_demand=builder_demand,
+        rankings=rankings,
     )
     government = GovernmentPolicy()  # One instance, so handler and blockers share its bounds.
     secondary = SecondaryPolicy()
@@ -346,7 +351,6 @@ def build_orchestrator(
         secondary.map = threat_map_handler.map  # Routes are checked against it (issue 269).
         defence.map = threat_map_handler.map  # The same map decides who is short (issue 264).
     victory_watch = VictoryWatch()
-    rankings = RankingsHolder()  # Every living civ's score (issue 256).
     diplomacy = DiplomacyPolicy(threats=victory_watch.threat_ids)
     research_policy = research.ResearchPolicy()
     gold = GoldPolicy(

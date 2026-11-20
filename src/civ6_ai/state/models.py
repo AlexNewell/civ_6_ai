@@ -295,6 +295,7 @@ class Empire:
     science_vp: int = 0
     diplomatic_vp: int = 0
     tourism: int = 0
+    difficulty: str = ""  # The overview's difficulty name ("Prince"); "" when not given.
 
     @property
     def empty_policy_slots(self) -> tuple[PolicySlot, ...]:

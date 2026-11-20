@@ -2154,3 +2154,224 @@ def test_city_state_cities_and_borders_do_not_press_but_still_space():
     assert (63, 11, 5, True) not in policy._pressure_sources()  # No pressure.
     assert all(c[0] != 63 for c in policy._pressure_sources())
     assert policy._phantoms == []
+
+
+# ----- Issue 319: a settler stops waiting after `max_wait_turns` -----
+
+
+def _fog_wait_game(turn=100):
+    """The issue 288 case: a site beside a sighting lost in the fog, so the settler holds."""
+    return make_game(
+        [settler(x=10, y=10)], cities=[alpha()], sites=[site(14, 10, food=40)], turn=turn
+    )
+
+
+def _fog_wait_policy():
+    policy = SettlingPolicy(SettlingSettings(map_width=84))
+    policy.threat_map = _Sightings((14, 7), age=1)
+    policy._fog = {(14, 10): FogCount(14, 10, 100, 70, 6, 3, 0)}
+    return policy
+
+
+def test_waiting_turns_are_counted_per_settler_and_end_with_a_step():
+    policy = _fog_wait_policy()
+    for expected in (1, 2, 3):
+        run(policy, _fog_wait_game())
+        assert policy.decisions[-1].action == "hold"
+        assert policy._waits[7] == expected
+    game = _fog_wait_game()
+    run(policy, game)  # The fourth turn: the cap is reached, the settler goes.
+    assert policy.decisions[-1].action == "move"
+    assert 7 not in policy._waits  # A step forward ends the run of waiting turns.
+
+
+def test_after_the_cap_a_settler_goes_without_an_escort_when_no_hostile_can_reach_the_route():
+    policy = _fog_wait_policy()
+    for _ in range(3):
+        run(policy, _fog_wait_game())
+    game = _fog_wait_game()
+    run(policy, game)
+    decision = policy.decisions[-1]
+    assert "waited 3 turns for an escort" in decision.reason
+    assert [a for a in game.actions if a[0] == "move" and a[1] == 7]
+
+
+def test_the_cap_is_the_setting():
+    policy = _fog_wait_policy()
+    policy.settings = SettlingSettings(map_width=84, max_wait_turns=1)
+    run(policy, _fog_wait_game())
+    run(policy, _fog_wait_game())
+    assert policy.decisions[-1].action == "move"
+
+
+def test_the_escort_that_cannot_move_stops_blocking_once_the_route_is_clear():
+    policy = _fog_wait_policy()
+    escort = unit_info(unit_id=9, unit_index=9, x=10, y=10)
+    other = unit_info(unit_id=10, unit_index=10, x=10, y=10)
+    for _ in range(3):
+        game = make_game(
+            [settler(x=10, y=10), escort, other],
+            cities=[alpha()],
+            sites=[site(14, 10, food=40)],
+            turn=100,
+        )
+        game.failing = {"move"}
+        run(policy, game)
+    assert policy._waits[7] == 3
+    game = make_game(
+        [settler(x=10, y=10), escort, other],
+        cities=[alpha()],
+        sites=[site(14, 10, food=40)],
+        turn=100,
+    )
+    run(policy, game)
+    assert [a for a in game.actions if a[1] == 7]
+
+
+def test_after_the_cap_a_threatened_far_site_gives_way_to_a_nearer_site_clear_of_hostiles():
+    # The far site has a hostile unit in sight near its route; the nearer one only has a sighting
+    # lost in the fog beside it (issue 288), which holds a settler for `max_wait_turns` turns.
+    far, near = site(14, 6, food=40), site(10, 18, food=30)
+
+    def play(waits):
+        policy = SettlingPolicy(SettlingSettings(threat_radius=2, map_width=84))
+        policy.threat_map = _Sightings((10, 20), age=1)
+        policy._fog = {(10, 18): FogCount(10, 18, 100, 70, 6, 3, 0)}
+        policy._waits[7] = waits
+        game = make_game(
+            [settler(y=14)],
+            cities=[alpha()],
+            threats=[barbarian(13, 10)],
+            sites=[far, near],
+            turn=100,
+        )
+        run(policy, game)
+        return policy, game
+
+    policy, game = play(0)
+    assert policy.decisions[-1].action == "hold"
+    policy, game = play(3)
+    decision = policy.decisions[-1]
+    assert decision.action == "move" and decision.target == (10, 18)
+    assert "waited 3 turns for the far site" in decision.reason
+    assert [a for a in game.actions if a[1] == 7]
+
+
+def test_after_the_cap_a_settler_never_steps_into_a_visible_hostiles_reach():
+    # Only site is past the hostile unit: no fallback, the settler keeps waiting (issues 283/291).
+    for waits in (3, 9):
+        policy = SettlingPolicy(SettlingSettings(threat_radius=2))
+        policy._waits[7] = waits
+        game = make_game(
+            [settler(y=14)],
+            cities=[alpha()],
+            threats=[barbarian(13, 10)],
+            sites=[site(14, 6, food=40)],
+        )
+        run(policy, game)
+        assert policy.decisions[-1].action == "hold"
+        assert not [a for a in game.actions if a[1] == 7]
+
+
+def test_a_settler_does_not_walk_alone_past_a_mounted_hostile_after_the_cap():
+    # A mounted unit reaches two tiles further, so a route five tiles off is still in its reach.
+    policy = SettlingPolicy(SettlingSettings(threat_radius=2))
+    policy._waits[7] = 5
+    horse = threat_info(x=13, y=10, owner_id=BARBARIANS, unit_type="UNIT_HORSEMAN")
+    game = make_game(
+        [settler(y=14)], cities=[alpha()], threats=[horse], sites=[site(14, 6, food=40)]
+    )
+    run(policy, game)
+    assert not [a for a in game.actions if a[1] == 7]
+
+
+def test_the_nearer_site_chosen_after_waiting_is_kept_on_the_next_turn():
+    far, near = site(14, 6, food=40), site(10, 18, food=30)
+
+    def play(policy):
+        policy.threat_map = _Sightings((10, 20), age=1)
+        policy._fog = {(10, 18): FogCount(10, 18, 100, 70, 6, 3, 0)}
+        game = make_game(
+            [settler(y=14)], cities=[alpha()], threats=[barbarian(13, 10)], sites=[far, near],
+            turn=100,
+        )  # fmt: skip
+        run(policy, game)
+        return policy.decisions[-1]
+
+    policy = SettlingPolicy(SettlingSettings(threat_radius=2, map_width=84))
+    policy._waits[7] = 3
+    assert play(policy).target == (10, 18)
+    assert policy._fallback_site[7] == (10, 18)
+    assert 7 not in policy._waits  # The step ended the run of waits.
+    again = play(policy)
+    assert again.target == (10, 18) and "nearer site chosen after waiting" in again.reason
+
+
+def test_the_kept_site_is_honoured_when_an_escort_appears_and_the_far_route_clears():
+    # Codex on PR 320: a later turn must not undo the nearer site chosen after waiting.
+    far, near = site(14, 6, food=40), site(10, 18, food=30)
+    policy = SettlingPolicy(SettlingSettings(threat_radius=2, map_width=84))
+    policy.threat_map = _Sightings((10, 20), age=1)
+    policy._fog = {(10, 18): FogCount(10, 18, 100, 70, 6, 3, 0)}
+    policy._waits[7] = 3
+    first = make_game(
+        [settler(y=14)], cities=[alpha()], threats=[barbarian(13, 10)], sites=[far, near],
+        turn=100,
+    )  # fmt: skip
+    run(policy, first)
+    assert policy._fallback_site[7] == (10, 18)
+    escort = unit_info(unit_id=9, unit_index=9, x=10, y=14)
+    second = make_game(
+        [settler(y=14), escort], cities=[alpha()], sites=[far, near], turn=101
+    )  # The hostile is gone and an escort stands on the settler.
+    run(policy, second)
+    decision = policy.decisions[-1]
+    assert decision.target == (10, 18) and "nearer site chosen" in decision.reason
+    assert [a for a in second.actions if a[1] == 7 and a[2:] == (10, 18)]
+
+
+def _outcome(policy, *decisions):
+    policy._outcomes = list(decisions)
+    policy._apply_wait(7)
+
+
+def test_the_wait_count_comes_from_the_turns_final_outcome():
+    policy = SettlingPolicy()
+    ok, refused = "MOVING_TO|1,1", "Error: CANNOT_MOVE"
+    _outcome(policy, ("hold", ""))  # A plain hold turn.
+    assert policy._waits[7] == 1
+    _outcome(policy, ("hold", refused), ("flee", ok))  # Refused first flee, accepted second.
+    assert policy._waits[7] == 1
+    _outcome(policy, ("hold", refused), ("hold", refused), ("escort_move", ok))
+    assert 7 not in policy._waits  # Flee refused, then the escorted settler moved: reset.
+    _outcome(policy, ("hold", ""))
+    _outcome(policy, ("move", refused), ("move", ok))  # A refused move, then another succeeds.
+    assert 7 not in policy._waits
+    _outcome(policy, ("move", refused))
+    _outcome(policy, ("escort_gather", ok))
+    assert policy._waits[7] == 2
+    _outcome(policy, ("found", ok))
+    assert 7 not in policy._waits
+    _outcome(policy)  # No decision at all: unchanged.
+    assert 7 not in policy._waits
+
+
+def test_a_flee_after_a_refused_first_city_leaves_the_wait_count_unchanged():
+    policy = SettlingPolicy(SettlingSettings(map_width=84))
+    policy._waits[7] = 2
+    cities = [city_info(x=10, y=10, buildings=[]), city_info(x=14, y=14, buildings=[])]
+    game = make_game(
+        [settler(x=11, y=11)], cities=cities, threats=[barbarian(12, 12)],
+        sites=[site(16, 10, food=40)], turn=100,
+    )  # fmt: skip
+    real = game.move_unit
+    calls = []
+
+    async def first_refused(unit_index, x, y):
+        calls.append((x, y))
+        return "Error: CANNOT_MOVE" if len(calls) == 1 else await real(unit_index, x, y)
+
+    game.move_unit = first_refused
+    run(policy, game)
+    assert [d.action for d in policy.decisions][-2:] == ["hold", "flee"]
+    assert policy._waits[7] == 2

@@ -1351,6 +1351,14 @@ async def choose_for_city(
         # as the last item left; the city takes the next option or stays idle.
         if option.item == "UNIT_SETTLER" and score(option, city, context, weights) <= 0:
             continue
+        # Issue 323: a wonder the race estimator rejected is not started, even when everything
+        # above it is refused. Off, a zero-scored wonder is still tried, as before.
+        if (
+            weights.wonder_races
+            and option.item in WONDERS
+            and score(option, city, context, weights) <= 0
+        ):
+            continue
         # A remembered refusal is checked only when the item has won its place in the ranking, so
         # a changed signature by itself costs no call and gives the item no priority.
         if (

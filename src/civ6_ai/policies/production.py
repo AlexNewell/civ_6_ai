@@ -115,6 +115,12 @@ class ProductionWeights:
     camp_share: float = 0.5
     # Turns a one-city empire holds back builders to put the first settler first. 0 turns it off.
     builder_hold_turns: int = _FIRST_SETTLER_TURNS
+    # Issue 299: score of a Monument in a city with no culture building and no threat, in place of
+    # its yield value. The bot's first Monument came on turn 74 to 80 (3 civics at turn 50 against
+    # a human's 9), because a second Warrior or Scout always outscored it. The default sits above
+    # an army-floor unit (8 to 11) and below an ordinary settler (14), so a ready settler still
+    # comes first. 0 turns it off.
+    early_monument: float = 12.0
 
     def __post_init__(self) -> None:
         for item in fields(self):
@@ -765,10 +771,19 @@ def _camp_score(
     return (_CAMP_UNIT_SCORE + lift + strength / 10.0) * w.military
 
 
+def wants_early_monument(city: City, ctx: ProductionContext, w: ProductionWeights) -> bool:
+    """No Monument yet and no threat: the city builds its culture first (issue 299)."""
+    if w.early_monument <= 0 or "MONUMENT" in city.buildings:
+        return False
+    return not under_threat(city, ctx)
+
+
 def _building_score(
     option: ProductionChoice, city: City, ctx: ProductionContext, w: ProductionWeights
 ) -> float:
     name = _short(option.item)
+    if name == "MONUMENT" and not option.is_repair and wants_early_monument(city, ctx, w):
+        return max(w.early_monument, _yield_value(_BUILDING_YIELDS[name], w))
     if option.item in WONDERS:
         # Needs a tile, which `_start` finds when the game asks for one.
         return 0.0 if under_threat(city, ctx) else _WONDER_VALUE * w.wonders
@@ -953,6 +968,18 @@ def rank_production(
         [*repairs, *keep],
         key=lambda o: (-scores[id(o)], o.category, o.item, o.repair_x or 0),
     )
+
+
+def _early_monument_note(
+    city: City, ranked: list[ProductionChoice], ctx: ProductionContext, w: ProductionWeights
+) -> str:
+    """For the options line (issue 299): says the Monument carries the early bonus, so a pick of
+    it over a unit can be read from the log."""
+    if not wants_early_monument(city, ctx, w):
+        return ""
+    if not any(o.item == "BUILDING_MONUMENT" for o in ranked):
+        return ""
+    return f"; early Monument (no culture building, no threat) {w.early_monument:.1f}"
 
 
 def _camp_demand_note(
@@ -1225,10 +1252,11 @@ async def choose_for_city(
     ranked = rank_production(city, options, context, weights)
     if ranked:
         log.info(
-            "%s options%s: %s%s",
+            "%s options%s: %s%s%s",
             city.name,
             " (defence only)" if only_defence else "",
             ", ".join(f"{o.item} {score(o, city, context, weights):.1f}" for o in ranked[:3]),
+            _early_monument_note(city, ranked, context, weights),
             _camp_demand_note(city, ranked, context, weights),
         )
     chain = PlanContext(planner, reads) if planner is not None and reads is not None else None

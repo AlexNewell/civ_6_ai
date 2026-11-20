@@ -82,7 +82,7 @@ def test_early_garrisoned_city_expands_once_it_can():
     grown = city(population=3, buildings=["PALACE"])
     scouted = replace(EARLY, recon=1)
     assert best(small, MENU, scouted) != "UNIT_SETTLER"
-    assert best(grown, MENU, scouted) == "UNIT_SETTLER"
+    assert best(grown, MENU, scouted) == "UNIT_SETTLER"  # Over the early Monument (issue 299).
 
 
 def test_the_first_scout_comes_before_a_settler():
@@ -108,7 +108,8 @@ def test_mid_game_city_builds_infrastructure_by_weight():
         option("BUILDING", "BUILDING_LIBRARY", 5),
     ]
     c = city(buildings=["PALACE"])
-    assert best(c, culture, MID) == "BUILDING_LIBRARY"
+    no_bonus = ProductionWeights(early_monument=0.0)  # The early Monument bonus (299) aside.
+    assert best(c, culture, MID, no_bonus) == "BUILDING_LIBRARY"
     leaning = ProductionWeights(culture=5.0, science=0.2)
     assert best(c, culture, MID, leaning) == "BUILDING_MONUMENT"
 
@@ -363,6 +364,7 @@ def test_weights_can_be_replaced_between_turns():
     ]
     infos = [fx.city_info(currently_building="nothing", buildings=["PALACE"])]
     policy = CityProductionPolicy()
+    policy.weights = replace(policy.weights, early_monument=0.0)  # Issue 299 aside.
     first = ScriptedGame(cities=infos, production=options)
     run(policy.run(first))
     policy.weights = replace(policy.weights, culture=10.0)
@@ -1669,6 +1671,63 @@ def test_a_district_the_city_cannot_start_does_not_demote_the_army_floor_unit():
     assert best(c, menu, ctx) == "UNIT_WARRIOR"  # A weaker district never lowers it either.
 
 
+# Issue 299: a Monument in a city's first build cycle outranks the second garrison or scout unit.
+_FRESH = ProductionContext(turn=15, num_cities=1, builders=1, recon=1, army=1)
+_FRESH_MENU = [
+    option("UNIT", "UNIT_WARRIOR", 4),
+    option("UNIT", "UNIT_SCOUT", 3),
+    option("UNIT", "UNIT_SLINGER", 4),
+    option("BUILDING", "BUILDING_MONUMENT", 5),
+]
+_WEIGHTS = ProductionWeights()
+
+
+def _monument_score(c, ctx=_FRESH):
+    return score(option("BUILDING", "BUILDING_MONUMENT", 5), c, ctx, _WEIGHTS)
+
+
+def test_a_fresh_city_builds_its_monument_before_a_second_unit():
+    c = city(population=1, buildings=["PALACE"])
+    assert best(c, _FRESH_MENU, _FRESH) == "BUILDING_MONUMENT"
+    # Below the army floor too (a second unit wanted).
+    assert best(c, _FRESH_MENU, replace(_FRESH, army=0)) == "BUILDING_MONUMENT"
+
+
+def test_a_ready_settler_still_beats_the_early_monument():
+    grown = city(population=3, buildings=["PALACE"])
+    menu = [option("UNIT", "UNIT_SETTLER", 5), option("BUILDING", "BUILDING_MONUMENT", 5)]
+    assert best(grown, menu, _FRESH) == "UNIT_SETTLER"
+    # No safe site: the settler scores 0 and the Monument is built.
+    assert best(grown, menu, replace(_FRESH, sites_ok=False)) == "BUILDING_MONUMENT"
+
+
+def test_no_early_bonus_once_the_city_has_a_monument():
+    bare = city(population=1, buildings=["PALACE"])
+    built = city(population=1, buildings=["PALACE", "MONUMENT"])
+    assert _monument_score(bare) > _monument_score(built)
+    assert _monument_score(built) == pytest.approx(
+        score(option("BUILDING", "BUILDING_MONUMENT", 5), built, _FRESH, _WEIGHTS)
+    )
+    assert best(built, _FRESH_MENU, _FRESH) != "BUILDING_MONUMENT"
+    # The bonus can be turned off.
+    off = ProductionWeights(early_monument=0.0)
+    assert score(option("BUILDING", "BUILDING_MONUMENT", 5), bare, _FRESH, off) == pytest.approx(
+        _monument_score(built)
+    )
+
+
+def test_no_early_monument_bonus_under_threat():
+    c = city(threats=[threat()], population=1, buildings=["PALACE"])
+    assert _monument_score(c) == pytest.approx(_monument_score(built_city()))
+    assert best(c, _FRESH_MENU, _FRESH) != "BUILDING_MONUMENT"
+    marked = replace(_FRESH, threatened=frozenset({city().city_id}))
+    assert best(city(buildings=["PALACE"]), _FRESH_MENU, marked) != "BUILDING_MONUMENT"
+
+
+def built_city():
+    return city(population=1, buildings=["PALACE", "MONUMENT"])
+
+
 def test_settlers_continue_past_six_cities_while_safe_sites_exist():
     # Issue 316: the cap was a fixed 6. Now it follows the cities while a safe site is known.
     grown = city(population=4)
@@ -1677,3 +1736,34 @@ def test_settlers_continue_past_six_cities_while_safe_sites_exist():
     # Safety is unchanged: no safe site, or one already in flight, builds no settler.
     assert best(grown, MENU, ProductionContext(**base, sites_ok=False)) != "UNIT_SETTLER"
     assert best(grown, MENU, ProductionContext(**base, settlers=2)) != "UNIT_SETTLER"
+
+
+def _monument_and_growth_menu():
+    return [
+        option("UNIT", "UNIT_WARRIOR", 4),
+        option("BUILDING", "BUILDING_MONUMENT", 5),
+        option("DISTRICT", "DISTRICT_CAMPUS", 4),
+        option("UNIT", "UNIT_BUILDER", 5),
+    ]
+
+
+def test_the_army_floor_yields_only_to_growth_that_outranks_the_early_monument():
+    # Issues 299 and 301 together: a safe garrisoned city with no Monument yet. The Monument
+    # bonus (12.0) puts it over a Campus and a Builder, and the floor unit must not fall under it.
+    centre = ["DISTRICT_CITY_CENTER@10,10"]
+    c = city(population=3, buildings=["PALACE"], districts=centre)
+    ctx = replace(GARRISONED_EARLY, army=0, builders=0)
+    order = [o.item for o in rank_production(c, _monument_and_growth_menu(), ctx)]
+    assert order.index("UNIT_WARRIOR") < order.index("BUILDING_MONUMENT")
+    assert order.index("BUILDING_MONUMENT") < order.index("DISTRICT_CAMPUS")
+    assert order.index("BUILDING_MONUMENT") < order.index("UNIT_BUILDER")
+
+
+def test_with_the_monument_built_a_campus_or_builder_outranks_the_army_floor_unit():
+    centre = ["DISTRICT_CITY_CENTER@10,10"]
+    c = city(population=3, buildings=["PALACE", "MONUMENT"], districts=centre)
+    ctx = replace(GARRISONED_EARLY, army=0, builders=0)
+    order = [o.item for o in rank_production(c, _monument_and_growth_menu(), ctx)]
+    assert order[0] == "UNIT_BUILDER"  # The best growth option; the Warrior yields to it only.
+    campus_only = [o for o in _monument_and_growth_menu() if o.item != "UNIT_BUILDER"]
+    assert rank_production(c, campus_only, ctx)[0].item == "DISTRICT_CAMPUS"

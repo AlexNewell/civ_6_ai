@@ -1783,3 +1783,16 @@ def test_demoted_army_floor_units_keep_their_order_when_the_district_fails():
     # The district is skipped or fails in `_start`: the next choice is the Warrior, not the Archer.
     after = [o.item for o in rank_production(c, [warrior, archer, holy], ctx, w, {holy.item})]
     assert after[0] == "UNIT_WARRIOR" and after.index("UNIT_ARCHER") > 0
+
+
+def test_a_rejected_wonder_race_is_not_started_when_everything_above_it_is_refused():
+    # Issue 323: with wonder_races on, a NO-GO wonder scores 0 but used to stay in the list.
+    c = city()
+    menu = [option("BUILDING", "BUILDING_STONEHENGE", 20, cost=180), option("UNIT", "UNIT_BUILDER")]
+    ctx = replace(MID, turn=77, difficulty="DEITY", rivals=5, army=9)
+    game = ScriptedGame(refuse={"UNIT_BUILDER": "ERR:NOPE"})
+    run(choose_for_city(game, c, menu, ctx, ProductionWeights(wonder_races=True)))
+    assert all(call[2] != "BUILDING_STONEHENGE" for call in game.set_calls)
+    off = ScriptedGame(refuse={"UNIT_BUILDER": "ERR:NOPE"})
+    run(choose_for_city(off, c, menu, ctx, ProductionWeights()))
+    assert any(call[2] == "BUILDING_STONEHENGE" for call in off.set_calls)

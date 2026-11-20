@@ -1,0 +1,19 @@
+Loaded STD_T1_03 at turn 1 in 24s
+preflight OK   screenshots: pywin32 and Pillow import
+preflight OK   patches: 12 civ6-mcp patches applied
+preflight OK   tuner: the tuner answers
+preflight OK   save: the open game is STD_T1_03
+Build ledger restored from 0 earlier events
+STD_T1_03: played 50 turns in 772s, stopped: turn_limit
+Slowest turn: 35.4s
+Decision time per turn: mean 8.8s, median 8.7s, p90 12.6s, max 14.8s (under the 10s goal)
+End-turn wait per turn: mean 6.6s, median 5.1s, p90 7.0s, max 28.4s
+Total per turn: mean 15.4s, median 13.9s, p90 19.5s, max 35.4s
+Policy effectiveness: G1 gate clean, 4 warnings
+  warn gold: turns above reserve with nothing bought: 36 of 42 (86%); nothing bought on at most 50% of turns above the reserve (from the logged spent-gold totals)
+  warn builders: builder actions the game refused: 2 of 14 (14%); at most 10% of builder actions refused (moves, improves and repairs; 1 is the most repeats of one tile and improvement)
+  warn offense: early: barbarian turns with no spare unit to answer: 24 of 41 (59%); at most 50% of turns with barbarians near a city leave no unit free (early defenders are all pinned to garrisons: build one more combat unit)
+  warn era score: eras that ended in a Dark Age: 1; none of the 1 completed eras scored below its Dark threshold (a Dark Age costs loyalty; the age is estimated from the last logged turn)
+Log: runs\STD_T1_03_20261120T053213Z.jsonl
+Game: STD_T1_03_20261120T053213Z
+Settling decisions: runs\STD_T1_03_20261120T053213Z_settle.jsonl

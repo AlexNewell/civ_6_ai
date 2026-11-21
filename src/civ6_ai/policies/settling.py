@@ -155,6 +155,10 @@ class SettlingSettings:
     # Bounds on waiting and retrying, so nothing stalls for good.
     no_site_disband_turns: int = 20  # A settler with no site this many turns in a row is disbanded.
     max_move_failures: int = 3  # Refused moves to one site before it is set aside.
+    # Issue 319: a settler waiting for an escort (hold, flee, no site, escort gathering, a refused
+    # move) this many turns goes without it, or to the best site it can reach safely, when no
+    # visible hostile unit can reach the route this turn or next. Run STD_T1_04 waited 18 turns.
+    max_wait_turns: int = 3
     # Loyalty. A city leans towards the owner of the bigger, nearer cities within `loyalty_radius`.
     loyalty_radius: int = 9
     loyalty_city_base: int = 2  # Added to a city's population, so a small city still pulls.
@@ -803,6 +807,14 @@ class _Danger:
         line = hex_line(start, end, self.map_width)
         return any(self.near(x, y, radius) for x, y in line)
 
+    def reachable_route(
+        self, start: tuple[int, int], end: tuple[int, int], radius: int, mounted_extra: int
+    ) -> bool:
+        """True when a visible hostile unit can be on, or beside, a tile of the route by next
+        turn: within `radius` of it, a mounted one `mounted_extra` further."""
+        line = hex_line(start, end, self.map_width)
+        return any(self.count_near(x, y, radius, mounted_extra) for x, y in line)
+
 
 @dataclass
 class SettlingPolicy:
@@ -848,6 +860,13 @@ class SettlingPolicy:
     _founded: set[int] = field(default_factory=set, init=False, repr=False)
     _held_now: set[int] = field(default_factory=set, init=False, repr=False)
     _no_site_turns: dict[int, int] = field(default_factory=dict, init=False, repr=False)
+    # Issue 319: turns in a row each settler has waited, decided once per settler per turn from
+    # the turn's final outcome (`_apply_wait`). `_outcomes` holds this settler's decisions so far.
+    _waits: dict[int, int] = field(default_factory=dict, init=False, repr=False)
+    _outcomes: list = field(default_factory=list, init=False, repr=False)
+    # The site a settler turned to after waiting too long, kept until it founds or loses it, so it
+    # does not swing back to the far site on the next turn (live: seven turns lost doing that).
+    _fallback_site: dict[int, tuple[int, int]] = field(default_factory=dict, init=False, repr=False)
     _rival_cities: list[tuple[int, int, int]] = field(default_factory=list, init=False, repr=False)
     # Every rival city seen on a visible tile, by tile, with its last seen population. The game
     # only lists a city while its tile is visible, so the estimate used to swing with the fog:
@@ -931,6 +950,7 @@ class SettlingPolicy:
             if self._first_turn is None and not cities:
                 self._first_turn = turn
             for settler in settlers:
+                self._outcomes = []
                 await self._settle(
                     game,
                     settler,
@@ -942,6 +962,7 @@ class SettlingPolicy:
                     turn,
                     claimed,
                 )
+                self._apply_wait(settler.unit_id)
         self.expansion.held_settlers = len(self._held_now)
         self._survey(settlers, units, exploration, city_tiles, danger, turn)
         for rank, scout in enumerate(sorted(scouts, key=lambda u: u.unit_id)):
@@ -1128,6 +1149,8 @@ class SettlingPolicy:
         self._site_claims = {k: v for k, v in self._site_claims.items() if k in alive}
         self._holds = {k: v for k, v in self._holds.items() if k in alive}
         self._no_site_turns = {k: v for k, v in self._no_site_turns.items() if k in alive}
+        self._waits = {k: v for k, v in self._waits.items() if k in alive}
+        self._fallback_site = {k: v for k, v in self._fallback_site.items() if k in alive}
         self._scout_targets = {k: v for k, v in self._scout_targets.items() if k in alive}
         self._scout_waits = {k: v for k, v in self._scout_waits.items() if k in alive}
         self._automated = {k: v for k, v in self._automated.items() if k in alive}
@@ -1435,6 +1458,7 @@ class SettlingPolicy:
         def record(action: str, reason: str, target=None, result: str = "") -> None:
             if action in _HELD_ACTIONS:
                 self._held_now.add(settler.unit_id)
+            self._outcomes.append((action, result))
             self._record(
                 SettleDecision(
                     turn=turn,
@@ -1572,6 +1596,7 @@ class SettlingPolicy:
                 self._holds.pop(settler.unit_id, None)
                 self._no_site_turns.pop(settler.unit_id, None)
                 self._founded.add(settler.unit_id)
+                self._fallback_site.pop(settler.unit_id, None)
                 city_tiles.append((settler.x, settler.y))  # Later settlers this turn see it.
                 return
             self._failed_sites.add((settler.x, settler.y))
@@ -1588,6 +1613,7 @@ class SettlingPolicy:
             return
         self._no_site_turns.pop(settler.unit_id, None)  # A site exists, so the streak ends.
         holds = self._holds.get(settler.unit_id, 0)
+        waits = self._waits.get(settler.unit_id, 0)
         # Live (Run 7): the escort chosen was another unit, and its move onto the settler's tile
         # was refused (STACKING_CONFLICT) because a combat unit already stood there, so the
         # settler held for turns. A unit already on the tile is the escort. Live (Run 12): the
@@ -1620,11 +1646,44 @@ class SettlingPolicy:
             ):
                 excluded.add(escort.unit_id)
                 escort = self._find_escort(settler, units, city_tiles, excluded, danger)
+        # Issue 319: after `max_wait_turns` waiting turns the settler stops waiting for an escort.
+        patient_reason = ""
+        patient_target = None
+        better_first = better[0]
+        kept = self._fallback_site.get(settler.unit_id)
+        if kept is not None and not any((c.x, c.y) == kept for c in better):
+            kept = None
+            self._fallback_site.pop(settler.unit_id, None)
+        free = self._unthreatened(settler, better, danger) if kept is not None else []
+        # The kept site is honoured whatever the escort and the far site's route now are, so a
+        # later turn never undoes the choice; only a route that is no longer clear drops it.
+        free = [c for c in free if (c.x, c.y) == kept]
+        if not free and waits >= s.max_wait_turns and (escort is None or better[0].path_threat):
+            free = self._unthreatened(settler, better, danger)
+        if free:
+            escort = None
+            patient_target = free[0]
+            if free[0] is not better_first:
+                self._fallback_site[settler.unit_id] = (free[0].x, free[0].y)
+            if kept is not None and (free[0].x, free[0].y) == kept:
+                patient_reason = "going on to the nearer site chosen after waiting"
+            elif free[0] is better_first:
+                patient_reason = (
+                    f"waited {waits} turns for an escort, no hostile unit can reach the "
+                    "route, so going without it"
+                )
+            else:
+                patient_reason = (
+                    f"waited {waits} turns for the far site, so heading for the best site "
+                    "reachable without passing a threat"
+                )
         if escort is not None and (escort.x, escort.y) in city_tiles:
             origin = (escort.x, escort.y)  # Wherever the settler is, this city loses its defender.
             if sum(1 for u in units if _land_military(u) and (u.x, u.y) == origin) == 1:
                 self._stripped[origin] = escort.unit_id
-        target = next((c for c in better if not c.path_threat or escort is not None), None)
+        target = patient_target or next(
+            (c for c in better if not c.path_threat or escort is not None), None
+        )
         if target is None:
             # Going alone is for a route the threat read finds clear (those candidates have no
             # path_threat); otherwise wait for an escort rather than walk into the threat.
@@ -1638,7 +1697,7 @@ class SettlingPolicy:
                 else "every route passes a hostile unit and no escort is free",
             )
             return
-        reason = "heading for the best site"
+        reason = patient_reason or "heading for the best site"
         self._site_claims[settler.unit_id] = (target.x, target.y)
         moved = await self._advance(
             game,
@@ -1654,6 +1713,38 @@ class SettlingPolicy:
             danger.threats,
         )
         self._holds[settler.unit_id] = 0 if moved else holds + 1
+
+    def _apply_wait(self, unit_id: int) -> None:
+        """Update the settler's run of waiting turns once, from the turn's final outcome (issue
+        319). A successful step or a found ends the run (0). A flee that moved the settler leaves
+        it unchanged. Anything else (hold, no site, an escort gathering, a refused move) is a
+        waiting turn (+1). Earlier refusals in the same turn do not count on their own."""
+        outcomes, self._outcomes = self._outcomes, []
+        if not outcomes:
+            return
+        if any(
+            a == "found" or (a in ("move", "escort_move") and move_succeeded(r))
+            for a, r in outcomes
+        ):
+            self._waits.pop(unit_id, None)
+        elif any(a == "flee" for a, _ in outcomes):
+            return
+        else:
+            self._waits[unit_id] = self._waits.get(unit_id, 0) + 1
+
+    def _unthreatened(self, settler, better, danger) -> list:
+        """The sites in `better` (best first) the settler may walk to alone: no visible hostile
+        unit can reach any tile of the route this turn or next, a mounted one from further
+        (issue 291). A sighting only remembered in the fog (issue 288) no longer holds it: the
+        settler has waited `max_wait_turns`, and still stops a tile short of such a site."""
+        s = self.settings
+        return [
+            c
+            for c in better
+            if not danger.reachable_route(
+                (settler.x, settler.y), (c.x, c.y), s.threat_radius, s.flee_mounted_extra
+            )
+        ]
 
     async def _advance(
         self,

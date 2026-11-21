@@ -10,8 +10,9 @@ for the player.
 
 Reads that exist: the overview carries the era name, the era score and both thresholds (see
 `orchestrator.read_standing`, `state.Empire`). Nothing readable gives the turns left in the era,
-so `EraSettings.era_length` is an assumption: the Standard-speed era length in turns, scaled by
-the game speed's cost multiplier. Check it against the `era` field changing in the turn log.
+so turns left is the turn the era name last changed (`EraClock`; the first era starts on turn 1)
+plus `EraSettings.era_length`, the Standard-speed era length scaled by the game speed. A game whose
+eras do not follow that length corrects itself at the next change.
 """
 
 import json
@@ -27,9 +28,10 @@ log = logging.getLogger(__name__)
 class EraSettings:
     """When the bot pushes for Historic Moments. Zero `window` turns the push off."""
 
-    # ASSUMED, not read: turns per world era at Standard speed. The first era change was seen
-    # near turn 50 (issue 311). Later eras are taken as the same length until a log says otherwise.
-    era_length: int = 50
+    # Turns per world era at Standard speed. Observed, not read from the game: in both a bot run
+    # and the player's game the era name changed on turns 41, 81 and 121 (Ancient to Classical to
+    # Medieval to Renaissance), so 40 turns an era. The first guess of 50 was wrong (issue 311).
+    era_length: int = 40
     # The player looks at the timer with about 10 turns left, so the push starts there.
     window: int = 10
     # A gap larger than this is out of reach: cheap moments are worth 1 to 3 points each.
@@ -59,12 +61,43 @@ class EraOutlook:
         return asdict(self)
 
 
-def turns_left_in_era(turn: int, game_speed: str, settings: EraSettings) -> int | None:
-    """Turns until the next era boundary, on the assumed era length scaled by game speed."""
+def turns_left_in_era(
+    turn: int, game_speed: str, settings: EraSettings, era_start: int | None = None
+) -> int | None:
+    """Turns until the next era boundary, counted from the turn the era began.
+
+    With no observed start the eras are taken to begin on turn 1, 1 + length, and so on.
+    """
     length = round(settings.era_length * speed_scale(game_speed))
     if length <= 0:
         return None
-    return length - (turn % length)
+    if era_start is None:
+        era_start = 1 + ((turn - 1) // length) * length
+    return max(1, era_start + length - turn)
+
+
+class EraClock:
+    """Remembers the turn the era name last changed, so turns left follows the game.
+
+    The first era starts on turn 1. A game loaded part-way has no observed start, so the fixed
+    grid stands in until the first change is seen.
+    """
+
+    def __init__(self) -> None:
+        self.era: str | None = None
+        self.start: int | None = None
+
+    def observe(self, turn: int, era: str | None) -> int | None:
+        """Record this turn's era name. Returns the observed start turn, or None when unknown."""
+        if not era:
+            return self.start
+        if self.era is None:
+            self.era = era
+            self.start = 1 if turn <= 1 else None
+        elif era != self.era:
+            self.era = era
+            self.start = turn
+        return self.start
 
 
 def outlook(
@@ -74,10 +107,11 @@ def outlook(
     golden: int,
     game_speed: str = "",
     settings: EraSettings | None = None,
+    era_start: int | None = None,
 ) -> EraOutlook:
     """The era outlook for this turn. Pure: no reads, no log."""
     settings = settings or EraSettings()
-    left = turns_left_in_era(turn, game_speed, settings)
+    left = turns_left_in_era(turn, game_speed, settings, era_start)
     if score < dark:
         target, gap, reach = "dark", dark - score, settings.dark_reach
     elif score < golden:
@@ -95,9 +129,14 @@ def outlook(
 
 
 def outlook_from_standing(
-    turn: int, standing: dict, game_speed: str = "", settings: EraSettings | None = None
+    turn: int,
+    standing: dict,
+    game_speed: str = "",
+    settings: EraSettings | None = None,
+    clock: EraClock | None = None,
 ) -> EraOutlook | None:
     """The outlook from the turn loop's standing fields, or None when they were not read."""
+    start = clock.observe(turn, standing.get("era")) if clock is not None else None
     try:
         return outlook(
             turn,
@@ -106,6 +145,7 @@ def outlook_from_standing(
             int(standing["era_golden"]),
             game_speed,
             settings,
+            start,
         )
     except (KeyError, TypeError, ValueError):
         return None

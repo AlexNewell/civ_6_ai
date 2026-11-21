@@ -19,7 +19,7 @@ from typing import Any, Protocol
 from civ6_ai.blockers import Blocker, BlockerGame, BlockerType
 from civ6_ai.city_tiles import REFRESH_TURNS, CityTiles, read_city_tiles
 from civ6_ai.construction import ProductionRefused, ProductionSet
-from civ6_ai.era import EraSettings, district_nudge, outlook
+from civ6_ai.era import EraClock, EraSettings, district_nudge, outlook
 from civ6_ai.monitors import Event, EventBus
 from civ6_ai.placement import (
     ELSEWHERE,
@@ -1702,6 +1702,7 @@ class CityProductionPolicy:
             trade_blocked  # `SecondaryPolicy.trade_blocked` (turn -> bool), or None.
         )
         self.builder_demand = builder_demand  # `builder.BuilderDemand`, or None.
+        self._era_clock = EraClock()  # Issue 311: when the era name last changed.
         self.scouts_built = 0  # Scouts queued so far; caps the early rebuilds (issue 301).
         self._food_focus: set[int] = set()  # Cities this policy set to a food focus.
         self._reset: set[int] = set()  # Cities returned to default, which may starve again.
@@ -1779,6 +1780,7 @@ class CityProductionPolicy:
             empire.golden_threshold,
             empire.game_speed,
             EraSettings(),
+            self._era_clock.observe(empire.turn, empire.era),
         ).push
 
     async def assign(self, game: ProductionGame) -> list[str]:

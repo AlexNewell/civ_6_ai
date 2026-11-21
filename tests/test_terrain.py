@@ -117,3 +117,34 @@ def test_a_camp_behind_a_strait_is_no_threat_to_the_far_side():
 
 def test_a_camp_read_is_the_camp_improvement():
     assert CAMP_IMPROVEMENT == "IMPROVEMENT_BARBARIAN_CAMP"
+
+
+def test_step_toward_goes_around_a_mountain_and_water_and_avoids_refused_tiles():
+    t = store({(2, 5): "m", (2, 4): "w", (2, 6): "w"})
+    step = t.step_toward((0, 5), (6, 5), 2)
+    assert step is not None and step not in {(2, 5), (2, 4), (2, 6)}
+    assert t.step_toward((0, 5), (6, 5), 2, avoid={(1, 5)}) != (1, 5)
+    assert t.step_toward((0, 5), (6, 5), 2, stop_short=True) is not None
+    path = t.path_to((0, 5), (6, 5))
+    assert path[-1] == (6, 5) and (2, 5) not in path
+
+
+def test_step_toward_spends_no_more_than_the_moves():
+    t = store({(1, 5): "f", (1, 4): "f", (1, 6): "f", (1, 3): "f", (1, 7): "f"})
+    assert t.step_toward((0, 5), (6, 5), 2) is not None
+    assert t.path_to((0, 5), (0, 5)) == []
+
+
+def test_paths_never_enter_rows_beyond_the_map():
+    mountains = {(11, 9): "m", (9, 8): "m", (10, 8): "m", (11, 8): "m", (12, 8): "m", (13, 8): "m"}
+    t = store(mountains | {(x, 9): "g" for x in (9, 10, 12, 13)})
+    t.map_height = 10
+    path = t.path_to((10, 9), (12, 9))
+    assert path is None or all(y <= 9 for _, y in path)
+
+
+def test_a_goal_beyond_the_rows_read_so_far_is_still_reachable():
+    t = store({})  # Rows 0..9 are known; the map is 46 rows high.
+    t.map_height = 46
+    path = t.path_to((5, 8), (5, 14))
+    assert path is not None and path[-1] == (5, 14)

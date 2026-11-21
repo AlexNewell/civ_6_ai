@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from typing import NamedTuple
 
 from civ6_ai.state.models import Tile
-from civ6_ai.state.reader import STANDARD_MAP_WIDTH, hex_distance
+from civ6_ai.state.reader import STANDARD_MAP_HEIGHT, STANDARD_MAP_WIDTH, hex_distance
 
 _EVEN_ROW = ((1, 0), (-1, 0), (0, -1), (-1, -1), (0, 1), (-1, 1))
 _ODD_ROW = ((1, 0), (-1, 0), (0, -1), (1, -1), (0, 1), (1, 1))  # Same as settling's neighbours.
@@ -73,6 +73,7 @@ class Ground(NamedTuple):
 @dataclass
 class TerrainStore:
     map_width: int | None = STANDARD_MAP_WIDTH
+    map_height: int | None = STANDARD_MAP_HEIGHT  # Rows past it are off the map; None: no bound.
     unknown_land_cost: float = 2.0  # A walker's guess for a tile never read.
     river_extra: float = 1.0  # Added to the cost of entering a river tile.
     _ground: dict[tuple[int, int], Ground] = field(default_factory=dict)
@@ -139,6 +140,72 @@ class TerrainStore:
             return None
         cost = 2.0 if ground.hills or ground.feature in SLOW_FEATURES else 1.0
         return cost + (self.river_extra if ground.river else 0.0)
+
+    def path_to(
+        self,
+        start: tuple[int, int],
+        goal: tuple[int, int],
+        avoid: Iterable[tuple[int, int]] = (),
+        max_cost: float = 80.0,
+    ) -> list[tuple[int, int]] | None:
+        """Cheapest walking path from `start` to `goal`, as the tiles after `start` up to and
+        including `goal`. Water, mountains and `avoid` tiles are never entered. None if there is
+        no path within `max_cost`."""
+        if start == goal:
+            return []
+        blocked = set(avoid)
+        best: dict[tuple[int, int], float] = {start: 0.0}
+        came: dict[tuple[int, int], tuple[int, int]] = {}
+        queue: list[tuple[float, int, int]] = [(0.0, start[0], start[1])]
+        while queue:
+            cost, cx, cy = heapq.heappop(queue)
+            if cost > best.get((cx, cy), float("inf")):
+                continue
+            if (cx, cy) == goal:
+                path = [goal]
+                while path[-1] in came and came[path[-1]] != start:
+                    path.append(came[path[-1]])
+                return path[::-1]
+            for nxt in neighbours(cx, cy, self.map_width):
+                step = self.step_cost(nxt[0], nxt[1], naval=False)
+                if (
+                    step is None
+                    or nxt in blocked
+                    or (self.map_height is not None and nxt[1] >= self.map_height)
+                ):
+                    continue
+                total = cost + step
+                if total <= max_cost and total < best.get(nxt, float("inf")):
+                    best[nxt] = total
+                    came[nxt] = (cx, cy)
+                    heapq.heappush(queue, (total, nxt[0], nxt[1]))
+        return None
+
+    def step_toward(
+        self,
+        start: tuple[int, int],
+        goal: tuple[int, int],
+        moves: float,
+        avoid: Iterable[tuple[int, int]] = (),
+        stop_short: bool = False,
+    ) -> tuple[int, int] | None:
+        """The farthest tile along the cheapest path that `moves` movement points reach (at least
+        one step, never more steps than whole moves). With `stop_short` the goal itself is left
+        out, so the unit ends beside it. None if no path is known; callers fall back to a
+        straight line."""
+        path = self.path_to(start, goal, avoid)
+        if stop_short and path:
+            path = path[:-1]
+        if not path:
+            return None
+        spent = 0.0
+        reached = path[0]
+        for i, tile in enumerate(path[: max(1, int(moves))]):
+            spent += self.step_cost(tile[0], tile[1], naval=False) or 0.0
+            if i and spent > moves:
+                break
+            reached = tile
+        return reached
 
     def reach(
         self,

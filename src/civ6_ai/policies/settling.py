@@ -823,6 +823,11 @@ class SettlingPolicy:
     # Escort orders the game refused, as (escort, from, to, military units on `to`): not sent again
     # until one of those changes.
     _refused: set = field(default_factory=set, init=False, repr=False)
+    # Issue 368: tiles the game refused an escorted step onto (terrain or foreign borders the
+    # store cannot see, not stacking), as {settler id: (goal, tiles)}. Kept for the whole trip, so
+    # the path routes around them instead of bouncing back once the pair has moved; dropped when
+    # the settler's goal changes or the settler is gone.
+    _refused_steps: dict = field(default_factory=dict, init=False, repr=False)
     # The threat state, or None to play without it (a war is then unknown, so no lone garrison
     # leaves). `_lone_ok` is this turn's cities whose last defender may leave; `_stripped` maps a
     # city tile whose last defender left with a settler to that escort's id.
@@ -1126,6 +1131,7 @@ class SettlingPolicy:
         """Drop what is kept per unit once the unit is gone, and any expired set-asides."""
         alive = {u.unit_id for u in units}  # Including units with no moves left this turn.
         self._site_claims = {k: v for k, v in self._site_claims.items() if k in alive}
+        self._refused_steps = {k: v for k, v in self._refused_steps.items() if k in alive}
         self._holds = {k: v for k, v in self._holds.items() if k in alive}
         self._no_site_turns = {k: v for k, v in self._no_site_turns.items() if k in alive}
         self._scout_targets = {k: v for k, v in self._scout_targets.items() if k in alive}
@@ -1673,9 +1679,11 @@ class SettlingPolicy:
         s = self.settings
         goal = (target.x, target.y)
         if target.path_threat and escort is not None:
-            line = hex_line((settler.x, settler.y), goal, s.map_width)
-            step = line[min(max(1, int(settler.moves)), len(line)) - 1]
+            step = self._pick_step(settler, goal)
             claimed.add(escort.unit_id)
+            if step is None:
+                record("hold", "every step towards the site was refused", goal)
+                return False
             # Issue 291: the escort must be able to hold the tile the pair ends this turn on.
             holds, taken, attackers = escort_holds_tile(escort, step, danger_threats, s)
             if attackers and not holds:
@@ -1704,10 +1712,13 @@ class SettlingPolicy:
                 return False
             result = await game.move_unit(escort.unit_index, *step)
             if not move_succeeded(result):
+                self._remember_refused(settler, goal, step, result)
                 record("hold", "the escort could not move", goal, result)
                 return False
             result = await game.move_unit(settler.unit_index, *step)
             moved = move_succeeded(result)
+            if not moved:
+                self._remember_refused(settler, goal, step, result)
             record("escort_move", "route is threatened, so the escort leads", goal, result)
             return moved
         # Issue 288: a settler that reaches the site with no moves left spends a turn there
@@ -1715,7 +1726,7 @@ class SettlingPolicy:
         dest = goal
         gap = hex_distance(settler.x, settler.y, *goal, s.map_width)
         if target.recent_near and 2 <= gap <= max(1, int(settler.moves)):
-            dest = hex_line((settler.x, settler.y), goal, s.map_width)[-2]
+            dest = self._pick_step(settler, goal, stop_short=True) or goal
             reason = "a hostile unit was seen near the site, so stopping a tile short"
         result = await game.move_unit(settler.unit_index, *dest)
         moved = move_succeeded(result)
@@ -1731,6 +1742,35 @@ class SettlingPolicy:
         record("move", reason if moved else "move refused, trying again later", goal, result)
         return moved
 
+    def _remember_refused(self, settler, goal, step, result) -> None:
+        """Keep a step the game refused for the trip to `goal`, unless only a stacking conflict
+        (which passes once the blocker moves) stopped it."""
+        if "STACKING" in str(result):
+            return
+        kept = self._refused_steps.get(settler.unit_id)
+        tiles = set(kept[1]) if kept is not None and kept[0] == tuple(goal) else set()
+        tiles.add(tuple(step))
+        self._refused_steps[settler.unit_id] = (tuple(goal), tiles)
+
+    def _pick_step(self, settler, goal, stop_short=False) -> tuple[int, int] | None:
+        """The tile to send the settler (and escort) to this turn. Issue 368: the first stretch of
+        a cheapest terrain path, never water or a mountain nor a step the game refused; the
+        straight line when no path is known."""
+        here = (settler.x, settler.y)
+        moves = max(1, int(settler.moves))
+        kept = self._refused_steps.get(settler.unit_id)
+        avoid = set(kept[1]) if kept is not None and kept[0] == tuple(goal) else set()
+        if self.terrain is not None and len(self.terrain):
+            found = self.terrain.step_toward(here, goal, moves, avoid, stop_short)
+            if found is not None or avoid:
+                return found  # None with refusals: the route is used up, so the caller holds.
+        line = hex_line(here, goal, self.settings.map_width)
+        if stop_short:
+            step = line[-2] if len(line) >= 2 else None
+        else:
+            step = line[min(moves, len(line)) - 1] if line else None
+        return None if step in avoid else step
+
     def _order_key(self, escort, dest, units) -> tuple:
         crowd = sum(1 for u in units if _holds_tile(u) and (u.x, u.y) == tuple(dest))
         return (escort.unit_id, (escort.x, escort.y), tuple(dest), crowd)
@@ -1742,10 +1782,9 @@ class SettlingPolicy:
         if not crowded:
             meet = (settler.x, settler.y)
         else:
-            line = hex_line((settler.x, settler.y), (target.x, target.y), self.settings.map_width)
-            if not line:
+            meet = self._pick_step(settler, (target.x, target.y))
+            if meet is None:
                 return False
-            meet = line[min(max(1, int(settler.moves)), len(line)) - 1]
         return self._order_key(escort, meet, units) in self._refused
 
     def _find_escort(self, settler, units, city_tiles, claimed, danger) -> Unit | None:

@@ -2154,3 +2154,129 @@ def test_city_state_cities_and_borders_do_not_press_but_still_space():
     assert (63, 11, 5, True) not in policy._pressure_sources()  # No pressure.
     assert all(c[0] != 63 for c in policy._pressure_sources())
     assert policy._phantoms == []
+
+
+# ----- issue 368: the escorted step follows terrain, not a straight line -----
+
+
+def _escort_pair_game(blocked, x=10, y=14, goal=(14, 6)):
+    from civ6_ai.state.reader import build_tile
+    from civ6_ai.terrain import TerrainStore
+    from fixtures.civ_state import tile
+
+    escort = unit_info(unit_id=9, unit_index=9, x=x, y=y)
+    game = make_game(
+        [settler(x=x, y=y, moves_remaining=2.0), escort],
+        cities=[alpha()],
+        threats=[barbarian(13, 10)],
+        sites=[site(*goal, food=40)],
+    )
+    policy = SettlingPolicy(SettlingSettings(threat_radius=2))
+    if blocked is not None:
+        store = TerrainStore(map_width=74)
+        tiles = []
+        for ty in range(2, 20):
+            for tx in range(8, 20):
+                kind = blocked.get((tx, ty))
+                extra = {"terrain": "TERRAIN_COAST"} if kind == "water" else {}
+                if kind == "mountain":
+                    extra = {"terrain": "TERRAIN_GRASS_MOUNTAIN"}
+                tiles.append(
+                    build_tile(
+                        tile(x=tx, y=ty, improvement=None, units=[], is_river=False, **extra)
+                    )
+                )
+        store.learn(tiles)
+        policy.terrain = store
+    return game, policy
+
+
+def _lead_step(game):
+    moves = [a for a in game.actions if a[0] == "move"]
+    assert len(moves) == 2 and moves[0][2:] == moves[1][2:]
+    return moves[0][2:]
+
+
+def test_escort_step_with_nothing_known_is_the_straight_line():
+    game, policy = _escort_pair_game(None)
+    run(policy, game)
+    line = hex_line((10, 14), (14, 6), 74)
+    assert _lead_step(game) == line[1]
+
+
+def test_escort_step_goes_around_a_mountain_on_the_line():
+    line = hex_line((10, 14), (14, 6), 74)
+    game, policy = _escort_pair_game({line[1]: "mountain"})
+    run(policy, game)
+    assert _lead_step(game) != line[1]
+
+
+def test_escort_step_goes_around_water_on_the_line():
+    line = hex_line((10, 14), (14, 6), 74)
+    game, policy = _escort_pair_game({line[1]: "water"})
+    run(policy, game)
+    assert _lead_step(game) != line[1]
+
+
+def test_a_refused_escort_step_is_not_sent_again():
+    game, policy = _escort_pair_game({})
+
+    async def refuse(unit_index, x, y):
+        game.actions.append(("move", unit_index, x, y))
+        return "BLOCKED (impassable mountain)"
+
+    game.move_unit = refuse
+    run(policy, game)
+    first = game.actions[0][2:]
+    game.actions.clear()
+    run(policy, game)
+    assert game.actions[0][2:] != first
+
+
+def test_when_every_terrain_step_is_refused_the_pair_holds():
+    game, policy = _escort_pair_game({})
+    first_run = []
+
+    async def refuse(unit_index, x, y):
+        game.actions.append(("move", unit_index, x, y))
+        return "BLOCKED (impassable mountain)"
+
+    game.move_unit = refuse
+    for _ in range(80):
+        game.actions.clear()
+        run(policy, game)
+        first_run.append(list(game.actions))
+    assert not first_run[-1]  # Out of steps: it holds instead of resending a refused one.
+
+
+def test_with_no_terrain_a_refused_straight_line_step_is_not_resent():
+    game, policy = _escort_pair_game(None)
+
+    async def refuse(unit_index, x, y):
+        game.actions.append(("move", unit_index, x, y))
+        return "BLOCKED (impassable mountain)"
+
+    game.move_unit = refuse
+    run(policy, game)
+    game.actions.clear()
+    run(policy, game)
+    assert not game.actions
+
+
+def test_a_refused_step_stays_avoided_for_the_whole_trip_so_the_pair_does_not_bounce():
+    # Live: foreign borders refused the step, the pair moved, and the path led straight back.
+    game, policy = _escort_pair_game({})
+    refused = {(11, 13), (11, 14)}
+    policy._remember_refused(settler(x=10, y=14), (14, 6), (11, 13), "BLOCKED (city-state border)")
+    policy._remember_refused(settler(x=10, y=14), (14, 6), (11, 14), "BLOCKED (city-state border)")
+    policy._remember_refused(settler(x=10, y=14), (14, 6), (9, 9), "Error: STACKING_CONFLICT")
+    assert policy._refused_steps[7][1] == refused  # Stacking is not remembered.
+    # From a different tile the pair is still steered clear of the refused tiles.
+    from types import SimpleNamespace
+
+    other = SimpleNamespace(unit_id=7, x=12, y=13, moves=2.0)
+    step = policy._pick_step(other, (14, 6))
+    assert step not in refused
+    # A new goal starts a new trip.
+    policy._remember_refused(other, (16, 6), (13, 12), "BLOCKED")
+    assert policy._refused_steps[7] == ((16, 6), {(13, 12)})

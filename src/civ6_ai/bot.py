@@ -374,7 +374,12 @@ def build_orchestrator(
     # `ResearchWeights.boost_judgement` is on: the provider is not called otherwise, so the extra
     # code reads nothing. The game it reads is the shared one built below.
     nudge_board = NudgeBoard()
-    builder = BuilderPolicy(demand=builder_demand, nudges=nudge_board.current)
+    builder = BuilderPolicy(
+        demand=builder_demand,
+        nudges=nudge_board.current,
+        terrain=threat_map_handler.terrain,  # The real walk to a job (issue 389).
+        threat_map=threat_map_handler.map if use_threat_map else None,  # Danger on the walk.
+    )
     shared_game: list[Any] = []
     research_policy = research.ResearchPolicy(
         boost_inputs=BoostInputs(game=lambda: shared_game[0], builder=builder, military=military),

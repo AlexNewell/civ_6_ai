@@ -154,7 +154,7 @@ def test_the_handler_scans_on_its_interval_not_every_turn():
 
 def test_only_the_military_and_defence_policies_read_the_map_so_far():
     """Stage 2a (issue 238). Each later stage adds its policy here, one at a time."""
-    allowed = {"military.py", "defence.py", "settling.py"}  # 264: defence; 288: settling.
+    allowed = {"military.py", "defence.py", "settling.py", "builder.py"}  # 264, 288, 389.
     for path in (SRC / "policies").glob("*.py"):
         if path.name not in allowed:
             assert "threat_map" not in path.read_text(encoding="utf-8"), path.name

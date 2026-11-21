@@ -650,3 +650,31 @@ Verdicts:
 - **Cap focus: not switched on.** The openings barely reach a cap, and from turn 78 the focus has no hysteresis, so citizens are reshuffled every other turn. Fix in issue 356.
 - **Wonder races: not switched on.** The race estimator works, but `tall_and_safe` is empire-wide (any threatened city, any settler, any camp force), so no wonder is ever started. Fix in issue 357.
 - **Boost judgement: not switched on.** A fixed estimate (a meeting "in about 6 turns from exploring") counts down to 1 and stays there until the 8-turn cap, which cost a tech on STD_T1_03. The builder half never ran: `BuilderWeights.use_boost_nudges` is off and was not switchable, so the Masonry quarry nudge logged on T40 to T51 was ignored. Fix in issue 358.
+
+### Re-test after the fixes (2026-11-21)
+
+**Baseline contamination found and fixed (issue 365, PR 366).** A run from `STD_T1_04_TURN78` that followed a run from the `STD_T1_04` start was taken for that game's continuation, because turn 78 comes after the earlier run's last turn. It restored 31 build-ledger events and the scenario-wide war and threat files of an unrelated game. Both turn-78 baselines above were affected, while the feature runs, which followed runs that ended after turn 78, were clean. A bisect on clean runs showed that the gap between the two contaminated baselines (372 and 368 at T107) came from the inherited state, not from code. Now a `--load` run is a new game (a `.fresh` marker the session grouping honours), and war and threat state is kept per game. Live: two turn-78 runs, one right after a start run, restored 0 events and were identical. The turn-1 comparisons above are unaffected, since a run from turn 1 never counts as a continuation.
+
+From STD_T1_04_TURN78, 30 turns, all runs clean, compared with the clean baseline on fab83b7:
+
+| Run | Score T107 | Population T107 | Notes |
+|---|---|---|---|
+| Baseline | 372 | 41 | starts the Oracle in Rome on T96 |
+| cap_focus, no hysteresis | 368 | 41 | 23 focus changes |
+| cap_focus with hysteresis (PR 362) | 368 | 41 | 10 focus changes |
+| wonder_races, empire-wide gate | 374 | 43 | no wonder started |
+| wonder_races, per-city gate (PR 361) | 372 | 41 | starts the same wonders as the baseline |
+| boost_judgement | 373 | 41 | |
+
+STD_T1_03 from the start, 50 turns, `--enable boost_judgement,boost_nudges`, compared with a control on 7cdcf4a that matches the earlier baseline:
+
+| Run | Score T30 / T50 | Era score T50 | Techs / civics started by T50 |
+|---|---|---|---|
+| Control | 31 / 56 | 6 | 10 / 5 |
+| Overdue rule (PR 360) | 31 / 57 | 8 | 9 / 6 |
+| Plus meeting evidence (PR 364) | 29 / 55 | 5 | 11 / 6 |
+
+Verdicts: all three stay off by default.
+- **Cap focus:** hysteresis stopped the reshuffling, but the rule still costs score from turn 78. Its yield choices are production and gold only, never science or culture, which the score counts.
+- **Wonder races:** with the per-city gate it now matches the baseline. It needs a save where wonder races are contested before it can show a gain.
+- **Boost judgement:** Writing is no longer held for a meeting that never comes, and research gained a tech and a civic by T50. Score moved within 2 points either way, by research order alone (Bronze Working ahead of Sailing for a barbarian-kill boost). It needs more saves.

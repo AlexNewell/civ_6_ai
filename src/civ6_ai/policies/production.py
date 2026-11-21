@@ -19,7 +19,13 @@ from typing import Any, Protocol
 from civ6_ai.blockers import Blocker, BlockerGame, BlockerType
 from civ6_ai.city_tiles import REFRESH_TURNS, CityTiles, read_city_tiles
 from civ6_ai.construction import ProductionRefused, ProductionSet
-from civ6_ai.era import EraClock, EraSettings, district_nudge, outlook
+from civ6_ai.era import (
+    EraClock,
+    EraSettings,
+    district_nudge,
+    eligible_districts,
+    outlook,
+)
 from civ6_ai.monitors import Event, EventBus
 from civ6_ai.placement import (
     ELSEWHERE,
@@ -215,6 +221,11 @@ class ProductionContext:
     rival_progress: Mapping[str, tuple[float, ...]] = field(default_factory=dict, compare=False)
     wonder_alternative: float = 5.0
     era_push: bool = False  # Issue 311: the era outlook says to favour cheap Historic Moments.
+    era_turns_left: int | None = None  # Turns to the era boundary; a build must beat it.
+    # The districts whose best tile in this city earns a Historic Moment (set per city, only while
+    # the push is on, by `choose_for_city`), and the kinds already chosen for one.
+    era_districts: frozenset[str] = frozenset()
+    era_claimed: frozenset[str] = frozenset()
     # Where `rivals` came from, for the log: "rankings" (living majors but us, as last read) or
     # "default" (no rankings read yet). Not a decision input.
     rivals_source: str = field(default="", compare=False)
@@ -1066,7 +1077,11 @@ def _raw_value(
         value = _unit_score(option, city, ctx, weights)
     elif option.category == "DISTRICT":
         value = _district_score(option, city, weights, ctx) + district_nudge(
-            _short(option.item), ctx.districts, ctx.era_push, weights.era_district_bonus
+            _short(option.item),
+            ctx.era_districts,
+            option.turns,
+            ctx.era_turns_left,
+            weights.era_district_bonus,
         )
     else:
         value = _building_score(option, city, ctx, weights)
@@ -1478,6 +1493,35 @@ async def _explain(
     return reason, needs, signature
 
 
+async def _with_era_districts(
+    game: ProductionGame,
+    city: City,
+    options: list[ProductionChoice],
+    context: ProductionContext,
+) -> ProductionContext:
+    """The context with the districts that would earn a Historic Moment in this city (issue 311).
+
+    Reads the district advisor for each district on offer whose kind is not yet claimed, only
+    while the era push is on, so the extra calls are limited to the last turns of an era.
+    """
+    best: dict[str, int] = {}
+    for option in options:
+        if option.category != "DISTRICT" or option.is_repair:
+            continue
+        name = _short(option.item)
+        if name in context.era_claimed or name in best:
+            continue
+        try:
+            placements = await game.get_district_advisor(city.city_id, option.item)
+        except Exception:  # A failed read only loses the nudge.
+            log.debug("era moment read failed for %s", option.item, exc_info=True)
+            continue
+        if isinstance(placements, list) and placements:
+            best[name] = max(p.total_adjacency for p in placements)
+    eligible = eligible_districts(best, context.era_claimed, EraSettings())
+    return replace(context, era_districts=eligible)
+
+
 async def choose_for_city(
     game: ProductionGame,
     city: City,
@@ -1489,6 +1533,7 @@ async def choose_for_city(
     emit: Callable[[Event], None] | None = None,
     reads: PlacementReads | None = None,
     planner: Planner | None = None,
+    era_claimed: set[str] | None = None,
 ) -> ProductionChoice | None:
     """Start the best option that the game accepts. Returns it, or None if all were refused.
 
@@ -1499,6 +1544,8 @@ async def choose_for_city(
     """
     options = list(options)
     base_context = context
+    if context.era_push and weights.era_district_bonus > 0 and not only_defence:
+        base_context = await _with_era_districts(game, city, options, context)
 
     def with_race(gone: frozenset[str] = frozenset()) -> ProductionContext:
         """The context with the race alternative, over the same filter and dominance pass as
@@ -1616,6 +1663,8 @@ async def choose_for_city(
                         placements_offered=trace.placements,
                     )
                 )
+            if era_claimed is not None and _short(option.item) in context.era_districts:
+                era_claimed.add(_short(option.item))  # Its moment is spoken for.
             if memory is not None:
                 memory.accepted(city, option.item)
             placed = option.category == "DISTRICT" or trace.placements is not None
@@ -1696,13 +1745,16 @@ class CityProductionPolicy:
         builder_demand: Any = None,
         trade_blocked: Any = None,
         rankings: Any = None,
+        era: Any = None,
     ) -> None:
         self.rankings = rankings  # A `RankingsHolder`, or None: the rivals count for wonder races.
         self.trade_blocked = (
             trade_blocked  # `SecondaryPolicy.trade_blocked` (turn -> bool), or None.
         )
         self.builder_demand = builder_demand  # `builder.BuilderDemand`, or None.
-        self._era_clock = EraClock()  # Issue 311: when the era name last changed.
+        self.era = era  # An `EraHolder`, or None: the turn loop's era outlook (issue 311).
+        self._era_clock = EraClock()  # Own clock when there is no holder (a test).
+        self._era_claimed: set[str] = set()  # District kinds chosen for a Historic Moment.
         self.scouts_built = 0  # Scouts queued so far; caps the early rebuilds (issue 301).
         self._food_focus: set[int] = set()  # Cities this policy set to a food focus.
         self._reset: set[int] = set()  # Cities returned to default, which may starve again.
@@ -1749,6 +1801,7 @@ class CityProductionPolicy:
             trade_safe=not (self.trade_blocked is not None and self.trade_blocked(empire.turn)),
         )
         self.expansion.target_cities = self.weights.target_cities
+        era = self._era_outlook(empire)
         growth = self.growth.update(cities, empire, self.weights.target_cities, tiles=self._tiles)
         context = replace(
             context,
@@ -1756,7 +1809,9 @@ class CityProductionPolicy:
             held_settlers=self.expansion.held_settlers,
             scouts_built=self.scouts_built,
             growth=growth,
-            era_push=self._era_push(empire),
+            era_push=era.push,
+            era_turns_left=era.turns_left,
+            era_claimed=frozenset(self._era_claimed),
         )
         if self.weights.wonder_races:
             # Issue 328: the race inputs are read only when the setting is on. The difficulty
@@ -1769,10 +1824,12 @@ class CityProductionPolicy:
             )
         return context
 
-    def _era_push(self, empire) -> bool:
-        """Issue 311: whether the era outlook says to favour cheap Historic Moments this turn."""
-        if self.weights.era_district_bonus <= 0:
-            return False
+    def _era_outlook(self, empire):
+        """Issue 311: the era outlook for this turn. The turn loop's when it set one (it sees
+        every era change), else one from this policy's own clock."""
+        held = self.era.last if self.era is not None else None
+        if held is not None and held.turn == empire.turn:
+            return held
         return outlook(
             empire.turn,
             empire.era_score,
@@ -1781,7 +1838,7 @@ class CityProductionPolicy:
             empire.game_speed,
             EraSettings(),
             self._era_clock.observe(empire.turn, empire.era),
-        ).push
+        )
 
     async def assign(self, game: ProductionGame) -> list[str]:
         """Choose for each idle city, and return the names of any left without a choice.
@@ -1832,6 +1889,7 @@ class CityProductionPolicy:
                 only_defence=True,
                 memory=self.refusals,
                 emit=self._emit,
+                era_claimed=self._era_claimed,
                 reads=reads,
             )
             if picked is not None:
@@ -1854,6 +1912,7 @@ class CityProductionPolicy:
                 self.weights,
                 memory=self.refusals,
                 emit=self._emit,
+                era_claimed=self._era_claimed,
                 reads=reads,
             )
             if picked is not None:
@@ -1886,6 +1945,7 @@ class CityProductionPolicy:
                 self.weights,
                 memory=self.refusals,
                 emit=self._emit,
+                era_claimed=self._era_claimed,
                 reads=reads,
                 planner=self.planner,
             )
@@ -1908,6 +1968,7 @@ class CityProductionPolicy:
                 self.weights,
                 memory=self.refusals,
                 emit=self._emit,
+                era_claimed=self._era_claimed,
                 reads=reads,
                 planner=self.planner,
             )

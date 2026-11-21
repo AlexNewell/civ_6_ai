@@ -57,6 +57,7 @@ from civ6_ai.build_ledger import BuildLedger, BuildTracker, EventFlush
 from civ6_ai.call_timer import CallTimer
 from civ6_ai.construction import ConstructionWatcher
 from civ6_ai.defeat import is_defeated
+from civ6_ai.era import EraHolder
 from civ6_ai.monitors import (
     EventBus,
     EventLog,
@@ -348,12 +349,14 @@ def build_orchestrator(
     expansion = ExpansionState()  # Settling fills it. Production and the log line read it.
     builder_demand = BuilderDemand()  # What the builders left undone, which production reads.
     rankings = RankingsHolder()  # Every living civ's score (issue 256).
+    era = EraHolder()  # The era clock and outlook, set each turn by the turn loop (issue 311).
     production = CityProductionPolicy(
         bus=bus,
         expansion=expansion,
         defence=defence,
         builder_demand=builder_demand,
         rankings=rankings,
+        era=era,
     )
     government = GovernmentPolicy()  # One instance, so handler and blockers share its bounds.
     secondary = SecondaryPolicy()
@@ -477,5 +480,6 @@ def build_orchestrator(
         call_timer=timer,
         screenshots=screenshots,
         rankings=rankings,
+        era=era,
         core_turn=partial(read_core_turn, game),
     )

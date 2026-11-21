@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Protocol
 
 from civ6_ai.call_timer import CallTimer
-from civ6_ai.era import EraClock, log_outlook, outlook_from_standing
+from civ6_ai.era import EraHolder, log_outlook, outlook_from_standing
 from civ6_ai.screenshots import Screenshotter
 from civ6_ai.world_rankings import RankingsHolder
 
@@ -202,7 +202,9 @@ class Orchestrator:
         screenshots: Screenshotter | None = None,
         rankings: RankingsHolder | None = None,
         core_turn: CoreTurn | None = None,
+        era: EraHolder | None = None,
     ) -> None:
+        self._era = era or EraHolder()  # Issue 311: shared with the production policy.
         self._core_turn = core_turn
         self._rankings = rankings
         self._call_timer = call_timer
@@ -227,8 +229,6 @@ class Orchestrator:
                 return reason
         return StopReason.TURN_LIMIT
 
-    _era_clock = EraClock()  # Issue 311: when the era name last changed.
-
     async def _play_turn(self) -> StopReason | None:
         if await self._game.check_game_over() is not None:
             return StopReason.GAME_OVER  # The run was started on a game that's already over.
@@ -236,14 +236,14 @@ class Orchestrator:
         started = time.perf_counter()
         turn = max(await self._read_turn(), self._confirmed_turn)
         standing = read_standing(self._overview)
-        log_outlook(
-            outlook_from_standing(
-                turn,
-                standing,
-                str(getattr(self._overview, "game_speed", "")),
-                clock=self._era_clock,
-            )
+        era = outlook_from_standing(
+            turn,
+            standing,
+            str(getattr(self._overview, "game_speed", "")),
+            clock=self._era.clock,
         )
+        self._era.last = era
+        log_outlook(era)
         seconds, errors = await self._run_handlers()
         if self._rankings is not None and self._rankings.last is not None:
             standing.update(self._rankings.last.fields())

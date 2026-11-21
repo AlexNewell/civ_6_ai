@@ -17,6 +17,7 @@ eras do not follow that length corrects itself at the next change.
 
 import json
 import logging
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 
 from civ6_ai.placement import speed_scale
@@ -37,6 +38,9 @@ class EraSettings:
     # A gap larger than this is out of reach: cheap moments are worth 1 to 3 points each.
     dark_reach: int = 12  # Points short of the Dark threshold that still count as reachable.
     golden_reach: int = 5  # Points short of the Golden threshold (a Golden Age is a bonus).
+    # A district earns a Historic Moment (the "Splendid" ones) only with at least this starting
+    # adjacency. Taken from the game's Civilopedia (Splendid Campus: +3), not read live.
+    moment_adjacency: int = 3
     # Turn the push stops, so the last turns of a run are not spent on a boundary that no longer
     # matters. 0 means never.
     last_turn: int = 0
@@ -157,11 +161,48 @@ def log_outlook(result: EraOutlook | None) -> None:
         log.info("era_outlook %s", json.dumps(result.fields(), sort_keys=True))
 
 
-def district_nudge(item: str, built: frozenset[str], push: bool, bonus: float) -> float:
-    """Extra score for the first district of its kind while the push is on (a Historic Moment).
+class EraHolder:
+    """The era clock and the newest outlook, shared by the turn loop and the production policy.
 
-    `item` and `built` are short district names (`CAMPUS`), as the production context holds them.
+    The turn loop reads the overview every turn and sets `last`, so the era change is seen on the
+    turn it happens even when no city needs a production choice (issue 311).
     """
-    if push and bonus > 0 and item not in built:
-        return bonus
-    return 0.0
+
+    def __init__(self) -> None:
+        self.clock = EraClock()
+        self.last: EraOutlook | None = None
+
+
+def eligible_districts(
+    adjacency: Mapping[str, int], claimed: frozenset[str], settings: EraSettings
+) -> frozenset[str]:
+    """The districts whose best tile would earn a district Historic Moment.
+
+    The game's moment for a district is the "Splendid" one (Splendid Campus and so on): a district
+    built with a starting adjacency of at least `moment_adjacency`, once per kind. Being the first
+    of its kind earns nothing by itself, so `adjacency` is the best tile's adjacency per district
+    short name and `claimed` the kinds already chosen for a moment.
+    """
+    return frozenset(
+        name
+        for name, best in adjacency.items()
+        if best >= settings.moment_adjacency and name not in claimed
+    )
+
+
+def district_nudge(
+    item: str,
+    eligible: frozenset[str],
+    turns: int,
+    turns_left: int | None,
+    bonus: float,
+) -> float:
+    """Extra score for a district that earns a Historic Moment before the era ends.
+
+    `item` is the short district name (`CAMPUS`). It must finish within `turns_left` turns,
+    or the moment lands in the next era and does not count toward this breakpoint. An unknown
+    `turns_left` gives no nudge.
+    """
+    if bonus <= 0 or item not in eligible or turns_left is None or turns > turns_left:
+        return 0.0
+    return bonus

@@ -125,6 +125,18 @@ class Session:
     turns: int
     first_turn: int | None
     last_turn: int | None
+    # Issue 365: the session loaded its save, so it starts a game of its own whatever its turns.
+    fresh: bool = False
+
+
+# A loaded session's marker beside its turn log: `<stem>.fresh`. It outlives the run, so every
+# later grouping (a restart, the cost report) puts the session in its own game.
+FRESH_SUFFIX = ".fresh"
+
+
+def mark_fresh(runs: Path, stem: str) -> None:
+    """Record that session `stem` loaded its save and starts a new game."""
+    (runs / f"{stem}{FRESH_SUFFIX}").write_text("", encoding="utf-8")
 
 
 @dataclass
@@ -197,6 +209,7 @@ def read_session(path: Path, problems: Problems) -> Session | None:
         len(turns),
         turns[0] if turns else None,
         turns[-1] if turns else None,
+        (path.parent / f"{path.stem}{FRESH_SUFFIX}").exists(),
     )
 
 
@@ -206,7 +219,7 @@ def group_sessions(sessions: list[Session]) -> list[Game]:
     current: dict[str, Game] = {}  # The open game of each save.
     for session in sorted(sessions, key=lambda s: (s.save, s.started, s.stem)):
         game = current.get(session.save)
-        starts_over = (
+        starts_over = session.fresh or (
             game is not None
             and session.first_turn is not None
             and game.last_turn is not None
@@ -224,7 +237,9 @@ def group_sessions(sessions: list[Session]) -> list[Game]:
     return sorted(games, key=lambda g: (g.started or "", g.id))
 
 
-def game_id_for_new_session(runs: Path, save: str, first_turn: int, stem: str) -> str:
+def game_id_for_new_session(
+    runs: Path, save: str, first_turn: int, stem: str, fresh: bool = False
+) -> str:
     """The id a session that is about to start at `first_turn` will have, for the ledger's
     `game_id`. The session's own log needn't exist yet. Use it, or the cap resets each session."""
     problems = Problems()
@@ -234,7 +249,7 @@ def game_id_for_new_session(runs: Path, save: str, first_turn: int, stem: str) -
         raise ValueError(f"{stem!r} is not a <save>_<UTC stamp> session name")
     sessions = [s for s in sessions if s.stem != stem]
     started = datetime.strptime(stamp["stamp"], STAMP_FORMAT).replace(tzinfo=UTC).isoformat()
-    sessions.append(Session(stem, save, started, 1, first_turn, first_turn))
+    sessions.append(Session(stem, save, started, 1, first_turn, first_turn, fresh))
     for game in group_sessions(sessions):
         if stem in game.sessions:
             return game.id

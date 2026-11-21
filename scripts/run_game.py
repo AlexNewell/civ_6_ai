@@ -28,7 +28,7 @@ from civ6_ai.fastcalls import fix_units_query, narrow_popup_scan, shorten_call_w
 from civ6_ai.game_speed import fix_overview_speed
 from civ6_ai.gp_advisor import fix_gp_advisor
 from civ6_ai.metrics.civbench_gap import gap_lines, load_baselines
-from civ6_ai.metrics.costs import game_id_for_new_session, game_id_of_log
+from civ6_ai.metrics.costs import game_id_for_new_session, game_id_of_log, mark_fresh
 from civ6_ai.metrics.history import merge_logs
 from civ6_ai.metrics.speed import summarise as summarise_speed
 from civ6_ai.monitors import EventBus, EventLog
@@ -81,15 +81,6 @@ class _NotifyingTurnLog(TurnLog):
         super().write(record)
         if self.on_turn is not None:
             self.on_turn(record)
-
-
-def session_game_id(fresh: bool, stem: str, infer: Callable[[], str]) -> str:
-    """The game a session belongs to. A run that loaded its save (`fresh`) is a new game, even
-    when its first turn comes after an earlier session's last: a turn-78 checkpoint loaded after
-    a 60-turn run from turn 1 is not that run's continuation. Inferring it there restored 31
-    events and the war and threat files of an unrelated game into a baseline. Otherwise the
-    game is inferred from earlier sessions (`infer`), so a restart keeps its game."""
-    return stem if fresh else infer()
 
 
 def game_state_paths(runs: Path, game_id: str) -> tuple[Path, Path]:
@@ -172,10 +163,13 @@ async def play_game(
     decisions.attach()
     try:
         first_turn = (await game.get_game_overview()).turn
-        game_id = session_game_id(
-            fresh,
-            f"{name}_{stamp}",
-            lambda: game_id_for_new_session(ROOT / "runs", name, first_turn, f"{name}_{stamp}"),
+        if fresh:
+            # Issue 365: a loaded save is a new game, even when its first turn comes after an
+            # earlier session's last (a turn-78 checkpoint after a 60-turn run from turn 1). The
+            # marker is written down, so restarts and reports group it the same way.
+            mark_fresh(ROOT / "runs", f"{name}_{stamp}")
+        game_id = game_id_for_new_session(
+            ROOT / "runs", name, first_turn, f"{name}_{stamp}", fresh=fresh
         )
         wars_state, threat_state = game_state_paths(ROOT / "runs", game_id)
         shots = Screenshotter(ROOT / "runs" / "screenshots", game_id)

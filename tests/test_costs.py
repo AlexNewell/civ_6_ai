@@ -310,3 +310,30 @@ def test_history_refuses_to_overwrite_a_file_that_is_not_one(tmp_path, capsys):
 def test_no_runs_folder_is_an_empty_report(tmp_path, capsys):
     assert main(["--runs", str(tmp_path / "absent")]) == 0
     assert "no games found" in capsys.readouterr().out
+
+
+def _turn_log(runs, stem, turns):
+    (runs / f"{stem}.jsonl").write_text(
+        "".join(json.dumps({"turn": t}) + "\n" for t in turns), encoding="utf-8"
+    )
+
+
+def test_a_loaded_session_starts_its_own_game_and_a_restart_keeps_it(tmp_path):
+    # Issue 365: a turn-78 checkpoint loaded after a 60-turn run from turn 1 is a new game, and
+    # a restart of it without loading stays in that new game.
+    from civ6_ai.metrics.costs import game_id_for_new_session, game_id_of_log, mark_fresh
+
+    _turn_log(tmp_path, "STD_T1_04_20261121T000225Z", range(1, 61))
+    assert (
+        game_id_for_new_session(tmp_path, "STD_T1_04", 78, "STD_T1_04_20261121T023018Z")
+        == "STD_T1_04_20261121T000225Z"
+    )  # The old heuristic: taken for a continuation.
+    mark_fresh(tmp_path, "STD_T1_04_20261121T023018Z")
+    loaded = game_id_for_new_session(
+        tmp_path, "STD_T1_04", 78, "STD_T1_04_20261121T023018Z", fresh=True
+    )
+    assert loaded == "STD_T1_04_20261121T023018Z"
+    _turn_log(tmp_path, "STD_T1_04_20261121T023018Z", range(78, 90))
+    assert game_id_of_log(tmp_path, tmp_path / "STD_T1_04_20261121T023018Z.jsonl") == loaded
+    restart = game_id_for_new_session(tmp_path, "STD_T1_04", 90, "STD_T1_04_20261121T040000Z")
+    assert restart == loaded

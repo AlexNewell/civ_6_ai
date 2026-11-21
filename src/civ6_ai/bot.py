@@ -362,6 +362,7 @@ def build_orchestrator(
     settling = SettlingPolicy(expansion=expansion, defence=defence)
     threat_map_handler = ThreatMapHandler(dump=threat_map_dump)
     settling.terrain = threat_map_handler.terrain  # What a step costs (issue 238).
+    military.terrain = threat_map_handler.terrain  # Fallback and approach tiles (issue 370).
     if use_threat_map:
         military.threat_map = threat_map_handler.map
         settling.threat_map = threat_map_handler.map  # Sightings gone into the fog (issue 288).

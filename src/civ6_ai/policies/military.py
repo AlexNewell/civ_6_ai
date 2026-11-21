@@ -717,6 +717,10 @@ class MilitaryPolicy:
     _recon_started: int = field(default=-99, init=False, repr=False)
     # The shared threat map (issue 238), set by the bot's wiring; camps come from it too.
     threat_map: Any = field(default=None, init=False, repr=False)
+    # The terrain store (issue 370), set by the bot's wiring. Without it every tile counts as
+    # passable, which is the old behaviour. Fallback, swap and approach tiles skip water and
+    # mountains the store knows; a tile it has not read stays a candidate.
+    terrain: Any = field(default=None, init=False, repr=False)
     _released: int = field(default=0, init=False, repr=False)
     # Camps marched on that have gone, reported once each on the next offense line.
     _camps_gone: int = field(default=0, init=False, repr=False)
@@ -823,6 +827,15 @@ class MilitaryPolicy:
 
     # ----- stacks (issue 266) -----
 
+    def _passable(self, p: tuple[int, int]) -> bool:
+        """Whether a land unit can enter the tile, as far as the terrain store knows (issue 370).
+
+        Water and mountains are refused by the game, so a candidate on one wastes an order and
+        the unit ends the turn where it stood. An unread tile is kept: the game decides.
+        """
+        terrain = self.terrain or getattr(self.threat_map, "terrain", None)
+        return terrain is None or terrain.step_cost(p[0], p[1], naval=False) is not None
+
     def _stack_tiles(self, t: _Turn, unit: Unit) -> list[tuple[int, int]]:
         """Free tiles beside the unit, best first, for the unit to leave a stack for.
 
@@ -841,6 +854,7 @@ class MilitaryPolicy:
                     x %= w
                 if (x, y) != here and hex_distance(unit.x, unit.y, x, y, w) == 1:
                     found.add((x, y))
+        found = {p for p in found if self._passable(p)}
         reach = 2 if unit.ranged_strength > 0 else 1
         hostile = [(th.x, th.y) for th in t.threats if th.hostile]
 
@@ -1050,7 +1064,6 @@ class MilitaryPolicy:
         s = self.settings
         if not s.recapture or self.threat_map is None:
             return
-        terrain = getattr(self.threat_map, "terrain", None)
         for civ in self._hostile_civilians(t, guarded=True):
             where = (civ.x, civ.y)
             if civ.guarded:
@@ -1062,7 +1075,7 @@ class MilitaryPolicy:
             if t.actions >= s.max_actions:
                 self._skip_recapture(t, civ, "the action limit for the turn is used")
                 continue
-            if terrain is not None and terrain.step_cost(civ.x, civ.y, naval=False) is None:
+            if not self._passable((civ.x, civ.y)):
                 self._skip_recapture(t, civ, "the tile is water or impassable (needs embarking)")
                 continue
             strength = self.threat_map.threat_at(civ.x, civ.y, t.turn)
@@ -1133,7 +1146,7 @@ class MilitaryPolicy:
                 goal = None
                 stop = 0.0
                 for step in reversed(line[:reach]):  # The furthest tile that can be stood on.
-                    if terrain is not None and terrain.step_cost(*step, naval=False) is None:
+                    if not self._passable(step):
                         continue  # Water or a mountain on the straight line.
                     stop = self.threat_map.threat_at(step[0], step[1], t.turn)
                     goal = step
@@ -1967,6 +1980,7 @@ class MilitaryPolicy:
                     found.add((x, y))
         found -= taken
         found.discard((unit.x, unit.y))
+        found = {p for p in found if self._passable(p)}  # Not water or a mountain (issue 370).
         ordered = sorted(found, key=lambda p: (hex_distance(unit.x, unit.y, *p, width), p))
         return ordered[: s.fallback_tiles]
 
@@ -2074,6 +2088,7 @@ class MilitaryPolicy:
                     found.add((x, y))
         found -= taken
         found.discard(self._pos(t, unit))
+        found = {p for p in found if self._passable(p)}  # Not water or a mountain (issue 370).
         return sorted(found, key=lambda p: (hex_distance(unit.x, unit.y, *p, w), p))
 
     async def _step_out(
@@ -2800,7 +2815,10 @@ class MilitaryPolicy:
         width = self.settings.map_width
         muster = self.settings.camp_muster_radius
         line = hex_line((unit.x, unit.y), camp, width)
-        first = next((p for p in line if hex_distance(*p, *camp, width) <= muster), camp)
+        first = next(
+            (p for p in line if hex_distance(*p, *camp, width) <= muster and self._passable(p)),
+            camp,
+        )
         taken = {self._pos(t, u) for u in t.units if u.unit_id != unit.unit_id}
         taken |= {(th.x, th.y) for th in t.threats} | t.blocked
         taken |= {p for p, until in self._muster_bad.items() if until >= t.turn}
@@ -2813,7 +2831,7 @@ class MilitaryPolicy:
         tiles = [first, *neighbours(*first, width), *((x, y) for _, x, y in ring)]
         free = list(
             dict.fromkeys(p for p in tiles if p not in taken and p != camp
-                          and hex_distance(*p, *camp, width) <= muster)
+                          and self._passable(p) and hex_distance(*p, *camp, width) <= muster)
         )  # fmt: skip
         return free[:tries]
 
@@ -2826,7 +2844,7 @@ class MilitaryPolicy:
         width = self.settings.map_width
         taken = {self._pos(t, u) for u in t.units if u.unit_id != unit.unit_id}
         taken |= {(th.x, th.y) for th in t.threats} | t.blocked
-        free = [p for p in neighbours(*camp, width) if p not in taken]
+        free = [p for p in neighbours(*camp, width) if p not in taken and self._passable(p)]
         free.sort(key=lambda p: (hex_distance(unit.x, unit.y, *p, width), p))
         return free[:tries]
 
@@ -2836,7 +2854,8 @@ class MilitaryPolicy:
         if hex_distance(unit.x, unit.y, *camp, width) <= 1:
             return None  # In reach, so the attack step takes it from here.
         line = hex_line((unit.x, unit.y), camp, width)
-        return line[-2] if len(line) >= 2 else None
+        # The last passable tile before the camp, so a lake or a ridge on the line is skipped.
+        return next((p for p in reversed(line[:-1]) if self._passable(p)), None)
 
     # ----- idle units -----
 
@@ -2915,7 +2934,6 @@ class MilitaryPolicy:
         if any(u.unit_type == "UNIT_SCOUT" for u in t.units):
             self._probe_note(t, "we have a scout, and settling sends it", sus)
             return
-        terrain = getattr(self.threat_map, "terrain", None)
         pool = [
             u
             for u in t.mine
@@ -2947,7 +2965,7 @@ class MilitaryPolicy:
             line = line[: max(1, int(unit.moves))]
             stop = threat = None
             for step in reversed(line):
-                if terrain is not None and terrain.step_cost(*step, naval=False) is None:
+                if not self._passable(step):
                     continue
                 threat = self.threat_map.threat_at(step[0], step[1], t.turn)
                 if threat <= s.probe_threat:

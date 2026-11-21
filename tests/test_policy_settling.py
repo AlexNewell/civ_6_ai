@@ -2261,3 +2261,22 @@ def test_with_no_terrain_a_refused_straight_line_step_is_not_resent():
     game.actions.clear()
     run(policy, game)
     assert not game.actions
+
+
+def test_a_refused_step_stays_avoided_for_the_whole_trip_so_the_pair_does_not_bounce():
+    # Live: foreign borders refused the step, the pair moved, and the path led straight back.
+    game, policy = _escort_pair_game({})
+    refused = {(11, 13), (11, 14)}
+    policy._remember_refused(settler(x=10, y=14), (14, 6), (11, 13), "BLOCKED (city-state border)")
+    policy._remember_refused(settler(x=10, y=14), (14, 6), (11, 14), "BLOCKED (city-state border)")
+    policy._remember_refused(settler(x=10, y=14), (14, 6), (9, 9), "Error: STACKING_CONFLICT")
+    assert policy._refused_steps[7][1] == refused  # Stacking is not remembered.
+    # From a different tile the pair is still steered clear of the refused tiles.
+    from types import SimpleNamespace
+
+    other = SimpleNamespace(unit_id=7, x=12, y=13, moves=2.0)
+    step = policy._pick_step(other, (14, 6))
+    assert step not in refused
+    # A new goal starts a new trip.
+    policy._remember_refused(other, (16, 6), (13, 12), "BLOCKED")
+    assert policy._refused_steps[7] == ((16, 6), {(13, 12)})

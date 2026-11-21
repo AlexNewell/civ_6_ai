@@ -2623,3 +2623,79 @@ def test_an_urgent_redirect_restarts_the_far_camps_campaign_clock():
     run(policy, game)
     assert state.camp_plan.target == (53, 11)
     assert (55, 7) not in {k[0] for k in policy._camp_turns}
+
+
+# ----- fallback and approach tiles skip water and mountains (issue 370) -----
+
+
+def _store(ground_by_tile):
+    from civ6_ai.terrain import TerrainStore
+
+    store = TerrainStore(map_width=74)
+    store.learn(
+        [
+            build_tile(tile(x=x, y=y, improvement=None, units=[], is_river=False, terrain=terr))
+            for (x, y), terr in ground_by_tile.items()
+        ]
+    )
+    return store
+
+
+def _ring_of(x, y):
+    return [(x + dx, y + dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1) if (dx, dy) != (0, 0)]
+
+
+def _turn_for(policy, game):
+    units = asyncio.run(read_units(game))
+    return policy, military_module._Turn(
+        turn=20, units=units, cities=(), threats=(), mine=list(units), reserved=frozenset()
+    )
+
+
+def test_passable_without_a_store_keeps_every_tile():
+    assert MilitaryPolicy()._passable((3, 3)) is True
+
+
+def test_passable_skips_water_and_mountain_but_keeps_unread_tiles():
+    policy = MilitaryPolicy()
+    policy.terrain = _store(
+        {(1, 1): "TERRAIN_COAST", (2, 1): "TERRAIN_GRASS_MOUNTAIN", (3, 1): "TERRAIN_GRASS"}
+    )
+    assert [policy._passable(p) for p in [(1, 1), (2, 1), (3, 1), (4, 1)]] == [
+        False,
+        False,
+        True,
+        True,
+    ]
+
+
+def test_a_refused_walk_home_falls_back_to_land_tiles_only():
+    # Real log: swap and retreat fallbacks picked (64,17) and (64,18), both water.
+    water = {p: "TERRAIN_COAST" for p in [(11, 10), (11, 9), (10, 11)]}
+    game = MilitaryGame(
+        [warrior(uid=1, x=13, y=10)],
+        [barbarian(x=14, y=11)],
+        cities=[city_info(garrison_unit="")],
+    )
+    game.refuse_moves_to = {(10, 10)}
+    policy = MilitaryPolicy()
+    policy.terrain = _store(water)
+    run(policy, game)
+    moved = [a[2:] for a in game.orders("move")]
+    assert not set(moved) & set(water)
+    assert any(p in _ring_of(10, 10) for p in moved)  # The next legal tile was tried.
+
+
+def test_stage_goals_and_stage_tile_skip_water_beside_a_camp():
+    policy = MilitaryPolicy()
+    policy.settings = dataclasses.replace(policy.settings, map_width=74)
+    camp = (20, 10)
+    lake = {(19, 10): "TERRAIN_COAST"}
+    policy.terrain = _store(lake)
+    game = MilitaryGame([warrior(uid=1, x=15, y=10)])
+    policy, t = _turn_for(policy, game)
+    unit = t.mine[0]
+    assert (19, 10) not in policy._stage_goals(t, unit, camp, tries=6)
+    stage = policy._stage_tile(unit, camp)
+    assert stage is not None and stage != (19, 10)
+    assert stage in _ring_of(*camp) or stage != camp

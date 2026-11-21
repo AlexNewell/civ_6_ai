@@ -190,3 +190,28 @@ def test_a_slice_resumed_on_a_checkpoint_turn_still_saves_it():
 
     asyncio.run(run_game.play_with_checkpoints(play, turn_now, save, 60, [30, 50, 100]))
     assert saved == [50, 100]
+
+
+def test_a_loaded_save_is_a_new_game_and_a_restart_keeps_its_game():
+    import run_game
+
+    inferred = []
+
+    def infer():
+        inferred.append(1)
+        return "STD_T1_04_20261121T000225Z"
+
+    stem = "STD_T1_04_20261121T023018Z"
+    assert run_game.session_game_id(True, stem, infer) == stem
+    assert not inferred  # A fresh load never looks at earlier sessions.
+    assert run_game.session_game_id(False, stem, infer) == "STD_T1_04_20261121T000225Z"
+
+
+def test_state_files_are_per_game(tmp_path):
+    import run_game
+
+    wars, threat = run_game.game_state_paths(tmp_path, "STD_T1_04_20261121T023018Z")
+    assert wars == tmp_path / "STD_T1_04_20261121T023018Z_wars.json"
+    assert threat == tmp_path / "STD_T1_04_20261121T023018Z_threat.json"
+    other, _ = run_game.game_state_paths(tmp_path, "STD_T1_04_20261121T000225Z")
+    assert other != wars

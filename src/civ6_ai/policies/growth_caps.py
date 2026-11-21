@@ -46,30 +46,64 @@ def at_housing_cap(city: City) -> bool:
     return city.pop >= math.floor(city.housing)
 
 
-def most_needed_yield(
+def yield_needs(
     city: City, empire: Empire | None, weights: Mapping[str, float] | None = None
-) -> str:
-    """The yield to favor: production while the city is mid-build, else the empire's lowest.
+) -> dict[str, float]:
+    """How well supplied each yield is (lower means more needed), scaled like for like.
 
-    The empire's science, culture and gold per turn are compared after scaling by how much
-    each is worth (`weights`, e.g. the production weights) and its typical size.
+    Mid-build the city needs production above all (need 0.0). With no empire read, production is
+    the only entry. The empire's science, culture and gold per turn are compared after scaling by
+    how much each is worth (`weights`, e.g. the production weights) and its typical size.
     """
     if city.building is not None and city.build_turns_left > 1:
-        return "production"
+        return {"production": 0.0}
     if empire is None:
-        return "production"
+        return {"production": 0.0}
     weights = weights or {}
     have = {
         "science": empire.science,
         "culture": empire.culture,
         "gold": empire.gold_per_turn,
     }
+    return {
+        name: have[name] / (_TYPICAL[name] * max(weights.get(name, 1.0), 0.01)) for name in have
+    }
 
-    def need(name: str) -> float:
-        scale = _TYPICAL[name] * max(weights.get(name, 1.0), 0.01)
-        return have[name] / scale
 
-    return min(have, key=need)
+def most_needed_yield(
+    city: City, empire: Empire | None, weights: Mapping[str, float] | None = None
+) -> str:
+    """The yield to favor: production while the city is mid-build, else the empire's lowest."""
+    needs = yield_needs(city, empire, weights)
+    return min(needs, key=needs.__getitem__)
+
+
+def hold_cap_focus(
+    held: str | None,
+    held_turns: int,
+    needs: Mapping[str, float],
+    *,
+    margin: float,
+    min_hold: int,
+) -> str:
+    """Pure. The focus to keep at a cap: the held one unless a clearly better yield exists.
+
+    `needs` is `yield_needs` (lower is more needed). With nothing held, the most needed yield.
+    A held focus stays for `min_hold` turns whatever the needs say, then changes only when the
+    new yield's need is below the held one's by more than `margin` of it (a yield with no need
+    entry counts as unneeded). Without this the pick flips every turn the needs cross.
+    """
+    best = min(needs, key=needs.__getitem__)
+    if held is None or held == best:
+        return best
+    if held_turns < min_hold:
+        return held
+    held_need = needs.get(held)
+    if held_need is None:
+        return best  # The held yield is no longer a candidate (production while idle).
+    if needs[best] < held_need - margin * abs(held_need):
+        return best
+    return held
 
 
 def decide_cap_focus(

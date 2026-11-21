@@ -626,3 +626,27 @@ Findings:
 - **Horizon.** A 50-turn slice judges changes whose effect lands by about turn 35-40. A change that acts late (a second city founded at T36 pays off in yields and growth over the next 30+ turns; a builder's tile improvements compound) has not finished showing its effect at T50. `slice_report.py` prints the score and city trajectory every 10 turns and the gain over the last 10; if a gap is still widening at the end, play on from a checkpoint (`--save-at 50`, then load it with `--turns 50`) to T100 before keeping or rejecting. Screen fast at 50, confirm slow at 100.
 - **One start is one data point.** Every row above is one civilization, one map and one seed (STD_T1_01). "Kept" means kept as a default for that start, not proven in general. Re-run a kept change on a second start before treating it as more than that.
 - **Nothing is a hard rule.** Results are encoded as defaults in the policy document's weights, never as unconditional code. The attack ratio is `military.min_damage_ratio` (postures already move it: DEFEND 1.3, CONQUER 0.8). The builder hold is `production.builder_hold_turns` (0 turns it off) and applies only while a settler is wanted: a site is known, expansion is weighted, and more than one city is the target. A tall start (one city, target_cities 1, or no survey site) trains builders at once. Reverting any kept change is a policy-document edit.
+
+
+## Opt-in features, first live A/B (2026-11-20 to 21)
+
+The features merged off by default in PRs 326 (cap focus), 327 and 349 (wonder races), and 343 and 351 (boost judgement) were switched on with `run_game.py --enable NAME` (PR 353). Each run was compared with a baseline from the same save on the same code. Runs are deterministic, so each row is one sample.
+
+**Controls.** The STD_T1_04 baselines on main ecbf288 and e5e3668 were identical: score 80 at T50, 92 at T60, cities founded T2 and T24, era score 16. The STD_T1_03 baselines on the same two commits were also identical (56 at T50). Control runs on fd5e04e (adds PR 349) and 8e52823 (adds PR 351) matched ecbf288 turn for turn. So the opt-in merges left default play unchanged.
+
+| Feature | Save, horizon | Fired | Focus metric | Score (feature / baseline) |
+|---|---|---|---|---|
+| cap_focus | STD_T1_04, 60 turns | 5 focus sets (Rome capped one turn, T41) | build list identical | T50 80 / 80, T60 93 / 92 |
+| cap_focus | STD_T1_03, 50 turns | never (no city at a cap) | identical | 56 / 56 |
+| cap_focus | STD_T1_04_TURN78, 30 turns | 23 focus sets: Ostia and Aquileia alternate production and gold every two turns | population T107 41 / 41 | T107 368 / 372 |
+| wonder_races | STD_T1_04, 60 turns | race lines from T41 | identical through T50 | T60 94 / 92 |
+| wonder_races | STD_T1_03, 50 turns | no wonder offered | identical | 56 / 56 |
+| wonder_races | STD_T1_04_TURN78, 30 turns | 144 GO lines, all "(not tall and safe)" | wonders started: 0 / 1 (Oracle, T96) | T107 374 / 372 |
+| boost_judgement | STD_T1_04, 60 turns | Early Empire delayed 2 turns, then slipped | identical | 80 / 80 |
+| boost_judgement | STD_T1_03, 50 turns | Writing delayed T13 to T22 for a meeting that never came | techs T50 9 / 10, civics 6 / 5, third city T48 / T45 | 55 / 56 |
+| boost_judgement | STD_T1_04_TURN78, 30 turns | yes | population T98 34 / 35 | T107 373 / 372 |
+
+Verdicts:
+- **Cap focus: not switched on.** The openings barely reach a cap, and from turn 78 the focus has no hysteresis, so citizens are reshuffled every other turn. Fix in issue 356.
+- **Wonder races: not switched on.** The race estimator works, but `tall_and_safe` is empire-wide (any threatened city, any settler, any camp force), so no wonder is ever started. Fix in issue 357.
+- **Boost judgement: not switched on.** A fixed estimate (a meeting "in about 6 turns from exploring") counts down to 1 and stays there until the 8-turn cap, which cost a tech on STD_T1_03. The builder half never ran: `BuilderWeights.use_boost_nudges` is off and was not switchable, so the Masonry quarry nudge logged on T40 to T51 was ignored. Fix in issue 358.

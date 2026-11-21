@@ -2285,13 +2285,13 @@ def test_a_refused_step_stays_avoided_for_the_whole_trip_so_the_pair_does_not_bo
 # ----- issue 379: sites ranked by the walk, not the hex distance -----
 
 
-def _walk_game(wall=(), sites=None, estimates=None, store=True):
+def _walk_game(wall=(), sites=None, estimates=None, store=True, at=(10, 10)):
     from civ6_ai.state.reader import build_tile
     from civ6_ai.terrain import TerrainStore
     from fixtures.civ_state import tile
 
     sites = sites or [site(15, 10, food=44), site(10, 15, food=40)]
-    game = make_game([settler()], cities=[alpha()], sites=sites)
+    game = make_game([settler(*at)], cities=[alpha()], sites=sites)
     game.estimate_calls = []
 
     async def moved(unit_index, x, y):
@@ -2375,8 +2375,15 @@ def test_the_game_estimate_overrides_the_terrain_estimate():
     assert policy.decisions[-1].target == (10, 15)
 
 
-def test_no_path_from_the_game_rejects_the_site():
-    game, policy = _walk_game(estimates={(15, 10): _est(-1, 0), (10, 15): _est(2)})
+def test_no_path_from_the_game_rejects_a_site_the_terrain_cannot_reach_either():
+    ring = {(x, y) for x in range(14, 17) for y in range(9, 12)} - {(15, 10)}
+    game, policy = _walk_game(wall=ring, estimates={(15, 10): _est(-1, 0), (10, 15): _est(2)})
+    run(policy, game)
+    assert policy.decisions[-1].target == (10, 15)
+
+
+def test_no_path_from_the_game_rejects_a_far_site_when_the_terrain_is_unknown():
+    game, policy = _walk_game(store=False, estimates={(15, 10): _est(-1, 0), (10, 15): _est(2)})
     run(policy, game)
     log = _by_site(policy)
     assert log[15, 10].turns_game == -1 and log[15, 10].rejected
@@ -2423,7 +2430,7 @@ def test_a_territory_refusal_blocks_the_tile_for_the_terrain_walk():
     assert (12, 10) not in policy._border_blocked
 
 
-def test_path_turns_counts_slow_ground_and_skips_blocked_tiles():
+def _row_store(kinds):
     from civ6_ai.state.reader import build_tile
     from civ6_ai.terrain import TerrainStore
     from fixtures.civ_state import tile
@@ -2431,50 +2438,42 @@ def test_path_turns_counts_slow_ground_and_skips_blocked_tiles():
     store = TerrainStore(map_width=74)
     store.learn(
         [
-            build_tile(tile(x=x, y=10, improvement=None, units=[], is_river=False, **extra))
-            for x, extra in [(10, {}), (11, {}), (12, {"is_hills": True}), (13, {}), (14, {})]
+            build_tile(tile(x=10 + i, y=10, improvement=None, units=[], is_river=False, **extra))
+            for i, extra in enumerate(kinds)
         ]
     )
-    turns = store.path_turns((10, 10), 2.0, horizon_turns=10)
-    assert turns[(10, 10)] == 0 and turns[(11, 10)] == 1
-    assert turns[(12, 10)] == 2  # 1 + 2 movement
-    assert turns[(11, 10)] <= turns[(13, 10)]
-    assert (14, 10) in turns
+    return store
+
+
+def test_path_turns_follows_the_games_any_movement_left_rule():
+    # A settler (2 moves) crosses two flat tiles a turn, or one hill a turn.
+    flat = _row_store([{}] * 6).path_turns((10, 10), 2.0, horizon_turns=10)
+    assert [flat[(10 + i, 10)] for i in range(6)] == [0, 1, 1, 2, 2, 3]
+    hills = _row_store([{}, {"is_hills": True}, {"is_hills": True}, {}, {}]).path_turns(
+        (10, 10), 2.0, horizon_turns=10
+    )
+    # Flat (1 spent), a hill entered with 1 left, then a hill a turn on, then two flat tiles.
+    assert [hills[(10 + i, 10)] for i in range(5)] == [0, 1, 2, 3, 3]
+
+
+def test_path_turns_skips_avoided_tiles():
+    store = _row_store([{}] * 4)
     assert (11, 10) not in store.path_turns((10, 10), 2.0, avoid=[(11, 10)], horizon_turns=10)
 
 
-def test_a_game_route_through_unread_ground_keeps_the_terrain_estimate():
-    route = lq.PathingEstimate(
-        turns=0, total_tiles=2, reachable_this_turn=2, waypoints=["(11,10)", "(40,40)"]
+def test_a_settler_standing_on_its_site_is_never_rejected_by_pathing():
+    # Live: the game answered "no path" to the settler's own tile and it walked away.
+    game, policy = _walk_game(
+        sites=[site(15, 10, food=44)], estimates={(15, 10): _est(-1, 0)}, at=(15, 10)
     )
-    game, policy = _walk_game(estimates={(15, 10): route, (10, 15): _est(2)})
     run(policy, game)
-    log = _by_site(policy)[15, 10]
-    assert log.turns_game is None and log.turns == log.turns_path
+    assert game.estimate_calls == []
+    assert game.actions == [("found", 7)]
 
 
-def test_a_game_route_through_a_mountain_keeps_the_terrain_estimate():
-    route = lq.PathingEstimate(
-        turns=0, total_tiles=2, reachable_this_turn=2, waypoints=["(12,10)", "(15,10)"]
-    )
-    game, policy = _walk_game(wall={(12, 10)}, estimates={(15, 10): route, (10, 15): _est(2)})
+def test_a_game_no_path_for_a_short_walk_with_a_terrain_path_is_not_trusted():
+    game, policy = _walk_game(estimates={(15, 10): _est(-1, 0), (10, 15): _est(-1, 0)})
     run(policy, game)
-    assert _by_site(policy)[15, 10].turns_game is None
-
-
-def test_a_game_route_over_known_ground_is_used():
-    route = lq.PathingEstimate(
-        turns=4, total_tiles=5, reachable_this_turn=2, waypoints=["(11,10)", "(15,10)"]
-    )
-    game, policy = _walk_game(estimates={(15, 10): route, (10, 15): _est(2)})
-    run(policy, game)
-    assert _by_site(policy)[15, 10].turns_game == 5
-
-
-def test_the_survey_without_a_settler_ignores_the_walking_horizon():
-    # A site reachable from another city but not from the first one must stay in the survey.
-    ring = {(x, y) for x in range(14, 17) for y in range(9, 12)} - {(15, 10)}
-    game, policy = _walk_game(wall=ring, sites=[site(15, 10, food=44)])
-    game.data["units"] = []
-    run(policy, game)
-    assert policy.expansion.safe_sites >= 1
+    log = _by_site(policy)
+    assert log[15, 10].rejected is None and log[15, 10].turns_game is None
+    assert policy.decisions[-1].target == (15, 10)

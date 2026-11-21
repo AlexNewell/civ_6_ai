@@ -1491,7 +1491,9 @@ class SettlingPolicy:
         examined: set[tuple[int, int]] = set()
         for _ in range(s.game_path_sites):
             top = [c for c in candidates if c.rejected is None][: s.game_path_sites]
-            target = next((c for c in top if (c.x, c.y) not in examined), None)
+            # Standing on the site: nothing to walk, so nothing to ask (the game answers "no path"
+            # to its own tile).
+            target = next((c for c in top if (c.x, c.y) not in examined and c.distance > 0), None)
             if target is None:
                 break
             examined.add((target.x, target.y))
@@ -1511,6 +1513,8 @@ class SettlingPolicy:
                 turns = None  # Issue 379: a route through unread or blocked ground is not trusted.
             if turns is None:
                 continue
+            if turns < 0 and (target.turns_path is not None or target.distance <= 2):
+                continue  # The terrain walk finds a way (or it is a step or two): not trusted.
             if turns < 0:
                 updated = replace(target, rejected=NO_GAME_PATH, turns_game=-1)
             else:

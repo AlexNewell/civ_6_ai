@@ -2083,4 +2083,18 @@ def test_the_handler_builds_the_holy_site_in_a_safe_city_and_reads_the_advisor_o
     game.set_calls.clear()
     run(policy.assign(game))
     assert game.advisor_calls - calls == 1  # Only `_start`'s read; the context read is cached.
-    assert policy._holy_adjacency == {65536: 3}
+    assert policy._holy_adjacency[65536][1] == 3
+
+
+def test_the_cached_adjacency_is_read_again_after_the_reread_turns():
+    game = holy_game(1)
+    policy = CityProductionPolicy()
+    run(policy.assign(game))
+    turn = policy._holy_adjacency[65536][0]
+    game.districts = [lq.DistrictPlacement(6, 6, {}, 3, "Hills")]  # Borders grew.
+    policy._holy_adjacency[65536] = (turn - 3, 1)
+    run(policy.assign(game))
+    assert policy._holy_adjacency[65536][1] == 1  # Too soon: still the cached read.
+    policy._holy_adjacency[65536] = (turn - 10, 1)
+    run(policy.assign(game))
+    assert policy._holy_adjacency[65536] == (turn, 3)

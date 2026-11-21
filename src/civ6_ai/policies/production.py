@@ -160,6 +160,9 @@ class ProductionWeights:
     holy_site_bonus_3: float = 9.0
     holy_site_bonus_2: float = 4.0
     holy_site_prophet_bonus: float = 2.0
+    # Border growth, a tile purchase or another build changes a city's placements, so the cached
+    # adjacency is read again after this many turns (a review finding on the first version).
+    holy_site_reread_turns: int = 10
 
     def __post_init__(self) -> None:
         for item in fields(self):
@@ -1785,7 +1788,7 @@ class CityProductionPolicy:
         )  # Chained tile buys. Its `book` is the gold policy's saving list.
         self.expansion = expansion if expansion is not None else ExpansionState()
         # Issue 375: best Holy Site adjacency per city, read once from the district advisor.
-        self._holy_adjacency: dict[int, int] = {}
+        self._holy_adjacency: dict[int, tuple[int, int]] = {}  # City -> (turn read, adjacency).
         self._holy_turn = 0
 
     async def run(self, game: ProductionGame) -> None:
@@ -1974,8 +1977,8 @@ class CityProductionPolicy:
         """Issue 375: add this city's best Holy Site adjacency to the context.
 
         Read from the district advisor only for a city offered a Holy Site while none exists, and
-        kept per city, so the advisor is asked once. A turn that goes back (a loaded save) clears
-        it.
+        kept per city and read again after `holy_site_reread_turns`. A turn that goes back (a
+        loaded save) clears it.
         """
         if context.turn < self._holy_turn:
             self._holy_adjacency.clear()
@@ -1994,7 +1997,8 @@ class CityProductionPolicy:
         )
         if offered is None:
             return context
-        if city.city_id not in self._holy_adjacency:
+        cached = self._holy_adjacency.get(city.city_id)
+        if cached is None or context.turn - cached[0] >= self.weights.holy_site_reread_turns:
             try:
                 placements = await game.get_district_advisor(city.city_id, offered.item)
             except ConnectionError:
@@ -2005,7 +2009,7 @@ class CityProductionPolicy:
             if not isinstance(placements, list):
                 return context  # Not cached: the advisor may answer next turn.
             best = max((p.total_adjacency for p in placements), default=0)
-            self._holy_adjacency[city.city_id] = best
+            self._holy_adjacency[city.city_id] = (context.turn, best)
             seen = replace(context, holy_site_adjacency=best)
             log.info(
                 "%s: best Holy Site adjacency %d, Holy Site scores %.1f (safe %s, prophet %s)",
@@ -2015,7 +2019,7 @@ class CityProductionPolicy:
                 holy_site_safe(city, context),
                 context.prophet_coming,
             )
-        return replace(context, holy_site_adjacency=self._holy_adjacency[city.city_id])
+        return replace(context, holy_site_adjacency=self._holy_adjacency[city.city_id][1])
 
     def _log_pillaged(self, cities: list[City]) -> None:
         """Log what is pillaged in each city when it changes, and each item repaired."""

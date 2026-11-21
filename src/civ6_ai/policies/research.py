@@ -278,8 +278,9 @@ def best_mountain_site(
     """Most mountains beside one candidate Holy Site tile within `radius` of the city (#383).
 
     The district advisor cannot place a Holy Site before Astrology, so this estimates the
-    adjacency from remembered terrain: +1 a mountain. A candidate is a known land tile that is not
-    a mountain and not the city centre. Unknown tiles count as no mountain, so the estimate errs
+    adjacency from remembered terrain: +1 a mountain. Polar ice, which `Ground.mountain` also
+    covers, is not one. A candidate is a known land tile that is not a mountain and not the city
+    centre. Unknown tiles count as no mountain, so the estimate errs
     low. Woods and wonders add to the real adjacency and are not counted.
     """
     ring = {(city.x, city.y)}
@@ -295,7 +296,7 @@ def best_mountain_site(
         count = sum(
             1
             for n in neighbours(*tile, map_width)
-            if (g := terrain.get(*n)) is not None and g.mountain
+            if (g := terrain.get(*n)) is not None and g.terrain.endswith("_MOUNTAIN")
         )
         best = max(best, count)
     return best
@@ -332,16 +333,15 @@ class HolySiteScout:
     game: Callable[[], Any]
     terrain: Callable[[], Any]
     defence: Any = None
-    radius: int = 3
     map_width: int | None = STANDARD_MAP_WIDTH
 
-    async def __call__(self) -> int:
+    async def __call__(self, radius: int) -> int:
         terrain = self.terrain()
         if terrain is None:
             return 0
         cities = await read_cities(self.game(), self.map_width)
         threatened = frozenset() if self.defence is None else self.defence.threatened_ids
-        return holy_site_view(cities, terrain, threatened, self.radius, self.map_width)
+        return holy_site_view(cities, terrain, threatened, radius, self.map_width)
 
 
 def astrology_adjustments(
@@ -424,7 +424,7 @@ class ResearchPolicy:
         weights: ResearchWeights | None = None,
         boost_inputs: Callable[[], Awaitable[tuple[BoostState, PlanSignals]]] | None = None,
         nudge_board: NudgeBoard | None = None,
-        holy_site_view: Callable[[], Awaitable[int]] | None = None,
+        holy_site_view: Callable[[int], Awaitable[int]] | None = None,
     ) -> None:
         self.weights = weights or ResearchWeights()
         # Reads the game counts and plan signals for the boost judgement. Without it, or with
@@ -469,7 +469,7 @@ class ResearchPolicy:
         if self.holy_site_view is None or self.weights.astrology_bonus <= 0:
             return {}
         try:
-            mountains = await self.holy_site_view()
+            mountains = await self.holy_site_view(self.weights.astrology_site_radius)
         except ConnectionError:
             raise
         except Exception:

@@ -527,13 +527,49 @@ def test_policy_applies_the_view_and_survives_its_failure():
         async def set_civic(self, name):
             return "ok"
 
-    async def view():
+    async def view(radius):
         return 3
 
-    async def broken():
+    async def broken(radius):
         raise ValueError("boom")
 
     run(ResearchPolicy(NO_PRIORITIES, holy_site_view=view).run(G()))
     run(ResearchPolicy(NO_PRIORITIES, holy_site_view=broken).run(G()))
     run(ResearchPolicy(NO_PRIORITIES).run(G()))
     assert seen == ["TECHNOLOGY_ASTROLOGY", "TECHNOLOGY_MINING", "TECHNOLOGY_MINING"]
+
+
+def test_ice_is_not_a_mountain_for_adjacency():
+    ice = Ground("TERRAIN_COAST", "FEATURE_ICE", False, False, True)
+    store = _terrain((10, 10), set())
+    for t in _site_with(3):
+        store._ground[t] = ice
+    assert best_mountain_site(_city(), store, 3) == 0
+
+
+def test_policy_passes_the_configured_radius():
+    seen = []
+
+    async def view(radius):
+        seen.append(radius)
+        return 0
+
+    class G:
+        async def get_tech_civics(self):
+            return status(techs=[tech("Mining")])
+
+        async def get_game_overview(self):
+            return fx.game_overview()
+
+        async def set_research(self, name):
+            return "ok"
+
+        async def set_civic(self, name):
+            return "ok"
+
+    run(
+        ResearchPolicy(replace(NO_PRIORITIES, astrology_site_radius=2), holy_site_view=view).run(
+            G()
+        )
+    )
+    assert seen == [2]

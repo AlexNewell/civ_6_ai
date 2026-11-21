@@ -1319,7 +1319,7 @@ def test_a_ship_in_a_coastal_city_is_not_the_settlers_companion():
     assert policy.decisions[-1].action == "hold"
 
 
-def test_a_refused_join_clears_when_an_engineer_blocking_the_tile_leaves():
+def test_no_join_is_ordered_onto_an_engineers_tile_until_it_leaves():
     class Refusing(ActionGame):
         async def move_unit(self, unit_index, x, y):
             self.actions.append(("move", unit_index, x, y))
@@ -1344,10 +1344,9 @@ def test_a_refused_join_clears_when_an_engineer_blocking_the_tile_leaves():
         return game.actions
 
     policy = SettlingPolicy(SettlingSettings(threat_radius=2))
-    first = play(policy, [engineer])
-    assert len(first) == 1
+    # Issue 377: the step avoids the engineer's tile, so no refused order is sent at all.
     assert play(policy, [engineer]) == []
-    assert len(play(policy, [])) == 1  # The blocker left, so the order is tried again.
+    assert len(play(policy, [])) == 1  # The blocker left, so the order is sent.
 
 
 def test_the_known_city_read_does_not_rely_on_the_stripped_end_marker():
@@ -2280,3 +2279,28 @@ def test_a_refused_step_stays_avoided_for_the_whole_trip_so_the_pair_does_not_bo
     # A new goal starts a new trip.
     policy._remember_refused(other, (16, 6), (13, 12), "BLOCKED")
     assert policy._refused_steps[7] == ((16, 6), {(13, 12)})
+
+
+def test_the_escort_step_skips_a_tile_our_own_unit_holds():
+    # Issue 377: the order to a tile a friendly Warrior stood on was refused three turns running.
+    game, policy = _escort_pair_game({})
+    from types import SimpleNamespace
+
+    from civ6_ai.state.reader import build_unit
+
+    settler_unit = SimpleNamespace(unit_id=7, x=10, y=14, moves=2.0)
+    escort = build_unit(unit_info(unit_id=9, unit_index=9, x=10, y=14))
+    free = policy._pick_step(settler_unit, (14, 6), units=[escort], escort=escort)
+    blocker = build_unit(unit_info(unit_id=11, unit_index=11, x=free[0], y=free[1]))
+    units = [escort, blocker]
+    step = policy._pick_step(settler_unit, (14, 6), units=units, escort=escort)
+    assert step is not None and step != free
+    # Every reachable tile taken: no step, so the pair holds.
+    taken = [
+        build_unit(unit_info(unit_id=20 + i, unit_index=20 + i, x=t[0], y=t[1]))
+        for i, t in enumerate(policy.terrain.path_to((10, 14), (14, 6))[:2])
+    ]
+    assert policy._pick_step(settler_unit, (14, 6), units=[escort, *taken], escort=escort) is None
+    # The escort's own tile is not a blocker.
+    on_escort = build_unit(unit_info(unit_id=9, unit_index=9, x=free[0], y=free[1]))
+    assert policy._pick_step(settler_unit, (14, 6), units=[on_escort], escort=on_escort) == free

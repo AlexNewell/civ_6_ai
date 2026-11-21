@@ -148,3 +148,12 @@ def test_a_goal_beyond_the_rows_read_so_far_is_still_reachable():
     t.map_height = 46
     path = t.path_to((5, 8), (5, 14))
     assert path is not None and path[-1] == (5, 14)
+
+
+def test_step_toward_passes_over_occupied_tiles_and_gives_none_when_all_are_taken():
+    t = store({})
+    far = t.step_toward((0, 5), (6, 5), 2)
+    near = t.path_to((0, 5), (6, 5))[0]
+    assert far != near
+    assert t.step_toward((0, 5), (6, 5), 2, occupied={far}) == near
+    assert t.step_toward((0, 5), (6, 5), 2, occupied={far, near}) is None

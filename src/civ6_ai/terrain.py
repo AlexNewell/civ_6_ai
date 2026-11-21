@@ -188,23 +188,27 @@ class TerrainStore:
         moves: float,
         avoid: Iterable[tuple[int, int]] = (),
         stop_short: bool = False,
+        occupied: Iterable[tuple[int, int]] = (),
     ) -> tuple[int, int] | None:
         """The farthest tile along the cheapest path that `moves` movement points reach (at least
         one step, never more steps than whole moves). With `stop_short` the goal itself is left
-        out, so the unit ends beside it. None if no path is known; callers fall back to a
-        straight line."""
+        out, so the unit ends beside it. Tiles in `occupied` can be crossed but not ended on; the
+        next-farthest free tile is used, None when every reachable tile is taken. None also if no
+        path is known; callers fall back to a straight line."""
+        occupied = set(occupied)
         path = self.path_to(start, goal, avoid)
         if stop_short and path:
             path = path[:-1]
         if not path:
             return None
         spent = 0.0
-        reached = path[0]
+        reached = None
         for i, tile in enumerate(path[: max(1, int(moves))]):
             spent += self.step_cost(tile[0], tile[1], naval=False) or 0.0
             if i and spent > moves:
                 break
-            reached = tile
+            if tile not in occupied:
+                reached = tile
         return reached
 
     def reach(

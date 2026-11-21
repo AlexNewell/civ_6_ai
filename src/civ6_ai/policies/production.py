@@ -127,6 +127,10 @@ class ProductionWeights:
     # Issue 323: a wonder is scored only when the race estimator (`strategy.wonders`) says go, and
     # only in a safe, tall-leaning city. Off: the old flat wonder score, unchanged.
     wonder_races: bool = False
+    # Issue 357: a threat elsewhere stops a city's wonder race only within this many tiles of it.
+    # A far city's raid does not need this city's production, and an empire-wide gate meant the
+    # barbarians or a settler somewhere stopped every wonder (none started live over 30 turns).
+    wonder_threat_reach: int = 10
 
     def __post_init__(self) -> None:
         for item in fields(self):
@@ -156,6 +160,9 @@ class ProductionContext:
     districts: frozenset[str] = frozenset()  # Short names of districts any city has built.
     science_districts: int = 0  # Campuses (or the unique district in their place) built or begun.
     threatened: frozenset[int] = frozenset()  # Ids of cities the threat state marks (1.35).
+    # Issue 357: where the threatened cities are, so a far threat can be told from a near one. An
+    # id missing here has an unknown position and counts as near.
+    threatened_at: Mapping[int, tuple[int, int]] = field(default_factory=dict, compare=False)
     short: frozenset[int] = frozenset()  # Of those, the ones with fewer than two defenders.
     mapped: frozenset[int] = frozenset()  # Of those, the ones the threat map judged (issue 264).
     wary: bool = False  # A much stronger rival at peace with us (`defence.wary_of`): walls.
@@ -272,6 +279,7 @@ def build_context(
         trade_capacity=empire.trade_capacity,
         trade_safe=trade_safe,
         threatened=defence.threatened_ids if defence is not None else frozenset(),
+        threatened_at={c.city_id: (c.x, c.y) for c in cities},
         short=defence.short_ids if defence is not None else frozenset(),
         mapped=defence.mapped_ids if defence is not None else frozenset(),
         wary=bool(defence is not None and defence.wary),
@@ -798,15 +806,35 @@ def wants_early_monument(city: City, ctx: ProductionContext, w: ProductionWeight
 _LOGGED_RACES: set[tuple[str, str, int, float]] = set()
 
 
-def tall_and_safe(city: City, ctx: ProductionContext) -> bool:
-    """Only a safe, tall-leaning city races (issue 323): no threat anywhere, no settler or camp
-    force being built, so the production is not wanted for expansion."""
-    return (
-        not under_threat(city, ctx)
-        and not ctx.threatened
-        and ctx.settlers == 0
-        and ctx.camp_units <= 0
-    )
+def not_tall_and_safe_reason(city: City, ctx: ProductionContext, w: ProductionWeights) -> str:
+    """Why this city does not race a wonder (issue 323, per city since issue 357), or "".
+
+    The city itself must be safe and not building a settler. A threat elsewhere counts only
+    within `wonder_threat_reach` tiles (a threatened city of unknown position counts as near).
+    Camp units block only a city the camp force is called from (`_CAMP_CITY_REACH`), the same
+    cities `_camp_score` asks for units; a camp far away leaves this city's production free. A
+    settler being walked or built in another city does not block: only this city's own settler
+    build takes its production.
+    """
+    if under_threat(city, ctx):
+        return "this city is threatened"
+    if city.building == "UNIT_SETTLER":
+        return "this city is building a settler"
+    for other in ctx.threatened:
+        at = ctx.threatened_at.get(other)
+        if at is None or hex_distance(city.x, city.y, *at) <= w.wonder_threat_reach:
+            return "a threatened city is near"
+    if ctx.camp_units > 0 and (
+        ctx.camp_target is None
+        or hex_distance(city.x, city.y, *ctx.camp_target) <= _CAMP_CITY_REACH
+    ):
+        return "a camp force is short nearby"
+    return ""
+
+
+def tall_and_safe(city: City, ctx: ProductionContext, w: ProductionWeights | None = None) -> bool:
+    """Only a safe city races a wonder: see `not_tall_and_safe_reason`."""
+    return not not_tall_and_safe_reason(city, ctx, w or ProductionWeights())
 
 
 # Rivals assumed when the world rankings have not been read yet (the first turns, or a failed
@@ -890,12 +918,13 @@ def _wonder_race_score(
         progress=tuple(ctx.rival_progress.get(option.item, ())),
         already_started=city.building == option.item,
     )
-    go = est.go and tall_and_safe(city, ctx)
+    blocked = not_tall_and_safe_reason(city, ctx, w)
+    go = est.go and not blocked
     # The alternative is in the key: a reranked verdict (an item ruled out) is a new line.
     key = (city.name, option.item, ctx.turn, round(ctx.wonder_alternative, 2))
     if key not in _LOGGED_RACES:
         _LOGGED_RACES.add(key)
-        reason = "" if tall_and_safe(city, ctx) else " (not tall and safe)"
+        reason = f" (not tall and safe: {blocked})" if blocked else ""
         shown = ",".join(f"{p:.2f}" for p in ctx.rival_progress.get(option.item, ())) or "none"
         inputs = (
             f" [inputs: difficulty={ctx.difficulty or 'unread'}, rivals={ctx.rivals}"

@@ -137,6 +137,13 @@ class ProductionWeights:
     # A far city's raid does not need this city's production, and an empire-wide gate meant the
     # barbarians or a settler somewhere stopped every wonder (none started live over 30 turns).
     wonder_threat_reach: int = 10
+    # Issue 369: a camp force's units no longer outbid a settler this city can build while the camp
+    # does not block expansion. Live (STD_T1_04, T24 to T29) four Slingers and two Warriors beat a
+    # settler worth about 10 after the build-time discount, and the 3rd city came 11 turns late.
+    # The camp unit is held just below the settler; a threatened city and a camp that blocks
+    # settling (issue 284) are unchanged. False restores the old order, for a posture that wants
+    # the camp cleared first.
+    settler_before_camp: bool = True
 
     def __post_init__(self) -> None:
         for item in fields(self):
@@ -1081,6 +1088,47 @@ def _growth_before_garrison(city: City, ctx: ProductionContext) -> bool:
     )
 
 
+def _settler_before_camp(
+    city: City,
+    keep: list[ProductionChoice],
+    scores: dict[int, float],
+    ctx: ProductionContext,
+    w: ProductionWeights,
+) -> None:
+    """Hold a camp unit just below a settler this city can build (issue 369), in place in `scores`.
+
+    Compared on the discounted scores, the ones the ranking uses. Only a unit the camp demand
+    itself lifted is held: an army-floor unit keeps its score.
+    """
+    if (
+        not w.settler_before_camp
+        or ctx.camp_units <= 0
+        or ctx.camp_blocks
+        or under_threat(city, ctx)
+        or is_pressed(city, ctx)
+    ):
+        return
+    settler = max(
+        (
+            scores[id(o)]
+            for o in keep
+            if o.category == "UNIT" and canonical(o.item) == "UNIT_SETTLER"
+        ),
+        default=0.0,
+    )
+    if settler <= 0:
+        return
+    for o in keep:
+        if o.category != "UNIT" or scores[id(o)] < settler:
+            continue
+        stats = COMBAT_UNITS.get(o.item)
+        if stats is None:
+            continue
+        camp = _camp_score(city, o.item, stats[4], defence_strength(o.item), ctx, w)
+        if camp > 0 and camp >= _raw_value(o, city, ctx, w):
+            scores[id(o)] = settler - 0.01
+
+
 def rank_production(
     city: City,
     options: Iterable[ProductionChoice],
@@ -1106,6 +1154,7 @@ def rank_production(
             for o in keep:
                 if o.category == "DISTRICT" and scores[id(o)] >= top:
                     scores[id(o)] = top - 0.01
+    _settler_before_camp(city, keep, scores, context, weights)
     if _growth_before_garrison(city, context):
         # Issue 301: a garrisoned, quiet city early on put the army floor (8 + up to 4 + the
         # matchup) over a Campus or a Builder, and the bot reached turn 60 with one district to

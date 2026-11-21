@@ -1919,3 +1919,36 @@ def test_replacements_are_read_once_per_game_and_logged(caplog, monkeypatch):
             run(policy.assign(game))
     assert ReplaceGame.reads == 1
     assert "1 buildings" in caplog.text
+
+
+# ----- a settler before the camp force (issue 369) -----
+
+
+def settler_vs_slinger(weights=None, threats=(), **ctx):
+    """The T24 pick: a settler (about 10 after the discount) against a camp Slinger."""
+    base = dict(
+        turn=24, num_cities=2, builders=2, recon=1, army=4, sites_ok=True, camp_units=4,
+        camp_wants="any",
+    )  # fmt: skip
+    context = ProductionContext(**{**base, **ctx})
+    options = [option("UNIT", "UNIT_SLINGER", 3), option("UNIT", "UNIT_SETTLER", 8)]
+    ranked = rank_production(city(threats=threats, population=3), options, context, weights)
+    return [o.item for o in ranked]
+
+
+def test_a_buildable_settler_outranks_a_camp_unit_when_the_camp_does_not_block():
+    assert settler_vs_slinger()[0] == "UNIT_SETTLER"
+
+
+def test_the_camp_unit_wins_when_the_camp_blocks_expansion():
+    assert settler_vs_slinger(held_settlers=1)[0] == "UNIT_SLINGER"
+
+
+def test_the_camp_unit_wins_in_a_threatened_city():
+    near = [threat(distance=1) for _ in range(3)]
+    assert settler_vs_slinger(threats=near)[0] != "UNIT_SETTLER"
+
+
+def test_the_camp_unit_wins_when_the_settler_posture_is_off():
+    weights = ProductionWeights(settler_before_camp=False)
+    assert settler_vs_slinger(weights)[0] == "UNIT_SLINGER"

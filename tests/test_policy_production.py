@@ -1952,3 +1952,28 @@ def test_the_camp_unit_wins_in_a_threatened_city():
 def test_the_camp_unit_wins_when_the_settler_posture_is_off():
     weights = ProductionWeights(settler_before_camp=False)
     assert settler_vs_slinger(weights)[0] == "UNIT_SLINGER"
+
+
+def test_the_settler_first_rule_keeps_the_first_defender_and_the_scout():
+    ctx = ProductionContext(
+        turn=24, num_cities=2, builders=2, recon=0, army=4, sites_ok=True, camp_units=4
+    )
+    options = [option("UNIT", "UNIT_WARRIOR", 3), option("UNIT", "UNIT_SETTLER", 8)]
+    ungarrisoned = city(population=3, garrison_unit=None)
+    base = score(options[0], ungarrisoned, ctx, ProductionWeights())
+    ranked = rank_production(ungarrisoned, options, ctx)
+    assert ranked[0].item == "UNIT_WARRIOR" and base > 10
+    scout = [option("UNIT", "UNIT_SCOUT", 3), option("UNIT", "UNIT_SETTLER", 8)]
+    assert rank_production(city(population=3), scout, ctx)[0].item == "UNIT_SCOUT"
+
+
+def test_demoted_camp_units_keep_their_relative_order():
+    ctx = ProductionContext(
+        turn=24, num_cities=2, builders=2, recon=1, army=4, sites_ok=True, camp_units=4,
+        camp_wants="any",
+    )  # fmt: skip
+    units = [option("UNIT", "UNIT_WARRIOR", 3), option("UNIT", "UNIT_SLINGER", 3)]
+    before = [o.item for o in rank_production(city(population=3), units, ctx)]
+    both = [*units, option("UNIT", "UNIT_SETTLER", 8)]
+    after = [o.item for o in rank_production(city(population=3), both, ctx)]
+    assert after[0] == "UNIT_SETTLER" and after[1:] == before

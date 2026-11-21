@@ -1118,15 +1118,23 @@ def _settler_before_camp(
     )
     if settler <= 0:
         return
+    # Only a combat unit in a garrisoned city reaches the camp score in `_unit_score`; a first
+    # defender and a Scout keep their own priorities.
+    if city.garrison_unit is None:
+        return
+    held = []
     for o in keep:
-        if o.category != "UNIT" or scores[id(o)] < settler:
+        if o.category != "UNIT" or not _is_floor_unit(o) or scores[id(o)] < settler:
             continue
-        stats = COMBAT_UNITS.get(o.item)
-        if stats is None:
-            continue
+        stats = COMBAT_UNITS[o.item]
         camp = _camp_score(city, o.item, stats[4], defence_strength(o.item), ctx, w)
         if camp > 0 and camp >= _raw_value(o, city, ctx, w):
-            scores[id(o)] = settler - 0.01
+            held.append(o)
+    if held:
+        # One common factor, so the camp units keep their order if the settler is refused.
+        factor = (settler - 0.01) / max(scores[id(o)] for o in held)
+        for o in held:
+            scores[id(o)] *= factor
 
 
 def rank_production(

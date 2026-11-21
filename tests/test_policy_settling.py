@@ -2441,3 +2441,40 @@ def test_path_turns_counts_slow_ground_and_skips_blocked_tiles():
     assert turns[(11, 10)] <= turns[(13, 10)]
     assert (14, 10) in turns
     assert (11, 10) not in store.path_turns((10, 10), 2.0, avoid=[(11, 10)], horizon_turns=10)
+
+
+def test_a_game_route_through_unread_ground_keeps_the_terrain_estimate():
+    route = lq.PathingEstimate(
+        turns=0, total_tiles=2, reachable_this_turn=2, waypoints=["(11,10)", "(40,40)"]
+    )
+    game, policy = _walk_game(estimates={(15, 10): route, (10, 15): _est(2)})
+    run(policy, game)
+    log = _by_site(policy)[15, 10]
+    assert log.turns_game is None and log.turns == log.turns_path
+
+
+def test_a_game_route_through_a_mountain_keeps_the_terrain_estimate():
+    route = lq.PathingEstimate(
+        turns=0, total_tiles=2, reachable_this_turn=2, waypoints=["(12,10)", "(15,10)"]
+    )
+    game, policy = _walk_game(wall={(12, 10)}, estimates={(15, 10): route, (10, 15): _est(2)})
+    run(policy, game)
+    assert _by_site(policy)[15, 10].turns_game is None
+
+
+def test_a_game_route_over_known_ground_is_used():
+    route = lq.PathingEstimate(
+        turns=4, total_tiles=5, reachable_this_turn=2, waypoints=["(11,10)", "(15,10)"]
+    )
+    game, policy = _walk_game(estimates={(15, 10): route, (10, 15): _est(2)})
+    run(policy, game)
+    assert _by_site(policy)[15, 10].turns_game == 5
+
+
+def test_the_survey_without_a_settler_ignores_the_walking_horizon():
+    # A site reachable from another city but not from the first one must stay in the survey.
+    ring = {(x, y) for x in range(14, 17) for y in range(9, 12)} - {(15, 10)}
+    game, policy = _walk_game(wall=ring, sites=[site(15, 10, food=44)])
+    game.data["units"] = []
+    run(policy, game)
+    assert policy.expansion.safe_sites >= 1

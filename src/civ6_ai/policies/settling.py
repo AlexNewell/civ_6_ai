@@ -1203,7 +1203,16 @@ class SettlingPolicy:
         # capital, every site read "hostile unit near the site", safe_sites stayed 0 from turn
         # 15 and no settler was built by turn 51.
         candidates = self._candidates(
-            origin, exploration, city_tiles, rival_tiles, danger, False, turn, [], escorted=True
+            origin,
+            exploration,
+            city_tiles,
+            rival_tiles,
+            danger,
+            False,
+            turn,
+            [],
+            escorted=True,
+            walk=bool(settlers),  # Issue 379: no settler, no single origin to walk from.
         )
         # Pending-fog sites count: their measurement arrives with the next read.
         sites = [c for c in candidates if c.rejected is None or c.rejected == FOG_PENDING]
@@ -1305,13 +1314,14 @@ class SettlingPolicy:
         turn: int,
         reserved: list[tuple[int, int]],
         escorted: bool = False,
+        walk: bool = True,
     ) -> list[CandidateLog]:
         self._needs_look = set()  # This scan's sites that need a look.
         s = self.settings
         found = []
         # The first own city listed stands for the capital in the distance component (logged only).
         capital = self._own_cities[0][:2] if self._own_cities else None
-        walk = self._walk_turns(settler)
+        walk = self._walk_turns(settler) if walk else None
         for site in exploration.settle_sites:
             site_score = score_site(site, s)
             distance = hex_distance(settler.x, settler.y, site.x, site.y, s.map_width)
@@ -1448,6 +1458,21 @@ class SettlingPolicy:
             self.settings.path_horizon_turns,
         )
 
+    def _route_known(self, estimate: Any) -> bool:
+        """True unless a waypoint of the game's route is a tile the terrain store has never read or
+        cannot be walked: the game plans blindly through unrevealed mountains and water, so such a
+        route's turns are discarded. A route with no waypoints, or no store, cannot be checked."""
+        if self.terrain is None or not len(self.terrain):
+            return True
+        for raw in getattr(estimate, "waypoints", None) or []:
+            try:
+                x, y = (int(v) for v in str(raw).strip("() ").split(","))
+            except ValueError:
+                continue
+            if self.terrain.get(x, y) is None or self.terrain.step_cost(x, y, False) is None:
+                return False
+        return True
+
     async def _confirm_with_game(
         self, game, settler: Unit, candidates: list[CandidateLog], turn: int
     ) -> list[CandidateLog]:
@@ -1480,7 +1505,10 @@ class SettlingPolicy:
                 except Exception:  # A failed read leaves the other estimates in place.
                     log.warning("pathing estimate failed", exc_info=True)
                     self._game_paths[slot] = None
-            turns = game_turns(self._game_paths[slot], target.distance)
+            estimate = self._game_paths[slot]
+            turns = game_turns(estimate, target.distance)
+            if turns is not None and turns >= 0 and not self._route_known(estimate):
+                turns = None  # Issue 379: a route through unread or blocked ground is not trusted.
             if turns is None:
                 continue
             if turns < 0:

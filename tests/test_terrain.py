@@ -176,3 +176,13 @@ def test_a_taken_farthest_path_tile_gives_a_free_side_tile_as_close_to_the_goal(
     assert walled.step_toward(start, goal, 2, occupied=reach) is None
     # A tile that makes no progress is never picked.
     assert t.step_toward(start, start[:1] + (5,), 2, occupied=set()) is None
+
+
+def test_the_fallback_step_never_crosses_a_refused_tile():
+    # Codex on #378: a refused tile was crossed while expanding reach, so a tile three steps
+    # away by the legal route was picked with two moves.
+    t = store({})
+    step = t.step_toward((3, 5), (7, 5), 2, avoid={(4, 5)}, occupied={(4, 4), (5, 4)})
+    assert step != (5, 5)
+    if step is not None:
+        assert len(t.path_to((3, 5), step, {(4, 5)})) <= 2

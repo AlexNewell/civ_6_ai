@@ -212,11 +212,11 @@ class TerrainStore:
                 reached = tile
         if reached is not None or not occupied:
             return reached
-        return self._free_step(start, goal, moves, avoid | occupied, stop_short)
+        return self._free_step(start, goal, moves, avoid, occupied, stop_short)
 
-    def _free_step(self, start, goal, moves, barred, stop_short):
+    def _free_step(self, start, goal, moves, avoid, occupied, stop_short):
         """Issue 377: the farthest path tile is taken, so pick among every tile reachable this turn
-        (not water, a mountain or barred) the one with the least terrain cost left to the goal,
+        (not water, a mountain or refused) the one with the least terrain cost left to the goal,
         then the nearer by hex distance, then the lowest coordinates. A tile that is no nearer
         than where the unit stands is skipped. None when nothing qualifies."""
         limit = max(1, int(moves))
@@ -229,7 +229,11 @@ class TerrainStore:
                 continue
             for nxt in neighbours(cx, cy, self.map_width):
                 step = self.step_cost(nxt[0], nxt[1], naval=False)
-                if step is None or (self.map_height is not None and nxt[1] >= self.map_height):
+                if (
+                    step is None
+                    or nxt in avoid
+                    or (self.map_height is not None and nxt[1] >= self.map_height)
+                ):
                     continue
                 total = cost + step
                 if (steps[cx, cy] and total > moves) or total >= best.get(nxt, float("inf")):
@@ -237,12 +241,12 @@ class TerrainStore:
                 best[nxt] = total
                 steps[nxt] = steps[cx, cy] + 1
                 heapq.heappush(queue, (total, nxt[0], nxt[1]))
-        here = self._cost_left(start, goal)
+        here = self._cost_left(start, goal, avoid)
         ranked = []
         for tile in best:
-            if tile == start or tile in barred or (stop_short and tile == goal):
+            if tile == start or tile in occupied or (stop_short and tile == goal):
                 continue
-            left = self._cost_left(tile, goal)
+            left = self._cost_left(tile, goal, avoid)
             if left is None or (here is not None and left >= here and tile != goal):
                 continue
             ranked.append(
@@ -250,8 +254,8 @@ class TerrainStore:
             )
         return min(ranked)[2:] if ranked else None
 
-    def _cost_left(self, tile, goal) -> float | None:
-        path = self.path_to(tile, goal)
+    def _cost_left(self, tile, goal, avoid) -> float | None:
+        path = self.path_to(tile, goal, avoid)
         if path is None:
             return None
         return sum(self.step_cost(x, y, naval=False) or 0.0 for x, y in path)

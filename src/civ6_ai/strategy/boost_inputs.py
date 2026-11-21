@@ -336,6 +336,30 @@ def kill_offers(units: Iterable[Unit], threats: Iterable[Threat]) -> dict[str, i
     return offers
 
 
+def nearest_unmet(
+    threats: Iterable[Threat], civs: Iterable[Any], met_city_states: Iterable[int]
+) -> tuple[int | None, int | None]:
+    """Distance to the nearest visible unit of an unmet major, and of an unmet city-state.
+
+    Evidence of an imminent meeting, from the threat scan and the diplomacy list the bot reads
+    each turn. The scan may not report an unmet owner's units at all, in which case this is
+    (None, None) and no meeting is waited for.
+    """
+    unmet_majors = {c.player_id for c in civs if not c.has_met}
+    met_cs = set(met_city_states)
+    civ: int | None = None
+    city_state: int | None = None
+    for t in threats:
+        if t.owner_id == BARBARIAN_ID:
+            continue
+        if t.is_city_state:
+            if t.owner_id not in met_cs and (city_state is None or t.distance < city_state):
+                city_state = t.distance
+        elif t.owner_id in unmet_majors and (civ is None or t.distance < civ):
+            civ = t.distance
+    return civ, city_state
+
+
 def pantheon_turns(has_pantheon: bool, balance: float, per_turn: float) -> int | None:
     """Turns until a pantheon can be bought, or None when none is being earned."""
     if has_pantheon or per_turn <= 0:
@@ -364,6 +388,7 @@ def build_plan_signals(
     claimed: frozenset[_Key],
     has_pantheon: bool,
     pantheon_balance: float,
+    unmet: tuple[int | None, int | None] = (None, None),
 ) -> PlanSignals:
     overall, biggest = growth_rates(cities)
     districts, queued_units, buildings, wonder = queued_by_kind(cities)
@@ -380,6 +405,8 @@ def build_plan_signals(
         buildings_queued=dict(buildings),
         kill_offers=kill_offers(units, threats),
         exploring=any(u.unit_type == SCOUT for u in units),
+        nearest_unmet_civ=unmet[0],
+        nearest_unmet_city_state=unmet[1],
         pantheon_turns=pantheon_turns(has_pantheon, pantheon_balance, sum(c.faith for c in cities)),
         wonder_queued=wonder,
         research_turns=research_turns(research),
@@ -431,5 +458,6 @@ class BoostInputs:
         signals = build_plan_signals(
             cities, units, threats, research, jobs, claimed, pantheon.has_pantheon,
             pantheon.faith_balance,
+            nearest_unmet(threats, civs, (c.player_id for c in envoys.city_states)),
         )  # fmt: skip
         return state, signals

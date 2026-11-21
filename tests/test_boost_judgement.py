@@ -248,8 +248,21 @@ def test_pantheon_and_meeting_boosts():
     assert one(pantheon, signals=PlanSignals(pantheon_turns=3)).decision is Decision.DELAY
     assert one(pantheon).decision is Decision.RESEARCH_NOW
     meet = item("Writing", "Meet another civilization.", turns=12)
-    assert one(meet, signals=PlanSignals(exploring=True)).decision is Decision.DELAY
+    assert one(meet, signals=PlanSignals(nearest_unmet_civ=5)).decision is Decision.DELAY
     assert one(meet).decision is Decision.RESEARCH_NOW
+
+
+def test_a_scout_alone_is_no_reason_to_wait_for_a_meeting():
+    meet = item("Writing", "Meet another civilization.", turns=12)
+    assert one(meet, signals=PlanSignals(exploring=True)).decision is Decision.RESEARCH_NOW
+    far = PlanSignals(exploring=True, nearest_unmet_civ=20)
+    assert one(meet, signals=far).decision is Decision.RESEARCH_NOW
+    done = BoostState(turn=20, civilizations_met=1)
+    assert one(meet, done, PlanSignals(exploring=True)).decision is Decision.DELAY
+    states = item("Political Philosophy", "Meet 1 city-state.", turns=12)
+    assert one(states, signals=PlanSignals(nearest_unmet_civ=3)).decision is Decision.RESEARCH_NOW
+    near = PlanSignals(nearest_unmet_city_state=3)
+    assert one(states, signals=near).decision is Decision.DELAY
 
 
 def test_mine_a_resource_ignores_ordinary_mines():

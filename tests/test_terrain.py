@@ -117,3 +117,19 @@ def test_a_camp_behind_a_strait_is_no_threat_to_the_far_side():
 
 def test_a_camp_read_is_the_camp_improvement():
     assert CAMP_IMPROVEMENT == "IMPROVEMENT_BARBARIAN_CAMP"
+
+
+def test_step_toward_goes_around_a_mountain_and_water_and_avoids_refused_tiles():
+    t = store({(2, 5): "m", (2, 4): "w", (2, 6): "w"})
+    step = t.step_toward((0, 5), (6, 5), 2)
+    assert step is not None and step not in {(2, 5), (2, 4), (2, 6)}
+    assert t.step_toward((0, 5), (6, 5), 2, avoid={(1, 5)}) != (1, 5)
+    assert t.step_toward((0, 5), (6, 5), 2, stop_short=True) is not None
+    path = t.path_to((0, 5), (6, 5))
+    assert path[-1] == (6, 5) and (2, 5) not in path
+
+
+def test_step_toward_spends_no_more_than_the_moves():
+    t = store({(1, 5): "f", (1, 4): "f", (1, 6): "f", (1, 3): "f", (1, 7): "f"})
+    assert t.step_toward((0, 5), (6, 5), 2) is not None
+    assert t.path_to((0, 5), (0, 5)) == []

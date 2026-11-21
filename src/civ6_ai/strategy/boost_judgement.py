@@ -93,7 +93,14 @@ class JudgementSettings:
     district_turns: int = 8
     unit_turns: int = 6
     building_turns: int = 8
+    # Turns per further meeting after the first, once a scout is out and finding people.
     meeting_turns: int = 6
+    # A meeting is only expected from an unmet player's unit seen this many tiles away or
+    # closer. A scout alone is no evidence: live, Writing waited 9 turns on one and no
+    # meeting came (#363). Farther than this a sighting is too loose to hold research for.
+    meeting_sight_tiles: int = 8
+    # Tiles a scout covers per turn toward a sighted unit (3 moves, rough terrain), for the eta.
+    meeting_tiles_per_turn: int = 2
     wonder_turns: int = 15
     settle_turns: int = 10
     kill_turns: int = 2
@@ -149,7 +156,11 @@ class PlanSignals:
     units_queued: Mapping[str, int] = field(default_factory=dict)
     buildings_queued: Mapping[str, int] = field(default_factory=dict)
     kill_offers: Mapping[str, int] = field(default_factory=dict)  # Kills the units could make.
-    exploring: bool = False  # A scout is out, so meetings come.
+    exploring: bool = False  # A scout is out. Not evidence of a meeting by itself (#363).
+    # Tiles to the nearest unit of a major civilization / city-state we have not met, seen in
+    # the threat scan. None when none is in sight.
+    nearest_unmet_civ: int | None = None
+    nearest_unmet_city_state: int | None = None
     pantheon_turns: int | None = None  # Turns until enough faith, when one is being earned.
     coastal_city_planned: bool = False
     wonder_queued: bool = False
@@ -381,10 +392,18 @@ def _other_reach(
         need = spec.count - met
         if need <= 0:
             return Reach(ReachLabel.ON_TRACK, 1, "a meeting already made", True)
-        eta = need * settings.meeting_turns
-        if signals.exploring and eta <= settings.horizon:
-            return Reach(ReachLabel.ON_TRACK, eta, "exploring", True, static=True)
-        return _no("not exploring")
+        seen = (
+            signals.nearest_unmet_city_state
+            if spec.target == CITY_STATE
+            else signals.nearest_unmet_civ
+        )
+        if seen is None or seen > settings.meeting_sight_tiles:
+            return _no("no unmet player in sight")
+        eta = max(1, math.ceil(seen / settings.meeting_tiles_per_turn))
+        eta += (need - 1) * settings.meeting_turns
+        if eta <= settings.horizon:
+            return Reach(ReachLabel.ON_TRACK, eta, "an unmet player in sight", True, static=True)
+        return _no("too far")
     if kind is BoostKind.FOUND:
         if spec.target == PANTHEON:
             if state.has_pantheon:

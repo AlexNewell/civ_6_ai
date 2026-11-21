@@ -843,3 +843,15 @@ def test_gave_up_is_logged_once_per_item(caplog):
         for turn[0] in (20, 21, 22):
             run(policy._boost_adjustments(research_view(options)))
     assert caplog.text.count("boost_judgement researching Writing") == 1
+
+
+def test_nearest_unmet_reads_unmet_units_from_the_scan():
+    civs = [fx.civ_info(player_id=fx.ME), fx.civ_info(player_id=1, has_met=False)]
+    far = threat(owner_id=1, hostile=False)
+    near = Threat(1, "Rome", "UNIT_WARRIOR", 1, 1, 100, 100, 8, 0, 4, False)
+    met = Threat(0, "Greece", "UNIT_WARRIOR", 1, 1, 100, 100, 8, 0, 2, False)
+    cs = Threat(70, "Kabul", "UNIT_WARRIOR", 1, 1, 100, 100, 8, 0, 6, True, True)
+    assert bi.nearest_unmet([far, near, met, cs], civs, [])[0] == 2
+    assert bi.nearest_unmet([met, threat()], civs, []) == (None, None)
+    assert bi.nearest_unmet([cs], civs, []) == (None, 6)
+    assert bi.nearest_unmet([cs], civs, [70]) == (None, None)

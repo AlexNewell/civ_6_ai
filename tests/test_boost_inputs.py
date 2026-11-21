@@ -19,6 +19,7 @@ from civ6_ai.strategy import boost_inputs as bi
 from civ6_ai.strategy.boost_judgement import (
     BoostState,
     Decision,
+    DelayRecord,
     Nudge,
     NudgeBoard,
     PlanSignals,
@@ -827,3 +828,18 @@ def test_unique_buildings_count_as_their_base_when_done_and_queued():
     assert done.buildings["UNIVERSITY"] == 1 and done.buildings["TEMPLE"] == 1
     _, _, queued, _ = bi.queued_by_kind([city(currently_building="BUILDING_STAVE_CHURCH")])
     assert queued == {"TEMPLE": 1}
+
+
+def test_gave_up_is_logged_once_per_item(caplog):
+    turn = [20]
+
+    async def inputs():
+        return BoostState(turn=turn[0]), PlanSignals(wonder_queued=True)
+
+    policy = ResearchPolicy(ResearchWeights(priorities=(), boost_judgement=True), inputs)
+    policy._delays = {"TECH_WRITING": DelayRecord(since_turn=2, first_eta=3)}
+    options = [tech("Writing", 12, "Build a wonder.")]
+    with caplog.at_level("INFO"):
+        for turn[0] in (20, 21, 22):
+            run(policy._boost_adjustments(research_view(options)))
+    assert caplog.text.count("boost_judgement researching Writing") == 1

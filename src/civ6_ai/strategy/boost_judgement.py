@@ -71,6 +71,10 @@ class JudgementSettings:
     max_delay: int = 8
     # The estimate may slip this many turns beyond what was promised before we stop waiting.
     slip_tolerance: int = 2
+    # A fixed estimate (a meeting, a queued wonder) does not move as we wait, so it only counts
+    # down. If the boost is still missing this many turns after the promised arrival, the
+    # estimate was wrong, and the count would otherwise sit at 1 until `max_delay`.
+    overdue_tolerance: int = 2
     # A boost saves about 40% of the cost (the `research_boosts` log).
     saving_fraction: float = 0.4
     # Turns lost per turn waited. Less than 1: other research goes on meanwhile, only this
@@ -452,7 +456,10 @@ def _judge_one(
             if reach.static:
                 # A fixed estimate is on schedule while it stays at or under the first one. It
                 # slips only when it grows (more actions needed); progress counts it down.
-                slipped = eta > record.first_eta + settings.slip_tolerance
+                slipped = (
+                    eta > record.first_eta + settings.slip_tolerance
+                    or waited > record.first_eta + settings.overdue_tolerance
+                )
                 eta = max(1, min(eta, record.first_eta) - waited)
                 reach = replace(reach, turns=eta)
             else:

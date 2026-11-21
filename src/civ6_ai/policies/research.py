@@ -334,8 +334,12 @@ class ResearchPolicy:
         judgements = judge_boosts(
             research.techs + research.civics, state, signals, settings, self._delays
         )
+        # An item already given up on logs its "gave up" line once, on the turn it gives up.
+        already_gave_up = {k for k, rec in self._delays.items() if rec.gave_up}
         self._delays = next_history(self._delays, judgements, state.turn)
         for j in judgements:
+            if j.gave_up and j.item_type in already_gave_up:
+                continue
             if j.decision is not Decision.RESEARCH_NOW or j.gave_up:
                 log.info("boost_judgement %s", j.reason)
         line = horizon_line(judgements, state.turn)

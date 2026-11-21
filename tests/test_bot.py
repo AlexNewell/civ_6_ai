@@ -648,11 +648,15 @@ def test_enable_features_switches_on_each_flag_and_leaves_the_rest() -> None:
         def __init__(self, weights: object) -> None:
             self.weights = weights
 
+    builder = bot.BuilderPolicy()
+
     holders = {
         "growth": GrowthPolicy(),
         "production": Holder(ProductionWeights()),
         "research": Holder(ResearchWeights()),
+        "builder": bot._SettingsAsWeights(builder),
     }
+    assert FEATURES["boost_nudges"] == ("builder", "use_boost_nudges")
     assert FEATURES["boost_judgement"] == ("research", "boost_judgement")
     for holder_name, flag in FEATURES.values():  # Every flag exists and starts off.
         assert getattr(holders[holder_name].weights, flag) is False
@@ -662,6 +666,9 @@ def test_enable_features_switches_on_each_flag_and_leaves_the_rest() -> None:
     enable_features(holders, ["boost_judgement"])
     assert holders["research"].weights.boost_judgement is True
     assert holders["growth"].weights.cap_focus is False
+    assert builder.settings.use_boost_nudges is False
+    enable_features(holders, ["boost_nudges"])
+    assert builder.settings.use_boost_nudges is True
     assert holders["production"].weights == replace(ProductionWeights(), wonder_races=True)
 
 
@@ -677,6 +684,10 @@ def test_build_orchestrator_switches_on_the_named_features(tmp_path):
     assert production.growth.weights.cap_focus is True
     research = next(h for h in orchestrator._handlers if type(h).__name__ == "ResearchPolicy")
     assert research.weights.boost_judgement is True
+    builder = next(h for h in orchestrator._handlers if isinstance(h, bot.BuilderPolicy))
+    assert builder.settings.use_boost_nudges is True
+    # The nudge source is the research policy's board, so the two halves are joined.
+    assert builder.nudges == research.nudge_board.current
     plain = bot.build_orchestrator(WiredGame(), EventBus(), TurnLog(tmp_path / "h.jsonl"))
     production = next(h for h in plain._handlers if isinstance(h, bot.CityProductionPolicy))
     assert production.weights.wonder_races is False

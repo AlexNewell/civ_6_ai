@@ -28,7 +28,7 @@ from civ6_ai.fastcalls import fix_units_query, narrow_popup_scan, shorten_call_w
 from civ6_ai.game_speed import fix_overview_speed
 from civ6_ai.gp_advisor import fix_gp_advisor
 from civ6_ai.metrics.civbench_gap import gap_lines, load_baselines
-from civ6_ai.metrics.costs import game_id_for_new_session, game_id_of_log
+from civ6_ai.metrics.costs import game_id_for_new_session, game_id_of_log, mark_fresh
 from civ6_ai.metrics.history import merge_logs
 from civ6_ai.metrics.speed import summarise as summarise_speed
 from civ6_ai.monitors import EventBus, EventLog
@@ -83,9 +83,15 @@ class _NotifyingTurnLog(TurnLog):
             self.on_turn(record)
 
 
+def game_state_paths(runs: Path, game_id: str) -> tuple[Path, Path]:
+    """The war and threat state files of a game: shared by its restarts, never by other games."""
+    return runs / f"{game_id}_wars.json", runs / f"{game_id}_threat.json"
+
+
 async def play_game(
     turns: int,
     expect_save: str | None = None,
+    fresh: bool = False,
     on_turn: Callable[[TurnRecord], None] | None = None,
     probe_kinds: list[str] | None = None,
     probe_overlay: bool = False,
@@ -157,7 +163,15 @@ async def play_game(
     decisions.attach()
     try:
         first_turn = (await game.get_game_overview()).turn
-        game_id = game_id_for_new_session(ROOT / "runs", name, first_turn, f"{name}_{stamp}")
+        if fresh:
+            # Issue 365: a loaded save is a new game, even when its first turn comes after an
+            # earlier session's last (a turn-78 checkpoint after a 60-turn run from turn 1). The
+            # marker is written down, so restarts and reports group it the same way.
+            mark_fresh(ROOT / "runs", f"{name}_{stamp}")
+        game_id = game_id_for_new_session(
+            ROOT / "runs", name, first_turn, f"{name}_{stamp}", fresh=fresh
+        )
+        wars_state, threat_state = game_state_paths(ROOT / "runs", game_id)
         shots = Screenshotter(ROOT / "runs" / "screenshots", game_id)
         probes = ProbeShots(
             shots,
@@ -182,8 +196,8 @@ async def play_game(
             turn_log,
             trade_offers=TRADE_OFFERS,
             screenshots=shots,
-            wars_state=ROOT / "runs" / f"{name}_wars.json",  # Same for every restart of this game.
-            threat_state=ROOT / "runs" / f"{name}_threat.json",  # Likewise, for the city set.
+            wars_state=wars_state,  # Same for every restart of this game.
+            threat_state=threat_state,  # Likewise, for the city set.
             ledger=ledger,
             event_log=event_log,
             probes=probes,
@@ -272,6 +286,7 @@ async def run(
         print(f"Loaded {loaded.name} at turn {loaded.turn} in {loaded.seconds:.0f}s")
     played = await play_game(
         turns,
+        fresh=bool(load),  # A loaded save starts a new game: nothing carries over (issue 365).
         probe_kinds=probe_kinds,
         probe_overlay=overlay,
         save_at=save_at,

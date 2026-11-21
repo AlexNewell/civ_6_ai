@@ -19,6 +19,9 @@ The score of an option is the sum of:
 - boost judgement (off by default): a penalty on an item whose boost lands soon on its own, a
   small bonus on an item already boosted. See `strategy/boost_judgement.py` (#322).
 
+- holy site timing (#383): a bonus on Astrology while a safe city can see a mountain-rich Holy Site
+  placement, and half of it on the one prerequisite still missing. Zero when none is visible.
+
 Ties go to the item type in alphabetical order.
 """
 
@@ -26,11 +29,12 @@ import json
 import logging
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
-from typing import Protocol
+from typing import Any, Protocol
 
 from civ6_ai.blockers import Blocker, BlockerGame, BlockerType
-from civ6_ai.state import Research, read_research
-from civ6_ai.state.models import LockedResearch, ResearchOption
+from civ6_ai.state import Research, read_cities, read_research
+from civ6_ai.state.models import City, LockedResearch, ResearchOption
+from civ6_ai.state.reader import STANDARD_MAP_WIDTH
 from civ6_ai.strategy.boost_judgement import (
     BoostJudgement,
     BoostState,
@@ -44,6 +48,7 @@ from civ6_ai.strategy.boost_judgement import (
     next_history,
     nudges,
 )
+from civ6_ai.terrain import neighbours
 
 log = logging.getLogger(__name__)
 
@@ -91,6 +96,17 @@ class ResearchWeights:
     boost_delay_max_turns: int = 8  # The longest an item is held back for its boost.
     # Small: an already boosted item wins a close call. `eureka` already counts the saving.
     boost_prefer: float = 1.0
+    # Holy Site timing (#383). The player had Astrology on turn 17 because Rome was safe and a
+    # +3 Holy Site (mountains) was in reach; the bot got it on turn 32, so the Holy Site started
+    # on turn 57. While a safe city without a Holy Site sees a placement with at least
+    # `astrology_min_mountains` mountains beside one candidate tile, Astrology gets
+    # `astrology_bonus` at 3 or more and half of it at the minimum (a bonus bounded by the
+    # weights, not a fixed opening: no visible placement, no change). Larger than the
+    # usual early priorities (0.5 to 2.5) so it wins a close call, smaller than the boost
+    # judgement's delay penalty. 0 turns it off.
+    astrology_bonus: float = 4.0
+    astrology_min_mountains: int = 2
+    astrology_site_radius: int = 3  # District placement reaches three tiles from the city.
 
 
 class ResearchGame(Protocol):
@@ -251,6 +267,104 @@ def boost_adjustments(
     return out
 
 
+ASTROLOGY = "ASTROLOGY"
+_HOLY_SITE = "DISTRICT_HOLY_SITE"
+_FULL_MOUNTAINS = 3  # The player's "+3 from mountains" placement.
+
+
+def best_mountain_site(
+    city: City, terrain, radius: int, map_width: int | None = STANDARD_MAP_WIDTH
+) -> int:
+    """Most mountains beside one candidate Holy Site tile within `radius` of the city (#383).
+
+    The district advisor cannot place a Holy Site before Astrology, so this estimates the
+    adjacency from remembered terrain: +1 a mountain. A candidate is a known land tile that is not
+    a mountain and not the city centre. Unknown tiles count as no mountain, so the estimate errs
+    low. Woods and wonders add to the real adjacency and are not counted.
+    """
+    ring = {(city.x, city.y)}
+    frontier = [(city.x, city.y)]
+    for _ in range(radius):
+        frontier = [n for x, y in frontier for n in neighbours(x, y, map_width) if n not in ring]
+        ring.update(frontier)
+    best = 0
+    for tile in ring - {(city.x, city.y)}:
+        ground = terrain.get(*tile)
+        if ground is None or ground.water or ground.mountain:
+            continue
+        count = sum(
+            1
+            for n in neighbours(*tile, map_width)
+            if (g := terrain.get(*n)) is not None and g.mountain
+        )
+        best = max(best, count)
+    return best
+
+
+def holy_site_view(
+    cities: Iterable[City],
+    terrain,
+    threatened: frozenset[int],
+    radius: int,
+    map_width: int | None = STANDARD_MAP_WIDTH,
+) -> int:
+    """The best mountain count over the safe cities that have no Holy Site, 0 when none (#383).
+
+    Safe: not threatened this turn and garrisoned. A city that has a Holy Site, or is not safe,
+    adds nothing.
+    """
+    best = 0
+    for city in cities:
+        if city.city_id in threatened or city.garrison_unit is None:
+            continue
+        if any(d.district_type == _HOLY_SITE for d in city.districts):
+            continue
+        best = max(best, best_mountain_site(city, terrain, radius, map_width))
+    return best
+
+
+@dataclass
+class HolySiteScout:
+    """The async `holy_site_view` for `ResearchPolicy`: one cities read (shared by the turn's
+    other policies), then `holy_site_view` over remembered terrain. `game`, `terrain` and
+    `defence` are callables or objects the bot wires; `terrain` may be None (reads 0)."""
+
+    game: Callable[[], Any]
+    terrain: Callable[[], Any]
+    defence: Any = None
+    radius: int = 3
+    map_width: int | None = STANDARD_MAP_WIDTH
+
+    async def __call__(self) -> int:
+        terrain = self.terrain()
+        if terrain is None:
+            return 0
+        cities = await read_cities(self.game(), self.map_width)
+        threatened = frozenset() if self.defence is None else self.defence.threatened_ids
+        return holy_site_view(cities, terrain, threatened, self.radius, self.map_width)
+
+
+def astrology_adjustments(
+    research: Research, mountains: int, weights: ResearchWeights
+) -> dict[str, float]:
+    """Score adjustment for Astrology (or its sole missing prerequisite) given the best site.
+
+    Nothing below `astrology_min_mountains`. Full at 3 mountains or more, half at fewer.
+    """
+    if weights.astrology_bonus <= 0 or mountains < weights.astrology_min_mountains:
+        return {}
+    bonus = weights.astrology_bonus * (1.0 if mountains >= _FULL_MOUNTAINS else 0.5)
+    for option in research.techs:
+        if _short(option.item_type) == ASTROLOGY:
+            return {option.item_type: bonus}
+    for item in research.locked_techs:
+        if _short(item.item_type) == ASTROLOGY and len(item.missing) == 1:
+            by_name = {o.name: o.item_type for o in research.techs}
+            step = by_name.get(item.missing[0])
+            return {step: bonus / 2} if step else {}
+    return {}
+
+
 def _succeeded(result: str) -> bool:
     return not result.startswith(("Error", "ERR:"))
 
@@ -310,6 +424,7 @@ class ResearchPolicy:
         weights: ResearchWeights | None = None,
         boost_inputs: Callable[[], Awaitable[tuple[BoostState, PlanSignals]]] | None = None,
         nudge_board: NudgeBoard | None = None,
+        holy_site_view: Callable[[], Awaitable[int]] | None = None,
     ) -> None:
         self.weights = weights or ResearchWeights()
         # Reads the game counts and plan signals for the boost judgement. Without it, or with
@@ -317,6 +432,8 @@ class ResearchPolicy:
         self.boost_inputs = boost_inputs
         # Where the nudges go for other policies to take up (#344). None means they are dropped.
         self.nudge_board = nudge_board
+        # Reads the best mountain count of a safe city's Holy Site placement (#383), 0 for none.
+        self.holy_site_view = holy_site_view
         self._delays: dict[str, DelayRecord] = {}
 
     async def _boost_adjustments(self, research: Research) -> dict[str, float]:
@@ -348,10 +465,27 @@ class ResearchPolicy:
             self.nudge_board.publish(state.turn, nudges(judgements))
         return boost_adjustments(judgements, self.weights)
 
+    async def _astrology_adjustments(self, research: Research) -> dict[str, float]:
+        if self.holy_site_view is None or self.weights.astrology_bonus <= 0:
+            return {}
+        try:
+            mountains = await self.holy_site_view()
+        except ConnectionError:
+            raise
+        except Exception:
+            log.exception("Reading the Holy Site placement failed")
+            return {}
+        found = astrology_adjustments(research, mountains, self.weights)
+        if found:
+            log.info("astrology_timing mountains=%d %s", mountains, json.dumps(found))
+        return found
+
     async def run(self, game: ResearchGame) -> None:
         research = await read_research_with_civic_progress(game)
         log_boosts(research)
         adjustments = await self._boost_adjustments(research)
+        for item_type, bonus in (await self._astrology_adjustments(research)).items():
+            adjustments[item_type] = adjustments.get(item_type, 0.0) + bonus
         ok_tech = await _start_best(
             choose_tech(research, self.weights, adjustments),
             research.current_tech,

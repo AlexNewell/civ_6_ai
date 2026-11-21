@@ -16,6 +16,7 @@ from civ6_ai.policies.research import (
 )
 from civ6_ai.state import reader
 from civ6_ai.state.models import LockedResearch
+from civ6_ai.state.reader import build_city
 from fixtures import civ_state as fx
 
 NO_PRIORITIES = ResearchWeights(priorities=())
@@ -416,3 +417,123 @@ def test_policy_starts_the_other_item_while_one_is_delayed():
     weights = ResearchWeights(priorities=(), boost_judgement=True)
     run(ResearchPolicy(weights, boost_inputs()).run(game))
     assert "TECHNOLOGY_BETA" in game.started
+
+
+# ----- Holy Site timing (#383) -----
+
+from civ6_ai.policies.research import (  # noqa: E402
+    astrology_adjustments,
+    best_mountain_site,
+    holy_site_view,
+)
+from civ6_ai.state.models import District  # noqa: E402
+from civ6_ai.terrain import Ground, TerrainStore, neighbours  # noqa: E402
+
+
+def _land():
+    return Ground("TERRAIN_GRASS", None, False, False, False)
+
+
+def _mountain():
+    return Ground("TERRAIN_GRASS_MOUNTAIN", None, False, False, False)
+
+
+def _terrain(centre, mountain_tiles, radius=3):
+    """Flat land round `centre` with mountains at `mountain_tiles`."""
+    store = TerrainStore()
+    seen = {centre}
+    frontier = [centre]
+    for _ in range(radius + 1):
+        frontier = [n for t in frontier for n in neighbours(*t) if n not in seen]
+        seen.update(frontier)
+    for t in seen:
+        store._ground[t] = _mountain() if t in mountain_tiles else _land()
+    return store
+
+
+def _city(**kw):
+    base = build_city(fx.city_info(x=10, y=10, city_id=1), [], set())
+    return replace(base, **{"garrison_unit": "UNIT_WARRIOR", "districts": (), **kw})
+
+
+def _site_with(n):
+    """Mountains `n` of the six tiles around a tile two steps from the city."""
+    site = neighbours(10, 10)[0]
+    site = neighbours(*site)[0]
+    around = [t for t in neighbours(*site) if t not in neighbours(10, 10) and t != (10, 10)]
+    return {t for t in around[:n]}
+
+
+def test_counts_mountains_beside_the_best_tile():
+    store = _terrain((10, 10), _site_with(3))
+    assert best_mountain_site(_city(), store, 3) >= 3
+
+
+def test_no_mountains_no_estimate():
+    assert best_mountain_site(_city(), _terrain((10, 10), set()), 3) == 0
+
+
+def test_unknown_terrain_counts_as_none():
+    assert best_mountain_site(_city(), TerrainStore(), 3) == 0
+
+
+def test_view_skips_unsafe_and_built_cities():
+    store = _terrain((10, 10), _site_with(3))
+    assert holy_site_view([_city()], store, frozenset(), 3) >= 3
+    assert holy_site_view([_city()], store, frozenset({1}), 3) == 0
+    assert holy_site_view([_city(garrison_unit=None)], store, frozenset(), 3) == 0
+    built = _city(districts=(District("DISTRICT_HOLY_SITE", 11, 10),))
+    assert holy_site_view([built], store, frozenset(), 3) == 0
+
+
+def test_astrology_bonus_scales_and_is_off_without_a_site():
+    r = research(techs=[tech("Astrology"), tech("Mining")])
+    w = ResearchWeights()
+    assert astrology_adjustments(r, 0, w) == {}
+    assert astrology_adjustments(r, 1, w) == {}
+    assert astrology_adjustments(r, 2, w) == {"TECHNOLOGY_ASTROLOGY": w.astrology_bonus / 2}
+    assert astrology_adjustments(r, 3, w) == {"TECHNOLOGY_ASTROLOGY": w.astrology_bonus}
+    assert astrology_adjustments(r, 3, replace(w, astrology_bonus=0.0)) == {}
+
+
+def test_astrology_bonus_flips_a_close_ranking():
+    r = research(techs=[tech("Astrology", turns=8), tech("Mining", turns=3)])
+    w = NO_PRIORITIES
+    assert choose_tech(r, w)[0].name == "Mining"
+    adj = astrology_adjustments(r, 3, w)
+    assert choose_tech(r, w, adj)[0].name == "Astrology"
+
+
+def test_bonus_goes_to_the_sole_missing_prerequisite():
+    locked = lq.LockedTech("Astrology", "TECHNOLOGY_ASTROLOGY", ["Mysticism"], "Ancient", False, "")
+    r = research(techs=[tech("Mysticism")], locked_techs=[locked])
+    assert astrology_adjustments(r, 3, ResearchWeights()) == {"TECHNOLOGY_MYSTICISM": 2.0}
+
+
+def test_policy_applies_the_view_and_survives_its_failure():
+    seen = []
+
+    class G:
+        async def get_tech_civics(self):
+            return status(techs=[tech("Astrology", turns=8), tech("Mining", turns=3)])
+
+        async def get_game_overview(self):
+            return fx.game_overview()
+
+        async def set_research(self, name):
+            seen.append(name)
+            return "ok"
+
+        async def set_civic(self, name):
+            return "ok"
+
+    async def view():
+        return 3
+
+    async def broken():
+        raise ValueError("boom")
+
+    run(ResearchPolicy(NO_PRIORITIES, holy_site_view=view).run(G()))
+    run(ResearchPolicy(NO_PRIORITIES, holy_site_view=broken).run(G()))
+    run(ResearchPolicy(NO_PRIORITIES).run(G()))
+    assert seen == ["TECHNOLOGY_ASTROLOGY", "TECHNOLOGY_MINING", "TECHNOLOGY_MINING"]

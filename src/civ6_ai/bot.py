@@ -379,6 +379,11 @@ def build_orchestrator(
     research_policy = research.ResearchPolicy(
         boost_inputs=BoostInputs(game=lambda: shared_game[0], builder=builder, military=military),
         nudge_board=nudge_board,
+        holy_site_view=research.HolySiteScout(
+            game=lambda: shared_game[0],
+            terrain=lambda: threat_map_handler.terrain,
+            defence=defence,
+        ),
     )
     gold = GoldPolicy(
         defence=defence,

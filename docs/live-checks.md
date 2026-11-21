@@ -678,3 +678,32 @@ Verdicts: all three stay off by default.
 - **Cap focus:** hysteresis stopped the reshuffling, but the rule still costs score from turn 78. Its yield choices are production and gold only, never science or culture, which the score counts.
 - **Wonder races:** with the per-city gate it now matches the baseline. It needs a save where wonder races are contested before it can show a gain.
 - **Boost judgement:** Writing is no longer held for a meeting that never comes, and research gained a tech and a civic by T50. Score moved within 2 points either way, by research order alone (Bronze Working ahead of Sailing for a barbarian-kill boost). It needs more saves.
+
+
+## Third city on the human's save (2026-11-21)
+
+A head-to-head on STD_T1_04 (Rome), the save the first human game was played on. The run on main dc35850 was compared with the human's observed game. The bot matched the human to turn 20 and founded its 2nd city earlier (turn 23 against 29). After that it fell behind: 3rd city on turn 60 against 49, and score 80 against 130 at turn 50.
+
+The bot log gave two causes, and a third showed up beside them:
+- **Settler outbid (issue 369).** From turn 24, camp-force Slingers and Warriors (16.7 to 27) outbid the settler (about 10.4) in Rome, though the camp didn't block expansion.
+- **Escort step onto a mountain (issue 368).** From turn 46 to 54 an escorted settler was held: its escort step came from a straight line, and on every turn that step was the mountain at (66,16).
+- **Military moves refused (issue 370).** Military fallback moves were refused 13 times on water or mountains.
+
+Each change was run for 60 turns from STD_T1_04 and compared with a baseline rerun on the code under it. Each row is one deterministic sample.
+
+| Run (code) | 3rd city | Score T50 / T60 | Era score T60 | Refused onto water or mountain (military / settler) |
+|---|---|---|---|---|
+| Baseline (dc35850) | T60 | 80 / 92 | 18 | 13 / 9 |
+| Military terrain filter, PR 372 (dc35850 + 372) | T60 | 80 / 93 | 19 | 0 / 9 |
+| Settler before camp units, PR 371 (dc35850 + 371) | **T46** | **92 / 116** | 25 | 12 / 2 |
+| Baseline (e9ea87e = 371 + 372) | T55 | 82 / 114 | 29 | 0 / 0 |
+| Terrain-path escort step, PR 373 (e9ea87e + 373) | **T47** | **92 / 116** | 26 | 0 / 0 |
+
+- **Second save.** PR 371 on STD_T1_03 (50 turns, against a dc35850 baseline) was identical: score 56 / 56. Camp demand came up once there, on a turn with no settler on offer, so the rule never had a chance to fire.
+- **No losses.** No unit or city was lost in any run.
+- **First try at PR 373.** On dc35850 the escort avoided the mountain, but then it bounced between two tiles beside a city-state border. The game refused that territory, and a refused step was forgotten once the pair moved. Keeping refused tiles for the whole trip fixed it.
+
+Verdicts:
+- All three are merged.
+- Main 6156fb2 founds a 3rd city on STD_T1_04 on turn 47, against 60 on dc35850. Score at turn 50 is 92 against 80.
+- The human's 130 at turn 50 is still far ahead. The largest remaining gap is faith: the human had a Holy Site on turn 19 and a religion on turn 45, and the bot has neither. Population (7 against 14 at turn 60) and Rome's housing cap at 4 come next.

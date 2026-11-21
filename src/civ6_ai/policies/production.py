@@ -144,6 +144,14 @@ class ProductionWeights:
     # settling (issue 284) are unchanged. False restores the old order, for a posture that wants
     # the camp cleared first.
     settler_before_camp: bool = True
+    # Issue 381: a Granary is worth its +1 Housing in a city held at its housing cap. Live
+    # (STD_T1_04, T47 to T82) Arretium sat at pop 3 of 3 for 35 turns and Setia at 2 of 2, while
+    # the Granary scored 1.3 (food only, at the bottom of every list) and was never built. This is
+    # the value of one housing slot, times `housing_multiplier` of the city's plan (1 + the
+    # citizens the cap costs, up to 3), and counts only within `housing_building_headroom` of the
+    # cap. 0 turns it off.
+    housing_building_value: float = 3.0
+    housing_building_headroom: int = 1
 
     def __post_init__(self) -> None:
         for item in fields(self):
@@ -589,6 +597,8 @@ _STARVING_FOOD_BOOST = 4.0  # Extra weight on the food yield of a food building 
 
 
 _HOUSING_ITEMS = frozenset({"SEWER", "NEIGHBORHOOD"})  # Their food profile stands for housing.
+# Early buildings that add housing as well as their yield: housing slots each gives (issue 381).
+_BUILDING_HOUSING: dict[str, float] = {"GRANARY": 1.0}
 
 
 def _deficit_tolerated(city: City, ctx: ProductionContext) -> bool:
@@ -980,9 +990,27 @@ def _building_score(
     if name == "GRANARY" and city.food_surplus > 3 and city.city_id not in ctx.growth:
         value *= 0.5
     value = _growth_adjusted(value, name, profile, city, ctx, w)
+    value += _building_housing_value(name, city, ctx, w)
     if name in _FOOD_BUILDINGS and is_starving(city) and not _deficit_tolerated(city, ctx):
         value += _STARVING_FOOD_BOOST * profile[0] * w.food
     return value
+
+
+def _building_housing_value(
+    name: str, city: City, ctx: ProductionContext, w: ProductionWeights
+) -> float:
+    """What a building's housing is worth to a city held at its housing cap (issue 381).
+
+    Nothing unless the plan says the cap is costing citizens and the city is within
+    `housing_building_headroom` of it: a roomy city has no use for another slot.
+    """
+    slots = _BUILDING_HOUSING.get(name, 0.0)
+    plan = ctx.growth.get(city.city_id)
+    if slots <= 0 or plan is None or plan.housing_gap <= 0:
+        return 0.0
+    if city.housing - city.pop > w.housing_building_headroom:
+        return 0.0
+    return slots * w.housing_building_value * housing_multiplier(plan)
 
 
 def _district_score(

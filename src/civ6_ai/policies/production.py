@@ -19,6 +19,7 @@ from typing import Any, Protocol
 from civ6_ai.blockers import Blocker, BlockerGame, BlockerType
 from civ6_ai.city_tiles import REFRESH_TURNS, CityTiles, read_city_tiles
 from civ6_ai.construction import ProductionRefused, ProductionSet
+from civ6_ai.era import EraSettings, district_nudge, outlook
 from civ6_ai.monitors import Event, EventBus
 from civ6_ai.placement import (
     ELSEWHERE,
@@ -144,6 +145,11 @@ class ProductionWeights:
     # settling (issue 284) are unchanged. False restores the old order, for a posture that wants
     # the camp cleared first.
     settler_before_camp: bool = True
+    # Issue 311: while the era outlook says push (about 10 turns before the era ends, the score
+    # within reach of a Dark or Golden breakpoint), the first district of a kind earns a Historic
+    # Moment. This adds to its score, about one ordinary building. The district would be built
+    # sooner or later; the nudge only moves it up. 0 turns it off.
+    era_district_bonus: float = 3.0
 
     def __post_init__(self) -> None:
         for item in fields(self):
@@ -208,6 +214,7 @@ class ProductionContext:
     rivals: int = 0
     rival_progress: Mapping[str, tuple[float, ...]] = field(default_factory=dict, compare=False)
     wonder_alternative: float = 5.0
+    era_push: bool = False  # Issue 311: the era outlook says to favour cheap Historic Moments.
     # Where `rivals` came from, for the log: "rankings" (living majors but us, as last read) or
     # "default" (no rankings read yet). Not a decision input.
     rivals_source: str = field(default="", compare=False)
@@ -1058,7 +1065,9 @@ def _raw_value(
     elif option.category == "UNIT":
         value = _unit_score(option, city, ctx, weights)
     elif option.category == "DISTRICT":
-        value = _district_score(option, city, weights, ctx)
+        value = _district_score(option, city, weights, ctx) + district_nudge(
+            _short(option.item), ctx.districts, ctx.era_push, weights.era_district_bonus
+        )
     else:
         value = _building_score(option, city, ctx, weights)
     return value
@@ -1746,6 +1755,7 @@ class CityProductionPolicy:
             held_settlers=self.expansion.held_settlers,
             scouts_built=self.scouts_built,
             growth=growth,
+            era_push=self._era_push(empire),
         )
         if self.weights.wonder_races:
             # Issue 328: the race inputs are read only when the setting is on. The difficulty
@@ -1757,6 +1767,19 @@ class CityProductionPolicy:
                 context, difficulty=empire.difficulty, rivals=rivals, rivals_source=source
             )
         return context
+
+    def _era_push(self, empire) -> bool:
+        """Issue 311: whether the era outlook says to favour cheap Historic Moments this turn."""
+        if self.weights.era_district_bonus <= 0:
+            return False
+        return outlook(
+            empire.turn,
+            empire.era_score,
+            empire.dark_threshold,
+            empire.golden_threshold,
+            empire.game_speed,
+            EraSettings(),
+        ).push
 
     async def assign(self, game: ProductionGame) -> list[str]:
         """Choose for each idle city, and return the names of any left without a choice.

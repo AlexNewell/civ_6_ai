@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Protocol
 
 from civ6_ai.call_timer import CallTimer
+from civ6_ai.era import log_outlook, outlook_from_standing
 from civ6_ai.screenshots import Screenshotter
 from civ6_ai.world_rankings import RankingsHolder
 
@@ -233,6 +234,9 @@ class Orchestrator:
         started = time.perf_counter()
         turn = max(await self._read_turn(), self._confirmed_turn)
         standing = read_standing(self._overview)
+        log_outlook(
+            outlook_from_standing(turn, standing, str(getattr(self._overview, "game_speed", "")))
+        )
         seconds, errors = await self._run_handlers()
         if self._rankings is not None and self._rankings.last is not None:
             standing.update(self._rankings.last.fields())

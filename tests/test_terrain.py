@@ -153,7 +153,26 @@ def test_a_goal_beyond_the_rows_read_so_far_is_still_reachable():
 def test_step_toward_passes_over_occupied_tiles_and_gives_none_when_all_are_taken():
     t = store({})
     far = t.step_toward((0, 5), (6, 5), 2)
-    near = t.path_to((0, 5), (6, 5))[0]
-    assert far != near
-    assert t.step_toward((0, 5), (6, 5), 2, occupied={far}) == near
-    assert t.step_toward((0, 5), (6, 5), 2, occupied={far, near}) is None
+    assert t.step_toward((0, 5), (6, 5), 2, occupied={far}) not in (None, far)
+
+
+def test_a_taken_farthest_path_tile_gives_a_free_side_tile_as_close_to_the_goal():
+    # Issue 377 live: the only in-reach tile on the one cheapest path held our Warrior, while a
+    # side tile two steps away was just as near the goal and free.
+    t = store({})
+    start, goal = (0, 5), (6, 5)
+    far = t.step_toward(start, goal, 2)
+    step = t.step_toward(start, goal, 2, occupied={far})
+    assert step is not None and step != far
+    left = lambda tile: len(t.path_to(tile, goal))  # noqa: E731
+    assert left(step) <= left(far) + 1 and left(step) < len(t.path_to(start, goal))
+    # Not water or a mountain: a side tile of either kind is never picked.
+    walled = store({(1, 4): "w", (1, 6): "m"})
+    first = walled.step_toward(start, goal, 2)
+    pick = walled.step_toward(start, goal, 2, occupied={first})
+    assert pick is None or walled.step_cost(*pick, naval=False) is not None
+    # Every tile the unit can reach holds a unit of ours: hold.
+    reach = {tile for tile in walled.reach(0, 5, 2, False, 1)} - {start}
+    assert walled.step_toward(start, goal, 2, occupied=reach) is None
+    # A tile that makes no progress is never picked.
+    assert t.step_toward(start, start[:1] + (5,), 2, occupied=set()) is None

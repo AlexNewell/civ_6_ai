@@ -2298,7 +2298,7 @@ def test_the_escort_step_skips_a_tile_our_own_unit_holds():
     # Every reachable tile taken: no step, so the pair holds.
     taken = [
         build_unit(unit_info(unit_id=20 + i, unit_index=20 + i, x=t[0], y=t[1]))
-        for i, t in enumerate(policy.terrain.path_to((10, 14), (14, 6))[:2])
+        for i, t in enumerate(sorted(set(policy.terrain.reach(10, 14, 2, False, 1)) - {(10, 14)}))
     ]
     assert policy._pick_step(settler_unit, (14, 6), units=[escort, *taken], escort=escort) is None
     # The escort's own tile is not a blocker.

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from dataclasses import replace
 
 from civ6_ai.policies.production import (
     DEFAULT_RIVALS,
@@ -121,6 +122,42 @@ def test_on_a_threatened_or_expanding_city_does_not_race():
     assert score(_menu()[0], c, _ctx(turn=40, settlers=1), w) == 0.0
     assert score(_menu()[0], c, _ctx(turn=41, threatened=frozenset({c.city_id})), w) == 0.0
     assert score(_menu()[0], c, _ctx(turn=42, threatened=frozenset({99})), w) == 0.0
+
+
+def test_a_safe_city_races_while_a_far_city_is_threatened(caplog):
+    # Issue 357: the gate is per city.
+    w = ProductionWeights(wonder_races=True)
+    c = _city(production=8.0)
+    far = {99: (c.x + 30, c.y)}
+    near = {99: (c.x + 3, c.y)}
+    assert score(_menu()[0], c, _ctx(turn=11, threatened=frozenset({99}), threatened_at=far), w) > 0
+    with caplog.at_level(logging.INFO):
+        blocked = score(
+            _menu()[0], c, _ctx(turn=12, threatened=frozenset({99}), threatened_at=near), w
+        )
+    assert blocked == 0.0
+    assert "not tall and safe: a threatened city is near" in caplog.text
+    assert score(_menu()[0], c, _ctx(turn=13, threatened=frozenset({c.city_id})), w) == 0.0
+
+
+def test_only_this_citys_settler_build_or_a_near_camp_blocks(caplog):
+    w = ProductionWeights(wonder_races=True)
+    c = _city(production=8.0)
+    assert score(_menu()[0], c, _ctx(turn=14, settlers=2), w) > 0
+    building = replace(c, building="UNIT_SETTLER")
+    assert score(_menu()[0], building, _ctx(turn=15), w) == 0.0
+    camp_far = _ctx(turn=16, camp_units=2, camp_target=(c.x + 40, c.y))
+    assert score(_menu()[0], c, camp_far, w) > 0
+    camp_near = _ctx(turn=17, camp_units=2, camp_target=(c.x + 2, c.y))
+    assert score(_menu()[0], c, camp_near, w) == 0.0
+
+
+def test_threatened_positions_come_from_the_cities():
+    from civ6_ai.policies.production import build_context
+
+    c = _city(production=8.0)
+    ctx = build_context(_empire(), [], cities=[c])
+    assert ctx.threatened_at == {c.city_id: (c.x, c.y)}
 
 
 # Issue 328: the estimator's real inputs.

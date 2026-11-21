@@ -101,6 +101,7 @@ FEATURES: dict[str, tuple[str, str]] = {
     "settler_note": ("growth", "settler_note"),  # Log-only companion of cap_focus.
     "wonder_races": ("production", "wonder_races"),  # Issue 323 (PR 327).
     "boost_judgement": ("research", "boost_judgement"),  # Issue 302 (PR 343), inputs in PR 351.
+    "boost_nudges": ("builder", "use_boost_nudges"),  # Issue 344: builders take the nudges.
 }
 
 
@@ -110,6 +111,21 @@ def parse_features(text: str) -> frozenset[str]:
     if unknown := sorted(names - FEATURES.keys()):
         raise ValueError(f"unknown feature {unknown}; known: {sorted(FEATURES)}")
     return names
+
+
+class _SettingsAsWeights:
+    """Lets `enable_features` reach a policy whose flags live in `settings`, not `weights`."""
+
+    def __init__(self, policy: Any) -> None:
+        self._policy = policy
+
+    @property
+    def weights(self) -> Any:
+        return self._policy.settings
+
+    @weights.setter
+    def weights(self, value: Any) -> None:
+        self._policy.settings = value
 
 
 def enable_features(holders: dict[str, Any], names: Iterable[str]) -> None:
@@ -371,7 +387,12 @@ def build_orchestrator(
         tile_valuation=tile_valuation,
     )
     enable_features(
-        {"growth": production.growth, "production": production, "research": research_policy},
+        {
+            "growth": production.growth,
+            "production": production,
+            "research": research_policy,
+            "builder": _SettingsAsWeights(builder),
+        },
         features,
     )
     gold.foreign_cities = settling.foreign_city_tiles  # Contested tiles (issue 338).

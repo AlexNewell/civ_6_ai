@@ -169,6 +169,20 @@ def test_give_up_when_the_estimate_slips():
     assert "slipped" in j.reason
 
 
+def test_a_fixed_estimate_that_has_run_out_counts_as_slipped():
+    option = item("Writing", "Build a wonder.", turns=20)
+    settings = JudgementSettings(wonder_turns=3)
+    signals = PlanSignals(wonder_queued=True)
+    record = {option.item_type: DelayRecord(since_turn=10, first_eta=3)}
+    # Waited 5 turns of a 3-turn estimate: still inside the tolerance of 2.
+    ok = one(option, BoostState(turn=15), signals, record, settings)
+    assert ok.decision is Decision.DELAY
+    # Waited 6: overdue. The estimate used to read 1 until max_delay.
+    late = one(option, BoostState(turn=16), signals, record, settings)
+    assert late.decision is Decision.RESEARCH_NOW and late.gave_up
+    assert "slipped" in late.reason
+
+
 def test_keep_waiting_when_the_estimate_holds():
     option = item("Early Empire", POP6, turns=20)
     record = DelayRecord(since_turn=17, first_eta=4)

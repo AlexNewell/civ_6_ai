@@ -20,7 +20,9 @@ from civ6_ai.policies.military import (
     attack_landed,
     camp_attacks_needed,
     camp_force_ok,
+    camp_group_near,
     camp_matchup,
+    camp_step_score,
     choose_promotion,
     expected_damage,
     garrison_required,
@@ -2699,3 +2701,106 @@ def test_stage_goals_and_stage_tile_skip_water_beside_a_camp():
     stage = policy._stage_tile(unit, camp)
     assert stage is not None and stage != (19, 10)
     assert stage in _ring_of(*camp) or stage != camp
+
+
+# ----- the camp force goes in together (issue 380) -----
+
+
+def _near(unit, others, camp=(14, 10)):
+    return camp_group_near(unit, others, lambda u: (u.x, u.y), camp, 2, 4, None)
+
+
+def test_a_lead_unit_outside_the_ring_has_no_force_near_it():
+    lead = build_unit(warrior(uid=1, x=12, y=7, **STRONG))
+    rest = build_unit(warrior(uid=2, x=4, y=10, **STRONG))
+    assert [u.unit_id for u in _near(lead, [lead, rest])] == [1]
+
+
+def test_units_in_the_ring_or_two_tiles_apart_count_as_together():
+    lead = build_unit(warrior(uid=1, x=12, y=10, **STRONG))
+    ring = build_unit(warrior(uid=2, x=11, y=13, **STRONG))
+    pair = build_unit(warrior(uid=3, x=12, y=12, **STRONG))
+    assert {u.unit_id for u in _near(lead, [lead, ring, pair])} == {1, 2, 3}
+
+
+def test_a_committed_lead_unit_waits_until_the_rest_of_the_force_is_near(caplog):
+    units = [warrior(uid=1, x=11, y=10, **STRONG), warrior(uid=2, x=3, y=10, **STRONG)]
+    game = camp_game([*units, warrior(uid=3)], [barbarian(x=14, y=10, cs=5)])
+    policy = MilitaryPolicy()
+    policy._committed[(14, 10)] = 15
+    run(policy, game)
+    assert not [o for o in game.orders("move") if o[1] == 1]
+    waits = [d for d in camp_orders(policy) if d.unit_id == 1]
+    assert waits and "waiting for the force (1 of 2 near)" in waits[0].reason
+
+
+def foe(x, y, cs=20):
+    return Threat(-1, "Barbarians", "UNIT_WARRIOR", x, y, 100, 100, cs, 0, 3, True)
+
+
+def _score(unit, tile, foes, friends=(), gap=1.0, here=None, camp=(14, 10)):
+    here = here or (unit.x, unit.y)
+    return camp_step_score(
+        unit,
+        here,
+        tile,
+        camp,
+        foes,
+        [unit, *friends],
+        lambda u: (u.x, u.y),
+        gap,
+        MilitarySettings(),
+    )
+
+
+def test_the_lone_warrior_walk_past_two_neighbours_it_would_lose_to_scores_negative():
+    me = build_unit(warrior(uid=1, x=12, y=10))
+    foes = [foe(13, 10), foe(11, 10)]
+    assert _score(me, (13, 11), foes).net < 0
+
+
+def test_a_step_that_sets_up_a_combined_attack_wins_despite_the_risk():
+    me = build_unit(warrior(uid=1, x=11, y=10))
+    mate = build_unit(warrior(uid=2, x=12, y=11))
+    foes = [foe(12, 9), foe(12, 10)]
+    alone = _score(me, (13, 10), foes, gap=0.0)
+    covered = _score(me, (13, 10), foes, friends=[mate], gap=0.0)
+    assert covered.net > alone.net and covered.net >= 0
+
+
+def test_a_cheap_unit_screening_a_settler_may_take_the_risk():
+    me = build_unit(warrior(uid=1, x=11, y=10))
+    settler = build_unit(warrior(uid=2, x=12, y=10, combat_strength=0))
+    foes = [foe(13, 9)]
+    assert _score(me, (12, 11), foes, [settler], gap=0.0).net >= 0
+
+
+def test_the_group_penalty_grows_as_the_force_near_falls_short():
+    me = build_unit(warrior(uid=1, x=11, y=10))
+    a = _score(me, (12, 10), [], gap=0.25)
+    b = _score(me, (12, 10), [], gap=1.0)
+    assert a.penalty < b.penalty and b.net < a.net
+
+
+def test_a_unit_walking_to_the_muster_does_not_step_beside_two_units_it_would_lose_to():
+    camp = tile(x=20, y=10, improvement="IMPROVEMENT_BARBARIAN_CAMP", owner_id=-1, units=[])
+    units = [warrior(uid=1, x=14, y=10, **STRONG), warrior(uid=2, x=14, y=11, **STRONG)]
+    foes = [barbarian(x=16, y=9, cs=45), barbarian(x=16, y=11, cs=45), barbarian(x=20, y=10, cs=5)]
+    game = camp_game([*units, warrior(uid=3)], foes, camp=camp)
+    policy = MilitaryPolicy()
+    policy._committed[(20, 10)] = 15
+    run(policy, game)
+    for _, _, x, y in [o for o in game.orders("move") if o[1] == 1]:
+        assert sum(hex_distance(x, y, *spot, None) <= 1 for spot in [(16, 9), (16, 11)]) < 2
+
+
+def test_a_plan_whose_need_outgrows_the_force_stops_the_advance():
+    camp = tile(x=20, y=10, improvement="IMPROVEMENT_BARBARIAN_CAMP", owner_id=-1, units=[])
+    units = [warrior(uid=1, x=16, y=10, **STRONG), warrior(uid=2, x=16, y=11, **STRONG)]
+    guards = [barbarian(x=20, y=10 + i % 2, cs=30) for i in range(5)]
+    game = camp_game([*units, warrior(uid=3)], guards, camp=camp)
+    policy = MilitaryPolicy()
+    policy._committed[(20, 10)] = 15
+    run(policy, game)
+    assert (20, 10) not in policy._committed
+    assert not [o for o in game.orders("move") if o[1] in (1, 2)]

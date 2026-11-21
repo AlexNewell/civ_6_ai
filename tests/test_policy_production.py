@@ -1977,3 +1977,124 @@ def test_demoted_camp_units_keep_their_relative_order():
     both = [*units, option("UNIT", "UNIT_SETTLER", 8)]
     after = [o.item for o in rank_production(city(population=3), both, ctx)]
     assert after[0] == "UNIT_SETTLER" and after[1:] == before
+
+
+# --- Holy Site when the city is safe and a +3 placement is on offer (issue 375) ------------------
+
+HS = option("DISTRICT", "DISTRICT_HOLY_SITE", turns=8, cost=54)
+CAMPUS = option("DISTRICT", "DISTRICT_CAMPUS", turns=8, cost=54)
+HS_SETTLER = option("UNIT", "UNIT_SETTLER", turns=6, cost=30)
+
+
+def holy_ctx(adjacency, **changes):
+    base = dict(
+        turn=30, num_cities=2, builders=2, recon=1, army=3, sites_ok=True,
+        science_districts=0, holy_site_adjacency=adjacency,
+    )  # fmt: skip
+    return ProductionContext(**{**base, **changes})
+
+
+def holy_scores(adjacency, c=None, **changes):
+    c = c or city(population=3)
+    ctx = holy_ctx(adjacency, **changes)
+    w = ProductionWeights()
+    return score(HS, c, ctx, w), score(CAMPUS, c, ctx, w), score(HS_SETTLER, c, ctx, w)
+
+
+def test_a_safe_city_ranks_a_plus_3_holy_site_above_a_campus_but_below_a_ready_settler():
+    holy, campus, settler = holy_scores(3)
+    assert campus < holy < settler
+
+
+def test_a_plus_2_holy_site_gets_a_smaller_bonus_and_stays_below_a_campus():
+    plain, bonus2, bonus3 = (holy_scores(a)[0] for a in (1, 2, 3))
+    assert plain < bonus2 < bonus3
+    assert bonus2 < holy_scores(2)[1]
+
+
+def test_a_plus_1_holy_site_gets_no_bonus():
+    assert holy_scores(1)[0] == holy_scores(0)[0]
+    assert holy_scores(1)[0] < holy_scores(1)[1]
+
+
+def test_a_threatened_or_ungarrisoned_city_gets_no_bonus():
+    base = holy_scores(0)[0]
+    assert holy_scores(3, city(population=3, garrison_unit=None))[0] == base
+    assert holy_scores(3, city(population=3, threats=[threat(distance=1)]))[0] == base
+    assert holy_scores(3, threatened=frozenset({65536}))[0] == base
+
+
+def test_a_camp_force_short_in_reach_gets_no_bonus():
+    base = holy_scores(0)[0]
+    near = city(population=3)
+    assert holy_scores(3, near, camp_units=2, camp_target=(near.x + 3, near.y))[0] == base
+    far = holy_scores(3, near, camp_units=2, camp_target=(near.x + 40, near.y))[0]
+    assert far > base
+
+
+def test_no_bonus_once_a_holy_site_exists_anywhere():
+    assert holy_scores(3, districts=frozenset({"HOLY_SITE"}))[0] == holy_scores(0)[0]
+
+
+def test_a_held_prophet_or_stonehenge_raises_the_value():
+    plain = holy_scores(3)[0]
+    with_prophet = holy_scores(3, prophet_coming=True)[0]
+    assert with_prophet > plain
+    assert with_prophet < holy_scores(3, prophet_coming=True)[2]  # Still below a ready settler.
+    assert holy_scores(0, prophet_coming=True)[0] > holy_scores(0)[0]
+
+
+def test_the_appetite_scales_the_bonus_and_zero_turns_it_off():
+    ctx = holy_ctx(3)
+    c = city(population=3)
+    off = score(HS, c, ctx, ProductionWeights(holy_site_appetite=0.0))
+    on = score(HS, c, ctx, ProductionWeights())
+    half = score(HS, c, ctx, ProductionWeights(holy_site_appetite=0.5))
+    assert off < half < on
+
+
+def test_build_context_sees_a_great_prophet_and_stonehenge():
+    empire = run(read_empire(fx.FakeGame()))
+    stone = city(buildings=["PALACE", "BUILDING_STONEHENGE"])
+    prophet = build_unit(fx.unit_info(unit_type="UNIT_GREAT_PROPHET"))
+    assert build_context(empire, [prophet], (), [city()]).prophet_coming
+    assert build_context(empire, [], (), [stone]).prophet_coming
+    assert build_context(empire, [], ["BUILDING_STONEHENGE"], [city()]).prophet_coming
+    assert not build_context(empire, [], (), [city()]).prophet_coming
+
+
+def holy_game(adjacency=3):
+    options = [
+        lq.ProductionOption("DISTRICT", "DISTRICT_HOLY_SITE", 54, 8, -1),
+        lq.ProductionOption("DISTRICT", "DISTRICT_CAMPUS", 54, 8, -1),
+    ]
+    game = CountingGame(cities=idle_cities(), production=options)
+    game.districts = [lq.DistrictPlacement(6, 6, {}, adjacency, "Hills")]
+    return game
+
+
+def test_the_handler_builds_the_holy_site_in_a_safe_city_and_reads_the_advisor_once_per_city():
+    game = holy_game(3)
+    policy = CityProductionPolicy()
+    run(policy.assign(game))
+    assert game.set_calls[0][2] == "DISTRICT_HOLY_SITE"
+    # One read for the context; the start reads the placement itself.
+    calls = game.advisor_calls
+    game.set_calls.clear()
+    run(policy.assign(game))
+    assert game.advisor_calls - calls == 1  # Only `_start`'s read; the context read is cached.
+    assert policy._holy_adjacency[65536][1] == 3
+
+
+def test_the_cached_adjacency_is_read_again_after_the_reread_turns():
+    game = holy_game(1)
+    policy = CityProductionPolicy()
+    run(policy.assign(game))
+    turn = policy._holy_adjacency[65536][0]
+    game.districts = [lq.DistrictPlacement(6, 6, {}, 3, "Hills")]  # Borders grew.
+    policy._holy_adjacency[65536] = (turn - 3, 1)
+    run(policy.assign(game))
+    assert policy._holy_adjacency[65536][1] == 1  # Too soon: still the cached read.
+    policy._holy_adjacency[65536] = (turn - 10, 1)
+    run(policy.assign(game))
+    assert policy._holy_adjacency[65536] == (turn, 3)

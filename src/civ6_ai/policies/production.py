@@ -144,6 +144,22 @@ class ProductionWeights:
     # settling (issue 284) are unchanged. False restores the old order, for a posture that wants
     # the camp cleared first.
     settler_before_camp: bool = True
+    # Issue 375: the player's rule, "Holy Site was a reaction to Rome being safe enough to work on
+    # a district and having a good placement option (+3 from mountains)". A Holy Site is worth its
+    # faith yield alone (4 x 0.5 = 2), below every other district, and the bot started none by turn
+    # 60 on STD_T1_04 (faith 29 at turn 50 against the human's 315, and no religion). While no
+    # Holy Site exists anywhere and the city is safe (no threat, not pressed, garrisoned, no camp
+    # force short in reach), its value gains `holy_site_bonus_3` at a best adjacency of 3 or more
+    # (about 11 raw, above a Campus at about 6 to 9 and below a ready Settler at 14, so the
+    # settler-before-camp and expansion rules of issue 369 still win) and `holy_site_bonus_2` at
+    # 2 (below a Campus). Below 2: nothing. `holy_site_prophet_bonus` is added while a Great
+    # Prophet stands on the map or Stonehenge is built or being built: a prophet with no site is
+    # wasted. `holy_site_appetite` scales all three (a faith posture dial for issue 321); 0 turns
+    # the bonus off.
+    holy_site_appetite: float = 1.0
+    holy_site_bonus_3: float = 9.0
+    holy_site_bonus_2: float = 4.0
+    holy_site_prophet_bonus: float = 2.0
 
     def __post_init__(self) -> None:
         for item in fields(self):
@@ -193,6 +209,11 @@ class ProductionContext:
     # barbarian): melee and ranged strength. The army floor picks units by their match against it.
     hostile: float = 0.0
     hostile_ranged: float = 0.0
+    # Issue 375: the best Holy Site adjacency in the city being chosen for, read from the district
+    # advisor (0 when not read or none fits), and whether a Great Prophet stands on the map or
+    # Stonehenge is built or being built. Only used while no Holy Site exists anywhere.
+    holy_site_adjacency: int = 0
+    prophet_coming: bool = False
     sites_ok: bool = True  # False when settling found no safe site to send a settler to.
     # Issue 283: settlers on the map that settling held this turn (no site, or no safe route and
     # no escort). While one waits, another settler could do no more than it.
@@ -326,8 +347,16 @@ def build_context(
         hostile=max(near[0], ctx.camp_defender),
         hostile_ranged=max(near[1], ctx.camp_defender_ranged),
     )
+    in_progress = list(in_progress)
     for item in in_progress:
         ctx = ctx.after_choosing(item)
+    # Issue 375: a Great Prophet unit, or Stonehenge finished or in production.
+    if (
+        any(u.unit_type == "UNIT_GREAT_PROPHET" for u in units)
+        or any(_short(b) == "STONEHENGE" for c in cities for b in c.buildings)
+        or any(_short(i) == "STONEHENGE" for i in in_progress)
+    ):
+        ctx = replace(ctx, prophet_coming=True)
     return ctx
 
 
@@ -985,6 +1014,40 @@ def _building_score(
     return value
 
 
+def holy_site_safe(city: City, ctx: ProductionContext) -> bool:
+    """Not threatened or pressed, garrisoned, and no camp force short within reach (issue 375)."""
+    if under_threat(city, ctx) or is_pressed(city, ctx) or city.garrison_unit is None:
+        return False
+    return not (
+        ctx.camp_units > 0
+        and (
+            ctx.camp_target is None
+            or hex_distance(city.x, city.y, *ctx.camp_target) <= _CAMP_CITY_REACH
+        )
+    )
+
+
+def holy_site_bonus(city: City, ctx: ProductionContext, w: ProductionWeights) -> float:
+    """Issue 375: what a safe city adds to its first Holy Site for a good placement or a prophet.
+
+    Zero once any Holy Site exists, in an unsafe city, or with the appetite at 0. The adjacency
+    tiers do not stack; the prophet bonus is added to either.
+    """
+    if w.holy_site_appetite <= 0 or any(_base_district(d) == "HOLY_SITE" for d in ctx.districts):
+        return 0.0
+    if not holy_site_safe(city, ctx):
+        return 0.0
+    if ctx.holy_site_adjacency >= 3:
+        bonus = w.holy_site_bonus_3
+    elif ctx.holy_site_adjacency == 2:
+        bonus = w.holy_site_bonus_2
+    else:
+        bonus = 0.0
+    if ctx.prophet_coming:
+        bonus += w.holy_site_prophet_bonus
+    return bonus * w.holy_site_appetite
+
+
 def _district_score(
     option: ProductionChoice, city: City, w: ProductionWeights, ctx: ProductionContext
 ) -> float:
@@ -995,6 +1058,8 @@ def _district_score(
     if profile is None:
         return _UNKNOWN_BUILDING * 2.0
     value = _yield_value(profile, w)
+    if name == "HOLY_SITE":
+        value += holy_site_bonus(city, ctx, w)
     if name == "CAMPUS" and ctx.num_cities > 0:
         behind = max(0.0, 1.0 - ctx.science_districts / ctx.num_cities)
         value += _SCIENCE_CATCHUP * behind * w.science
@@ -1719,6 +1784,9 @@ class CityProductionPolicy:
             emit=self._emit
         )  # Chained tile buys. Its `book` is the gold policy's saving list.
         self.expansion = expansion if expansion is not None else ExpansionState()
+        # Issue 375: best Holy Site adjacency per city, read once from the district advisor.
+        self._holy_adjacency: dict[int, int] = {}
+        self._holy_turn = 0
 
     async def run(self, game: ProductionGame) -> None:
         unfinished = await self.assign(game)
@@ -1879,7 +1947,7 @@ class CityProductionPolicy:
                 game,
                 city,
                 options,
-                context,
+                await self._with_holy_site(game, city, options, context),
                 self.weights,
                 memory=self.refusals,
                 emit=self._emit,
@@ -1895,6 +1963,59 @@ class CityProductionPolicy:
                     context = replace(context, scouts_built=self.scouts_built)
                 self._note(city, f"production: chose {picked.item}")
         return unfinished
+
+    async def _with_holy_site(
+        self,
+        game: ProductionGame,
+        city: City,
+        options: list[ProductionChoice],
+        context: ProductionContext,
+    ) -> ProductionContext:
+        """Issue 375: add this city's best Holy Site adjacency to the context.
+
+        Read from the district advisor only for a city offered a Holy Site while none exists, and
+        kept per city, so the advisor is asked once. A turn that goes back (a loaded save) clears
+        it.
+        """
+        if context.turn < self._holy_turn:
+            self._holy_adjacency.clear()
+        self._holy_turn = context.turn
+        if self.weights.holy_site_appetite <= 0 or any(
+            _base_district(d) == "HOLY_SITE" for d in context.districts
+        ):
+            return context
+        offered = next(
+            (
+                o
+                for o in options
+                if o.category == "DISTRICT" and _base_district(o.item) == "HOLY_SITE"
+            ),
+            None,
+        )
+        if offered is None:
+            return context
+        if city.city_id not in self._holy_adjacency:
+            try:
+                placements = await game.get_district_advisor(city.city_id, offered.item)
+            except ConnectionError:
+                raise
+            except Exception:
+                log.exception("Reading the Holy Site placement failed")
+                return context
+            if not isinstance(placements, list):
+                return context  # Not cached: the advisor may answer next turn.
+            best = max((p.total_adjacency for p in placements), default=0)
+            self._holy_adjacency[city.city_id] = best
+            seen = replace(context, holy_site_adjacency=best)
+            log.info(
+                "%s: best Holy Site adjacency %d, Holy Site scores %.1f (safe %s, prophet %s)",
+                city.name,
+                best,
+                score(offered, city, seen, self.weights),
+                holy_site_safe(city, context),
+                context.prophet_coming,
+            )
+        return replace(context, holy_site_adjacency=self._holy_adjacency[city.city_id])
 
     def _log_pillaged(self, cities: list[City]) -> None:
         """Log what is pillaged in each city when it changes, and each item repaired."""

@@ -48,7 +48,13 @@ from civ6_ai.policies.growth import (
     food_multiplier,
     housing_multiplier,
 )
-from civ6_ai.policies.growth_caps import at_housing_cap, decide_cap_focus, settler_delay_note
+from civ6_ai.policies.growth_caps import (
+    at_housing_cap,
+    decide_cap_focus,
+    hold_cap_focus,
+    settler_delay_note,
+    yield_needs,
+)
 from civ6_ai.policies.military import MilitaryWeights, camp_matchup
 from civ6_ai.replacements import READ_TRIES, apply_replacements, read_replacements
 from civ6_ai.state import City, Empire, ProductionChoice, Unit
@@ -1645,6 +1651,8 @@ class CityProductionPolicy:
         self.refusals = RefusalMemory()
         self.growth = GrowthPolicy()  # Target size and stance per city (1.47).
         self._cap_focus: dict[int, str] = {}  # City -> yield favored at a cap (issue 215).
+        self._cap_since: dict[int, int] = {}  # City -> turn that focus was set (issue 356).
+        self._cap_tried: dict[int, int] = {}  # City -> last turn a focus call was made for it.
         self._tiles: dict[int, CityTiles] = {}  # Food of each city's tiles (`city_tiles.py`).
         self._tiles_age = REFRESH_TURNS  # Turns since the last read.
         self._replace_tries = 0  # Reads of the game's replacement tables tried.
@@ -2006,19 +2014,32 @@ class CityProductionPolicy:
         for city in cities:
             if city.city_id in self._food_focus or is_starving(city):
                 self._cap_focus.pop(city.city_id, None)  # The food rule owns the focus now.
+                self._cap_since.pop(city.city_id, None)
                 continue
             held = self._cap_focus.get(city.city_id)
             if held is None and not at_housing_cap(city):
                 continue  # Nothing held and not capped: the usual turn costs no read.
             if empire is None:
                 empire = await _read_empire(game)  # One read a turn, only while a city is capped.
+            if self._cap_tried.get(city.city_id) == empire.turn:
+                continue  # One focus call per city per turn.
             verdict = decide_cap_focus(city, empire, enabled=True, weights=weights)
-            if verdict.focus is not None and verdict.focus != held:
-                focus = verdict.focus  # New cap, or the most-needed yield changed.
+            keep = verdict.focus
+            if keep is not None:
+                keep = hold_cap_focus(
+                    held,
+                    empire.turn - self._cap_since.get(city.city_id, empire.turn),
+                    yield_needs(city, empire, weights),
+                    margin=w.cap_margin,
+                    min_hold=w.cap_min_hold,
+                )
+            if keep is not None and keep != held:
+                focus = keep  # New cap, or a clearly more needed yield after the hold.
             elif verdict.focus is None and held is not None:
                 focus = "default"
             else:
                 continue
+            self._cap_tried[city.city_id] = empire.turn
             try:
                 result = await game.set_city_focus(city.city_id, focus)
             except Exception as err:  # A focus is a nicety. It must never stop production.
@@ -2035,8 +2056,10 @@ class CityProductionPolicy:
             )
             if focus == "default":
                 self._cap_focus.pop(city.city_id, None)
+                self._cap_since.pop(city.city_id, None)
             else:
                 self._cap_focus[city.city_id] = focus
+                self._cap_since[city.city_id] = empire.turn
 
     def _note(self, city: City, text: str) -> None:
         if self.defence is not None:

@@ -97,6 +97,12 @@ class GrowthWeights:
     # Issue 215: at a housing or amenity cap, favor a non-food yield instead of growing into the
     # penalty (`growth_caps.py`). Off until a live run shows the focus call moves citizens.
     cap_focus: bool = False
+    # Issue 356: the most-needed yield was re-picked every turn and flipped production and gold
+    # every two turns, reshuffling citizens each time. A held focus changes only when the new
+    # yield's need is lower by this fraction of the held one's, and not before `cap_min_hold`
+    # turns: a citizen move costs a turn of output, so a small edge is not worth it.
+    cap_margin: float = 0.25
+    cap_min_hold: int = 5
     # Log (never act on) a Settler that finishes just before its city grows.
     settler_note: bool = False
 

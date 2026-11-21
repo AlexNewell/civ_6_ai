@@ -7,6 +7,7 @@ from dataclasses import replace
 from civ6_ai.policies.growth import GrowthPolicy, GrowthWeights
 from civ6_ai.policies.growth_caps import (
     decide_cap_focus,
+    hold_cap_focus,
     most_needed_yield,
     settler_delay_note,
 )
@@ -84,14 +85,21 @@ def _policy(**kw):
 BUSY = dict(currently_building="BUILDING_LIBRARY", production_turns_left=5)
 
 
+def at_turn(game, turn):
+    game.data["overview"] = fx.overview(turn=turn, num_cities=1)
+
+
 def test_policy_hook_sets_the_focus_once_and_resets_below_the_cap():
     game = FocusGame(cities=[fx.city_info(population=7, housing=7.0, **BUSY)])
     policy = _policy(cap_focus=True)
-    for _ in range(3):
+    for turn in range(40, 43):
+        at_turn(game, turn)
         run(policy.assign(game))
     assert game.focus_calls == [(65536, "production")]
     game.data["cities"] = [fx.city_info(population=7, housing=10.0, **BUSY)]
+    at_turn(game, 43)
     run(policy.assign(game))
+    at_turn(game, 44)
     run(policy.assign(game))
     assert game.focus_calls == [(65536, "production"), (65536, "default")]
 
@@ -131,13 +139,66 @@ def test_faith_balance_is_never_compared_with_income():
 def test_policy_hook_updates_the_held_focus_when_the_desired_yield_changes():
     idle = dict(population=7, housing=7.0, currently_building="nothing")
     game = FocusGame(cities=[fx.city_info(**idle)])
-    policy = _policy(cap_focus=True)
+    policy = _policy(cap_focus=True, cap_min_hold=3)
+    at_turn(game, 40)
     run(policy.assign(game))
     first = game.focus_calls[-1][1]
     assert first != "production"  # Idle city: an empire yield.
     game.data["cities"] = [fx.city_info(population=7, housing=7.0, **BUSY)]
+    at_turn(game, 41)
+    run(policy.assign(game))
+    assert len(game.focus_calls) == 1  # Inside the minimum hold.
+    at_turn(game, 43)
     run(policy.assign(game))
     assert game.focus_calls[-1] == (65536, "production")
     assert len(game.focus_calls) == 2
+    at_turn(game, 44)
     run(policy.assign(game))
     assert len(game.focus_calls) == 2  # Unchanged: no repeat call.
+
+
+def test_hold_keeps_the_focus_when_the_need_alternates_slightly():
+    held = "gold"
+    # Science is a little more needed than gold, inside the margin: keep gold.
+    needs = {"science": 9.0, "culture": 20.0, "gold": 10.0}
+    assert hold_cap_focus(held, 9, needs, margin=0.25, min_hold=5) == "gold"
+    flipped = {"science": 10.0, "culture": 20.0, "gold": 9.0}
+    assert hold_cap_focus(held, 9, flipped, margin=0.25, min_hold=5) == "gold"
+
+
+def test_hold_switches_once_on_a_large_change_after_the_minimum_hold():
+    needs = {"science": 2.0, "culture": 20.0, "gold": 10.0}
+    assert hold_cap_focus("gold", 2, needs, margin=0.25, min_hold=5) == "gold"
+    assert hold_cap_focus("gold", 5, needs, margin=0.25, min_hold=5) == "science"
+    assert hold_cap_focus(None, 0, needs, margin=0.25, min_hold=5) == "science"
+
+
+def test_hold_gives_up_a_focus_that_is_no_longer_a_candidate():
+    needs = {"science": 5.0, "culture": 6.0, "gold": 7.0}
+    assert hold_cap_focus("production", 5, needs, margin=0.25, min_hold=5) == "science"
+    assert hold_cap_focus("production", 1, needs, margin=0.25, min_hold=5) == "production"
+
+
+def test_policy_hold_flipping_build_state_makes_one_call_per_hold():
+    idle = dict(currently_building="nothing")
+    game = FocusGame(cities=[fx.city_info(population=7, housing=7.0, **idle)])
+    policy = _policy(cap_focus=True)  # Default hold of 5 turns.
+    for turn in range(40, 45):  # Build state alternates every turn.
+        busy = turn % 2 == 1
+        game.data["cities"] = [fx.city_info(population=7, housing=7.0, **(BUSY if busy else idle))]
+        at_turn(game, turn)
+        run(policy.assign(game))
+    assert len(game.focus_calls) == 1
+
+
+def test_policy_one_call_per_city_per_turn():
+    game = FocusGame(cities=[fx.city_info(population=7, housing=7.0, **BUSY)])
+    policy = _policy(cap_focus=True, cap_min_hold=0, cap_margin=0.0)
+    at_turn(game, 40)
+    run(policy.assign(game))
+    game.data["cities"] = [fx.city_info(population=7, housing=7.0, currently_building="nothing")]
+    run(policy.assign(game))  # Same game turn: the second change waits.
+    assert len(game.focus_calls) == 1
+    at_turn(game, 41)
+    run(policy.assign(game))
+    assert len(game.focus_calls) == 2

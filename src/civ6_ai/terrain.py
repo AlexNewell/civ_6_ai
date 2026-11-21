@@ -16,6 +16,7 @@ to be corrected from the game's own numbers where they differ. For our own units
 """
 
 import heapq
+import math
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import NamedTuple
@@ -249,3 +250,36 @@ class TerrainStore:
                     if t < turns.get((nx, ny), float("inf")):
                         turns[nx, ny] = t
         return turns
+
+    def path_turns(
+        self,
+        start: tuple[int, int],
+        moves: float,
+        avoid: Iterable[tuple[int, int]] = (),
+        horizon_turns: float = 20.0,
+    ) -> dict[tuple[int, int], int]:
+        """Issue 379: whole turns for a walker with `moves` per turn to reach each tile by the
+        cheapest terrain path, never entering water, mountains or `avoid` tiles (at least 1 for
+        any tile but `start`, which is 0). A tile with no path within `horizon_turns` is absent."""
+        blocked = set(avoid)
+        per_turn = max(1.0, moves)
+        limit = per_turn * horizon_turns
+        best: dict[tuple[int, int], float] = {start: 0.0}
+        queue: list[tuple[float, int, int]] = [(0.0, start[0], start[1])]
+        while queue:
+            cost, cx, cy = heapq.heappop(queue)
+            if cost > best.get((cx, cy), float("inf")):
+                continue
+            for nxt in neighbours(cx, cy, self.map_width):
+                step = self.step_cost(nxt[0], nxt[1], naval=False)
+                if (
+                    step is None
+                    or nxt in blocked
+                    or (self.map_height is not None and nxt[1] >= self.map_height)
+                ):
+                    continue
+                total = cost + step
+                if total <= limit and total < best.get(nxt, float("inf")):
+                    best[nxt] = total
+                    heapq.heappush(queue, (total, nxt[0], nxt[1]))
+        return {p: (0 if p == start else max(1, math.ceil(c / per_turn))) for p, c in best.items()}

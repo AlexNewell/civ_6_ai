@@ -2280,3 +2280,164 @@ def test_a_refused_step_stays_avoided_for_the_whole_trip_so_the_pair_does_not_bo
     # A new goal starts a new trip.
     policy._remember_refused(other, (16, 6), (13, 12), "BLOCKED")
     assert policy._refused_steps[7] == ((16, 6), {(13, 12)})
+
+
+# ----- issue 379: sites ranked by the walk, not the hex distance -----
+
+
+def _walk_game(wall=(), sites=None, estimates=None, store=True):
+    from civ6_ai.state.reader import build_tile
+    from civ6_ai.terrain import TerrainStore
+    from fixtures.civ_state import tile
+
+    sites = sites or [site(15, 10, food=44), site(10, 15, food=40)]
+    game = make_game([settler()], cities=[alpha()], sites=sites)
+    game.estimate_calls = []
+
+    async def moved(unit_index, x, y):
+        game.actions.append(("move", unit_index, x, y))
+        return f"MOVING_TO|{x},{y}|from:10,10|now_at:{x},{y}"
+
+    game.move_unit = moved
+    if estimates is not None:
+
+        async def estimate(unit_index, x, y):
+            game.estimate_calls.append((unit_index, x, y))
+            return estimates[(x, y)]
+
+        game.get_pathing_estimate = estimate
+    policy = SettlingPolicy()
+    if store:
+        ground = TerrainStore(map_width=74)
+        tiles = []
+        for ty in range(2, 20):
+            for tx in range(4, 22):
+                extra = {"terrain": "TERRAIN_GRASS_MOUNTAIN"} if (tx, ty) in wall else {}
+                tiles.append(
+                    build_tile(
+                        tile(x=tx, y=ty, improvement=None, units=[], is_river=False, **extra)
+                    )
+                )
+        ground.learn(tiles)
+        policy.terrain = ground
+    return game, policy
+
+
+def _ridge():
+    return {(12, y) for y in range(2, 19)}
+
+
+def _by_site(policy):
+    return {(c.x, c.y): c for c in policy.decisions[-1].candidates}
+
+
+def test_a_site_behind_a_ridge_ranks_below_a_slightly_worse_open_one():
+    game, policy = _walk_game(wall=_ridge())
+    run(policy, game)
+    behind, open_ = _by_site(policy)[15, 10], _by_site(policy)[10, 15]
+    assert behind.turns_path > behind.turns_hex
+    assert behind.site_score > open_.site_score  # The hex estimate alone would pick it.
+    assert policy.decisions[-1].target == (10, 15)
+
+
+def test_with_no_ridge_the_better_site_still_wins():
+    game, policy = _walk_game()
+    run(policy, game)
+    assert policy.decisions[-1].target == (15, 10)
+
+
+def test_without_a_terrain_store_the_hex_estimate_is_used():
+    game, policy = _walk_game(wall=_ridge(), store=False)
+    run(policy, game)
+    log = _by_site(policy)[15, 10]
+    assert log.turns_path is None and log.turns == log.turns_hex
+    assert policy.decisions[-1].target == (15, 10)
+
+
+def test_a_site_walled_in_by_mountains_is_rejected():
+    ring = {(x, y) for x in range(14, 17) for y in range(9, 12)} - {(15, 10)}
+    game, policy = _walk_game(wall=ring)
+    run(policy, game)
+    assert _by_site(policy)[15, 10].rejected is not None
+    assert policy.decisions[-1].target == (10, 15)
+
+
+def _est(turns, tiles=5):
+    return lq.PathingEstimate(turns=turns, total_tiles=tiles, reachable_this_turn=2)
+
+
+def test_the_game_estimate_overrides_the_terrain_estimate():
+    game, policy = _walk_game(estimates={(15, 10): _est(9), (10, 15): _est(1)})
+    run(policy, game)
+    log = _by_site(policy)
+    assert log[15, 10].turns_game == 10 and log[15, 10].turns == 10
+    assert log[15, 10].turns_path is not None and log[15, 10].turns_hex == 3
+    assert policy.decisions[-1].target == (10, 15)
+
+
+def test_no_path_from_the_game_rejects_the_site():
+    game, policy = _walk_game(estimates={(15, 10): _est(-1, 0), (10, 15): _est(2)})
+    run(policy, game)
+    log = _by_site(policy)
+    assert log[15, 10].turns_game == -1 and log[15, 10].rejected
+    assert policy.decisions[-1].target == (10, 15)
+
+
+def test_an_empty_game_reply_keeps_the_terrain_estimate():
+    game, policy = _walk_game(estimates={(15, 10): _est(0, 0), (10, 15): _est(0, 0)})
+    run(policy, game)
+    assert _by_site(policy)[15, 10].turns_game is None
+
+
+def test_at_most_n_game_reads_per_settler_per_turn():
+    many = [site(15, 10 + i, food=44 - i) for i in range(-3, 4)]
+    estimates = {(s.x, s.y): _est(-1, 0) for s in many}
+    game, policy = _walk_game(sites=many, estimates=estimates)
+    policy.settings = SettlingSettings(game_path_sites=2)
+    run(policy, game)
+    assert len(game.estimate_calls) == 2
+    assert len(set(game.estimate_calls)) == 2
+    game.estimate_calls.clear()
+    run(policy, game)  # The same turn again: nothing is read twice.
+    assert game.estimate_calls == []
+
+
+def test_a_game_with_a_failing_read_falls_back():
+    game, policy = _walk_game()
+
+    async def broken(unit_index, x, y):
+        raise RuntimeError("no connection")
+
+    game.get_pathing_estimate = broken
+    run(policy, game)
+    assert policy.decisions[-1].target == (15, 10)
+
+
+def test_a_territory_refusal_blocks_the_tile_for_the_terrain_walk():
+    game, policy = _walk_game()
+    policy._remember_refused(
+        settler(), (15, 10), (11, 10), "BLOCKED (city-state territory (Anshan))"
+    )
+    assert (11, 10) in policy._border_blocked
+    policy._remember_refused(settler(), (15, 10), (12, 10), "BLOCKED (impassable mountain)")
+    assert (12, 10) not in policy._border_blocked
+
+
+def test_path_turns_counts_slow_ground_and_skips_blocked_tiles():
+    from civ6_ai.state.reader import build_tile
+    from civ6_ai.terrain import TerrainStore
+    from fixtures.civ_state import tile
+
+    store = TerrainStore(map_width=74)
+    store.learn(
+        [
+            build_tile(tile(x=x, y=10, improvement=None, units=[], is_river=False, **extra))
+            for x, extra in [(10, {}), (11, {}), (12, {"is_hills": True}), (13, {}), (14, {})]
+        ]
+    )
+    turns = store.path_turns((10, 10), 2.0, horizon_turns=10)
+    assert turns[(10, 10)] == 0 and turns[(11, 10)] == 1
+    assert turns[(12, 10)] == 2  # 1 + 2 movement
+    assert turns[(11, 10)] <= turns[(13, 10)]
+    assert (14, 10) in turns
+    assert (11, 10) not in store.path_turns((10, 10), 2.0, avoid=[(11, 10)], horizon_turns=10)

@@ -48,6 +48,7 @@ if TYPE_CHECKING:
 
 # Civ VI's Small map. Used to measure distance across the east-west wrap.
 STANDARD_MAP_WIDTH = 74
+STANDARD_MAP_HEIGHT = 46
 CITY_THREAT_RADIUS = 4  # City attacks reach 2 tiles, and most land units move 2 a turn.
 _IDLE_BUILDS = {"", "nothing", "NONE"}
 _RESOURCE_CLASSES = {"strategic", "luxury", "bonus"}

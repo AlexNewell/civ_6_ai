@@ -2231,3 +2231,33 @@ def test_a_refused_escort_step_is_not_sent_again():
     game.actions.clear()
     run(policy, game)
     assert game.actions[0][2:] != first
+
+
+def test_when_every_terrain_step_is_refused_the_pair_holds():
+    game, policy = _escort_pair_game({})
+    first_run = []
+
+    async def refuse(unit_index, x, y):
+        game.actions.append(("move", unit_index, x, y))
+        return "BLOCKED (impassable mountain)"
+
+    game.move_unit = refuse
+    for _ in range(80):
+        game.actions.clear()
+        run(policy, game)
+        first_run.append(list(game.actions))
+    assert not first_run[-1]  # Out of steps: it holds instead of resending a refused one.
+
+
+def test_with_no_terrain_a_refused_straight_line_step_is_not_resent():
+    game, policy = _escort_pair_game(None)
+
+    async def refuse(unit_index, x, y):
+        game.actions.append(("move", unit_index, x, y))
+        return "BLOCKED (impassable mountain)"
+
+    game.move_unit = refuse
+    run(policy, game)
+    game.actions.clear()
+    run(policy, game)
+    assert not game.actions

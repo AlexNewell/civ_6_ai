@@ -1678,6 +1678,9 @@ class SettlingPolicy:
         if target.path_threat and escort is not None:
             step = self._pick_step(settler, goal)
             claimed.add(escort.unit_id)
+            if step is None:
+                record("hold", "every step towards the site was refused", goal)
+                return False
             # Issue 291: the escort must be able to hold the tile the pair ends this turn on.
             holds, taken, attackers = escort_holds_tile(escort, step, danger_threats, s)
             if attackers and not holds:
@@ -1701,8 +1704,6 @@ class SettlingPolicy:
                 result = await game.move_unit(escort.unit_index, *meet)
                 if not move_succeeded(result):
                     self._refused.add(self._order_key(escort, meet, units))
-                    if meet == step:
-                        self._refused_steps.add((settler.unit_id, (settler.x, settler.y), step))
                 action = "escort_gather" if move_succeeded(result) else "hold"
                 record(action, "route is threatened, so the escort joins first", goal, result)
                 return False
@@ -1744,17 +1745,17 @@ class SettlingPolicy:
         straight line when no path is known."""
         here = (settler.x, settler.y)
         moves = max(1, int(settler.moves))
+        avoid = {t for sid, at, t in self._refused_steps if sid == settler.unit_id and at == here}
         if self.terrain is not None and len(self.terrain):
-            avoid = {
-                t for sid, at, t in self._refused_steps if sid == settler.unit_id and at == here
-            }
             found = self.terrain.step_toward(here, goal, moves, avoid, stop_short)
-            if found is not None:
-                return found
+            if found is not None or avoid:
+                return found  # None with refusals: the route is used up, so the caller holds.
         line = hex_line(here, goal, self.settings.map_width)
         if stop_short:
-            return line[-2] if len(line) >= 2 else None
-        return line[min(moves, len(line)) - 1] if line else None
+            step = line[-2] if len(line) >= 2 else None
+        else:
+            step = line[min(moves, len(line)) - 1] if line else None
+        return None if step in avoid else step
 
     def _order_key(self, escort, dest, units) -> tuple:
         crowd = sum(1 for u in units if _holds_tile(u) and (u.x, u.y) == tuple(dest))

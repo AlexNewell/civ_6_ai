@@ -153,6 +153,9 @@ class TerrainStore:
         if start == goal:
             return []
         blocked = set(avoid)
+        # Rows beyond the last one ever read are off the map (nothing reads them, and an unknown
+        # tile otherwise counts as land), so a path never enters one.
+        last_row = max((y for _, y in self._ground), default=None)
         best: dict[tuple[int, int], float] = {start: 0.0}
         came: dict[tuple[int, int], tuple[int, int]] = {}
         queue: list[tuple[float, int, int]] = [(0.0, start[0], start[1])]
@@ -167,7 +170,7 @@ class TerrainStore:
                 return path[::-1]
             for nxt in neighbours(cx, cy, self.map_width):
                 step = self.step_cost(nxt[0], nxt[1], naval=False)
-                if step is None or nxt in blocked:
+                if step is None or nxt in blocked or (last_row is not None and nxt[1] > last_row):
                     continue
                 total = cost + step
                 if total <= max_cost and total < best.get(nxt, float("inf")):

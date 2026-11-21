@@ -133,3 +133,10 @@ def test_step_toward_spends_no_more_than_the_moves():
     t = store({(1, 5): "f", (1, 4): "f", (1, 6): "f", (1, 3): "f", (1, 7): "f"})
     assert t.step_toward((0, 5), (6, 5), 2) is not None
     assert t.path_to((0, 5), (0, 5)) == []
+
+
+def test_paths_never_enter_rows_beyond_the_map():
+    mountains = {(11, 9): "m", (9, 8): "m", (10, 8): "m", (11, 8): "m", (12, 8): "m", (13, 8): "m"}
+    t = store(mountains | {(x, 9): "g" for x in (9, 10, 12, 13)})
+    path = t.path_to((10, 9), (12, 9))
+    assert path is None or all(y <= 9 for _, y in path)

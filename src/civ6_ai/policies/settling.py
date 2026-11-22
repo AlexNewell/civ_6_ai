@@ -101,6 +101,12 @@ class SettlingSettings:
     far_penalty: float = 6.0
     far_min_safe_rate: float = 8.0
     travel_turn_cost: float = 6.0  # Score given up for each turn spent walking to a site.
+    # Issue 379: the walk is timed along a terrain path (water, mountains and refused territory
+    # blocked, hills and woods slower), not by hex distance: a '3 turn' site took 10. The top
+    # `game_path_sites` candidates are then checked with the game's own pathing estimate, at most
+    # that many reads per settler per turn. 0 reads nothing from the game.
+    game_path_sites: int = 3
+    path_horizon_turns: float = 20.0  # The terrain walk looks this many turns out.
     # Site score. The weights follow the ones civ6-mcp ranks its list with, minus its hidden terms.
     food_weight: float = 2.0
     production_weight: float = 2.0
@@ -455,6 +461,11 @@ class CandidateLog:
     breakdown: dict[str, tuple[float, float]] = field(default_factory=dict)
     # The site-quality score alone: no loyalty, fog or far-city penalty (`site_score` has them).
     quality_score: float = 0.0
+    # Issue 379: the three turn estimates. `turns` is the best one known (game, else path, else
+    # hex). -1 for the game means it found no path; None means that estimate was not available.
+    turns_hex: int = 0
+    turns_path: int | None = None
+    turns_game: int | None = None
 
 
 @dataclass(frozen=True)
@@ -501,6 +512,27 @@ class SettlingGame(GameReads, Protocol):
     async def found_city(self, unit_index: int) -> str: ...
 
     async def automate_explore(self, unit_index: int) -> str: ...
+
+    # Issue 379: optional. A game without it falls back to the terrain estimate.
+    async def get_pathing_estimate(self, unit_index: int, target_x: int, target_y: int) -> Any: ...
+
+
+NO_GAME_PATH = "no path to it (the game's estimate)"
+NO_WALKING_PATH = "no walking path to it (mountains, water or refused territory)"
+
+
+def game_turns(estimate: Any, distance: int) -> int | None:
+    """Turns the game's pathing estimate gives, counted as the hex estimate counts them (a walk
+    that ends this turn is 1). -1 for "no path"; None when the reply says nothing. The game's own
+    `turns` counts the turns after this one, and is -1 when there is no path."""
+    turns = getattr(estimate, "turns", None)
+    if turns is None:
+        return None
+    if turns < 0:
+        return -1
+    if getattr(estimate, "total_tiles", 0) <= 0:
+        return None if distance > 0 else 0
+    return int(turns) + 1
 
 
 def _land_military(unit: Unit) -> bool:
@@ -832,6 +864,13 @@ class SettlingPolicy:
     # the path routes around them instead of bouncing back once the pair has moved; dropped when
     # the settler's goal changes or the settler is gone.
     _refused_steps: dict = field(default_factory=dict, init=False, repr=False)
+    # Issue 379: tiles a move was refused onto for a border (city-state or foreign territory), kept
+    # for the game: the terrain walk treats them as blocked.
+    _border_blocked: set = field(default_factory=set, init=False, repr=False)
+    # The game's pathing answers this turn, {(settler id, x, y): estimate}, and the reads spent.
+    _game_paths: dict = field(default_factory=dict, init=False, repr=False)
+    _game_reads: dict = field(default_factory=dict, init=False, repr=False)
+    _game_paths_turn: int = field(default=-1, init=False, repr=False)
     # The threat state, or None to play without it (a war is then unknown, so no lone garrison
     # leaves). `_lone_ok` is this turn's cities whose last defender may leave; `_stripped` maps a
     # city tile whose last defender left with a settler to that escort's id.
@@ -1168,7 +1207,16 @@ class SettlingPolicy:
         # capital, every site read "hostile unit near the site", safe_sites stayed 0 from turn
         # 15 and no settler was built by turn 51.
         candidates = self._candidates(
-            origin, exploration, city_tiles, rival_tiles, danger, False, turn, [], escorted=True
+            origin,
+            exploration,
+            city_tiles,
+            rival_tiles,
+            danger,
+            False,
+            turn,
+            [],
+            escorted=True,
+            walk=bool(settlers),  # Issue 379: no settler, no single origin to walk from.
         )
         # Pending-fog sites count: their measurement arrives with the next read.
         sites = [c for c in candidates if c.rejected is None or c.rejected == FOG_PENDING]
@@ -1270,16 +1318,25 @@ class SettlingPolicy:
         turn: int,
         reserved: list[tuple[int, int]],
         escorted: bool = False,
+        walk: bool = True,
     ) -> list[CandidateLog]:
         self._needs_look = set()  # This scan's sites that need a look.
         s = self.settings
         found = []
         # The first own city listed stands for the capital in the distance component (logged only).
         capital = self._own_cities[0][:2] if self._own_cities else None
+        walk = self._walk_turns(settler) if walk else None
         for site in exploration.settle_sites:
             site_score = score_site(site, s)
             distance = hex_distance(settler.x, settler.y, site.x, site.y, s.map_width)
-            turns = math.ceil(distance / max(1.0, settler.max_moves))
+            turns_hex = math.ceil(distance / max(1.0, settler.max_moves))
+            turns, turns_path, walk_rejected = turns_hex, None, None
+            if walk is not None and distance > 0:
+                turns_path = walk.get((site.x, site.y))
+                if turns_path is not None:
+                    turns = turns_path
+                elif self.terrain.get(site.x, site.y) is not None:
+                    walk_rejected = NO_WALKING_PATH
             # The first city can't be picky: a rival's pull is only counted once we have a city.
             margin, rate, safe = 0.0, 0.0, 0.0
             sources = self._pressure_sources()
@@ -1312,6 +1369,8 @@ class SettlingPolicy:
             rejected = None
             if (site.x, site.y) in self._failed_sites:
                 rejected = "founding failed here"
+            elif walk_rejected is not None:
+                rejected = walk_rejected
             elif self._set_aside.get((site.x, site.y), -1) >= turn:
                 rejected = "recent moves to it were refused"
             elif any(
@@ -1383,10 +1442,93 @@ class SettlingPolicy:
                     fog_risk,
                     breakdown,
                     breakdown_total(breakdown),
+                    turns_hex,
+                    turns_path,
                 )
             )
         found.sort(key=lambda c: (-c.net_score, c.distance, c.x, c.y))
         return found
+
+    def _walk_turns(self, settler: Unit) -> dict[tuple[int, int], int] | None:
+        """Issue 379: turns for `settler` to walk to each tile by the terrain path, or None when
+        there is no terrain store (or it holds no tiles, or is a stub without the method)."""
+        walker = getattr(self.terrain, "path_turns", None)
+        if walker is None or not len(self.terrain):
+            return None
+        return walker(
+            (settler.x, settler.y),
+            max(1.0, settler.max_moves),
+            self._border_blocked,
+            self.settings.path_horizon_turns,
+        )
+
+    def _route_known(self, estimate: Any) -> bool:
+        """True unless a waypoint of the game's route is a tile the terrain store has never read or
+        cannot be walked: the game plans blindly through unrevealed mountains and water, so such a
+        route's turns are discarded. A route with no waypoints, or no store, cannot be checked."""
+        if self.terrain is None or not len(self.terrain):
+            return True
+        for raw in getattr(estimate, "waypoints", None) or []:
+            try:
+                x, y = (int(v) for v in str(raw).strip("() ").split(","))
+            except ValueError:
+                continue
+            if self.terrain.get(x, y) is None or self.terrain.step_cost(x, y, False) is None:
+                return False
+        return True
+
+    async def _confirm_with_game(
+        self, game, settler: Unit, candidates: list[CandidateLog], turn: int
+    ) -> list[CandidateLog]:
+        """Issue 379: replace the estimate of the top `game_path_sites` sites with the game's own
+        pathing estimate for this settler, and reject a site it finds no path to. At most that
+        many reads per settler per turn, once per site; a game without the read, or a reply that
+        says nothing, leaves the terrain or hex estimate in place."""
+        s = self.settings
+        read = getattr(game, "get_pathing_estimate", None)
+        if read is None or s.game_path_sites <= 0:
+            return candidates
+        if turn != self._game_paths_turn:
+            self._game_paths_turn = turn
+            self._game_paths.clear()
+            self._game_reads.clear()
+        examined: set[tuple[int, int]] = set()
+        for _ in range(s.game_path_sites):
+            top = [c for c in candidates if c.rejected is None][: s.game_path_sites]
+            # Standing on the site: nothing to walk, so nothing to ask (the game answers "no path"
+            # to its own tile).
+            target = next((c for c in top if (c.x, c.y) not in examined and c.distance > 0), None)
+            if target is None:
+                break
+            examined.add((target.x, target.y))
+            slot = (settler.unit_id, target.x, target.y)
+            if slot not in self._game_paths:
+                if self._game_reads.get(settler.unit_id, 0) >= s.game_path_sites:
+                    break
+                self._game_reads[settler.unit_id] = self._game_reads.get(settler.unit_id, 0) + 1
+                try:
+                    self._game_paths[slot] = await read(settler.unit_index, target.x, target.y)
+                except Exception:  # A failed read leaves the other estimates in place.
+                    log.warning("pathing estimate failed", exc_info=True)
+                    self._game_paths[slot] = None
+            estimate = self._game_paths[slot]
+            turns = game_turns(estimate, target.distance)
+            if turns is not None and turns >= 0 and not self._route_known(estimate):
+                turns = None  # Issue 379: a route through unread or blocked ground is not trusted.
+            if turns is None:
+                continue
+            if turns < 0 and (target.turns_path is not None or target.distance <= 2):
+                continue  # The terrain walk finds a way (or it is a step or two): not trusted.
+            if turns < 0:
+                updated = replace(target, rejected=NO_GAME_PATH, turns_game=-1)
+            else:
+                net = target.net_score + s.travel_turn_cost * (target.turns - turns)
+                updated = replace(target, turns=turns, net_score=net, turns_game=turns)
+            candidates = sorted(
+                [updated if c is target else c for c in candidates],
+                key=lambda c: (-c.net_score, c.distance, c.x, c.y),
+            )
+        return candidates
 
     async def _settle(
         self,
@@ -1431,6 +1573,7 @@ class SettlingPolicy:
             reserved,
             escorted,
         )
+        candidates = await self._confirm_with_game(game, settler, candidates, turn)
         usable = [c for c in candidates if c.rejected is None]
         if not escorted:
             # A site refused only because a hostile unit is near it is open to an escorted
@@ -1772,6 +1915,8 @@ class SettlingPolicy:
         (which passes once the blocker moves) stopped it."""
         if "STACKING" in str(result):
             return
+        if "territory" in str(result).lower():
+            self._border_blocked.add(tuple(step))  # Issue 379: the terrain walk avoids it too.
         kept = self._refused_steps.get(settler.unit_id)
         tiles = set(kept[1]) if kept is not None and kept[0] == tuple(goal) else set()
         tiles.add(tuple(step))

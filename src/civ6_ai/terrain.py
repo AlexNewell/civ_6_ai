@@ -302,3 +302,41 @@ class TerrainStore:
                     if t < turns.get((nx, ny), float("inf")):
                         turns[nx, ny] = t
         return turns
+
+    def path_turns(
+        self,
+        start: tuple[int, int],
+        moves: float,
+        avoid: Iterable[tuple[int, int]] = (),
+        horizon_turns: float = 20.0,
+    ) -> dict[tuple[int, int], int]:
+        """Issue 379: whole turns for a walker with `moves` per turn to reach each tile by the
+        cheapest terrain path, never entering water, mountains or `avoid` tiles (1 for a tile
+        reached this turn, 0 for `start`). The game's rule: a unit may enter a tile while it has
+        any movement left, however much the tile costs, so a settler (2 moves) crosses two flat
+        tiles or one hill a turn, not "total cost / moves" rounded up. A tile with no path
+        within `horizon_turns` is absent."""
+        blocked = set(avoid)
+        per_turn = max(1.0, moves)
+        best: dict[tuple[int, int], tuple[int, float]] = {start: (0, 0.0)}
+        queue: list[tuple[int, float, int, int]] = [(0, 0.0, start[0], start[1])]
+        while queue:
+            turns, spent, cx, cy = heapq.heappop(queue)
+            if (turns, spent) > best.get((cx, cy), (1 << 30, 0.0)):
+                continue
+            for nxt in neighbours(cx, cy, self.map_width):
+                step = self.step_cost(nxt[0], nxt[1], naval=False)
+                if (
+                    step is None
+                    or nxt in blocked
+                    or (self.map_height is not None and nxt[1] >= self.map_height)
+                ):
+                    continue
+                if spent >= per_turn:
+                    state = (turns + 1, min(step, per_turn))
+                else:
+                    state = (turns, spent + step)
+                if state[0] < horizon_turns and state < best.get(nxt, (1 << 30, 0.0)):
+                    best[nxt] = state
+                    heapq.heappush(queue, (state[0], state[1], nxt[0], nxt[1]))
+        return {p: (0 if p == start else s[0] + 1) for p, s in best.items()}

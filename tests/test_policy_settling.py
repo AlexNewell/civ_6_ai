@@ -2281,6 +2281,203 @@ def test_a_refused_step_stays_avoided_for_the_whole_trip_so_the_pair_does_not_bo
     assert policy._refused_steps[7] == ((16, 6), {(13, 12)})
 
 
+# ----- issue 379: sites ranked by the walk, not the hex distance -----
+
+
+def _walk_game(wall=(), sites=None, estimates=None, store=True, at=(10, 10)):
+    from civ6_ai.state.reader import build_tile
+    from civ6_ai.terrain import TerrainStore
+    from fixtures.civ_state import tile
+
+    sites = sites or [site(15, 10, food=44), site(10, 15, food=40)]
+    game = make_game([settler(*at)], cities=[alpha()], sites=sites)
+    game.estimate_calls = []
+
+    async def moved(unit_index, x, y):
+        game.actions.append(("move", unit_index, x, y))
+        return f"MOVING_TO|{x},{y}|from:10,10|now_at:{x},{y}"
+
+    game.move_unit = moved
+    if estimates is not None:
+
+        async def estimate(unit_index, x, y):
+            game.estimate_calls.append((unit_index, x, y))
+            return estimates[(x, y)]
+
+        game.get_pathing_estimate = estimate
+    policy = SettlingPolicy()
+    if store:
+        ground = TerrainStore(map_width=74)
+        tiles = []
+        for ty in range(2, 20):
+            for tx in range(4, 22):
+                extra = {"terrain": "TERRAIN_GRASS_MOUNTAIN"} if (tx, ty) in wall else {}
+                tiles.append(
+                    build_tile(
+                        tile(x=tx, y=ty, improvement=None, units=[], is_river=False, **extra)
+                    )
+                )
+        ground.learn(tiles)
+        policy.terrain = ground
+    return game, policy
+
+
+def _ridge():
+    return {(12, y) for y in range(2, 19)}
+
+
+def _by_site(policy):
+    return {(c.x, c.y): c for c in policy.decisions[-1].candidates}
+
+
+def test_a_site_behind_a_ridge_ranks_below_a_slightly_worse_open_one():
+    game, policy = _walk_game(wall=_ridge())
+    run(policy, game)
+    behind, open_ = _by_site(policy)[15, 10], _by_site(policy)[10, 15]
+    assert behind.turns_path > behind.turns_hex
+    assert behind.site_score > open_.site_score  # The hex estimate alone would pick it.
+    assert policy.decisions[-1].target == (10, 15)
+
+
+def test_with_no_ridge_the_better_site_still_wins():
+    game, policy = _walk_game()
+    run(policy, game)
+    assert policy.decisions[-1].target == (15, 10)
+
+
+def test_without_a_terrain_store_the_hex_estimate_is_used():
+    game, policy = _walk_game(wall=_ridge(), store=False)
+    run(policy, game)
+    log = _by_site(policy)[15, 10]
+    assert log.turns_path is None and log.turns == log.turns_hex
+    assert policy.decisions[-1].target == (15, 10)
+
+
+def test_a_site_walled_in_by_mountains_is_rejected():
+    ring = {(x, y) for x in range(14, 17) for y in range(9, 12)} - {(15, 10)}
+    game, policy = _walk_game(wall=ring)
+    run(policy, game)
+    assert _by_site(policy)[15, 10].rejected is not None
+    assert policy.decisions[-1].target == (10, 15)
+
+
+def _est(turns, tiles=5):
+    return lq.PathingEstimate(turns=turns, total_tiles=tiles, reachable_this_turn=2)
+
+
+def test_the_game_estimate_overrides_the_terrain_estimate():
+    game, policy = _walk_game(estimates={(15, 10): _est(9), (10, 15): _est(1)})
+    run(policy, game)
+    log = _by_site(policy)
+    assert log[15, 10].turns_game == 10 and log[15, 10].turns == 10
+    assert log[15, 10].turns_path is not None and log[15, 10].turns_hex == 3
+    assert policy.decisions[-1].target == (10, 15)
+
+
+def test_no_path_from_the_game_rejects_a_site_the_terrain_cannot_reach_either():
+    ring = {(x, y) for x in range(14, 17) for y in range(9, 12)} - {(15, 10)}
+    game, policy = _walk_game(wall=ring, estimates={(15, 10): _est(-1, 0), (10, 15): _est(2)})
+    run(policy, game)
+    assert policy.decisions[-1].target == (10, 15)
+
+
+def test_no_path_from_the_game_rejects_a_far_site_when_the_terrain_is_unknown():
+    game, policy = _walk_game(store=False, estimates={(15, 10): _est(-1, 0), (10, 15): _est(2)})
+    run(policy, game)
+    log = _by_site(policy)
+    assert log[15, 10].turns_game == -1 and log[15, 10].rejected
+    assert policy.decisions[-1].target == (10, 15)
+
+
+def test_an_empty_game_reply_keeps_the_terrain_estimate():
+    game, policy = _walk_game(estimates={(15, 10): _est(0, 0), (10, 15): _est(0, 0)})
+    run(policy, game)
+    assert _by_site(policy)[15, 10].turns_game is None
+
+
+def test_at_most_n_game_reads_per_settler_per_turn():
+    many = [site(15, 10 + i, food=44 - i) for i in range(-3, 4)]
+    estimates = {(s.x, s.y): _est(-1, 0) for s in many}
+    game, policy = _walk_game(sites=many, estimates=estimates)
+    policy.settings = SettlingSettings(game_path_sites=2)
+    run(policy, game)
+    assert len(game.estimate_calls) == 2
+    assert len(set(game.estimate_calls)) == 2
+    game.estimate_calls.clear()
+    run(policy, game)  # The same turn again: nothing is read twice.
+    assert game.estimate_calls == []
+
+
+def test_a_game_with_a_failing_read_falls_back():
+    game, policy = _walk_game()
+
+    async def broken(unit_index, x, y):
+        raise RuntimeError("no connection")
+
+    game.get_pathing_estimate = broken
+    run(policy, game)
+    assert policy.decisions[-1].target == (15, 10)
+
+
+def test_a_territory_refusal_blocks_the_tile_for_the_terrain_walk():
+    game, policy = _walk_game()
+    policy._remember_refused(
+        settler(), (15, 10), (11, 10), "BLOCKED (city-state territory (Anshan))"
+    )
+    assert (11, 10) in policy._border_blocked
+    policy._remember_refused(settler(), (15, 10), (12, 10), "BLOCKED (impassable mountain)")
+    assert (12, 10) not in policy._border_blocked
+
+
+def _row_store(kinds):
+    from civ6_ai.state.reader import build_tile
+    from civ6_ai.terrain import TerrainStore
+    from fixtures.civ_state import tile
+
+    store = TerrainStore(map_width=74)
+    store.learn(
+        [
+            build_tile(tile(x=10 + i, y=10, improvement=None, units=[], is_river=False, **extra))
+            for i, extra in enumerate(kinds)
+        ]
+    )
+    return store
+
+
+def test_path_turns_follows_the_games_any_movement_left_rule():
+    # A settler (2 moves) crosses two flat tiles a turn, or one hill a turn.
+    flat = _row_store([{}] * 6).path_turns((10, 10), 2.0, horizon_turns=10)
+    assert [flat[(10 + i, 10)] for i in range(6)] == [0, 1, 1, 2, 2, 3]
+    hills = _row_store([{}, {"is_hills": True}, {"is_hills": True}, {}, {}]).path_turns(
+        (10, 10), 2.0, horizon_turns=10
+    )
+    # Flat (1 spent), a hill entered with 1 left, then a hill a turn on, then two flat tiles.
+    assert [hills[(10 + i, 10)] for i in range(5)] == [0, 1, 2, 3, 3]
+
+
+def test_path_turns_skips_avoided_tiles():
+    store = _row_store([{}] * 4)
+    assert (11, 10) not in store.path_turns((10, 10), 2.0, avoid=[(11, 10)], horizon_turns=10)
+
+
+def test_a_settler_standing_on_its_site_is_never_rejected_by_pathing():
+    # Live: the game answered "no path" to the settler's own tile and it walked away.
+    game, policy = _walk_game(
+        sites=[site(15, 10, food=44)], estimates={(15, 10): _est(-1, 0)}, at=(15, 10)
+    )
+    run(policy, game)
+    assert game.estimate_calls == []
+    assert game.actions == [("found", 7)]
+
+
+def test_a_game_no_path_for_a_short_walk_with_a_terrain_path_is_not_trusted():
+    game, policy = _walk_game(estimates={(15, 10): _est(-1, 0), (10, 15): _est(-1, 0)})
+    run(policy, game)
+    log = _by_site(policy)
+    assert log[15, 10].rejected is None and log[15, 10].turns_game is None
+    assert policy.decisions[-1].target == (15, 10)
+
+
 def test_the_escort_step_skips_a_tile_our_own_unit_holds():
     # Issue 377: the order to a tile a friendly Warrior stood on was refused three turns running.
     game, policy = _escort_pair_game({})

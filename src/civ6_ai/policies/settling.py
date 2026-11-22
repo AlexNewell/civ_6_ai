@@ -155,6 +155,10 @@ class SettlingSettings:
     # Bounds on waiting and retrying, so nothing stalls for good.
     no_site_disband_turns: int = 20  # A settler with no site this many turns in a row is disbanded.
     max_move_failures: int = 3  # Refused moves to one site before it is set aside.
+    # Issue 394: a long move the game refused (the route crosses a tile it will not plan through)
+    # was resent for six turns. The same turn, up to this many terrain steps toward the site are
+    # tried in turn, each refused one remembered; 0 turns the fallback off.
+    refused_move_fallback_steps: int = 3
     # Loyalty. A city leans towards the owner of the bigger, nearer cities within `loyalty_radius`.
     loyalty_radius: int = 9
     loyalty_city_base: int = 2  # Added to a city's population, so a small city still pulls.
@@ -1730,6 +1734,26 @@ class SettlingPolicy:
             reason = "a hostile unit was seen near the site, so stopping a tile short"
         result = await game.move_unit(settler.unit_index, *dest)
         moved = move_succeeded(result)
+        if not moved and gap > max(1, int(settler.moves)):
+            # Issue 394: the long order was refused; step along the terrain path this turn.
+            self._remember_refused(settler, goal, dest, result)
+            tried = {tuple(dest)}
+            for _ in range(max(0, s.refused_move_fallback_steps)):
+                step = self._pick_step(settler, goal, units=units)
+                if step is None or tuple(step) in tried:
+                    break
+                tried.add(tuple(step))
+                short = await game.move_unit(settler.unit_index, *step)
+                if move_succeeded(short):
+                    self._move_failures.pop(goal, None)
+                    record(
+                        "move",
+                        f"the long move was refused, so a terrain step to {tuple(step)} instead",
+                        goal,
+                        short,
+                    )
+                    return True
+                self._remember_refused(settler, goal, step, short)
         if moved:
             self._move_failures.pop(goal, None)
         else:

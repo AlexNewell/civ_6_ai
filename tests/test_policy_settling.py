@@ -2531,3 +2531,14 @@ def test_stepping_onto_the_site_to_found_records_the_arrival():
     policy._last_turn = 1
     asyncio.run(policy._step_and_found(game, settler(x=13, y=10), target, [], lambda *a, **k: None))
     assert policy._movement().trips.closed[-1]["outcome"] == "arrived"
+
+
+def test_a_ranged_hostile_shoots_across_water_it_cannot_cross():
+    from dataclasses import replace
+
+    ring = {t: "water" for t in neighbours(12, 12, 74)}
+    store = _flat_store(ring)
+    archer = replace(_hostile(12, 12, "UNIT_ARCHER"), ranged_strength=15)
+    assert _danger(store, [archer]).near(14, 12, 3)  # Two tiles away: in range over the water.
+    assert not _danger(store, [_hostile(12, 12)]).near(14, 12, 3)  # A warrior cannot.
+    assert not _danger(store, [archer]).near(15, 12, 3)  # Past its range from where it stands.

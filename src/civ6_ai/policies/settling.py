@@ -778,6 +778,7 @@ def frontier_points(
     return points
 
 
+_RANGED_REACH = 2  # How far a ranged hostile strikes beyond where it stands.
 _MOUNTED = ("HORSE", "COURSER", "KNIGHT", "CAVALRY", "CHARIOT", "CAMEL", "ELEPHANT")
 
 
@@ -799,24 +800,28 @@ class _Danger:
 
     def _can_reach(self, t: Threat, x: int, y: int, radius: int) -> bool:
         """Whether hostile `t` can attack tile (x, y): within `radius` by hex distance, and (with
-        terrain) by the walk. The radius is the old rule's generosity: a melee unit walks
-        `radius - 1` moves and then strikes one tile further, so on open ground this equals the
-        hex radius, and water or a mountain in the way shortens it."""
+        terrain) by the walk. The radius is the old rule's generosity: a unit walks
+        `radius - range` moves and then strikes `range` tiles further (1 for a melee unit, 2 for
+        a ranged one, which can shoot across water it cannot cross), so on open ground this
+        equals the hex radius, and water or a mountain in the way shortens it."""
         if hex_distance(x, y, t.x, t.y, self.map_width) > radius:
             return False
         movement = self.movement
+        attack_range = _RANGED_REACH if t.ranged_strength > 0 else 1
         if (
             not self.walk
             or movement is None
             or movement.terrain is None
-            or radius <= 1
+            or radius <= attack_range
             or any(word in t.unit_type for word in _SEA_UNITS)
         ):
             return True
-        key = (t.x, t.y, radius)
+        key = (t.x, t.y, radius, attack_range)
         reach = self._reach.get(key)
         if reach is None:
-            reach = self._reach[key] = movement.threat_reach((t.x, t.y), radius - 1)
+            reach = self._reach[key] = movement.threat_reach(
+                (t.x, t.y), radius - attack_range, attack_range
+            )
         return (x, y) in reach
 
     def near(self, x: int, y: int, radius: int) -> bool:

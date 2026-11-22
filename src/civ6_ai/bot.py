@@ -370,11 +370,12 @@ def build_orchestrator(
         secondary.map = threat_map_handler.map  # Routes are checked against it (issue 269).
         defence.map = threat_map_handler.map  # The same map decides who is short (issue 264).
     # One movement service for builders and traders (epic #399): walking turns, route danger and
-    # the `movement_trip` log. Settling and military join it in later slices.
+    # the `movement_trip` log. Military joins it (slice 3); settling in a later slice.
     movement = Movement(
         threat_map_handler.terrain, threat_map_handler.map if use_threat_map else None
     )
     secondary.movement = movement
+    military.movement = movement  # Camp approach and every move-to-goal order (slice 3).
     victory_watch = VictoryWatch()
     diplomacy = DiplomacyPolicy(threats=victory_watch.threat_ids)
     # The boost judgement's inputs and nudges (#344). Both are used only when

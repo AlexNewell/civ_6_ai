@@ -2731,15 +2731,23 @@ class MilitaryPolicy:
                 continue
             # Run 15: a move straight onto a camp three tiles off is refused (the game only allows
             # that capture move from beside it), so walk to the tile beside it first.
+            on_route = False
             if adjacent and not occupied:
                 goals = [where]
             elif adjacent:
                 continue  # In reach of the guards: the attack step takes it from here.
             elif far:
-                # One attempt is kept back for the stretch below if the game refuses them all.
-                goals = self._muster_goals(
-                    t, unit, where, tries=max(1, min(4, s.attempts_per_unit - 1))
-                )
+                goals = self._muster_goals(t, unit, where)
+                aim = self._muster_pick.get(where)
+                if aim is not None and self._field(t, where) is not None:
+                    # Issue 392: before the force is rallied the order is the next stretch of OUR
+                    # walking route to the muster tile, never the camp or a tile across the bay
+                    # (live: orders for tiles beside the camp from 6 tiles off were refused as
+                    # "path may be blocked by intermediate tiles" turn after turn).
+                    heading = goals[0] if goals else aim
+                    stretch = self._stop_tile(unit, self._pos(t, unit), heading)
+                    goals = [stretch] if stretch != self._pos(t, unit) else []
+                    on_route = True
                 t.map_use["muster_moves"] = t.map_use.get("muster_moves", 0) + 1
             else:
                 goals = self._stage_goals(t, unit, where)
@@ -2782,6 +2790,7 @@ class MilitaryPolicy:
 
             # Every option on one scale: advance, fight, hold, fall back (issue 380).
             advance = [(g, weigh(g)) for g in goals]
+            unsafe = advance
             advance = [(g, sc) for g, sc in advance if sc.net >= s.camp_step_min_net]
             advance.sort(key=lambda gs: -gs[1].net)  # The goal that won is the one tried first.
             options: dict[str, float] = {}
@@ -2819,7 +2828,12 @@ class MilitaryPolicy:
                     fights.append((self._target_score(t, unit, foe, odds).total, spot, odds, foe))
             if fights:
                 options["attack"] = max(f[0] for f in fights)
-            order = ["attack", "hold", "fall_back", "advance"]  # Ties go to the careful one.
+            # Ties go to the careful one, except where staying has no risk to avoid: then a step
+            # forward wins (live: hold and advance both scored 1.0 at zero risk, and nine units
+            # stood still for ten turns).
+            order = ["attack", "hold", "fall_back", "advance"]
+            if hold.risk <= 0 and hold.exposure <= 0:
+                order = ["attack", "advance", "hold", "fall_back"]
             choice = max((o for o in order if o in options), key=lambda o: options[o])
             numbers = {"chosen": choice, "options": {k: round(v, 2) for k, v in options.items()}}
             step = None
@@ -2835,10 +2849,13 @@ class MilitaryPolicy:
             if choice == "hold":
                 t.acted.add(unit.unit_id)  # Holds the ground it stands on.
                 waiting = gap > 0
+                risky = any(sc.risk > 0 for _, sc in unsafe)
                 why = (
                     f"waiting for the force ({len(near)} of {len(force)} near)"
                     if waiting
                     else "step unsafe, holding"
+                    if risky
+                    else "no step toward the camp scores above holding"
                 )
                 self._log(t, unit, "camp", why, where, odds={**numbers, **asdict(hold)})
                 continue
@@ -2872,10 +2889,11 @@ class MilitaryPolicy:
                     # A muster tile the game will not take us to (impassable ground, another
                     # nation's land): remember it, and try the next one now. Run 19: a unit was
                     # refused the same unreachable tile every few turns and never arrived.
-                    self._muster_bad[goal] = t.turn + s.muster_bad_turns
+                    if not on_route:  # A stretch of the route is not a muster tile to blame.
+                        self._muster_bad[goal] = t.turn + s.muster_bad_turns
             else:
                 result = result or ""
-            if far and goals and unit.unit_id not in t.acted and not out_of_orders:
+            if far and goals and not on_route and unit.unit_id not in t.acted and not out_of_orders:
                 # The game refused the whole way (live: "path may be blocked by intermediate
                 # tiles", turn after turn). Our own route is known tile by tile, so walk the
                 # stretch this turn's moves reach, which the game takes as a short move.
@@ -3505,10 +3523,7 @@ class MilitaryPolicy:
                 if p not in taken and p != camp and self._passable(p)
                 and 0 < field_.get(p, -1) <= walk
             ]  # fmt: skip
-            if free:
-                return free[:tries]
-            # Every tile of the route is taken or refused: the old line to the camp still moves
-            # the unit, where an empty list left it holding for good (live: nine turns frozen).
+            return free[:tries]
         line = hex_line((unit.x, unit.y), camp, width)
         first = next(
             (p for p in line if hex_distance(*p, *camp, width) <= muster and self._passable(p)),

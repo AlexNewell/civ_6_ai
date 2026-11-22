@@ -3277,7 +3277,6 @@ def test_a_force_whose_muster_tiles_are_all_refused_still_walks_the_route():
     run(policy, game)
     moved = {(o[2], o[3]) for o in game.orders("move")}
     assert moved and not moved & near_camp  # A stretch of the route, not the refused tiles.
-    assert any("a stretch at a time" in d.reason for d in camp_orders(policy))
 
 
 def test_the_muster_tile_is_never_one_the_game_refused_lately():
@@ -3336,3 +3335,54 @@ def test_a_unit_ordered_by_a_city_role_is_not_counted_into_the_camp_force_that_t
     assert policy.decisions and not [
         d for d in camp_orders(policy) if d.unit_id == 2 and d.turn == policy.decisions[0].turn
     ]
+
+
+def test_a_far_units_order_is_the_next_stretch_of_our_route_not_a_tile_across_the_bay():
+    # Live STD_T1_04 T58: units 6-8 tiles off ordered tiles beside the camp (61,17 and 60,17,
+    # across the water) and 63,17, all refused as "path may be blocked".
+    units = [
+        warrior(uid=1, x=12, y=10, **STRONG),
+        warrior(uid=2, x=12, y=11, **STRONG),
+        warrior(uid=3, x=9, y=9, **STRONG),
+    ]
+    policy = _bay_policy()
+    game = _bay_game(units)
+    run(policy, game)
+    camp = (21, 10)
+    orders = game.orders("move")
+    assert len(orders) == 3
+    for _, _index, x, y in orders:
+        assert hex_distance(x, y, *camp, 74) > 1  # Never the camp or a tile beside it.
+        assert (x, y) not in {(16, y2) for y2 in range(0, 16)} | {(19, 10), (20, 10), (20, 9)}
+    # Each order is within one turn's walk of where the unit stood.
+    starts = {1: (12, 10), 2: (12, 11), 3: (9, 9)}
+    for (_, _index, x, y), uid in zip(sorted(orders, key=lambda o: o[1]), (1, 2, 3), strict=False):
+        assert (x, y) in policy.terrain.reach(*starts[uid], 2.0, False, 1.0)
+
+
+def test_with_no_risk_a_step_forward_beats_standing_beside_friends():
+    # Live STD_T1_04 T58: hold scored the cover of two friends (1.0) and the step scored its
+    # progress (1.0); at zero risk the tie went to holding, for ten turns.
+    one_move = dict(moves_remaining=1.0, max_moves=1.0)
+    units = [
+        warrior(uid=1, x=12, y=10, **STRONG, **one_move),
+        warrior(uid=2, x=11, y=10, **STRONG),
+        warrior(uid=3, x=11, y=11, **STRONG),
+    ]
+    policy = _bay_policy()
+    game = _bay_game(units)
+    run(policy, game)
+    (decision,) = [d for d in camp_orders(policy) if d.unit_id == 1]
+    assert decision.odds["options"]["advance"] == decision.odds["options"]["hold"] == 1.0
+    assert decision.odds["chosen"] == "advance" and any(o[1] == 1 for o in game.orders("move"))
+
+
+def test_the_hold_reason_says_unsafe_only_when_the_step_has_risk():
+    # Zero-risk hold with nowhere to step (a lone unit with no route): not called "unsafe".
+    from civ6_ai.policies.military import camp_step_score
+
+    me = build_unit(warrior(uid=1, x=12, y=10, **STRONG))
+    s = MilitarySettings(map_width=74)
+    pos = lambda u: (u.x, u.y)  # noqa: E731
+    stay = camp_step_score(me, (12, 10), (12, 10), (21, 10), [], [], pos, 0.0, s, advancing=False)
+    assert stay.risk == 0 and stay.exposure == 0

@@ -620,10 +620,12 @@ def step_exposure(
     taken = 0.0
     kills = False
     for h in hostiles:
-        far = max(reach, ranged_reach) if h.ranged_strength > 0 else reach
-        if hex_distance(h.x, h.y, *tile, width) > far:
+        gap = hex_distance(h.x, h.y, *tile, width)
+        if gap > (max(reach, ranged_reach) if h.ranged_strength > 0 else reach):
             continue
         taken += incoming_damage(unit, h)
+        if gap > (ranged_reach if unit.ranged_strength > 0 else 1):
+            continue  # It can hit us, but we cannot hit it from this tile: no kill credit.
         odds = assess_attack(unit, Target(h.unit_type, h.x, h.y, h.hp), h, weights, None, width)
         kills = kills or (odds is not None and odds.sure_kill)
     return taken / max(unit.hp, 1), kills
@@ -2599,7 +2601,7 @@ class MilitaryPolicy:
             # muster all of them are.
             guards = [
                 b for b in t.threats
-                if b.hostile
+                if b.hostile and (b.x, b.y) not in t.dead
                 and (b.owner_id != BARBARIAN_ID or far or gap > 0
                      or hex_distance(b.x, b.y, *where, s.map_width) > s.camp_defender_radius)
             ]  # fmt: skip

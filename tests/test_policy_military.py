@@ -2959,3 +2959,32 @@ def test_a_hostile_archer_two_tiles_away_still_exposes_the_tile():
     walker = Threat(-1, "Barbarians", "UNIT_WARRIOR", 14, 10, 100, 100, 20, 0, 3, True)
     assert step_exposure(me, (12, 10), [shooter], W, None, 1)[0] > 0
     assert step_exposure(me, (12, 10), [walker], W, None, 1)[0] == 0
+
+
+def test_a_melee_unit_gets_no_kill_credit_for_an_archer_it_cannot_reach():
+    from civ6_ai.policies.military import step_exposure
+
+    me = build_unit(warrior(uid=1, x=12, y=10, combat_strength=30))
+    weak_archer = Threat(-1, "Barbarians", "UNIT_ARCHER", 14, 10, 5, 100, 15, 25, 3, True)
+    exposure, kills = step_exposure(me, (12, 10), [weak_archer], W, None, 1)
+    assert exposure > 0 and not kills  # It shoots us from two tiles; we cannot hit it.
+    assert step_exposure(me, (13, 10), [weak_archer], W, None, 1)[1]  # Beside it, we can.
+
+
+def test_a_hostile_already_killed_this_turn_is_not_step_risk():
+    camp = tile(x=20, y=10, improvement="IMPROVEMENT_BARBARIAN_CAMP", owner_id=-1, units=[])
+    units = [warrior(uid=1, x=16, y=10, **STRONG), warrior(uid=2, x=16, y=11, **STRONG)]
+    foes = [barbarian(x=17, y=10, cs=30), barbarian(x=20, y=10, cs=5)]
+    game = camp_game([*units, warrior(uid=3)], foes, camp=camp)
+    policy = MilitaryPolicy()
+    policy._committed[(20, 10)] = 15
+    original = policy._clear_camp
+
+    async def with_dead(game_, t):
+        t.dead.add((17, 10))
+        await original(game_, t)
+
+    policy._clear_camp = with_dead
+    run(policy, game)
+    scored = [d for d in camp_orders(policy) if d.unit_id == 1 and d.odds and "exposure" in d.odds]
+    assert scored and scored[0].odds["exposure"] == 0

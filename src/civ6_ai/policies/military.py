@@ -248,7 +248,10 @@ class MilitarySettings:
     camp_group_radius: int = 2  # Units this close, or inside the muster ring too, go in together.
     camp_step_reach: int = 1  # Hostile units this close to the stop tile are counted as risk.
     camp_step_min_net: float = 0.0
-    camp_risk_weight: float = 3.0  # Per unit's whole health expected to be lost to the hostiles.
+    camp_risk_weight: float = 5.0  # Per unit's whole health expected to be lost to the hostiles.
+    # Walking on past hostiles that can hit it next turn is the riskiest option: nobody covers its
+    # back and it is not dug in, so its risk is this many times a fighter's or a holder's.
+    camp_advance_risk_factor: float = 2.0
     camp_group_weight: float = 3.0  # Penalty for a force fully short of `needed` (scaled by gap).
     camp_progress_gain: float = 1.0  # Per tile closer to the camp.
     camp_setup_gain: float = 2.0  # Ends beside the camp with the whole force near.
@@ -256,6 +259,13 @@ class MilitarySettings:
     camp_screen_gain: float = 2.0  # A friendly civilian beside the tile that the unit covers.
     camp_cover_gain: float = 0.5  # Per friendly soldier beside the tile (two at most).
     camp_escape_gain: float = 3.0  # Per unit of exposure the stop tile has less than here.
+    # Fighting is one more option on the same scale (the owner: the Warrior walked toward the camp
+    # past hostiles beside it instead of fighting or falling back). Attack: gain for the share of
+    # the target's health dealt, for a sure kill, and a credit for the damage that unit would
+    # deal to us anyway if left alone (a fight it cannot avoid is better taken on our terms).
+    camp_attack_gain: float = 4.0
+    camp_kill_gain: float = 2.0
+    camp_unavoidable_credit: float = 2.0
     max_camp_turns: int = 8  # Turns spent assaulting one camp before it is set aside.
     camp_travel_turns: int = 20  # Turns a force may take to reach the muster point first.
     camp_retry_turns: int = 30
@@ -548,7 +558,9 @@ def camp_group_near(
 ) -> list[Unit]:
     """The units of the force that go in with `unit` (issue 380), itself included.
 
-    Those within `radius` of it, and, while it is inside the muster ring, those inside it too.
+    Those within `radius` of it, and, while it is inside the muster ring, those inside it too
+    and within twice the radius (live STD_T1_04: a lead unit's mates on the far side of the ring,
+    6 tiles off, made it "together" and it went in alone).
     """
     here = position(unit)
     ringed = hex_distance(*here, *camp, width) <= muster
@@ -557,8 +569,9 @@ def camp_group_near(
         if other.unit_id == unit.unit_id:
             continue
         spot = position(other)
-        if hex_distance(*here, *spot, width) <= radius or (
-            ringed and hex_distance(*spot, *camp, width) <= muster
+        gap = hex_distance(*here, *spot, width)
+        if gap <= radius or (
+            ringed and gap <= 2 * radius and hex_distance(*spot, *camp, width) <= muster
         ):
             near.append(other)
     return near
@@ -576,6 +589,15 @@ class StepScore:
     gap: float  # How far the force near is under the need, 0 (enough) to 1 (none).
 
 
+def incoming_damage(unit: Unit, hostile: Threat) -> float:
+    """Expected damage `hostile` deals to `unit` if it attacks it (it shoots when it has a ranged
+    attack, and our melee strength defends), not the retaliation we would take attacking it."""
+    attack = max(hostile.combat_strength, hostile.ranged_strength)
+    if attack <= 0:
+        return 0.0
+    return expected_damage(attack, unit.combat_strength or unit.ranged_strength or attack)
+
+
 def step_exposure(
     unit: Unit,
     tile: tuple[int, int],
@@ -584,20 +606,31 @@ def step_exposure(
     width: int | None,
     reach: int,
 ) -> tuple[float, bool]:
-    """Expected damage from hostiles within `reach` of `tile` over the unit's health, and whether
-    the unit would surely kill one of them, by the estimate behind the attack skips
-    ("deals 23, takes 25")."""
+    """Expected damage over the unit's health from hostiles within `reach` of `tile` attacking it
+    next turn, and whether the unit would surely kill one of them (the outgoing estimate behind
+    the attack skips, "deals 23, takes 25", kept apart: a ranged unit takes nothing back from a
+    melee unit it shoots, but that unit still attacks it)."""
     taken = 0.0
     kills = False
     for h in hostiles:
         if hex_distance(h.x, h.y, *tile, width) > reach:
             continue
+        taken += incoming_damage(unit, h)
         odds = assess_attack(unit, Target(h.unit_type, h.x, h.y, h.hp), h, weights, None, width)
-        if odds is None:
-            continue
-        taken += odds.taken
-        kills = kills or odds.sure_kill
+        kills = kills or (odds is not None and odds.sure_kill)
     return taken / max(unit.hp, 1), kills
+
+
+def camp_attack_score(
+    unit: Unit, target: Threat, odds: AttackOdds, settings: "MilitarySettings"
+) -> float:
+    """The attack option on the same scale as a step: the share of the target's health dealt, a
+    sure kill, and the damage it would deal to us anyway, less the damage taken attacking."""
+    s = settings
+    share = min(odds.dealt, target.hp) / max(target.hp, 1)
+    score = s.camp_attack_gain * share + (s.camp_kill_gain if odds.sure_kill else 0.0)
+    score += s.camp_unavoidable_credit * incoming_damage(unit, target) / max(unit.hp, 1)
+    return score - s.camp_risk_weight * odds.taken / max(unit.hp, 1)
 
 
 def camp_step_score(
@@ -610,6 +643,7 @@ def camp_step_score(
     position: Callable[[Unit], tuple[int, int]],
     gap: float,
     settings: "MilitarySettings",
+    advancing: bool = True,
 ) -> StepScore:
     """Weigh stepping to `tile`: gain (progress to the camp, a combined attack set up, a sure
     kill, screening a civilian, cover from friends, escaping a worse tile) against the risk
@@ -620,10 +654,15 @@ def camp_step_score(
     hostiles = list(hostiles)
     exposure, kills = step_exposure(unit, tile, hostiles, s.weights, width, s.camp_step_reach)
     here_exposure, _ = step_exposure(unit, here, hostiles, s.weights, width, s.camp_step_reach)
-    gain = s.camp_progress_gain * max(
-        0, hex_distance(*here, *camp, width) - hex_distance(*tile, *camp, width)
+    # Progress counts in full only with the force: alone it is a reason to wait, not to go on.
+    gain = (
+        s.camp_progress_gain
+        * (1.0 - gap)
+        * max(0, hex_distance(*here, *camp, width) - hex_distance(*tile, *camp, width))
+        if advancing
+        else 0.0
     )
-    if hex_distance(*tile, *camp, width) <= 1 and gap <= 0:
+    if advancing and hex_distance(*tile, *camp, width) <= 1 and gap <= 0:
         gain += s.camp_setup_gain
     if kills:
         gain += s.camp_finish_gain
@@ -637,7 +676,7 @@ def camp_step_score(
         gain += s.camp_screen_gain
     gain += s.camp_cover_gain * min(len(soldiers), 2)
     gain += s.camp_escape_gain * max(0.0, here_exposure - exposure)
-    risk = s.camp_risk_weight * exposure
+    risk = s.camp_risk_weight * exposure * (s.camp_advance_risk_factor if advancing else 1.0)
     penalty = s.camp_group_weight * gap
     return StepScore(risk, penalty, gain, gain - risk - penalty, exposure, gap)
 
@@ -2473,45 +2512,99 @@ class MilitaryPolicy:
                 gap = max(0.0, 1.0 - have / need) if need > 0 else 0.0
                 if len(near) < s.camp_min_units:
                     gap = 1.0  # A lone unit is the whole shortfall.
-            # With the force together the camp's own guards are the fight it came for; every other
-            # hostile unit is risk. On the walk to the muster all of them are.
+            # With the force together the camp's own barbarian guards are the fight it came for;
+            # every other hostile unit, of any nation at war with us, is risk. On the walk to the
+            # muster all of them are.
             guards = [
                 b for b in t.threats
-                if b.hostile and b.owner_id == BARBARIAN_ID
-                and (far or gap > 0
+                if b.hostile
+                and (b.owner_id != BARBARIAN_ID or far or gap > 0
                      or hex_distance(b.x, b.y, *where, s.map_width) > s.camp_defender_radius)
             ]  # fmt: skip
             here = self._pos(t, unit)
 
             def weigh(
-                goal: tuple[int, int], unit=unit, guards=guards, gap=gap, here=here
+                goal: tuple[int, int], unit=unit, guards=guards, here=here, base=gap, **kw: Any
             ) -> StepScore:
-                # The tile it stops on this turn: as far along the line as its moves reach.
+                # The tile it stops on this turn. `hex_line` leaves out the start, so a unit with
+                # two moves stops at index 1.
                 line = hex_line(here, goal, s.map_width)
-                stop = line[min(max(1, int(unit.moves)), len(line) - 1)] if line else goal
+                stop = line[min(max(1, int(unit.moves)), len(line)) - 1] if line else goal
                 return camp_step_score(
-                    unit, here, stop, where, guards, t.units, lambda u: self._pos(t, u), gap, s
-                )
+                    unit, here, stop, where, guards, t.units, lambda other: self._pos(t, other),
+                    kw.pop("gap", base), s, **kw,
+                )  # fmt: skip
 
-            scored = [(g, weigh(g)) for g in goals]
-            taken = [(g, sc) for g, sc in scored if sc.net >= s.camp_step_min_net]
-            if goals and not taken and not far:
-                # Nothing good ahead: fall back to the muster ring if that is better.
-                scored = [(g, weigh(g)) for g in self._muster_goals(t, unit, where)]
-                taken = [(g, sc) for g, sc in scored if sc.net >= s.camp_step_min_net]
-            if goals and not taken:
-                best = max((sc for _, sc in scored), key=lambda sc: sc.net, default=None)
+            # Every option on one scale: advance, fight, hold, fall back (issue 380).
+            advance = [(g, weigh(g)) for g in goals]
+            advance = [(g, sc) for g, sc in advance if sc.net >= s.camp_step_min_net]
+            options: dict[str, float] = {}
+            if advance:
+                options["advance"] = max(sc.net for _, sc in advance)
+            hold = weigh(here, gap=0.0, advancing=False)
+            options["hold"] = hold.net
+            # Falling back is toward the friends (one step along the line to the nearest) or
+            # onto a muster tile no nearer the camp, never deeper in.
+            mates = sorted(
+                (hex_distance(*here, *self._pos(t, u), s.map_width), u.unit_id, self._pos(t, u))
+                for u in t.mine
+                if u.unit_id != unit.unit_id
+            )
+            taken_tiles = {self._pos(t, u) for u in t.units} | {(b.x, b.y) for b in t.threats}
+            retreats = [
+                g for g in self._muster_goals(t, unit, where)
+                if hex_distance(*g, *where, s.map_width) >= hex_distance(*here, *where, s.map_width)
+            ]  # fmt: skip
+            if mates:
+                line = hex_line(here, mates[0][2], s.map_width)
+                if len(line) > 1 and line[0] not in taken_tiles and self._passable(line[0]):
+                    retreats.insert(0, line[0])
+            back = [
+                (g, weigh(g, gap=0.0, advancing=False))
+                for g in dict.fromkeys(retreats)
+                if g != here
+            ]
+            if back:
+                options["fall_back"] = max(sc.net for _, sc in back)
+            fights = []
+            for spot, (odds, who, _) in t.rejected.items():
+                foe = self._defender_at(t, spot)
+                if who.unit_id == unit.unit_id and foe and spot not in t.attacked | t.dead:
+                    fights.append((camp_attack_score(unit, foe, odds, s), spot, odds, foe))
+            if fights:
+                options["attack"] = max(f[0] for f in fights)
+            order = ["attack", "hold", "fall_back", "advance"]  # Ties go to the careful one.
+            choice = max((o for o in order if o in options), key=lambda o: options[o])
+            numbers = {"chosen": choice, "options": {k: round(v, 2) for k, v in options.items()}}
+            step = None
+            message = "odds are clearly good, advancing on the camp"
+            if choice == "attack":
+                _, spot, odds, foe = max(fights, key=lambda f: f[0])
+                target = self._live(t, Target(foe.unit_type, spot[0], spot[1], foe.hp))
+                if await self._strike(
+                    game, t, unit, target, odds, "camp unit fights what stands beside it"
+                ):
+                    continue
+                choice = "hold"
+            if choice == "hold":
                 t.acted.add(unit.unit_id)  # Holds the ground it stands on.
+                waiting = hold.exposure <= 0 and gap > 0
                 why = (
                     f"waiting for the force ({len(near)} of {len(force)} near)"
-                    if best is not None and best.penalty >= best.risk
+                    if waiting
                     else "step unsafe, holding"
                 )
-                numbers = {} if best is None else asdict(best)
-                self._log(t, unit, "camp", why, where, odds=numbers)
+                self._log(t, unit, "camp", why, where, odds={**numbers, **asdict(hold)})
                 continue
-            goals = [g for g, _ in taken] if goals else goals
-            step = taken[0][1] if taken else None
+            if choice == "fall_back":
+                best = max(back, key=lambda gs: gs[1].net)
+                goals = [best[0]]
+                step = best[1]
+                message = "falling back from the hostiles beside it"
+            else:
+                goals = [g for g, _ in advance]
+                step = advance[0][1]
+            numbers.update(asdict(step))
             result = None
             out_of_orders = False
             for goal in goals:
@@ -2523,8 +2616,7 @@ class MilitaryPolicy:
                     t.acted.add(unit.unit_id)
                     t.placed[unit.unit_id] = self._reached(result, goal)
                     self._leave(t, unit)
-                    self._log(t, unit, "camp", "odds are clearly good, advancing on the camp",
-                              where, odds=None if step is None else asdict(step),
+                    self._log(t, unit, "camp", message, where, odds=numbers,
                               result=result)  # fmt: skip
                     break
                 self._learn_full_tile(t, result)  # Another unit holds it: try the next tile.

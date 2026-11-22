@@ -1643,18 +1643,20 @@ async def _with_era_districts(
     city: City,
     options: list[ProductionChoice],
     context: ProductionContext,
+    claimed: frozenset[str] = frozenset(),
 ) -> ProductionContext:
     """The context with the districts that would earn a Historic Moment in this city (issue 311).
 
     Reads the district advisor for each district on offer whose kind is not yet claimed, only
     while the era push is on, so the extra calls are limited to the last turns of an era.
     """
+    claimed = claimed | context.era_claimed  # The shared set is newer than the snapshot.
     best: dict[str, int] = {}
     for option in options:
         if option.category != "DISTRICT" or option.is_repair:
             continue
         name = _short(option.item)
-        if name in context.era_claimed or name in best:
+        if name in claimed or name in best:
             continue
         try:
             placements = await game.get_district_advisor(city.city_id, option.item)
@@ -1663,7 +1665,7 @@ async def _with_era_districts(
             continue
         if isinstance(placements, list) and placements:
             best[name] = max(p.total_adjacency for p in placements)
-    eligible = eligible_districts(best, context.era_claimed, EraSettings())
+    eligible = eligible_districts(best, claimed, EraSettings())
     return replace(context, era_districts=eligible)
 
 
@@ -1690,7 +1692,9 @@ async def choose_for_city(
     options = list(options)
     base_context = context
     if context.era_push and weights.era_district_bonus > 0 and not only_defence:
-        base_context = await _with_era_districts(game, city, options, context)
+        base_context = await _with_era_districts(
+            game, city, options, context, frozenset(era_claimed or ())
+        )
 
     def with_race(gone: frozenset[str] = frozenset()) -> ProductionContext:
         """The context with the race alternative, over the same filter and dominance pass as
@@ -1981,6 +1985,8 @@ class CityProductionPolicy:
         held = self.era.last if self.era is not None else None
         if held is not None and held.turn == empire.turn:
             return held
+        # The holder's clock sees every turn the turn loop plays, so share it when there is one.
+        clock = self.era.clock if self.era is not None else self._era_clock
         return outlook(
             empire.turn,
             empire.era_score,
@@ -1988,7 +1994,7 @@ class CityProductionPolicy:
             empire.golden_threshold,
             empire.game_speed,
             EraSettings(),
-            self._era_clock.observe(empire.turn, empire.era),
+            clock.observe(empire.turn, empire.era),
         )
 
     async def assign(self, game: ProductionGame) -> list[str]:

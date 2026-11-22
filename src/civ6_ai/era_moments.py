@@ -50,7 +50,7 @@ ERAS = (
 # Kinds the bot can steer toward, by words in the moment type. The first match wins.
 _KINDS = (
     ("pantheon", ("PANTHEON", "BELIEF")),
-    ("trade", ("TRADE_ROUTE", "TRADE")),
+    ("trade", ("TRADE_ROUTE", "TRADING", "TRADE")),  # TRADING_POST_... is a real moment name.
     ("wonder", ("WONDER",)),
     ("district", ("DISTRICT",)),
     ("meeting", ("MEET", "MET_", "FIRST_CONTACT", "CITY_STATE")),
@@ -99,7 +99,12 @@ async def read_moments(game) -> tuple[Moment, ...]:
 
 
 def _era_index(name: str) -> int | None:
-    return ERAS.index(name) if name in ERAS else None
+    """The era's place in `ERAS`. Takes `ERA_ANCIENT` (the table) or `Ancient` (the overview)."""
+    key = name.strip().upper().removesuffix(" ERA").removeprefix("ERA_")
+    for index, era in enumerate(ERAS):
+        if era.removeprefix("ERA_") == key:
+            return index
+    return None
 
 
 def in_era(moment: Moment, era: str) -> bool:

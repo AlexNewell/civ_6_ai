@@ -15,7 +15,14 @@ from civ6_ai.era import (
     outlook_from_standing,
     turns_left_in_era,
 )
-from civ6_ai.era_moments import cheapest_by_kind, moment_nudge, parse_moments
+from civ6_ai.era_moments import (
+    Moment,
+    cheapest_by_kind,
+    classify,
+    in_era,
+    moment_nudge,
+    parse_moments,
+)
 from civ6_ai.policies.production import (
     CityProductionPolicy,
     ProductionContext,
@@ -242,3 +249,26 @@ def test_first_trader_scores_higher_while_the_push_is_on():
 
     assert value(True) > value(False) > 0
     assert value(True, traders=1) == value(False, traders=1)
+
+
+def test_real_moment_names_and_overview_era_names():
+    assert classify("MOMENT_TRADING_POST_CONSTRUCTED_IN_OTHER_CIV") == "trade"
+    later = Moment("MOMENT_X", 2, "trade", first_era="ERA_CLASSICAL")
+    assert not in_era(later, "Ancient")  # The overview says "Ancient", the table ERA_ANCIENT.
+    assert in_era(later, "Classical") and in_era(later, "ERA_MEDIEVAL")
+
+
+def test_claimed_set_is_merged_between_idle_cities():
+    ctx = ProductionContext(turn=35, num_cities=2, era_push=True)
+    options = [ProductionChoice("DISTRICT", "DISTRICT_CAMPUS", 54, 5)]
+    city = build_city(fx.city_info(), (), set())
+    got = asyncio.run(_with_era_districts(_Advisor(3), city, options, ctx, frozenset({"CAMPUS"})))
+    assert got.era_districts == frozenset()
+
+
+def test_policy_without_a_fresh_outlook_uses_the_holders_clock():
+    holder = EraHolder()
+    holder.clock.observe(1, "ERA_ANCIENT")
+    holder.clock.observe(41, "ERA_CLASSICAL")  # The turn loop saw the change on turn 41.
+    policy = CityProductionPolicy(era=holder)
+    assert policy._era_outlook(_empire(50, "ERA_CLASSICAL")).turns_left == 31

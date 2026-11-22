@@ -621,13 +621,13 @@ def step_exposure(
     kills = False
     for h in hostiles:
         gap = hex_distance(h.x, h.y, *tile, width)
-        if gap > (max(reach, ranged_reach) if h.ranged_strength > 0 else reach):
-            continue
-        taken += incoming_damage(unit, h)
-        if gap > (ranged_reach if unit.ranged_strength > 0 else 1):
-            continue  # It can hit us, but we cannot hit it from this tile: no kill credit.
-        odds = assess_attack(unit, Target(h.unit_type, h.x, h.y, h.hp), h, weights, None, width)
-        kills = kills or (odds is not None and odds.sure_kill)
+        # Two separate questions: can it hit this tile (its reach), and can we hit it from here
+        # (ours: beside it, or a ranged unit's range).
+        if gap <= (max(reach, ranged_reach) if h.ranged_strength > 0 else reach):
+            taken += incoming_damage(unit, h)
+        if gap <= (ranged_reach if unit.ranged_strength > 0 else 1) and not kills:
+            odds = assess_attack(unit, Target(h.unit_type, h.x, h.y, h.hp), h, weights, None, width)
+            kills = odds is not None and odds.sure_kill
     return taken / max(unit.hp, 1), kills
 
 
@@ -1031,6 +1031,23 @@ class MilitaryPolicy:
                 t.at_city[u.x, u.y] = t.at_city.get((u.x, u.y), 0) + 1
 
     # ----- stacks (issue 266) -----
+
+    def _stop_tile(
+        self, unit: Unit, here: tuple[int, int], goal: tuple[int, int]
+    ) -> tuple[int, int]:
+        """Where the unit ends this turn walking to `goal`: along the terrain store's cheapest
+        path by movement cost (hills and forest use up moves), else along the straight line,
+        which `hex_line` starts after `here`."""
+        moves = max(1, int(unit.moves))
+        terrain = self.terrain or getattr(self.threat_map, "terrain", None)
+        if here == goal:
+            return goal
+        if terrain is not None and len(terrain):
+            found = terrain.step_toward(here, goal, unit.moves)
+            if found is not None:
+                return found
+        line = hex_line(here, goal, self.settings.map_width)
+        return line[min(moves, len(line)) - 1] if line else goal
 
     def _passable(self, p: tuple[int, int]) -> bool:
         """Whether a land unit can enter the tile, as far as the terrain store knows (issue 370).
@@ -2612,8 +2629,7 @@ class MilitaryPolicy:
             ) -> StepScore:
                 # The tile it stops on this turn. `hex_line` leaves out the start, so a unit with
                 # two moves stops at index 1.
-                line = hex_line(here, goal, s.map_width)
-                stop = line[min(max(1, int(unit.moves)), len(line)) - 1] if line else goal
+                stop = self._stop_tile(unit, here, goal)
                 return camp_step_score(
                     unit, here, stop, where, guards, t.units, lambda other: self._pos(t, other),
                     kw.pop("gap", base), s, **kw,

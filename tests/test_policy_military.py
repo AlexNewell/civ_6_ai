@@ -2988,3 +2988,42 @@ def test_a_hostile_already_killed_this_turn_is_not_step_risk():
     run(policy, game)
     scored = [d for d in camp_orders(policy) if d.unit_id == 1 and d.odds and "exposure" in d.odds]
     assert scored and scored[0].odds["exposure"] == 0
+
+
+def test_an_archer_can_kill_a_weak_melee_target_two_tiles_off_that_cannot_reach_it():
+    from civ6_ai.policies.military import step_exposure
+
+    shooter = build_unit(archer(uid=1, x=12, y=10))
+    weak_melee = Threat(-1, "Barbarians", "UNIT_WARRIOR", 14, 10, 5, 100, 8, 0, 3, True)
+    exposure, kills = step_exposure(shooter, (12, 10), [weak_melee], W, None, 1)
+    assert exposure == 0 and kills  # We can hit it; it cannot hit us.
+
+
+def test_the_stop_tile_follows_terrain_costs_and_falls_back_to_the_line():
+    me = build_unit(warrior(uid=1, x=10, y=10))
+    plain = MilitaryPolicy()
+    assert plain._stop_tile(me, (10, 10), (14, 10)) == hex_line_second((10, 10), (14, 10))
+    from civ6_ai.terrain import TerrainStore
+
+    store = TerrainStore(map_width=74)
+    store.learn(
+        [
+            build_tile(
+                tile(
+                    x=x, y=y, improvement=None, units=[], is_river=False,
+                    terrain="TERRAIN_GRASS", is_hills=(x == 11),
+                )
+            )
+            for x in range(9, 16)
+            for y in range(8, 13)
+        ]
+    )  # fmt: skip
+    hilly = MilitaryPolicy()
+    hilly.terrain = store
+    assert hilly._stop_tile(me, (10, 10), (14, 10)) == (11, 10)  # The hill uses up both moves.
+
+
+def hex_line_second(a, b):
+    from civ6_ai.policies.military import hex_line
+
+    return hex_line(a, b, 74)[1]

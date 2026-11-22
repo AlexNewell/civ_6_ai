@@ -488,7 +488,8 @@ def test_view_skips_unsafe_and_built_cities():
 
 def test_astrology_bonus_scales_and_is_off_without_a_site():
     r = research(techs=[tech("Astrology"), tech("Mining")])
-    w = ResearchWeights()
+    assert astrology_adjustments(r, 3, ResearchWeights()) == {}  # Off by default.
+    w = ResearchWeights(astrology_bonus=4.0)
     assert astrology_adjustments(r, 0, w) == {}
     assert astrology_adjustments(r, 1, w) == {}
     assert astrology_adjustments(r, 2, w) == {"TECHNOLOGY_ASTROLOGY": w.astrology_bonus / 2}
@@ -498,7 +499,7 @@ def test_astrology_bonus_scales_and_is_off_without_a_site():
 
 def test_astrology_bonus_flips_a_close_ranking():
     r = research(techs=[tech("Astrology", turns=8), tech("Mining", turns=3)])
-    w = NO_PRIORITIES
+    w = replace(NO_PRIORITIES, astrology_bonus=4.0)
     assert choose_tech(r, w)[0].name == "Mining"
     adj = astrology_adjustments(r, 3, w)
     assert choose_tech(r, w, adj)[0].name == "Astrology"
@@ -507,7 +508,9 @@ def test_astrology_bonus_flips_a_close_ranking():
 def test_bonus_goes_to_the_sole_missing_prerequisite():
     locked = lq.LockedTech("Astrology", "TECHNOLOGY_ASTROLOGY", ["Mysticism"], "Ancient", False, "")
     r = research(techs=[tech("Mysticism")], locked_techs=[locked])
-    assert astrology_adjustments(r, 3, ResearchWeights()) == {"TECHNOLOGY_MYSTICISM": 2.0}
+    assert astrology_adjustments(r, 3, ResearchWeights(astrology_bonus=4.0)) == {
+        "TECHNOLOGY_MYSTICISM": 2.0
+    }
 
 
 def test_policy_applies_the_view_and_survives_its_failure():
@@ -533,8 +536,8 @@ def test_policy_applies_the_view_and_survives_its_failure():
     async def broken(radius):
         raise ValueError("boom")
 
-    run(ResearchPolicy(NO_PRIORITIES, holy_site_view=view).run(G()))
-    run(ResearchPolicy(NO_PRIORITIES, holy_site_view=broken).run(G()))
+    run(ResearchPolicy(replace(NO_PRIORITIES, astrology_bonus=4.0), holy_site_view=view).run(G()))
+    run(ResearchPolicy(replace(NO_PRIORITIES, astrology_bonus=4.0), holy_site_view=broken).run(G()))
     run(ResearchPolicy(NO_PRIORITIES).run(G()))
     assert seen == ["TECHNOLOGY_ASTROLOGY", "TECHNOLOGY_MINING", "TECHNOLOGY_MINING"]
 
@@ -568,8 +571,9 @@ def test_policy_passes_the_configured_radius():
             return "ok"
 
     run(
-        ResearchPolicy(replace(NO_PRIORITIES, astrology_site_radius=2), holy_site_view=view).run(
-            G()
-        )
+        ResearchPolicy(
+            replace(NO_PRIORITIES, astrology_bonus=4.0, astrology_site_radius=2),
+            holy_site_view=view,
+        ).run(G())
     )
     assert seen == [2]

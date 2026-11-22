@@ -104,7 +104,11 @@ class ResearchWeights:
     # weights, not a fixed opening: no visible placement, no change). Larger than the
     # usual early priorities (0.5 to 2.5) so it wins a close call, smaller than the boost
     # judgement's delay penalty. 0 turns it off.
-    astrology_bonus: float = 4.0
+    # Off by default after the live run (#383, PR #385): Astrology came on turn 13 (baseline 32)
+    # but production never took the Holy Site (its score of 4.8 on turn 41 lost to a settler and
+    # a Campus), and the game was worse (2 cities on turn 50 against 3, score 113 against 116 on
+    # turn 60). The site estimate also read 3 mountains where the advisor read 2. Set 4.0 to test.
+    astrology_bonus: float = 0.0
     astrology_min_mountains: int = 2
     astrology_site_radius: int = 3  # District placement reaches three tiles from the city.
 

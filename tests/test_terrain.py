@@ -186,3 +186,30 @@ def test_the_fallback_step_never_crosses_a_refused_tile():
     assert step != (5, 5)
     if step is not None:
         assert len(t.path_to((3, 5), step, {(4, 5)})) <= 2
+
+
+# ----- the walking cost to a goal (issue 392) -----
+
+
+def test_walk_field_goes_round_water_where_hex_distance_goes_across():
+    wall = {(4, y): "w" for y in range(0, 9)}  # A bay from the top edge down to row 8.
+    t = store(wall)
+    field = t.walk_field((6, 5), 40.0)
+    assert field[(6, 5)] == 0.0
+    assert field[(7, 5)] == 1.0  # Beside the goal: one step in.
+    assert (4, 5) not in field  # Water is never stood on.
+    assert field[(3, 5)] >= 8  # Across the bay: round its end at row 9, not a straight line.
+    flat = store({}).walk_field((6, 5), 40.0)
+    assert flat[(3, 5)] == 3.0
+
+
+def test_walk_field_matches_path_to_and_costs_hills():
+    t = store({(5, 5): "h"})
+    field = t.walk_field((7, 5), 40.0)
+    for start in [(2, 5), (3, 2), (8, 8)]:
+        path = t.path_to(start, (7, 5))
+        assert field[start] == sum(t.step_cost(x, y, naval=False) for x, y in path)
+
+
+def test_walk_field_stops_at_max_cost():
+    assert (0, 5) not in store({}).walk_field((6, 5), 3.0)

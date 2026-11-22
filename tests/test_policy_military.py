@@ -3065,3 +3065,142 @@ def test_a_hostiles_reach_follows_terrain_when_there_is_a_store():
     tiles = reach(walker)
     assert (14, 10) not in tiles  # The hill band at x=15 uses up its moves.
     assert (16, 10) in tiles
+
+
+# ----- the camp force musters by the walk, not by hex distance (issue 392) -----
+
+
+def _bay_store(wall_x=(17, 18), gap_y=3):
+    """Land everywhere in x 8..26, y 0..15 except a bay (two columns) from row 4 to row 15, so the
+    camp's east side is reached by the land to the north, through rows 0..3."""
+    water = {(x, y): "TERRAIN_COAST" for x in wall_x for y in range(gap_y + 1, 16)}
+    land = {
+        (x, y): "TERRAIN_GRASS" for x in range(8, 27) for y in range(0, 16) if (x, y) not in water
+    }
+    return _store({**land, **water})
+
+
+def _bay_game(units, **kw):
+    camp = tile(x=21, y=10, improvement="IMPROVEMENT_BARBARIAN_CAMP", owner_id=-1, units=[])
+    return camp_game(units, [], camp=camp, **kw)
+
+
+def _bay_policy():
+    policy = MilitaryPolicy()
+    policy.settings = dataclasses.replace(policy.settings, map_width=74)
+    policy.terrain = _bay_store()
+    return policy
+
+
+def test_a_camp_across_water_gets_a_muster_tile_on_the_land_approach_not_the_shore():
+    units = [
+        warrior(uid=1, x=12, y=10, **STRONG),
+        warrior(uid=2, x=12, y=11, **STRONG),
+        warrior(uid=3, x=9, y=9),
+    ]
+    policy = _bay_policy()
+    run(policy, _bay_game(units))
+    pick = policy._muster_pick[(21, 10)]
+    # By hex distance the shore at x=16 is 5 from the camp, nearer than anything on its side; by
+    # the walk it is a long way round, so the muster is east of the bay.
+    assert pick[0] >= 19
+
+
+def test_the_force_is_ordered_to_the_land_approach_and_not_the_shore():
+    units = [
+        warrior(uid=1, x=12, y=10, **STRONG),
+        warrior(uid=2, x=12, y=11, **STRONG),
+        warrior(uid=3, x=9, y=9),
+    ]
+    policy = _bay_policy()
+    game = _bay_game(units)
+    run(policy, game)
+    goals = {(o[2], o[3]) for o in game.orders("move")}
+    assert goals
+    assert not any(x == 16 for x, _ in goals)  # The west shore is where hex distance sent them.
+
+
+def test_eta_uses_the_walk_turns_not_hex_distance():
+    from civ6_ai.policies.defence import DefenceState
+
+    units = [
+        warrior(uid=1, x=12, y=10, **STRONG),
+        warrior(uid=2, x=12, y=11, **STRONG),
+        warrior(uid=3, x=9, y=9),
+    ]
+    state = DefenceState()
+    policy = MilitaryPolicy(defence=state)
+    policy.settings = dataclasses.replace(policy.settings, map_width=74)
+    policy.terrain = _bay_store()
+    cities = [city_info(city_id=65536, name="A", x=15, y=10, garrison_unit="")]
+    camp = tile(x=21, y=10, improvement="IMPROVEMENT_BARBARIAN_CAMP", owner_id=-1, units=[])
+    run(policy, camp_game(units, [], camp=camp, cities=cities))
+    plan = state.camp_plan
+    assert plan is not None and plan.target == (21, 10)
+    by_hex = math.ceil(hex_distance(12, 10, 21, 10, 74) / 2)
+    assert plan.eta > by_hex  # Round the bay is far longer than nine tiles over the water.
+    field = policy.terrain.walk_field((21, 10), 40.0)
+    assert plan.eta >= military_module.walk_turns(field[(12, 10)], 2.0)
+
+
+def test_a_unit_with_no_land_route_is_not_counted_in_the_force():
+    # A lone strip of land cut off by water: the unit on it cannot walk to the camp.
+    land = {(x, y): "TERRAIN_GRASS" for x in range(8, 27) for y in range(0, 16)}
+    water = {(12, y): "TERRAIN_COAST" for y in range(-1, 17)}
+    water |= {(x, y): "TERRAIN_COAST" for x in range(7, 28) for y in (-1, 16)}
+    water |= {(x, y): "TERRAIN_COAST" for x in (7, 27) for y in range(-1, 17)}
+    policy = MilitaryPolicy()
+    policy.settings = dataclasses.replace(policy.settings, map_width=74)
+    policy.terrain = _store({**land, **water})
+    game = _bay_game([warrior(uid=1, x=10, y=10, **STRONG), warrior(uid=2, x=20, y=10, **STRONG)])
+    policy, t = _turn_for(policy, game)
+    cut_off, free = t.mine
+    got = policy._arrivable(t, [cut_off, free], (21, 10))
+    assert [u.unit_id for u in got] == [2]
+
+
+def test_units_wait_at_the_muster_tile_until_the_force_is_near():
+    units = [
+        warrior(uid=1, x=20, y=8, **STRONG),  # On the approach, walk-close to the camp.
+        warrior(uid=2, x=12, y=10, **STRONG),  # Across the bay: a long walk round.
+        warrior(uid=3, x=9, y=9),
+    ]
+    policy = _bay_policy()
+    game = _bay_game(units)
+    run(policy, game)
+    first = build_unit(units[0])
+    assert not any(o[1] == first.unit_index for o in game.orders("move"))
+    assert any("waiting" in d.reason for d in policy.decisions if d.unit_id == 1)
+    assert not policy._committed
+
+
+def test_the_muster_score_weighs_walk_nearness_exposure_and_cover():
+    from civ6_ai.policies.military import choose_muster, muster_score
+
+    s = MilitarySettings()
+    base = muster_score([2.0, 2.0], 4.0, 0, False, s)
+    assert muster_score([4.0, 4.0], 4.0, 0, False, s) > base  # A longer walk costs.
+    assert muster_score([2.0, 2.0], 2.0, 0, False, s) < base  # Nearer the camp is better.
+    assert muster_score([2.0, 2.0], 4.0, 1, False, s) > base  # Exposure costs.
+    assert muster_score([2.0, 2.0], 4.0, 0, True, s) < base  # Cover helps.
+    # Weighted, not a filter: with the exposure weight at zero an exposed near tile wins.
+    free = dataclasses.replace(s, muster_exposure_weight=0.0)
+    assert muster_score([2.0], 2.0, 3, False, free) < muster_score([2.0], 5.0, 0, False, free)
+    # The old tile stays while it is within the margin.
+    scores = {(1, 1): 5.0, (2, 2): 4.5}
+    assert choose_muster(scores, (1, 1), 0.75) == (1, 1)
+    assert choose_muster(scores, (1, 1), 0.25) == (2, 2)
+    assert choose_muster({}, None, 0.75) is None
+
+
+def test_the_walk_turns_round_up_and_a_zero_walk_is_zero():
+    from civ6_ai.policies.military import walk_turns
+
+    assert [walk_turns(c, 2.0) for c in (0, 1, 2, 2.5, 6)] == [0, 1, 1, 2, 3]
+
+
+def test_without_a_terrain_store_the_muster_is_by_hex_distance_as_before():
+    policy = MilitaryPolicy()
+    game = camp_game(strong_pair(), [])
+    run(policy, game)
+    assert not policy._muster_pick

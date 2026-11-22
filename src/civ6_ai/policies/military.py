@@ -2719,7 +2719,10 @@ class MilitaryPolicy:
             elif adjacent:
                 continue  # In reach of the guards: the attack step takes it from here.
             elif far:
-                goals = self._muster_goals(t, unit, where)
+                # One attempt is kept back for the stretch below if the game refuses them all.
+                goals = self._muster_goals(
+                    t, unit, where, tries=max(1, min(4, s.attempts_per_unit - 1))
+                )
                 t.map_use["muster_moves"] = t.map_use.get("muster_moves", 0) + 1
             else:
                 goals = self._stage_goals(t, unit, where)
@@ -2855,6 +2858,22 @@ class MilitaryPolicy:
                     self._muster_bad[goal] = t.turn + s.muster_bad_turns
             else:
                 result = result or ""
+            if far and goals and unit.unit_id not in t.acted and not out_of_orders:
+                # The game refused the whole way (live: "path may be blocked by intermediate
+                # tiles", turn after turn). Our own route is known tile by tile, so walk the
+                # stretch this turn's moves reach, which the game takes as a short move.
+                stretch = self._stop_tile(unit, here, goals[0])
+                if stretch != here and self._available(t, unit, "move"):
+                    stretch_result = await self._order(
+                        t, unit, "move", game.move_unit(unit.unit_index, *stretch)
+                    )
+                    if stretch_result is not None and move_succeeded(stretch_result):
+                        t.acted.add(unit.unit_id)
+                        t.placed[unit.unit_id] = self._reached(stretch_result, stretch)
+                        self._leave(t, unit)
+                        self._log(t, unit, "camp", "walking the route a stretch at a time",
+                                  where, odds=numbers, result=stretch_result)  # fmt: skip
+                        continue
             if unit.unit_id not in t.acted and not out_of_orders:
                 self._refuse(t, unit, "move")
                 self._log(t, unit, "camp", "move refused", where, result=result or "")
@@ -3404,6 +3423,8 @@ class MilitaryPolicy:
         for p, cost in field_.items():
             if not 0 < cost <= s.camp_muster_walk or p in occupied or not self._passable(p):
                 continue
+            if self._muster_bad.get(p, -1) >= t.turn:
+                continue  # The game refused it lately; the force gathers on a tile it takes.
             walk = [r[p] for r in reaches if p in r]
             if not walk:
                 continue
@@ -3467,7 +3488,10 @@ class MilitaryPolicy:
                 if p not in taken and p != camp and self._passable(p)
                 and 0 < field_.get(p, -1) <= walk
             ]  # fmt: skip
-            return free[:tries]
+            if free:
+                return free[:tries]
+            # Every tile of the route is taken or refused: the old line to the camp still moves
+            # the unit, where an empty list left it holding for good (live: nine turns frozen).
         line = hex_line((unit.x, unit.y), camp, width)
         first = next(
             (p for p in line if hex_distance(*p, *camp, width) <= muster and self._passable(p)),

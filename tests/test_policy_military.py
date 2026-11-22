@@ -3248,3 +3248,43 @@ def test_the_hold_reason_says_how_many_rallied_and_how_far_the_rest_are(caplog):
         run(policy, _bay_game(units))
     lines = [r.message for r in caplog.records if "military_camp_hold" in r.message]
     assert any("0 of 3 rallied, the rest" in m and "walk turns off" in m for m in lines)
+
+
+BLOCKED_PATH = (
+    "MOVING_TO|0,0|from:0,0|now_at:0,0|BLOCKED (tile appears passable - path may be blocked)"
+)
+
+
+def test_a_force_whose_muster_tiles_are_all_refused_still_walks_the_route():
+    # Live STD_T1_04: the game refused every far muster goal for ten turns, the tiles were
+    # remembered as bad, and the units held where they stood.
+    units = [warrior(uid=1, x=12, y=10, **STRONG), warrior(uid=2, x=12, y=11, **STRONG)]
+    policy = _bay_policy()
+    game = _bay_game(units)
+    near_camp = {
+        p
+        for p, c in policy.terrain.walk_field((21, 10), 40.0).items()
+        if c <= policy.settings.camp_muster_walk
+    }
+    real = game.move_unit
+
+    async def refuse_far(unit_index, x, y):
+        if (x, y) in near_camp:
+            return BLOCKED_PATH
+        return await real(unit_index, x, y)
+
+    game.move_unit = refuse_far
+    run(policy, game)
+    moved = {(o[2], o[3]) for o in game.orders("move")}
+    assert moved and not moved & near_camp  # A stretch of the route, not the refused tiles.
+    assert any("a stretch at a time" in d.reason for d in camp_orders(policy))
+
+
+def test_the_muster_tile_is_never_one_the_game_refused_lately():
+    units = [warrior(uid=1, x=12, y=10, **STRONG), warrior(uid=2, x=12, y=11, **STRONG)]
+    policy = _bay_policy()
+    run(policy, _bay_game(units))
+    first = policy._muster_pick[(21, 10)]
+    policy._muster_bad[first] = 10**6
+    run(policy, _bay_game(units))
+    assert policy._muster_pick[(21, 10)] != first

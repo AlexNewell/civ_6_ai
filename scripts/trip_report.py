@@ -52,7 +52,8 @@ def summarise(trips: list[dict]) -> dict[str, dict]:
         row = kinds.setdefault(
             trip["kind"],
             {"trips": 0, "arrived": 0, "graded": 0, "within": 0, "abs": 0.0, "signed": 0.0,
-             "refused": 0, "other": 0, "hex_basis": 0},
+             "refused": 0, "other": 0, "hex_basis": 0,
+             "m_within": 0, "m_abs": 0.0, "m_signed": 0.0},
         )  # fmt: skip
         row["trips"] += 1
         if trip.get("outcome") == "arrived":
@@ -64,6 +65,10 @@ def summarise(trips: list[dict]) -> dict[str, dict]:
                 row["abs"] += abs(error)
                 row["signed"] += error
                 row["hex_basis"] += trip.get("basis") == "hex"
+                moving = error - trip.get("waits", 0)  # Turns spent waiting are not travel.
+                row["m_within"] += abs(moving) <= WITHIN
+                row["m_abs"] += abs(moving)
+                row["m_signed"] += moving
         elif trip.get("outcome") == "refused":
             row["refused"] += 1
         else:
@@ -73,6 +78,9 @@ def summarise(trips: list[dict]) -> dict[str, dict]:
         row["share_within"] = row["within"] / n if n else None
         row["mean_abs"] = row["abs"] / n if n else None
         row["mean_signed"] = row["signed"] / n if n else None
+        row["moving_share_within"] = row["m_within"] / n if n else None
+        row["moving_mean_abs"] = row["m_abs"] / n if n else None
+        row["moving_mean_signed"] = row["m_signed"] / n if n else None
     return kinds
 
 
@@ -88,6 +96,10 @@ def format_report(kinds: dict[str, dict]) -> str:
                 f"({row['within']}/{row['graded']})"
                 f", mean abs error {row['mean_abs']:.2f}, mean signed {row['mean_signed']:+.2f}"
                 f", hex-basis {row['hex_basis']}"
+                f"; moving turns (waits taken out) within +-{WITHIN} "
+                f"{row['moving_share_within']:.0%} ({row['m_within']}/{row['graded']})"
+                f", mean abs {row['moving_mean_abs']:.2f}"
+                f", mean signed {row['moving_mean_signed']:+.2f}"
             )
         else:
             grade = "no arrived trip with an estimate"

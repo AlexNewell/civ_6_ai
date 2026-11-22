@@ -532,3 +532,15 @@ def test_an_arrival_is_observed_even_when_no_builder_has_moves_left(caplog):
         asyncio.run(policy.run(spent))
     (row,) = _rows(caplog)
     assert (row["outcome"], row["actual"]) == ("arrived", 3)
+
+
+def test_trip_report_shows_the_error_on_moving_turns():
+    format_report, summarise = trip_report.format_report, trip_report.summarise
+
+    trips = [
+        {"kind": "settler", "outcome": "arrived", "estimated": 2, "actual": 5, "waits": 3},
+        {"kind": "settler", "outcome": "arrived", "estimated": 2, "actual": 3},
+    ]
+    rows = summarise(trips)["settler"]
+    assert rows["share_within"] == 0.5 and rows["moving_share_within"] == 1.0
+    assert "moving turns" in format_report(summarise(trips))

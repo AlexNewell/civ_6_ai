@@ -2533,12 +2533,46 @@ def test_stepping_onto_the_site_to_found_records_the_arrival():
     assert policy._movement().trips.closed[-1]["outcome"] == "arrived"
 
 
-def test_a_ranged_hostile_shoots_across_water_it_cannot_cross():
+def test_a_ranged_hostile_across_water_counts_part_of_a_hostile():
     from dataclasses import replace
 
     ring = {t: "water" for t in neighbours(12, 12, 74)}
     store = _flat_store(ring)
     archer = replace(_hostile(12, 12, "UNIT_ARCHER"), ranged_strength=15)
-    assert _danger(store, [archer]).near(14, 12, 3)  # Two tiles away: in range over the water.
-    assert not _danger(store, [_hostile(12, 12)]).near(14, 12, 3)  # A warrior cannot.
-    assert not _danger(store, [archer]).near(15, 12, 3)  # Past its range from where it stands.
+    one = _danger(store, [archer])
+    assert one.count_near(14, 12, 3) == 0.5  # In range over the water, at the set weight.
+    assert not one.near(14, 12, 3)  # One archer alone is not enough to call the tile near.
+    two = _danger(store, [archer, replace(archer, x=13, y=11)])
+    assert two.count_near(14, 12, 3) >= 1.0 and two.near(14, 12, 3)
+    assert _danger(store, [_hostile(12, 12)]).count_near(14, 12, 3) == 0  # A warrior cannot.
+    assert one.count_near(15, 12, 3) == 0  # Past its range from where it stands.
+    mountain = _flat_store({**ring, (13, 12): "mountain"})
+    assert _danger(mountain, [archer]).count_near(14, 12, 3) == 0  # No line of sight.
+
+
+def test_open_ground_ranged_hostile_counts_in_full():
+    from dataclasses import replace
+
+    archer = replace(_hostile(12, 12, "UNIT_ARCHER"), ranged_strength=15)
+    assert _danger(_flat_store(), [archer]).near(14, 12, 3)
+
+
+def test_a_settler_trip_counts_waits_once_a_turn_and_logs_them():
+    policy = SettlingPolicy(SettlingSettings(map_width=74))
+    trips = policy._movement().trips
+    trips.start(7, "settler", (10, 14), (10, 20), 1, 3)
+    trips.wait(7, 2)
+    trips.wait(7, 2)
+    trips.wait(7, 3)
+    trips.arrived(7, 5)
+    assert trips.closed[-1]["waits"] == 2
+
+
+def test_a_lost_settler_trip_is_closed_when_nothing_else_runs():
+    game = make_game([], cities=[alpha()])
+    policy = SettlingPolicy(SettlingSettings(map_width=74))
+    policy.expansion.target_cities = 1  # Target met and no scout: run returns early.
+    policy._movement().trips.start(7, "settler", (10, 14), (10, 20), 1, 3)
+    run(policy, game)
+    assert policy._movement().trips.trip(7) is None
+    assert policy._movement().trips.closed[-1]["outcome"] == "gone"

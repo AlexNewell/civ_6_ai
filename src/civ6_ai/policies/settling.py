@@ -25,7 +25,7 @@ from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Protocol
 
 from civ6_ai.blockers import action_succeeded, move_succeeded
-from civ6_ai.movement import Movement, MovementSettings
+from civ6_ai.movement import Movement, MovementSettings, straight_line
 from civ6_ai.policies.expansion import ExpansionState
 from civ6_ai.policies.game_data import COMBAT_UNITS
 from civ6_ai.state import (
@@ -58,6 +58,7 @@ SETTLER = "UNIT_SETTLER"
 SCOUT = "UNIT_SCOUT"
 # Decisions that leave a settler waiting with nowhere to go this turn (issue 283).
 _HELD_ACTIONS = frozenset({"hold", "no_site"})
+_WAIT_ACTIONS = frozenset({"hold", "flee", "escort_gather"})  # Turns not spent walking.
 
 # Fog rays follow civ6-mcp's strategic map query, which steps along these offsets from a city.
 _FOG_RAYS = ((0, -1), (1, -1), (1, 1), (0, 1), (-1, 1), (-1, -1))
@@ -128,6 +129,11 @@ class SettlingSettings:
     # water and mountains in the way), by `Movement.threat_reach`; a route is checked along the
     # walking route, not the straight line. False is the old hex radius and straight line.
     walk_danger: bool = True
+    # A ranged hostile that cannot walk to a tile but can shoot it (within 2 of where it can
+    # stand, no mountain between) counts this share of a hostile in the danger count; 0 ignores
+    # it, 1 counts it in full. Live: full counting cut the STD_T1_04 T60 score 8.6% (settlers
+    # waited for escorts); 0.5 lets one archer across water pass unremarked, two still count.
+    ranged_reach_weight: float = 0.5
     flee_radius: int = 2  # A settler this close to a hostile unit runs.
     flee_mounted_extra: int = 2  # A mounted hostile unit is this many tiles further a danger.
     flee_escorted_hostiles: int = 2  # An escort is no cover against this many hostile units near.
@@ -793,52 +799,68 @@ class _Danger:
     recent: tuple[tuple[int, int], ...] = ()
     movement: Movement | None = None
     walk: bool = True
+    ranged_weight: float = 0.5
     _reach: dict = field(default_factory=dict, init=False, repr=False)
 
     def recent_near(self, x: int, y: int, radius: int) -> bool:
         return any(hex_distance(x, y, rx, ry, self.map_width) <= radius for rx, ry in self.recent)
 
-    def _can_reach(self, t: Threat, x: int, y: int, radius: int) -> bool:
-        """Whether hostile `t` can attack tile (x, y): within `radius` by hex distance, and (with
-        terrain) by the walk. The radius is the old rule's generosity: a unit walks
-        `radius - range` moves and then strikes `range` tiles further (1 for a melee unit, 2 for
-        a ranged one, which can shoot across water it cannot cross), so on open ground this
-        equals the hex radius, and water or a mountain in the way shortens it."""
+    def _weight(self, t: Threat, x: int, y: int, radius: int) -> float:
+        """How much hostile `t` counts toward danger at tile (x, y): 1.0 within `radius` by hex
+        distance and (with terrain) by the walk. The radius is the old rule generosity: a unit
+        walks `radius - 1` moves and then strikes one tile further, so on open ground this equals
+        the hex radius, and water or a mountain in the way shortens it. A ranged unit that cannot
+        walk there but can still shoot the tile (within its range of where it can stand, no
+        mountain between) counts `ranged_reach_weight` of a hostile: counting it in full made
+        settlers too cautious (live, STD_T1_04), ignoring it ignored real fire across water."""
         if hex_distance(x, y, t.x, t.y, self.map_width) > radius:
-            return False
+            return 0.0
         movement = self.movement
-        attack_range = _RANGED_REACH if t.ranged_strength > 0 else 1
         if (
             not self.walk
             or movement is None
             or movement.terrain is None
-            or radius <= attack_range
+            or radius <= 1
             or any(word in t.unit_type for word in _SEA_UNITS)
         ):
-            return True
-        key = (t.x, t.y, radius, attack_range)
+            return 1.0
+        key = (t.x, t.y, radius, 1)
         reach = self._reach.get(key)
         if reach is None:
-            reach = self._reach[key] = movement.threat_reach(
-                (t.x, t.y), radius - attack_range, attack_range
+            reach = self._reach[key] = movement.threat_reach((t.x, t.y), radius - 1, 1)
+        if (x, y) in reach:
+            return 1.0
+        if t.ranged_strength <= 0 or self.ranged_weight <= 0 or radius <= _RANGED_REACH:
+            return 0.0
+        key = (t.x, t.y, radius, _RANGED_REACH)
+        shot = self._reach.get(key)
+        if shot is None:
+            shot = self._reach[key] = movement.threat_reach(
+                (t.x, t.y), radius - _RANGED_REACH, _RANGED_REACH
             )
-        return (x, y) in reach
+        if (x, y) not in shot:
+            return 0.0
+        for mx, my in straight_line(t.x, t.y, x, y, self.map_width)[1:-1]:
+            ground = movement.terrain.get(mx, my)
+            if ground is not None and ground.mountain:
+                return 0.0  # A mountain between: no line of sight.
+        return self.ranged_weight
 
     def near(self, x: int, y: int, radius: int) -> bool:
-        return any(self._can_reach(t, x, y, radius) for t in self.threats if t.hostile)
+        return sum(self._weight(t, x, y, radius) for t in self.threats if t.hostile) >= 1.0
 
-    def count_near(self, x: int, y: int, radius: int, mounted_extra: int = 0) -> int:
-        """Hostile units that can be on the tile next turn: a mounted one reaches further."""
+    def count_near(self, x: int, y: int, radius: int, mounted_extra: int = 0) -> float:
+        """Hostile units that can be on the tile next turn (a ranged one that can only shoot it
+        counts part of one): a mounted one reaches further."""
         return sum(
-            1
-            for t in self.threats
-            if t.hostile
-            and self._can_reach(
+            self._weight(
                 t,
                 x,
                 y,
                 radius + (mounted_extra if any(w in t.unit_type for w in _MOUNTED) else 0),
             )
+            for t in self.threats
+            if t.hostile
         )
 
     def on_path(self, start: tuple[int, int], end: tuple[int, int], radius: int) -> bool:
@@ -953,6 +975,9 @@ class SettlingPolicy:
         # settlers built, none used). Survey every turn while below the city target; it is
         # re-checked as the map changes, not on a timer.
         if not settlers and not scouts and not below_target:
+            if any(trip.kind == "settler" for trip in self._movement().trips.trips.values()):
+                turn = (await game.get_game_overview()).turn
+                self._movement().trips.sweep({u.unit_id for u in units}, turn, "settler")
             return
         turn = (await game.get_game_overview()).turn
         try:
@@ -970,6 +995,7 @@ class SettlingPolicy:
             self._recent_sightings(turn),
             self._movement(),
             self.settings.walk_danger,
+            self.settings.ranged_reach_weight,
         )
         city_tiles = [(c.x, c.y) for c in cities]
         self._lone_ok = (
@@ -1500,6 +1526,8 @@ class SettlingPolicy:
         def record(action: str, reason: str, target=None, result: str = "") -> None:
             if action in _HELD_ACTIONS:
                 self._held_now.add(settler.unit_id)
+            if action in _WAIT_ACTIONS:
+                self._movement().trips.wait(settler.unit_id, turn)
             self._record(
                 SettleDecision(
                     turn=turn,
@@ -1558,7 +1586,7 @@ class SettlingPolicy:
         ):
             return
         near = danger.count_near(settler.x, settler.y, s.flee_radius, s.flee_mounted_extra)
-        threatened = near > 0 and not found_now_ok
+        threatened = near >= 1.0 and not found_now_ok
         # Live (Run 12): an escorted settler stepped out, then fled back to the city next turn
         # and the pair repeated it. A settler with its escort on the tile goes on instead. Live
         # (issue 283): two settlers were taken with an escort on the tile or beside it, with two
@@ -2071,7 +2099,7 @@ class SettlingPolicy:
                 self._end_trip(settler, "fled")
                 record(
                     "flee",
-                    f"{near} hostile unit(s) close, retreating to the nearest city",
+                    f"{near:g} hostile unit(s) close, retreating to the nearest city",
                     city,
                     result,
                 )

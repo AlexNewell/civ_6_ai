@@ -27,6 +27,7 @@ from civ6_ai.policies.military import (
     expected_damage,
     garrison_required,
     remembered_defenders,
+    score_target,
 )
 from civ6_ai.policies.settling import units_reserved_for_settling
 from civ6_ai.state import read_cities, read_threats, read_units
@@ -2863,3 +2864,51 @@ def test_a_camp_unit_beside_a_hostile_weighs_the_attack_with_the_other_options()
     assert game.orders("attack") or not [o for o in game.orders("move") if o[1] == 1 and o[2] > 16]
     weighed = [d for d in camp_orders(policy) if d.unit_id == 1 and d.odds]
     assert not weighed or weighed[0].odds["chosen"] != "advance"
+
+
+# ----- which hostile to attack (issue 380) -----
+
+
+def _target_value(attacker, foe_unit, followup=0.0, hp=None):
+    odds = assess_attack(
+        attacker,
+        Target(foe_unit.unit_type, foe_unit.x, foe_unit.y, foe_unit.hp),
+        foe_unit,
+        W,
+        None,
+        None,
+    )
+    hp = foe_unit.hp if hp is None else hp
+    return score_target(attacker, foe_unit, hp, odds, followup, MilitarySettings())
+
+
+def test_a_target_beside_a_city_state_unit_beats_an_otherwise_equal_one():
+    me = build_unit(warrior(uid=1, combat_strength=14))
+    foe_unit = foe(11, 10, cs=12)
+    with_help = _target_value(me, foe_unit, followup=30.0)
+    alone = _target_value(me, foe_unit, followup=0.0)
+    assert with_help.total > alone.total and with_help.follow > 0
+
+
+def test_an_archer_beats_a_warrior_of_equal_health_for_a_melee_attacker():
+    me = build_unit(warrior(uid=1, combat_strength=14))
+    archer_foe = Threat(-1, "Barbarians", "UNIT_ARCHER", 11, 10, 100, 100, 15, 25, 3, True)
+    warrior_foe = Threat(-1, "Barbarians", "UNIT_WARRIOR", 11, 11, 100, 100, 20, 0, 3, True)
+    assert _target_value(me, archer_foe).total > _target_value(me, warrior_foe).total
+
+
+def test_a_near_dead_target_beats_a_full_health_one():
+    me = build_unit(warrior(uid=1, combat_strength=14))
+    weak = Threat(-1, "Barbarians", "UNIT_WARRIOR", 11, 10, 15, 100, 12, 0, 3, True)
+    full = Threat(-1, "Barbarians", "UNIT_WARRIOR", 11, 11, 100, 100, 12, 0, 3, True)
+    assert _target_value(me, weak).total > _target_value(me, full).total
+
+
+def test_an_attack_logs_the_weighing_of_its_target():
+    targets = [target(11, 10, 100)]
+    units = [warrior(uid=1, combat_strength=30, targets=targets), warrior(uid=3)]
+    game = MilitaryGame(units, [barbarian(x=11, y=10, cs=8)])
+    policy = MilitaryPolicy()
+    run(policy, game)
+    shots = [d for d in policy.decisions if d.action == "attack" and d.odds]
+    assert shots and "follow" in shots[0].odds["target_score"]

@@ -265,6 +265,11 @@ class MilitarySettings:
     # deal to us anyway if left alone (a fight it cannot avoid is better taken on our terms).
     camp_attack_gain: float = 4.0
     camp_kill_gain: float = 2.0
+    # Which target (issue 380, owner): other hits that land before it acts (a city-state unit
+    # beside it, our units with attacks left, a city's strike) raise a target's value by the share
+    # of its remaining health they take, and a kill they make possible is worth this much.
+    camp_followup_gain: float = 2.0
+    camp_followup_kill_gain: float = 1.0
     camp_unavoidable_credit: float = 2.0
     max_camp_turns: int = 8  # Turns spent assaulting one camp before it is set aside.
     camp_travel_turns: int = 20  # Turns a force may take to reach the muster point first.
@@ -621,16 +626,42 @@ def step_exposure(
     return taken / max(unit.hp, 1), kills
 
 
-def camp_attack_score(
-    unit: Unit, target: Threat, odds: AttackOdds, settings: "MilitarySettings"
-) -> float:
-    """The attack option on the same scale as a step: the share of the target's health dealt, a
-    sure kill, and the damage it would deal to us anyway, less the damage taken attacking."""
+@dataclass(frozen=True)
+class TargetScore:
+    """One attack on one target, weighed (issue 380). Every part is logged."""
+
+    damage: float  # Share of its remaining health we deal, by its defence against our attack.
+    kill: float  # A sure kill alone, or one the follow-up hits make.
+    follow: float  # Share of what is left that the follow-up hits take.
+    threat: float  # The damage it would deal us next turn, which removing it spares.
+    retaliation: float  # Damage we take back attacking it (none for a ranged unit against melee).
+    total: float
+
+
+def score_target(
+    unit: Unit,
+    target: Threat,
+    hp: float,
+    odds: AttackOdds,
+    followup: float,
+    settings: "MilitarySettings",
+) -> TargetScore:
+    """Value of `unit` attacking `target` (remaining health `hp`) on one scale, from `odds` (the
+    existing estimate) and `followup`, the expected damage other hits deal it before it acts."""
     s = settings
-    share = min(odds.dealt, target.hp) / max(target.hp, 1)
-    score = s.camp_attack_gain * share + (s.camp_kill_gain if odds.sure_kill else 0.0)
-    score += s.camp_unavoidable_credit * incoming_damage(unit, target) / max(unit.hp, 1)
-    return score - s.camp_risk_weight * odds.taken / max(unit.hp, 1)
+    own = max(unit.hp, 1)
+    damage = s.camp_attack_gain * min(odds.dealt, hp) / max(hp, 1)
+    left = max(hp - odds.dealt, 0.0)
+    follow = s.camp_followup_gain * min(1.0, followup / left) if left > 0 else 0.0
+    kill = s.camp_kill_gain if odds.sure_kill else 0.0
+    v = s.weights.damage_variance
+    if not odds.sure_kill and odds.dealt + followup * (1 - v) >= hp:
+        kill = s.camp_followup_kill_gain
+    threat = s.camp_unavoidable_credit * incoming_damage(unit, target) / own
+    retaliation = s.camp_risk_weight * odds.taken / own
+    return TargetScore(
+        damage, kill, follow, threat, retaliation, damage + kill + follow + threat - retaliation
+    )
 
 
 def camp_step_score(
@@ -1963,6 +1994,10 @@ class MilitaryPolicy:
         reason: str,
     ) -> bool:
         """Order one unit's attack. True if it landed."""
+        foe = self._defender_at(t, (target.x, target.y))
+        numbers = asdict(odds)
+        if foe is not None:  # The weighing behind the choice of target (issue 380).
+            numbers["target_score"] = asdict(self._target_score(t, unit, foe, odds))
         result = await self._order(
             t, unit, "attack", game.attack_unit(unit.unit_index, target.x, target.y)
         )
@@ -1975,7 +2010,7 @@ class MilitaryPolicy:
             self._refuse(t, unit, "attack")
             self._log(
                 t, unit, "attack", "attack refused",
-                target=where, odds=asdict(odds), result=result or "",
+                target=where, odds=numbers, result=result or "",
             )  # fmt: skip
             return False
         failure = attack_failed(unit, result)
@@ -1984,7 +2019,7 @@ class MilitaryPolicy:
             self._refused[unit.unit_id, "attack"] = t.turn  # Not asked to attack again this turn.
             self._log(
                 t, unit, "attack", f"attack failed: {failure}",
-                target=where, odds=asdict(odds), result=result,
+                target=where, odds=numbers, result=result,
             )  # fmt: skip
             return False
         t.acted.add(unit.unit_id)
@@ -1999,7 +2034,7 @@ class MilitaryPolicy:
                 self.settings.camp_defender_radius
             ):
                 self._camp_hit[camp] = t.turn  # The campaign is doing damage.
-        self._log(t, unit, "attack", reason, target=where, odds=asdict(odds), result=result)
+        self._log(t, unit, "attack", reason, target=where, odds=numbers, result=result)
         return True
 
     def _attack_options(self, t: _Turn, unit: Unit) -> list[tuple[AttackOdds, Target, Threat]]:
@@ -2052,8 +2087,43 @@ class MilitaryPolicy:
             kept = t.rejected.get(where)
             if kept is None or odds.rank > kept[0].rank:
                 t.rejected[where] = (odds, unit, reason)
-        found.sort(key=lambda f: (-f[0].rank, f[1].x, f[1].y))
+        found.sort(
+            key=lambda f: (
+                -self._target_score(t, unit, f[2], f[0]).total,
+                -f[0].rank,
+                f[1].x,
+                f[1].y,
+            )
+        )
         return found
+
+    def _followup_damage(self, t: _Turn, unit: Unit, foe: Threat) -> float:
+        """Expected damage that hits other than `unit`'s land on `foe` before it acts: our other
+        units that can still attack it, a city-state unit beside it (at war with the barbarians),
+        and a city strike."""
+        s = self.settings
+        where = (foe.x, foe.y)
+        guard = foe.combat_strength + s.weights.assumed_defender_bonus
+        total = 0.0
+        for u in t.mine:
+            if u.unit_id == unit.unit_id or not self._available(t, u, "attack"):
+                continue
+            if any((tg.x, tg.y) == where for tg in u.targets):
+                total += expected_damage(max(u.combat_strength, u.ranged_strength), guard)
+        for th in t.threats:
+            near = hex_distance(th.x, th.y, *where, s.map_width) <= 1
+            if th.is_city_state and not th.hostile and near and th.combat_strength > 0:
+                total += expected_damage(max(th.combat_strength, th.ranged_strength), guard)
+        for city in t.cities:
+            in_range = hex_distance(city.x, city.y, *where, s.map_width) <= s.city_strike_range
+            odds = self._city_strike_odds(city, foe, foe.hp) if in_range else None
+            if odds is not None and self._city_can_strike(t, city):
+                total += odds.dealt
+        return total
+
+    def _target_score(self, t: _Turn, unit: Unit, foe: Threat, odds: AttackOdds) -> TargetScore:
+        hp = t.target_hp.get((foe.x, foe.y), foe.hp)
+        return score_target(unit, foe, hp, odds, self._followup_damage(t, unit, foe), self.settings)
 
     def _log_rejections(self, t: _Turn) -> None:
         """Once per target, the best option turned down, so a quiet turn can be audited."""
@@ -2570,7 +2640,7 @@ class MilitaryPolicy:
             for spot, (odds, who, _) in t.rejected.items():
                 foe = self._defender_at(t, spot)
                 if who.unit_id == unit.unit_id and foe and spot not in t.attacked | t.dead:
-                    fights.append((camp_attack_score(unit, foe, odds, s), spot, odds, foe))
+                    fights.append((self._target_score(t, unit, foe, odds).total, spot, odds, foe))
             if fights:
                 options["attack"] = max(f[0] for f in fights)
             order = ["attack", "hold", "fall_back", "advance"]  # Ties go to the careful one.

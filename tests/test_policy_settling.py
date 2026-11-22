@@ -461,7 +461,7 @@ def test_refused_moves_set_a_site_aside_for_a_while_not_for_good():
         game = make_game([settler()], cities=[alpha()], sites=sites, turn=turn)
         game.failing = {"move"}
         run(policy, game)
-        assert game.actions == [("move", 7, 14, 10)]
+        assert game.actions[0] == ("move", 7, 14, 10)  # Then terrain steps (issue 394), refused.
     skipped = make_game([settler()], cities=[alpha()], sites=sites, turn=3)
     run(policy, skipped)
     assert skipped.actions == []
@@ -2304,3 +2304,60 @@ def test_the_escort_step_skips_a_tile_our_own_unit_holds():
     # The escort's own tile is not a blocker.
     on_escort = build_unit(unit_info(unit_id=9, unit_index=9, x=free[0], y=free[1]))
     assert policy._pick_step(settler_unit, (14, 6), units=[on_escort], escort=on_escort) == free
+
+
+def _lone_settler_game(goal=(14, 6)):
+    game = make_game(
+        [settler(x=10, y=14, moves_remaining=2.0)],
+        cities=[alpha()],
+        sites=[site(*goal, food=40)],
+    )
+    return game, SettlingPolicy(SettlingSettings())
+
+
+def _refuse_far_moves(game, limit=2):
+    from civ6_ai.state.reader import hex_distance
+
+    async def move(unit_index, x, y):
+        game.actions.append(("move", unit_index, x, y))
+        if hex_distance(10, 14, x, y, 74) > limit:
+            return "MOVING_TO|BLOCKED (tile appears passable - path may be blocked)"
+        return f"MOVING_TO|{x},{y}|from:10,14|now_at:{x},{y}"
+
+    game.move_unit = move
+
+
+def test_a_refused_long_settler_move_is_followed_by_a_terrain_step_the_same_turn():
+    game, policy = _lone_settler_game()
+    _refuse_far_moves(game)
+    run(policy, game)
+    moves = [a for a in game.actions if a[0] == "move"]
+    assert moves[0][2:] == (14, 6)  # The long order goes first, and is refused.
+    assert len(moves) >= 2 and moves[-1][2:] != (14, 6)
+
+
+def test_refused_short_settler_steps_are_not_resent():
+    game, policy = _lone_settler_game()
+    _refuse_far_moves(game, limit=0)  # Every move is refused.
+    run(policy, game)
+    sent = [a[2:] for a in game.actions if a[0] == "move"]
+    assert len(sent) == len(set(sent))
+    game.actions.clear()
+    run(policy, game)
+    again = [a[2:] for a in game.actions if a[0] == "move"]
+    assert not set(again) & set(sent[1:])
+
+
+def test_a_refused_long_move_does_not_mark_the_site_as_a_refused_tile():
+    game, policy = _lone_settler_game()
+    _refuse_far_moves(game)
+    run(policy, game)
+    kept = policy._refused_steps.get(7)
+    assert kept is None or (14, 6) not in kept[1]
+    from types import SimpleNamespace
+
+    s = SimpleNamespace(unit_id=7, x=10, y=14, moves=2.0)
+    assert policy._pick_step(s, (14, 6), stop_short=False) is not None
+    game.actions.clear()
+    run(policy, game)
+    assert game.actions[0][2:] == (14, 6)  # The site is still targeted first.

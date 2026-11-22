@@ -158,28 +158,6 @@ def score_destination(dest: Any, weights: SecondaryWeights) -> float:
     return value
 
 
-def line_tiles(x1: int, y1: int, x2: int, y2: int, map_width: int | None) -> list[tuple[int, int]]:
-    """Tiles on the straight hex line from one tile to another, both ends included.
-
-    Deprecated (#399): a straight line is only the fallback for a route with no known walk. Ask
-    `Movement.route_tiles` for the walking route; this is `movement.straight_line`.
-    """
-    return straight_line(x1, y1, x2, y2, map_width)
-
-
-def route_danger(field_map: Any, x1: int, y1: int, x2: int, y2: int, turn: int) -> float:
-    """The worst raw civilian danger on the straight line of a route, 0.0 with no map.
-
-    Deprecated (#399): the line is not the walk. Use `Movement.route_danger`."""
-    if field_map is None:
-        return 0.0
-    width = field_map.settings.map_width
-    return max(
-        (field_map.raw_danger_at(x, y, turn) for x, y in line_tiles(x1, y1, x2, y2, width)),
-        default=0.0,
-    )
-
-
 def route_check(
     field_map: Any,
     x1: int,
@@ -199,7 +177,7 @@ def route_check(
     width = field_map.settings.map_width
     worst = 0.0
     camps: set[tuple[int, int]] = set()
-    for x, y in line_tiles(x1, y1, x2, y2, width) if tiles is None else tiles:
+    for x, y in straight_line(x1, y1, x2, y2, width) if tiles is None else tiles:
         worst = max(worst, field_map.raw_danger_at(x, y, turn))
         for camp, value in field_map.camps_reaching(x, y):
             worst = max(worst, value)
@@ -770,7 +748,7 @@ class SecondaryPolicy:
         if self.movement is not None:
             return self.movement.route_tiles((trader.x, trader.y), (dest.x, dest.y))
         width = self.map.settings.map_width if self.map is not None else None
-        return line_tiles(trader.x, trader.y, dest.x, dest.y, width)
+        return straight_line(trader.x, trader.y, dest.x, dest.y, width)
 
     def _start_trip(self, trader: Any, dest: Any, turn: int) -> None:
         """Log the trader's trip to the destination (#399); a no-op with no movement service."""

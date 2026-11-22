@@ -20,6 +20,7 @@ and comes with the stages that use it; a decision to use the map must not assume
 
 import json
 import logging
+import math
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -27,6 +28,7 @@ from typing import Any
 
 from civ_mcp.lua._helpers import SENTINEL
 
+from civ6_ai.movement import attack_tiles
 from civ6_ai.policies.game_data import COMBAT_UNITS
 from civ6_ai.policies.settling import _SEA_UNITS as _POLICY_SEA_UNITS
 from civ6_ai.state import read_cities, read_threats, read_units
@@ -77,6 +79,9 @@ class ThreatMapSettings:
     ship_moves: float = 3.0
     ranged_reach: int = 2  # Tiles a ranged unit shoots from where it stands.
     melee_reach: int = 1  # And a melee unit strikes.
+    # A hostile unit counts as near a city when it can attack the city within this many turns of
+    # walking (`ThreatMap.hostile_reach`). One turn is a unit's moves plus its reach.
+    warn_turns: float = 1.0
     # Our side. Cover is what our units and cities answer with; it is not threat's opposite, so
     # the two are kept as separate layers and combined by whoever decides.
     own_horizon_turns: float = 2.0  # Our unit's cover fades out over this many turns of reach.
@@ -320,6 +325,7 @@ class ThreatMap:
     _last_scan: int = -10_000
     _baselined: bool = False
     _fields: dict[tuple, dict[tuple[int, int], float]] = field(default_factory=dict)
+    _attacks: dict[tuple, set[tuple[int, int]]] = field(default_factory=dict, repr=False)
 
     # ----- updating -----
 
@@ -501,6 +507,7 @@ class ThreatMap:
     # ----- queries -----
 
     def _reach(self, source: Source) -> int:
+        """Fade radius in tiles: used only with no terrain store, where there is no walk to cost."""
         return self.settings.camp_radius if source.kind == CAMP else self.settings.unit_radius
 
     def _profile(self, src: Source) -> tuple[float, bool, int, float]:
@@ -526,6 +533,20 @@ class ThreatMap:
             moves = s.scout_moves
         ranged = (stats is not None and stats[1] > 0) or klass in ("RANGED", "SIEGE")
         return moves, False, s.ranged_reach if ranged else s.melee_reach
+
+    def hostile_reach(self, unit_type: str, x: int, y: int) -> set[tuple[int, int]]:
+        """Tiles a hostile unit at (x, y) can attack within `warn_turns` turns of walking: terrain
+        costed (`movement.attack_tiles`, the service's `threat_reach`), so a ridge or a bay between
+        the unit and a city keeps the city out of it where a hex radius would not."""
+        moves, naval, rng = self._unit_profile(unit_type)
+        known = self.terrain.revision if self.terrain is not None else 0
+        key = ("attack", unit_type, x, y, known)
+        if key not in self._attacks:
+            self._attacks[key] = attack_tiles(
+                self.terrain, (x, y), moves, rng, naval, self.settings.map_width,
+                max(1, math.ceil(self.settings.warn_turns)),
+            )  # fmt: skip
+        return self._attacks[key]
 
     def _field(self, src: Source) -> dict[tuple[int, int], float]:
         """One source's threat on each tile it reaches, before any fade with age."""

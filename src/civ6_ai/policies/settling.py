@@ -990,7 +990,7 @@ class _Danger:
         if self.walk and self.movement is not None:
             route = self.movement.route_tiles(start, end)[1:]  # The walk, not the straight line.
         else:
-            route = hex_line(start, end, self.map_width)
+            route = straight_line(*start, *end, self.map_width)[1:]
         return any(self.near(x, y, radius) for x, y in route)
 
 
@@ -2084,7 +2084,7 @@ class SettlingPolicy:
             )
             if found is not None or avoid or occupied:
                 return found  # None with refusals: the route is used up, so the caller holds.
-        line = hex_line(here, goal, self.settings.map_width)
+        line = straight_line(*here, *goal, self.settings.map_width)[1:]
         if stop_short:
             step = line[-2] if len(line) >= 2 else None
         else:

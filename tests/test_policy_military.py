@@ -3025,9 +3025,9 @@ def test_the_step_tile_follows_terrain_costs_and_falls_back_to_the_line():
 
 
 def hex_line_second(a, b):
-    from civ6_ai.policies.settling import hex_line
+    from civ6_ai.movement import straight_line
 
-    return hex_line(a, b, 74)[1]
+    return straight_line(*a, *b, 74)[2]
 
 
 def test_a_two_move_melee_hostile_counts_from_three_tiles_but_not_five():

@@ -18,7 +18,7 @@ from civ6_ai.movement import (
     turn_field,
 )
 from civ6_ai.policies.builder import BuilderPolicy
-from civ6_ai.policies.secondary import SecondaryPolicy, line_tiles
+from civ6_ai.policies.secondary import SecondaryPolicy
 from civ6_ai.state.reader import build_tile, hex_distance
 from civ6_ai.terrain import TerrainStore
 from fixtures.civ_state import overview, tile
@@ -178,9 +178,10 @@ def test_next_step_is_none_with_no_terrain():
 # ----- route danger on the walk -----
 
 
-def test_straight_line_matches_the_old_trade_line_and_wraps_the_seam():
-    assert straight_line(10, 10, 14, 10, 44) == line_tiles(10, 10, 14, 10, 44)
-    assert straight_line(42, 10, 1, 10, 44) == line_tiles(42, 10, 1, 10, 44)
+def test_straight_line_runs_between_the_ends_and_wraps_the_seam():
+    assert straight_line(10, 10, 14, 10, 44) == [(10, 10), (11, 10), (12, 10), (13, 10), (14, 10)]
+    seam = straight_line(42, 10, 1, 10, 44)
+    assert seam[0] == (42, 10) and seam[-1] == (1, 10) and len(seam) == 4
     assert straight_line(10, 10, 14, 10, 44)[0] == (10, 10)
 
 
@@ -313,7 +314,7 @@ def test_refusals_are_logged_with_the_trip():
 def test_builder_route_danger_matches_the_old_line_on_open_ground():
     policy = BuilderPolicy(terrain=store(), threat_map=Map({(12, 10): 4.0}))
     target = job(x=14, y=10)
-    old = max(policy.danger_at(x, y, 5) for x, y in line_tiles(10, 10, 14, 10, None))
+    old = max(policy.danger_at(x, y, 5) for x, y in straight_line(10, 10, 14, 10, None))
     assert policy._route_danger(worker_unit(10, 10), target, 5) == old == 4.0
 
 

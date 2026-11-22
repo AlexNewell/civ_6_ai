@@ -2266,19 +2266,26 @@ def test_a_refused_step_stays_avoided_for_the_whole_trip_so_the_pair_does_not_bo
     # Live: foreign borders refused the step, the pair moved, and the path led straight back.
     game, policy = _escort_pair_game({})
     refused = {(11, 13), (11, 14)}
-    policy._remember_refused(settler(x=10, y=14), (14, 6), (11, 13), "BLOCKED (city-state border)")
-    policy._remember_refused(settler(x=10, y=14), (14, 6), (11, 14), "BLOCKED (city-state border)")
-    policy._remember_refused(settler(x=10, y=14), (14, 6), (9, 9), "Error: STACKING_CONFLICT")
-    assert policy._refused_steps[7][1] == refused  # Stacking is not remembered.
+    here = settler(x=10, y=14)
+    trips = policy._movement().trips
+    trips.start(7, "settler", (10, 14), (14, 6), 1, None)
+    policy._last_turn = 1
+    policy._refuse(here, (11, 13), "BLOCKED (city-state border)")
+    policy._refuse(here, (11, 14), "BLOCKED (city-state border)")
+    policy._refuse(here, (9, 9), "Error: STACKING_CONFLICT")
+    assert trips.trip(7).blocked(1, ("stacking",)) == refused | {(9, 9)}  # Stacking: this turn.
+    assert trips.trip(7).blocked(2, ("stacking",)) == refused  # Not on a later turn.
     # From a different tile the pair is still steered clear of the refused tiles.
     from types import SimpleNamespace
 
+    policy._last_turn = 2
     other = SimpleNamespace(unit_id=7, x=12, y=13, moves=2.0)
-    step = policy._pick_step(other, (14, 6))
+    step = policy._next_step(other, (14, 6))
     assert step not in refused
-    # A new goal starts a new trip.
-    policy._remember_refused(other, (16, 6), (13, 12), "BLOCKED")
-    assert policy._refused_steps[7] == ((16, 6), {(13, 12)})
+    # A new goal starts a new trip, with no refusals of the old one.
+    trips.start(7, "settler", (12, 13), (16, 6), 2, None)
+    policy._refuse(other, (13, 12), "BLOCKED")
+    assert set(trips.trip(7).refused) == {(13, 12)}
 
 
 def test_the_escort_step_skips_a_tile_our_own_unit_holds():
@@ -2290,20 +2297,20 @@ def test_the_escort_step_skips_a_tile_our_own_unit_holds():
 
     settler_unit = SimpleNamespace(unit_id=7, x=10, y=14, moves=2.0)
     escort = build_unit(unit_info(unit_id=9, unit_index=9, x=10, y=14))
-    free = policy._pick_step(settler_unit, (14, 6), units=[escort], escort=escort)
+    free = policy._next_step(settler_unit, (14, 6), units=[escort], escort=escort)
     blocker = build_unit(unit_info(unit_id=11, unit_index=11, x=free[0], y=free[1]))
     units = [escort, blocker]
-    step = policy._pick_step(settler_unit, (14, 6), units=units, escort=escort)
+    step = policy._next_step(settler_unit, (14, 6), units=units, escort=escort)
     assert step is not None and step != free
     # Every reachable tile taken: no step, so the pair holds.
     taken = [
         build_unit(unit_info(unit_id=20 + i, unit_index=20 + i, x=t[0], y=t[1]))
         for i, t in enumerate(sorted(set(policy.terrain.reach(10, 14, 2, False, 1)) - {(10, 14)}))
     ]
-    assert policy._pick_step(settler_unit, (14, 6), units=[escort, *taken], escort=escort) is None
+    assert policy._next_step(settler_unit, (14, 6), units=[escort, *taken], escort=escort) is None
     # The escort's own tile is not a blocker.
     on_escort = build_unit(unit_info(unit_id=9, unit_index=9, x=free[0], y=free[1]))
-    assert policy._pick_step(settler_unit, (14, 6), units=[on_escort], escort=on_escort) == free
+    assert policy._next_step(settler_unit, (14, 6), units=[on_escort], escort=on_escort) == free
 
 
 def _lone_settler_game(goal=(14, 6)):
@@ -2352,12 +2359,145 @@ def test_a_refused_long_move_does_not_mark_the_site_as_a_refused_tile():
     game, policy = _lone_settler_game()
     _refuse_far_moves(game)
     run(policy, game)
-    kept = policy._refused_steps.get(7)
-    assert kept is None or (14, 6) not in kept[1]
+    trip = policy._movement().trips.trip(7)
+    assert trip is None or (14, 6) not in trip.refused
     from types import SimpleNamespace
 
     s = SimpleNamespace(unit_id=7, x=10, y=14, moves=2.0)
-    assert policy._pick_step(s, (14, 6), stop_short=False) is not None
+    assert policy._next_step(s, (14, 6), stop_short=False) is not None
     game.actions.clear()
     run(policy, game)
     assert game.actions[0][2:] == (14, 6)  # The site is still targeted first.
+
+
+# ----- epic 399, slice 2: settling on the movement service -----
+
+
+def _flat_store(blocked=None, width=74):
+    from civ6_ai.state.reader import build_tile
+    from civ6_ai.terrain import TerrainStore
+
+    blocked = blocked or {}
+    store = TerrainStore(map_width=width)
+    tiles = []
+    for ty in range(0, 30):
+        for tx in range(0, 30):
+            kind = blocked.get((tx, ty))
+            extra = {"terrain": "TERRAIN_COAST"} if kind == "water" else {}
+            if kind == "mountain":
+                extra = {"terrain": "TERRAIN_GRASS_MOUNTAIN"}
+            tiles.append(
+                build_tile(tile(x=tx, y=ty, improvement=None, units=[], is_river=False, **extra))
+            )
+    store.learn(tiles)
+    return store
+
+
+def _hostile(x, y, unit_type="UNIT_WARRIOR"):
+    from civ6_ai.state.models import Threat
+
+    return Threat(BARBARIANS, "Barbarians", unit_type, x, y, 100, 100, 10, 0, 3, True)
+
+
+def _danger(store, threats, walk=True):
+    from civ6_ai.movement import Movement
+    from civ6_ai.policies.settling import _Danger
+
+    return _Danger(tuple(threats), 74, (), Movement(store), walk)
+
+
+def test_danger_on_open_ground_is_the_hex_radius():
+    danger = _danger(_flat_store(), [_hostile(12, 12)])
+    for radius in (2, 3):
+        for x in range(4, 22):
+            for y in range(4, 22):
+                assert danger.near(x, y, radius) == (hex_distance(x, y, 12, 12, 74) <= radius)
+    assert danger.count_near(12, 12, 2, 2) == 1
+
+
+def test_a_hostile_walled_in_by_mountains_is_not_near_a_tile_past_them():
+    ring = {t: "mountain" for t in neighbours(12, 12, 74)}
+    danger = _danger(_flat_store(ring), [_hostile(12, 12)])
+    assert not danger.near(15, 12, 3)  # Hex distance 3, but it cannot walk out.
+    assert danger.near(13, 12, 3)  # The ring itself is struck from where it stands.
+    assert _danger(_flat_store(ring), [_hostile(12, 12)], walk=False).near(15, 12, 3)
+
+
+def test_a_route_is_checked_along_the_walk_not_the_straight_line():
+    wall = {(13, y): "water" for y in range(5, 16)}
+    store = _flat_store(wall)
+    danger = _danger(store, [_hostile(13, 10, "UNIT_GALLEY")])
+    start, end = (10, 10), (16, 10)
+    assert (13, 10) in hex_line(start, end, 74)
+    assert (13, 10) not in danger.movement.route_tiles(start, end)
+    assert not danger.on_path(start, end, 0)
+    assert _danger(store, [_hostile(13, 10, "UNIT_GALLEY")], walk=False).on_path(start, end, 0)
+
+
+def test_site_turns_are_the_walk_and_equal_the_hex_estimate_on_open_ground():
+    policy = SettlingPolicy(SettlingSettings(map_width=74))
+    policy.terrain = _flat_store()
+    unit = settler(x=10, y=10, max_moves=2.0)
+    for x, y in [(11, 10), (12, 10), (13, 10), (10, 15), (16, 12), (10, 10)]:
+        distance = hex_distance(10, 10, x, y, 74)
+        expected = 0 if distance == 0 else -(-distance // 2)
+        assert (
+            policy._site_turns(unit, SettleSite(x, y, 30, 10, "fresh", (), 0, 0, 0), distance, ())
+            == expected
+        )
+
+
+def test_site_turns_follow_the_walk_round_a_ridge():
+    wall = {(12, y): "mountain" for y in range(2, 14)}
+    policy = SettlingPolicy(SettlingSettings(map_width=74))
+    policy.terrain = _flat_store(wall)
+    unit = settler(x=10, y=10, max_moves=2.0)
+    target = SettleSite(14, 10, 30, 10, "fresh", (), 0, 0, 0)
+    distance = hex_distance(10, 10, 14, 10, 74)
+    assert distance == 4  # Two turns as the crow flies.
+    assert policy._site_turns(unit, target, distance, ()) > 2
+
+
+def test_site_turns_without_terrain_are_the_hex_estimate():
+    policy = SettlingPolicy(SettlingSettings(map_width=74))
+    unit = settler(x=10, y=10, max_moves=2.0)
+    target = SettleSite(14, 10, 30, 10, "fresh", (), 0, 0, 0)
+    assert policy._site_turns(unit, target, 4, ()) == 2
+
+
+def test_a_settler_trip_is_logged_with_its_estimate_and_closed_on_arrival(caplog):
+    game = make_game([settler(x=10, y=14, moves_remaining=2.0)], [alpha()], sites=[site(10, 16)])
+
+    async def arrives(unit_index, x, y):
+        game.actions.append(("move", unit_index, x, y))
+        return f"MOVING_TO|{x},{y}|from:10,14|now_at:{x},{y}"
+
+    game.move_unit = arrives
+    policy = SettlingPolicy(SettlingSettings(map_width=74))
+    policy.terrain = _flat_store()
+    with caplog.at_level(logging.INFO, logger="civ6_ai.movement"):
+        run(policy, game)
+    rows = [json.loads(r.getMessage().split("movement_trip ", 1)[1]) for r in caplog.records]
+    assert len(rows) == 1
+    row = rows[0]
+    assert (row["kind"], row["goal"], row["outcome"]) == ("settler", [10, 16], "arrived")
+    assert (row["estimated"], row["actual"], row["basis"]) == (1, 1, "walk")
+    assert policy._movement().trips.trip(7) is None
+
+
+def test_a_settler_trip_open_across_turns_is_graded_by_turns_taken():
+    game = make_game([settler(x=10, y=14, moves_remaining=2.0)], [alpha()], sites=[site(10, 20)])
+
+    async def steps(unit_index, x, y):
+        return f"MOVING_TO|{x},{y}|from:10,14|now_at:10,14"  # Never gets there.
+
+    game.move_unit = steps
+    policy = SettlingPolicy(SettlingSettings(map_width=74))
+    policy.terrain = _flat_store()
+    run(policy, game)
+    trip = policy._movement().trips.trip(7)
+    assert trip is not None and trip.goal == (10, 20) and trip.estimated == 3
+    game.data["units"] = [settler(x=10, y=20, moves_remaining=2.0)]
+    game.data["overview"] = overview(turn=3, num_cities=1)
+    run(policy, game)
+    assert policy._movement().trips.closed[-1]["actual"] == 3

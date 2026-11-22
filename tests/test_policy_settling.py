@@ -2702,3 +2702,25 @@ def test_a_fleeing_settler_picks_a_tile_the_hostile_cannot_reach_next_turn():
     decision = policy.decisions[-1]
     assert decision.action == "flee"
     assert "danger 0" in decision.reason  # A tile neither hostile can attack next turn.
+
+
+def test_flee_tiles_beyond_a_hostile_in_a_corridor_are_not_reachable():
+    # Codex on #409: a hostile on a bottleneck must not leave tiles behind it "reachable".
+    walls = {(x, y): "mountain" for x in range(8, 20) for y in range(2, 20) if y != 14}
+    game, policy = _escort_pair_game(walls, x=13, y=14)
+    policy._last_turn = 5
+    from civ6_ai.policies.settling import _Danger
+
+    settler_ = _soldier(7, 13, 14, "UNIT_SETTLER")
+
+    danger = _Danger((_foe("UNIT_WARRIOR", 14, 14, 8),), 74, movement=policy._movement())
+    _, scores = policy._safest_tile(settler_, [(10, 10)], danger, [settler_])
+    assert scores and all(f.tile[0] <= 13 for f in scores)
+
+
+def test_the_trip_projection_follows_terrain_costs_not_moves_times_turn():
+    game, policy = _escort_pair_game({}, x=10, y=14)
+    movement = policy._movement()
+    first = movement.next_step((10, 14), (14, 6), 2)
+    second = movement.next_step(first, (14, 6), 2)
+    assert second != first

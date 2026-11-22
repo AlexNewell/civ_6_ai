@@ -2217,11 +2217,17 @@ class SettlingPolicy:
         movement = self._movement()
         here = (settler.x, settler.y)
         moves = max(1, int(settler.moves))
-        route = [tuple(t) for t in movement.route_tiles(here, goal)[1:]]
         tiles = [tuple(step)]
-        for turn in range(2, max(1, s.trip_lookahead_turns) + 1):
-            if len(route) > moves * (turn - 1):
-                tiles.append(route[min(moves * turn, len(route)) - 1])
+        for _ in range(2, max(1, s.trip_lookahead_turns) + 1):
+            # Where the pair finishes each turn follows the terrain costs (Movement.next_step),
+            # not the route index times the moves: slow ground advances fewer tiles.
+            ahead = movement.next_step(tiles[-1], goal, moves)
+            if ahead is None and movement.terrain is None:  # No terrain known: the straight line.
+                line = hex_line(tiles[-1], goal, s.map_width)[1:]
+                ahead = line[min(moves, len(line)) - 1] if line else None
+            if ahead is None:
+                break
+            tiles.append(tuple(ahead))
         tiles = [t for i, t in enumerate(tiles) if i == 0 or t != tiles[i - 1]]
         walk = s.walk_danger and movement.terrain is not None
 
@@ -2330,10 +2336,13 @@ class SettlingPolicy:
         here = (settler.x, settler.y)
         if danger is None or not s.walk_danger or movement.terrain is None:
             return None
-        field_ = movement.turn_field(here, max(1.0, settler.moves))
+        hostiles = [t for t in danger.threats if t.hostile]
+        # A hostile-held tile is not walked through, so nothing beyond it counts as reachable.
+        field_ = movement.turn_field(
+            here, max(1.0, settler.moves), avoid={(t.x, t.y) for t in hostiles}
+        )
         if not field_:
             return None
-        hostiles = [t for t in danger.threats if t.hostile]
         occupied = {(t.x, t.y) for t in hostiles} | {
             (u.x, u.y) for u in units if u.unit_id != settler.unit_id and not _land_military(u)
         }

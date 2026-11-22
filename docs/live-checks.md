@@ -707,3 +707,26 @@ Verdicts:
 - All three are merged.
 - Main 6156fb2 founds a 3rd city on STD_T1_04 on turn 47, against 60 on dc35850. Score at turn 50 is 92 against 80.
 - The human's 130 at turn 50 is still far ahead. The largest remaining gap is faith: the human had a Holy Site on turn 19 and a religion on turn 45, and the bot has neither. Population (7 against 14 at turn 60) and Rome's housing cap at 4 come next.
+
+
+## Loop 5: faith, settler steps, threat by reach, builders, camps (2026-11-21 to 22)
+
+Each change was compared with a baseline rerun from the same save on the code under it. Runs are deterministic, so each row is one sample. The issues came from watching live runs on STD_T1_04 and from the player's answers: the early Holy Site was a reaction to a safe capital with a +3 placement, and camps are cleared before a settler when that is cheap.
+
+| Change | Save, horizon | Focus metric (change against baseline) | Guardrails | Verdict |
+|---|---|---|---|---|
+| Holy Site in a safe city with a strong placement, PR 376 | STD_T1_04, 90 | Holy Site T57 (never); religion founded T84 (none) | score T90 202 / 185; population 16 / 19 | merged |
+| Escort step avoids our own units, PR 378 | STD_T1_03, 50 | refused or stacked steps 0 / 3; 2nd city T26 / T30 | 3rd city missed by T50 after the game diverged | merged |
+| Walls follow the threat map, PR 390 | STD_T1_04, 50 | Arretium builds a Campus on T44 instead of Walls (net threat 0) | score equal, no losses | merged |
+| Builders weigh the walk and route danger, PR 391 | STD_T1_04, 60 | builders lost 0 / 1; improve actions 9 / 4 | population T60 11 / 9; score 120 / 119 | merged |
+| Camp advance as a weighted group step, PR 387 | STD_T1_04, 60; STD_T1_01, 60 | lone advances 7 / 32; 20 unsafe holds; 7 good attacks | STD_T1_04 score T60 114 / 119 after divergence; STD_T1_01 identical | merged |
+| Earlier Astrology for the Holy Site, PR 385 | STD_T1_04, 60 | Astrology T13 / T32, but no Holy Site built | score T50 82 / 92 | closed |
+| Site travel by path and game estimate, PR 382 | STD_T1_04, 90; STD_T1_03, 50 | site choice unchanged (the game estimate is optimistic) | 4 cities / 5 at T90, score 176 / 192 | draft |
+| Granary values housing at the cap, PR 386 | STD_T1_04, 90; STD_T1_01, 60 | population T90 19 / 16; at-cap lines 3 / 9 | STD_T1_04 score -5, era score -13; STD_T1_01 3 cities / 4, score 118 / 124 | draft |
+| Era outlook and Moments read, PR 384 | STD_T1_03, 50 | the Moments table reads (150 moments); the clock is right; no build changed | identical | draft |
+
+Findings:
+- **No camp is cleared.** `camps_cleared_by_us` is 0 in every run of this loop. A camp is worth 2-3 era score (Moments table), and the player cleared two by T67 (issue 392).
+- **Settlers stall on refused orders.** A settler in Rome resends a refused long move for 6 turns (STD_T1_04 T55-60; issue 394, PR 395).
+- **The Holy Site loses to Builders.** On current main Rome's Holy Site, at adjacency 2, scores 4.4-4.8 behind Builders (6.7-8.7). The +3 placement the player used isn't available to Rome on this map.
+- **Eras run 40 turns.** In both the bot's and the player's games on these saves, eras turned at T41, T81 and T121.

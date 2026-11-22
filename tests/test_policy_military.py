@@ -3065,3 +3065,324 @@ def test_a_hostiles_reach_follows_terrain_when_there_is_a_store():
     tiles = reach(walker)
     assert (14, 10) not in tiles  # The hill band at x=15 uses up its moves.
     assert (16, 10) in tiles
+
+
+# ----- the camp force musters by the walk, not by hex distance (issue 392) -----
+
+
+def _bay_store(wall_x=(17, 18), gap_y=3):
+    """Land everywhere in x 8..26, y 0..15 except a bay (two columns) from row 4 to row 15, so the
+    camp's east side is reached by the land to the north, through rows 0..3."""
+    water = {(x, y): "TERRAIN_COAST" for x in wall_x for y in range(gap_y + 1, 16)}
+    land = {
+        (x, y): "TERRAIN_GRASS" for x in range(8, 27) for y in range(0, 16) if (x, y) not in water
+    }
+    return _store({**land, **water})
+
+
+def _bay_game(units, **kw):
+    camp = tile(x=21, y=10, improvement="IMPROVEMENT_BARBARIAN_CAMP", owner_id=-1, units=[])
+    return camp_game(units, [], camp=camp, **kw)
+
+
+def _bay_policy():
+    policy = MilitaryPolicy()
+    policy.settings = dataclasses.replace(policy.settings, map_width=74)
+    policy.terrain = _bay_store()
+    return policy
+
+
+def test_a_camp_across_water_gets_a_muster_tile_on_the_land_approach_not_the_shore():
+    units = [
+        warrior(uid=1, x=12, y=10, **STRONG),
+        warrior(uid=2, x=12, y=11, **STRONG),
+        warrior(uid=3, x=9, y=9),
+    ]
+    policy = _bay_policy()
+    run(policy, _bay_game(units))
+    pick = policy._muster_pick[(21, 10)]
+    # By hex distance the shore at x=16 is 5 from the camp, nearer than anything on its side; by
+    # the walk it is a long way round, so the muster is east of the bay.
+    assert pick[0] >= 19
+
+
+def test_the_force_is_ordered_to_the_land_approach_and_not_the_shore():
+    units = [
+        warrior(uid=1, x=12, y=10, **STRONG),
+        warrior(uid=2, x=12, y=11, **STRONG),
+        warrior(uid=3, x=9, y=9),
+    ]
+    policy = _bay_policy()
+    game = _bay_game(units)
+    run(policy, game)
+    goals = {(o[2], o[3]) for o in game.orders("move")}
+    assert goals
+    assert not any(x == 16 for x, _ in goals)  # The west shore is where hex distance sent them.
+
+
+def test_eta_uses_the_walk_turns_not_hex_distance():
+    from civ6_ai.policies.defence import DefenceState
+
+    units = [
+        warrior(uid=1, x=12, y=10, **STRONG),
+        warrior(uid=2, x=12, y=11, **STRONG),
+        warrior(uid=3, x=9, y=9),
+    ]
+    state = DefenceState()
+    policy = MilitaryPolicy(defence=state)
+    policy.settings = dataclasses.replace(policy.settings, map_width=74)
+    policy.terrain = _bay_store()
+    cities = [city_info(city_id=65536, name="A", x=15, y=10, garrison_unit="")]
+    camp = tile(x=21, y=10, improvement="IMPROVEMENT_BARBARIAN_CAMP", owner_id=-1, units=[])
+    run(policy, camp_game(units, [], camp=camp, cities=cities))
+    plan = state.camp_plan
+    assert plan is not None and plan.target == (21, 10)
+    by_hex = math.ceil(hex_distance(12, 10, 21, 10, 74) / 2)
+    assert plan.eta > by_hex  # Round the bay is far longer than nine tiles over the water.
+    field = policy.terrain.walk_field((21, 10), 40.0)
+    assert plan.eta >= military_module.walk_turns(field[(12, 10)], 2.0)
+
+
+def test_a_unit_with_no_land_route_is_not_counted_in_the_force():
+    # A lone strip of land cut off by water: the unit on it cannot walk to the camp.
+    land = {(x, y): "TERRAIN_GRASS" for x in range(8, 27) for y in range(0, 16)}
+    water = {(12, y): "TERRAIN_COAST" for y in range(-1, 17)}
+    water |= {(x, y): "TERRAIN_COAST" for x in range(7, 28) for y in (-1, 16)}
+    water |= {(x, y): "TERRAIN_COAST" for x in (7, 27) for y in range(-1, 17)}
+    policy = MilitaryPolicy()
+    policy.settings = dataclasses.replace(policy.settings, map_width=74)
+    policy.terrain = _store({**land, **water})
+    game = _bay_game([warrior(uid=1, x=10, y=10, **STRONG), warrior(uid=2, x=20, y=10, **STRONG)])
+    policy, t = _turn_for(policy, game)
+    cut_off, free = t.mine
+    got = policy._arrivable(t, [cut_off, free], (21, 10))
+    assert [u.unit_id for u in got] == [2]
+
+
+def test_units_wait_at_the_muster_tile_until_the_force_is_near():
+    units = [
+        warrior(uid=1, x=20, y=8, **STRONG),  # On the approach, walk-close to the camp.
+        warrior(uid=2, x=12, y=10, **STRONG),  # Across the bay: a long walk round.
+        warrior(uid=3, x=9, y=9),
+    ]
+    policy = _bay_policy()
+    game = _bay_game(units)
+    run(policy, game)
+    first = build_unit(units[0])
+    assert not any(o[1] == first.unit_index for o in game.orders("move"))
+    assert any("waiting" in d.reason for d in policy.decisions if d.unit_id == 1)
+    assert not policy._committed
+
+
+def test_the_muster_score_weighs_walk_nearness_exposure_and_cover():
+    from civ6_ai.policies.military import choose_muster, muster_score
+
+    s = MilitarySettings()
+    base = muster_score([2.0, 2.0], 4.0, 0, False, s)
+    assert muster_score([4.0, 4.0], 4.0, 0, False, s) > base  # A longer walk costs.
+    assert muster_score([2.0, 2.0], 2.0, 0, False, s) < base  # Nearer the camp is better.
+    assert muster_score([2.0, 2.0], 4.0, 1, False, s) > base  # Exposure costs.
+    assert muster_score([2.0, 2.0], 4.0, 0, True, s) < base  # Cover helps.
+    # Weighted, not a filter: with the exposure weight at zero an exposed near tile wins.
+    free = dataclasses.replace(s, muster_exposure_weight=0.0)
+    assert muster_score([2.0], 2.0, 3, False, free) < muster_score([2.0], 5.0, 0, False, free)
+    # The old tile stays while it is within the margin.
+    scores = {(1, 1): 5.0, (2, 2): 4.5}
+    assert choose_muster(scores, (1, 1), 0.75) == (1, 1)
+    assert choose_muster(scores, (1, 1), 0.25) == (2, 2)
+    assert choose_muster({}, None, 0.75) is None
+
+
+def test_the_walk_turns_round_up_and_a_zero_walk_is_zero():
+    from civ6_ai.policies.military import walk_turns
+
+    assert [walk_turns(c, 2.0) for c in (0, 1, 2, 2.5, 6)] == [0, 1, 1, 2, 3]
+
+
+def test_without_a_terrain_store_the_muster_is_by_hex_distance_as_before():
+    policy = MilitaryPolicy()
+    game = camp_game(strong_pair(), [])
+    run(policy, game)
+    assert not policy._muster_pick
+
+
+def test_a_unit_two_hex_across_water_but_turns_away_by_land_is_not_near():
+    from civ6_ai.policies.military import camp_group_near
+
+    units = [warrior(uid=1, x=16, y=6, **STRONG), warrior(uid=2, x=19, y=6, **STRONG)]
+    policy = _bay_policy()  # Water at x 17-18 from row 4 down: 3 hex apart, round the bay by land.
+    policy, t = _turn_for(policy, _bay_game(units))
+    a, b = t.mine
+    camp = (21, 10)
+    pos = lambda u: policy._pos(t, u)  # noqa: E731
+    by_hex = camp_group_near(a, t.mine, pos, camp, 3, 4, 74)
+    assert {u.unit_id for u in by_hex} == {1, 2}  # Near by hex distance.
+    by_walk = camp_group_near(a, t.mine, pos, camp, 3, 4, 74, **policy._near_by_walk(t, camp))
+    assert {u.unit_id for u in by_walk} == {1}
+    assert policy._unit_turns(t, a)[(19, 6)] >= 3  # Turns away round the bay's head.
+
+
+def test_a_step_along_the_land_route_is_progress_even_when_no_nearer_by_hex():
+    from civ6_ai.policies.military import camp_step_score
+
+    me = build_unit(warrior(uid=1, x=16, y=6, **STRONG))
+    s = MilitarySettings(map_width=74)
+    camp, here, tile_ = (21, 10), (16, 6), (16, 5)  # Up and away: the way round the bay's head.
+    pos = lambda u: (u.x, u.y)  # noqa: E731
+    flat = camp_step_score(me, here, tile_, camp, [], [], pos, 0.0, s)
+    assert flat.gain <= 0  # By hex distance it is a step backwards.
+    cost = _bay_store().walk_field(camp, 40.0)
+    assert cost[tile_] < cost[here]
+    routed = camp_step_score(me, here, tile_, camp, [], [], pos, 0.0, s, walk_cost=cost)
+    assert routed.gain >= s.camp_progress_gain and routed.net >= s.camp_step_min_net
+
+
+def test_the_hold_reason_says_how_many_rallied_and_how_far_the_rest_are(caplog):
+    units = [
+        warrior(uid=1, x=12, y=10, **STRONG),
+        warrior(uid=2, x=12, y=11, **STRONG),
+        warrior(uid=3, x=9, y=9),
+    ]
+    policy = _bay_policy()
+    with caplog.at_level(logging.INFO, logger=military_module.log.name):
+        run(policy, _bay_game(units))
+    lines = [r.message for r in caplog.records if "military_camp_hold" in r.message]
+    assert any("0 of 3 rallied, the rest" in m and "walk turns off" in m for m in lines)
+
+
+BLOCKED_PATH = (
+    "MOVING_TO|0,0|from:0,0|now_at:0,0|BLOCKED (tile appears passable - path may be blocked)"
+)
+
+
+def test_a_force_whose_muster_tiles_are_all_refused_still_walks_the_route():
+    # Live STD_T1_04: the game refused every far muster goal for ten turns, the tiles were
+    # remembered as bad, and the units held where they stood.
+    units = [warrior(uid=1, x=12, y=10, **STRONG), warrior(uid=2, x=12, y=11, **STRONG)]
+    policy = _bay_policy()
+    game = _bay_game(units)
+    near_camp = {
+        p
+        for p, c in policy.terrain.walk_field((21, 10), 40.0).items()
+        if c <= policy.settings.camp_muster_walk
+    }
+    real = game.move_unit
+
+    async def refuse_far(unit_index, x, y):
+        if (x, y) in near_camp:
+            return BLOCKED_PATH
+        return await real(unit_index, x, y)
+
+    game.move_unit = refuse_far
+    run(policy, game)
+    moved = {(o[2], o[3]) for o in game.orders("move")}
+    assert moved and not moved & near_camp  # A stretch of the route, not the refused tiles.
+
+
+def test_the_muster_tile_is_never_one_the_game_refused_lately():
+    units = [warrior(uid=1, x=12, y=10, **STRONG), warrior(uid=2, x=12, y=11, **STRONG)]
+    policy = _bay_policy()
+    run(policy, _bay_game(units))
+    first = policy._muster_pick[(21, 10)]
+    policy._muster_bad[first] = 10**6
+    run(policy, _bay_game(units))
+    assert policy._muster_pick[(21, 10)] != first
+
+
+def _cover_game(on_mission):
+    """A threatened city (threat map says not short) holding one unit, and a second unit outside
+    that is either marching on the camp or idle."""
+    from civ6_ai.policies.defence import CityThreat, DefenceState
+
+    city = city_info(city_id=65536, name="A", x=15, y=10, garrison_unit="")
+    units = [warrior(uid=1, x=15, y=10), warrior(uid=2, x=12, y=10, **STRONG)]
+    camp = tile(x=21, y=10, improvement="IMPROVEMENT_BARBARIAN_CAMP", owner_id=-1, units=[])
+    game = camp_game(units, [], camp=camp, cities=[city])
+    state = DefenceState()
+    state.cities[65536] = CityThreat(
+        city_id=65536, name="A", x=15, y=10, reasons=("hostile units near",),
+        hostile_units=1, defenders_in=1, defenders_beside=0,
+        reading=types.SimpleNamespace(pressed=lambda margin: False),
+        hostile_tiles=((18, 10),),
+    )  # fmt: skip
+    policy = MilitaryPolicy(defence=state)
+    policy.settings = dataclasses.replace(policy.settings, map_width=74)
+    policy.terrain = _bay_store()
+    if on_mission:
+        policy._camps[(21, 10)] = 5
+        policy._mission[2] = ((21, 10), 20)
+    return game, policy, state
+
+
+def test_a_unit_marching_on_the_camp_is_not_pulled_back_by_a_city_that_is_not_short():
+    game, policy, state = _cover_game(on_mission=True)
+    assert not state.cities[65536].short
+    run(policy, game)
+    assert not [d for d in policy.decisions if d.action == "cover" and d.unit_id == 2]
+    assert not [d for d in policy.decisions if d.action == "garrison" and d.unit_id == 2]
+
+
+def test_a_unit_that_is_not_on_a_mission_is_still_covered_for_a_threatened_city():
+    game, policy, _ = _cover_game(on_mission=False)
+    run(policy, game)
+    assert [d for d in policy.decisions if d.action == "cover" and d.unit_id == 2]
+
+
+def test_a_unit_ordered_by_a_city_role_is_not_counted_into_the_camp_force_that_turn():
+    game, policy, _ = _cover_game(on_mission=False)
+    run(policy, game)
+    # Unit 2 was given the cover role, so the camp force never counted it: one owner per turn.
+    assert policy.decisions and not [
+        d for d in camp_orders(policy) if d.unit_id == 2 and d.turn == policy.decisions[0].turn
+    ]
+
+
+def test_a_far_units_order_is_the_next_stretch_of_our_route_not_a_tile_across_the_bay():
+    # Live STD_T1_04 T58: units 6-8 tiles off ordered tiles beside the camp (61,17 and 60,17,
+    # across the water) and 63,17, all refused as "path may be blocked".
+    units = [
+        warrior(uid=1, x=12, y=10, **STRONG),
+        warrior(uid=2, x=12, y=11, **STRONG),
+        warrior(uid=3, x=9, y=9, **STRONG),
+    ]
+    policy = _bay_policy()
+    game = _bay_game(units)
+    run(policy, game)
+    camp = (21, 10)
+    orders = game.orders("move")
+    assert len(orders) == 3
+    for _, _index, x, y in orders:
+        assert hex_distance(x, y, *camp, 74) > 1  # Never the camp or a tile beside it.
+        assert (x, y) not in {(16, y2) for y2 in range(0, 16)} | {(19, 10), (20, 10), (20, 9)}
+    # Each order is within one turn's walk of where the unit stood.
+    starts = {1: (12, 10), 2: (12, 11), 3: (9, 9)}
+    for (_, _index, x, y), uid in zip(sorted(orders, key=lambda o: o[1]), (1, 2, 3), strict=False):
+        assert (x, y) in policy.terrain.reach(*starts[uid], 2.0, False, 1.0)
+
+
+def test_with_no_risk_a_step_forward_beats_standing_beside_friends():
+    # Live STD_T1_04 T58: hold scored the cover of two friends (1.0) and the step scored its
+    # progress (1.0); at zero risk the tie went to holding, for ten turns.
+    one_move = dict(moves_remaining=1.0, max_moves=1.0)
+    units = [
+        warrior(uid=1, x=12, y=10, **STRONG, **one_move),
+        warrior(uid=2, x=11, y=10, **STRONG),
+        warrior(uid=3, x=11, y=11, **STRONG),
+    ]
+    policy = _bay_policy()
+    game = _bay_game(units)
+    run(policy, game)
+    (decision,) = [d for d in camp_orders(policy) if d.unit_id == 1]
+    assert decision.odds["options"]["advance"] == decision.odds["options"]["hold"] == 1.0
+    assert decision.odds["chosen"] == "advance" and any(o[1] == 1 for o in game.orders("move"))
+
+
+def test_the_hold_reason_says_unsafe_only_when_the_step_has_risk():
+    # Zero-risk hold with nowhere to step (a lone unit with no route): not called "unsafe".
+    from civ6_ai.policies.military import camp_step_score
+
+    me = build_unit(warrior(uid=1, x=12, y=10, **STRONG))
+    s = MilitarySettings(map_width=74)
+    pos = lambda u: (u.x, u.y)  # noqa: E731
+    stay = camp_step_score(me, (12, 10), (12, 10), (21, 10), [], [], pos, 0.0, s, advancing=False)
+    assert stay.risk == 0 and stay.exposure == 0

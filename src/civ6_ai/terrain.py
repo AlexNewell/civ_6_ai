@@ -302,3 +302,31 @@ class TerrainStore:
                     if t < turns.get((nx, ny), float("inf")):
                         turns[nx, ny] = t
         return turns
+
+    def walk_field(
+        self, goal: tuple[int, int], max_cost: float = 40.0
+    ) -> dict[tuple[int, int], float]:
+        """Walking cost from each tile to `goal` (issue 392): what a land unit standing there
+        spends entering the tiles on its cheapest way, `goal` included. One search from the goal
+        answers it for every tile, so a force's walk to a camp is read off, not guessed from hex
+        distance. Water and mountains are never entered, so a tile across a bay from the goal
+        costs the way round. Tiles past `max_cost` are left out; the goal costs 0."""
+        best: dict[tuple[int, int], float] = {goal: 0.0}
+        queue: list[tuple[float, int, int]] = [(0.0, goal[0], goal[1])]
+        while queue:
+            cost, cx, cy = heapq.heappop(queue)
+            if cost > best.get((cx, cy), float("inf")):
+                continue
+            enter = self.step_cost(cx, cy, naval=False)
+            if enter is None:
+                continue  # Nobody walks through it; only the goal itself may sit on such a tile.
+            for nxt in neighbours(cx, cy, self.map_width):
+                if self.map_height is not None and nxt[1] >= self.map_height:
+                    continue
+                if self.step_cost(nxt[0], nxt[1], naval=False) is None:
+                    continue  # A walker never stands on water or a mountain.
+                total = cost + enter
+                if total <= max_cost and total < best.get(nxt, float("inf")):
+                    best[nxt] = total
+                    heapq.heappush(queue, (total, nxt[0], nxt[1]))
+        return best

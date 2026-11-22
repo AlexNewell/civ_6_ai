@@ -144,6 +144,36 @@ class ProductionWeights:
     # settling (issue 284) are unchanged. False restores the old order, for a posture that wants
     # the camp cleared first.
     settler_before_camp: bool = True
+    # Issue 388: Walls in a city the threat map rates. Live (STD_T1_04, T44) Arretium built Walls at
+    # 10.8 over a Granary at 4.8 while the map said cover 80 against threat 21.9 (net 0, walls
+    # save 4 damage): the barbarians had to walk around mountains and sea. Walls are now worth
+    # `walls_covered_base` plus `walls_saving_weight` per hit point of damage they save, rising to
+    # the full threatened score as the pressure (net threat plus `walls_fog_weight` times the
+    # unseen threat) reaches `walls_full_pressure` hit points a turn. Not absolute: fog or real net
+    # threat still raises Walls to the top. A city the map did not judge keeps the full score.
+    walls_covered_base: float = 2.0
+    walls_saving_weight: float = 0.3
+    walls_fog_weight: float = 1.0
+    walls_full_pressure: float = 10.0
+    # Issue 375: the player's rule, "Holy Site was a reaction to Rome being safe enough to work on
+    # a district and having a good placement option (+3 from mountains)". A Holy Site is worth its
+    # faith yield alone (4 x 0.5 = 2), below every other district, and the bot started none by turn
+    # 60 on STD_T1_04 (faith 29 at turn 50 against the human's 315, and no religion). While no
+    # Holy Site exists anywhere and the city is safe (no threat, not pressed, garrisoned, no camp
+    # force short in reach), its value gains `holy_site_bonus_3` at a best adjacency of 3 or more
+    # (about 11 raw, above a Campus at about 6 to 9 and below a ready Settler at 14, so the
+    # settler-before-camp and expansion rules of issue 369 still win) and `holy_site_bonus_2` at
+    # 2 (below a Campus). Below 2: nothing. `holy_site_prophet_bonus` is added while a Great
+    # Prophet stands on the map or Stonehenge is built or being built: a prophet with no site is
+    # wasted. `holy_site_appetite` scales all three (a faith posture dial for issue 321); 0 turns
+    # the bonus off.
+    holy_site_appetite: float = 1.0
+    holy_site_bonus_3: float = 9.0
+    holy_site_bonus_2: float = 4.0
+    holy_site_prophet_bonus: float = 2.0
+    # Border growth, a tile purchase or another build changes a city's placements, so the cached
+    # adjacency is read again after this many turns (a review finding on the first version).
+    holy_site_reread_turns: int = 10
     # Issue 381: a Granary is worth its +1 Housing in a city held at its housing cap. Live
     # (STD_T1_04, T47 to T82) Arretium sat at pop 3 of 3 for 35 turns and Setia at 2 of 2, while
     # the Granary scored 1.3 (food only, at the bottom of every list) and was never built. This is
@@ -186,6 +216,9 @@ class ProductionContext:
     threatened_at: Mapping[int, tuple[int, int]] = field(default_factory=dict, compare=False)
     short: frozenset[int] = frozenset()  # Of those, the ones with fewer than two defenders.
     mapped: frozenset[int] = frozenset()  # Of those, the ones the threat map judged (issue 264).
+    # Issue 388: the threat map's reading (a `CityReading`) of each mapped city, so Walls
+    # follow the reach-aware net threat and the damage walls save, not a count of units nearby.
+    readings: Mapping[int, Any] = field(default_factory=dict, compare=False)
     wary: bool = False  # A much stronger rival at peace with us (`defence.wary_of`): walls.
     # Issue 268: combat units still to build to clear the camp the military policy has chosen,
     # and the kind most missing ("melee", "ranged" or "any"). Each army pick counts one off.
@@ -201,6 +234,11 @@ class ProductionContext:
     # barbarian): melee and ranged strength. The army floor picks units by their match against it.
     hostile: float = 0.0
     hostile_ranged: float = 0.0
+    # Issue 375: the best Holy Site adjacency in the city being chosen for, read from the district
+    # advisor (0 when not read or none fits), and whether a Great Prophet stands on the map or
+    # Stonehenge is built or being built. Only used while no Holy Site exists anywhere.
+    holy_site_adjacency: int = 0
+    prophet_coming: bool = False
     sites_ok: bool = True  # False when settling found no safe site to send a settler to.
     # Issue 283: settlers on the map that settling held this turn (no site, or no safe route and
     # no escort). While one waits, another settler could do no more than it.
@@ -303,6 +341,7 @@ def build_context(
         threatened_at={c.city_id: (c.x, c.y) for c in cities},
         short=defence.short_ids if defence is not None else frozenset(),
         mapped=defence.mapped_ids if defence is not None else frozenset(),
+        readings=_map_readings(defence),
         wary=bool(defence is not None and defence.wary),
         districts=frozenset(_short(d.district_type) for c in cities for d in c.districts),
         science_districts=sum(
@@ -334,8 +373,16 @@ def build_context(
         hostile=max(near[0], ctx.camp_defender),
         hostile_ranged=max(near[1], ctx.camp_defender_ranged),
     )
+    in_progress = list(in_progress)
     for item in in_progress:
         ctx = ctx.after_choosing(item)
+    # Issue 375: a Great Prophet unit, or Stonehenge finished or in production.
+    if (
+        any(u.unit_type == "UNIT_GREAT_PROPHET" for u in units)
+        or any(_short(b) == "STONEHENGE" for c in cities for b in c.buildings)
+        or any(_short(i) == "STONEHENGE" for i in in_progress)
+    ):
+        ctx = replace(ctx, prophet_coming=True)
     return ctx
 
 
@@ -958,6 +1005,31 @@ def _wonder_race_score(
     return _WONDER_VALUE * w.wonders if go else 0.0
 
 
+def _map_readings(defence: Any) -> dict[int, Any]:
+    """The threat map's reading of each city it judged (issue 388), by city id."""
+    if defence is None:
+        return {}
+    return {i: defence.cities[i].reading for i in defence.mapped_ids}
+
+
+def _walls_by_map(full: float, city: City, ctx: ProductionContext, w: ProductionWeights) -> float:
+    """Walls in a threatened city, weighed by what the threat map says (issue 388).
+
+    Without a reading the full score stands. With one, the score slides from what the walls save
+    (a covered city) up to the full score as net threat and fog grow.
+    """
+    reading = ctx.readings.get(city.city_id) if city.city_id in ctx.mapped else None
+    if reading is None:
+        return full
+    # Damage the walls turn away: what the attackers would deal to the city less what reaches the
+    # walls (`wall_damage` is the share that hits them, small for melee and all of a siege's).
+    saving = max(0.0, reading.damage - reading.wall_damage)
+    low = min(full, w.walls_covered_base + w.walls_saving_weight * saving)
+    pressure = max(0.0, reading.net) + w.walls_fog_weight * max(0.0, reading.fog)
+    share = 1.0 if w.walls_full_pressure <= 0 else min(1.0, pressure / w.walls_full_pressure)
+    return low + share * (full - low)
+
+
 def _building_score(
     option: ProductionChoice, city: City, ctx: ProductionContext, w: ProductionWeights
 ) -> float:
@@ -973,7 +1045,8 @@ def _building_score(
         return _WONDER_VALUE * w.wonders
     if name in _DEFENSIVE_BUILDINGS:
         if city.city_id in ctx.threatened and not city.has_walls:
-            return 26.0 + len(city.threats)  # Walls come right after the first defender.
+            full = 26.0 + len(city.threats)  # Walls come right after the first defender.
+            return _walls_by_map(full, city, ctx, w)
         if is_pressed(city, ctx) and not city.has_walls:
             return 17.0 + len(city.threats)
         if ctx.wary and name == "WALLS" and not city.has_walls:
@@ -1013,6 +1086,40 @@ def _building_housing_value(
     return slots * w.housing_building_value * housing_multiplier(plan)
 
 
+def holy_site_safe(city: City, ctx: ProductionContext) -> bool:
+    """Not threatened or pressed, garrisoned, and no camp force short within reach (issue 375)."""
+    if under_threat(city, ctx) or is_pressed(city, ctx) or city.garrison_unit is None:
+        return False
+    return not (
+        ctx.camp_units > 0
+        and (
+            ctx.camp_target is None
+            or hex_distance(city.x, city.y, *ctx.camp_target) <= _CAMP_CITY_REACH
+        )
+    )
+
+
+def holy_site_bonus(city: City, ctx: ProductionContext, w: ProductionWeights) -> float:
+    """Issue 375: what a safe city adds to its first Holy Site for a good placement or a prophet.
+
+    Zero once any Holy Site exists, in an unsafe city, or with the appetite at 0. The adjacency
+    tiers do not stack; the prophet bonus is added to either.
+    """
+    if w.holy_site_appetite <= 0 or any(_base_district(d) == "HOLY_SITE" for d in ctx.districts):
+        return 0.0
+    if not holy_site_safe(city, ctx):
+        return 0.0
+    if ctx.holy_site_adjacency >= 3:
+        bonus = w.holy_site_bonus_3
+    elif ctx.holy_site_adjacency == 2:
+        bonus = w.holy_site_bonus_2
+    else:
+        bonus = 0.0
+    if ctx.prophet_coming:
+        bonus += w.holy_site_prophet_bonus
+    return bonus * w.holy_site_appetite
+
+
 def _district_score(
     option: ProductionChoice, city: City, w: ProductionWeights, ctx: ProductionContext
 ) -> float:
@@ -1023,6 +1130,8 @@ def _district_score(
     if profile is None:
         return _UNKNOWN_BUILDING * 2.0
     value = _yield_value(profile, w)
+    if name == "HOLY_SITE":
+        value += holy_site_bonus(city, ctx, w)
     if name == "CAMPUS" and ctx.num_cities > 0:
         behind = max(0.0, 1.0 - ctx.science_districts / ctx.num_cities)
         value += _SCIENCE_CATCHUP * behind * w.science
@@ -1747,6 +1856,9 @@ class CityProductionPolicy:
             emit=self._emit
         )  # Chained tile buys. Its `book` is the gold policy's saving list.
         self.expansion = expansion if expansion is not None else ExpansionState()
+        # Issue 375: best Holy Site adjacency per city, read once from the district advisor.
+        self._holy_adjacency: dict[int, tuple[int, int]] = {}  # City -> (turn read, adjacency).
+        self._holy_turn = 0
 
     async def run(self, game: ProductionGame) -> None:
         unfinished = await self.assign(game)
@@ -1907,7 +2019,7 @@ class CityProductionPolicy:
                 game,
                 city,
                 options,
-                context,
+                await self._with_holy_site(game, city, options, context),
                 self.weights,
                 memory=self.refusals,
                 emit=self._emit,
@@ -1923,6 +2035,60 @@ class CityProductionPolicy:
                     context = replace(context, scouts_built=self.scouts_built)
                 self._note(city, f"production: chose {picked.item}")
         return unfinished
+
+    async def _with_holy_site(
+        self,
+        game: ProductionGame,
+        city: City,
+        options: list[ProductionChoice],
+        context: ProductionContext,
+    ) -> ProductionContext:
+        """Issue 375: add this city's best Holy Site adjacency to the context.
+
+        Read from the district advisor only for a city offered a Holy Site while none exists, and
+        kept per city and read again after `holy_site_reread_turns`. A turn that goes back (a
+        loaded save) clears it.
+        """
+        if context.turn < self._holy_turn:
+            self._holy_adjacency.clear()
+        self._holy_turn = context.turn
+        if self.weights.holy_site_appetite <= 0 or any(
+            _base_district(d) == "HOLY_SITE" for d in context.districts
+        ):
+            return context
+        offered = next(
+            (
+                o
+                for o in options
+                if o.category == "DISTRICT" and _base_district(o.item) == "HOLY_SITE"
+            ),
+            None,
+        )
+        if offered is None:
+            return context
+        cached = self._holy_adjacency.get(city.city_id)
+        if cached is None or context.turn - cached[0] >= self.weights.holy_site_reread_turns:
+            try:
+                placements = await game.get_district_advisor(city.city_id, offered.item)
+            except ConnectionError:
+                raise
+            except Exception:
+                log.exception("Reading the Holy Site placement failed")
+                return context
+            if not isinstance(placements, list):
+                return context  # Not cached: the advisor may answer next turn.
+            best = max((p.total_adjacency for p in placements), default=0)
+            self._holy_adjacency[city.city_id] = (context.turn, best)
+            seen = replace(context, holy_site_adjacency=best)
+            log.info(
+                "%s: best Holy Site adjacency %d, Holy Site scores %.1f (safe %s, prophet %s)",
+                city.name,
+                best,
+                score(offered, city, seen, self.weights),
+                holy_site_safe(city, context),
+                context.prophet_coming,
+            )
+        return replace(context, holy_site_adjacency=self._holy_adjacency[city.city_id][1])
 
     def _log_pillaged(self, cities: list[City]) -> None:
         """Log what is pillaged in each city when it changes, and each item repaired."""

@@ -20,7 +20,7 @@ import json
 import logging
 import math
 import re
-from collections.abc import Collection, Iterable
+from collections.abc import Collection, Iterable, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Protocol
 
@@ -239,7 +239,16 @@ class SettlingSettings:
     loyalty_safe_penalty_weight: float = 2.0  # Score lost per point of safe rate under comfort.
     rival_city_default_pop: int = 5  # A rival city seen but never with its population read.
     retry_turns: int = 10  # How long a site or frontier that could not be reached is set aside.
-    scout_wait_turns: int = 2  # A scout waits this long for a hostile unit on its route, then goes.
+    # Issue 405 (STD_T1_04 T18-21): a scout stood beside a camp counting "wait N of 2" and died.
+    # With every frontier near a hostile it now scores each tile it can reach this turn, in any
+    # direction (onward into the fog included), and re-scores every turn: no wait counter. Each
+    # weight is a tunable cost, not a rule; a fast unit running deeper is fine when it is safe.
+    scout_danger_weight: float = 10.0  # Score lost per hostile that can attack the tile next turn.
+    scout_explore_weight: float = 1.0  # Score per tile of progress toward the nearest frontier.
+    scout_reveal_weight: float = 0.5  # Score per frontier point within `scout_reveal_radius`.
+    scout_reveal_radius: int = 2
+    scout_cover_weight: float = 0.5  # A mild bonus for an own city or unit within cover radius.
+    scout_cover_radius: int = 2
     automate_retry_turns: int = 3  # Before an idle scout is handed to the game's explorer again.
     map_width: int | None = STANDARD_MAP_WIDTH
 
@@ -766,6 +775,25 @@ def _round_axial(q: float, r: float) -> tuple[int, int]:
     return rq, rr
 
 
+def score_scout_tile(
+    danger: float,
+    progress: int,
+    revealed: int,
+    covered: bool,
+    settings: "SettlingSettings",
+) -> float:
+    """Issue 405: one reachable tile for a scout that cannot explore safely. `danger` counts the
+    hostiles that can attack it next turn, `progress` is the hex distance toward the nearest
+    frontier gained by going there (negative for a retreat), `revealed` the frontier points within
+    sight of it and `covered` whether an own city or unit is close. Every term is a weight."""
+    return (
+        -settings.scout_danger_weight * danger
+        + settings.scout_explore_weight * progress
+        + settings.scout_reveal_weight * revealed
+        + (settings.scout_cover_weight if covered else 0.0)
+    )
+
+
 def frontier_points(
     exploration: Exploration, map_width: int | None = STANDARD_MAP_WIDTH
 ) -> list[tuple[int, int]]:
@@ -921,7 +949,6 @@ class SettlingPolicy:
     _stripped: dict[tuple[int, int], int] = field(default_factory=dict, init=False, repr=False)
     _automated: dict[int, int] = field(default_factory=dict, init=False, repr=False)
     _scout_targets: dict[int, tuple[int, int]] = field(default_factory=dict, init=False, repr=False)
-    _scout_waits: dict[int, int] = field(default_factory=dict, init=False, repr=False)
     # Shared with production and the expansion log. `run` fills it when it surveys the map.
     expansion: ExpansionState = field(default_factory=ExpansionState)
     _own_cities: list[tuple[int, int, int]] = field(default_factory=list, init=False, repr=False)
@@ -1037,6 +1064,7 @@ class SettlingPolicy:
                 )
         self.expansion.held_settlers = len(self._held_now)
         self._survey(settlers, units, exploration, city_tiles, danger, turn)
+        friends = [(c.x, c.y) for c in cities] + [(u.x, u.y) for u in units if u not in scouts]
         for rank, scout in enumerate(sorted(scouts, key=lambda u: u.unit_id)):
             look = self._look_points[rank % len(self._look_points)] if self._look_points else None
             s_width = self.settings.map_width
@@ -1051,7 +1079,7 @@ class SettlingPolicy:
                     ]
                     look = short[-1] if short else None
                     log.info("scout %s sent toward the suspected camp at %s", scout.unit_id, look)
-            await self._explore(game, scout, exploration, danger, turn, look)
+            await self._explore(game, scout, exploration, danger, turn, look, friends)
 
     def _recent_sightings(self, turn: int) -> tuple[tuple[int, int], ...]:
         """Where hostile land units were last seen in recent turns and are not in sight now."""
@@ -1227,7 +1255,6 @@ class SettlingPolicy:
         self._holds = {k: v for k, v in self._holds.items() if k in alive}
         self._no_site_turns = {k: v for k, v in self._no_site_turns.items() if k in alive}
         self._scout_targets = {k: v for k, v in self._scout_targets.items() if k in alive}
-        self._scout_waits = {k: v for k, v in self._scout_waits.items() if k in alive}
         self._automated = {k: v for k, v in self._automated.items() if k in alive}
         self._set_aside = {k: v for k, v in self._set_aside.items() if v >= turn}
         self._bad_frontiers = {k: v for k, v in self._bad_frontiers.items() if v >= turn}
@@ -2122,6 +2149,68 @@ class SettlingPolicy:
 
     # ----- scouts -----
 
+    async def _scout_to_safety(
+        self,
+        game: SettlingGame,
+        scout: Unit,
+        frontier: Sequence[tuple[int, int]],
+        danger: _Danger,
+        friends: Sequence[tuple[int, int]],
+    ) -> bool:
+        """Issue 405: move the scout to the best-scored tile it can reach this turn (see
+        `score_scout_tile`), onward into the fog as readily as back toward a city. True when it
+        moved. Staying put is a candidate too; it is chosen when nothing scores better."""
+        s = self.settings
+        width = s.map_width
+        here = (scout.x, scout.y)
+        moves = max(1.0, scout.max_moves)
+        field = self._movement().turn_field(here, moves)
+        if field is not None:
+            tiles = [p for p, turns in field.items() if turns <= 1]
+        else:  # No terrain yet: every tile within the move allowance.
+            reach = int(moves)
+            tiles = [
+                (x, y)
+                for x in range(scout.x - reach, scout.x + reach + 1)
+                for y in range(scout.y - reach, scout.y + reach + 1)
+                if y >= 0 and hex_distance(scout.x, scout.y, x, y, width) <= reach
+            ]
+            tiles = [(x % width if width else x, y) for x, y in tiles]
+
+        def nearest(p: tuple[int, int]) -> int:
+            return min((hex_distance(*p, *f, width) for f in frontier), default=0)
+
+        gap = nearest(here)
+        scored = []
+        for tile in tiles:
+            d = danger.count_near(*tile, s.scout_threat_radius)
+            score = score_scout_tile(
+                d,
+                (gap - nearest(tile)) if frontier else 0,
+                sum(hex_distance(*tile, *f, width) <= s.scout_reveal_radius for f in frontier),
+                any(hex_distance(*tile, *f, width) <= s.scout_cover_radius for f in friends),
+                s,
+            )
+            scored.append((-score, tile != here, tile, d))
+        scored.sort()
+        for neg, _, tile, d in scored[: _MAX_SCOUT_TRIES + 1]:
+            if tile == here:
+                log.info("scout %s stays at %s: best tile (danger %g)", scout.unit_id, here, d)
+                return False
+            if move_succeeded(await game.move_unit(scout.unit_index, *tile)):
+                self._scout_targets.pop(scout.unit_id, None)
+                log.info(
+                    "scout %s moves %s -> %s: every frontier is near a hostile unit "
+                    "(score %.1f, danger %g)",
+                    scout.unit_id,
+                    here,
+                    tile,
+                    -neg,
+                    d,
+                )
+                return True
+        return False
+
     async def _explore(
         self,
         game: SettlingGame,
@@ -2130,6 +2219,7 @@ class SettlingPolicy:
         danger: _Danger,
         turn: int,
         look: tuple[int, int] | None = None,
+        friends: Sequence[tuple[int, int]] = (),
     ) -> None:
         s = self.settings
         taken = {t for uid, t in self._scout_targets.items() if uid != scout.unit_id}
@@ -2139,11 +2229,9 @@ class SettlingPolicy:
             for p in frontier_points(exploration, s.map_width)
             if self._bad_frontiers.get(p, -1) < turn and p not in taken and p != here
         ]
-        # Live (Run 15): a scout sat in the capital for ever because a camp's guards ruled out
-        # every frontier, and the wait below never ended. After a short wait it goes anyway.
-        impatient = self._scout_waits.get(scout.unit_id, 0) >= s.scout_wait_turns
-        # A hostile unit only rules a frontier out for this turn, because it will move.
-        frontier = [p for p in reachable if impatient or not danger.near(*p, s.scout_threat_radius)]
+        # Issue 405: no wait counter. A frontier near a hostile is skipped this turn only, and
+        # every turn re-scores them; when none is safe the scout picks the best reachable tile.
+        frontier = [p for p in reachable if not danger.near(*p, s.scout_threat_radius)]
         if look is not None and look != here and self._bad_frontiers.get(look, -1) < turn:
             frontier.append(look)  # The fog a site's loyalty depends on, itself a target.
         previous = self._scout_targets.get(scout.unit_id)
@@ -2166,7 +2254,7 @@ class SettlingPolicy:
         # Live: barbarians camped beside the capital from turn 9, so every route out started
         # within their radius and the first scout waited for ever. After a short wait it goes.
         for target in frontier:
-            if not impatient and danger.on_path(here, target, s.scout_threat_radius):
+            if danger.on_path(here, target, s.scout_threat_radius):
                 blocked_by_threat = True
                 continue
             if tried == _MAX_SCOUT_TRIES:
@@ -2174,20 +2262,15 @@ class SettlingPolicy:
             tried += 1
             if move_succeeded(await game.move_unit(scout.unit_index, *target)):
                 self._scout_targets[scout.unit_id] = target
-                self._scout_waits.pop(scout.unit_id, None)
                 return
             self._bad_frontiers[target] = turn + s.retry_turns
         self._scout_targets.pop(scout.unit_id, None)
-        if blocked_by_threat and not tried:
-            self._scout_waits[scout.unit_id] = self._scout_waits.get(scout.unit_id, 0) + 1
-            log.info(
-                "scout %s waits at %s: every frontier is near a hostile unit (wait %d of %d)",
-                scout.unit_id,
-                here,
-                self._scout_waits[scout.unit_id],
-                s.scout_wait_turns,
-            )
-            return  # Wait a turn for the hostile unit to move on.
+        in_reach = danger.count_near(scout.x, scout.y, s.scout_threat_radius) >= 1.0
+        if (blocked_by_threat and not tried) or in_reach:
+            # Issue 405: score every tile it can reach, in any direction, and go to the best.
+            if await self._scout_to_safety(game, scout, reachable, danger, friends):
+                return
+            return  # Staying is the best tile, or in reach: never hand it over (issue 405).
         last = self._automated.get(scout.unit_id)
         if last is None or turn - last >= s.automate_retry_turns:
             result = await game.automate_explore(scout.unit_index)

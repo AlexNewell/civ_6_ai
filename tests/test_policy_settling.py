@@ -18,6 +18,7 @@ from civ6_ai.policies.settling import (
     loyalty_rate,
     neighbours,
     safe_loyalty_rate,
+    score_scout_tile,
     score_site,
 )
 from civ6_ai.state.models import Exploration, SettleSite
@@ -410,28 +411,49 @@ def test_a_threat_near_a_scout_route_only_blocks_that_turn():
         [scout], cities=[alpha()], strategic=only, threats=[barbarian(10, 15)], turn=6
     )
     run(policy, waiting)
-    assert waiting.actions == []  # Waits instead of blacklisting the frontier or auto-exploring.
+    # No blacklisting, no auto-explore: the scout re-scores its tiles (issue 405).
+    assert [a[0] for a in waiting.actions] in ([], ["move"])
     clear = make_game([scout], cities=[alpha()], strategic=only, turn=7)
     run(policy, clear)
     assert clear.actions == [("move", 3, 10, 13)]
 
 
-def test_a_scout_blocked_by_a_threat_goes_anyway_after_waiting():
+def test_a_scout_with_hostiles_adjacent_leaves_their_reach_and_has_no_counter():
+    # Issue 405 (STD_T1_04 T21): the scout stood beside a camp counting turns, and died.
     scout = unit_info(unit_id=3, unit_index=3, x=10, y=12, **SCOUT)
     only = lq.StrategicMapData([lq.FogBoundary("Alpha", 10, 10, [-1, -1, -1, 4, -1, -1])], [])
     policy = SettlingPolicy()
-    waits = SettlingPolicy().settings.scout_wait_turns
-    for turn in range(5, 5 + waits):
+    assert not hasattr(policy.settings, "scout_wait_turns")
+    for turn in range(5, 9):  # Every turn is judged afresh; there is nothing to count.
         game = make_game(
-            [scout], cities=[alpha()], strategic=only, threats=[barbarian(10, 15)], turn=turn
+            [scout], cities=[alpha()], strategic=only, threats=[barbarian(10, 13)], turn=turn
         )
         run(policy, game)
-        assert game.actions == []
-    game = make_game(
-        [scout], cities=[alpha()], strategic=only, threats=[barbarian(10, 15)], turn=5 + waits
-    )
-    run(policy, game)
-    assert game.actions == [("move", 3, 10, 13)]  # Stuck in the city for ever otherwise.
+        assert [a[0] for a in game.actions] == ["move"]
+        x, y = game.actions[0][2:]
+        assert hex_distance(x, y, 10, 13, policy.settings.map_width) > 2  # Out of its reach.
+
+
+def test_a_safe_tile_deeper_in_the_fog_beats_one_back_toward_a_city():
+    s = SettlingSettings()
+    deeper = score_scout_tile(0, 3, 2, False, s)
+    back = score_scout_tile(0, -3, 0, True, s)
+    assert deeper > back
+    assert score_scout_tile(1, 3, 2, False, s) < back  # Danger outweighs the gain.
+    scout = unit_info(unit_id=3, unit_index=3, x=10, y=12, **SCOUT)
+    only = lq.StrategicMapData([lq.FogBoundary("Alpha", 10, 10, [-1, -1, -1, 8, -1, -1])], [])
+    game = make_game([scout], cities=[alpha()], strategic=only, threats=[barbarian(10, 13)], turn=5)
+    run(SettlingPolicy(), game)
+    _, _, x, y = game.actions[0]
+    assert y >= 12  # Onward or sideways, not home to the city at (10, 10).
+
+
+def test_a_scout_with_nothing_in_reach_explores():
+    scout = unit_info(unit_id=3, unit_index=3, x=10, y=12, **SCOUT)
+    only = lq.StrategicMapData([lq.FogBoundary("Alpha", 10, 10, [-1, -1, -1, 4, -1, -1])], [])
+    game = make_game([scout], cities=[alpha()], strategic=only, threats=[barbarian(30, 30)])
+    run(SettlingPolicy(), game)
+    assert game.actions == [("move", 3, 10, 13)]
 
 
 def test_refused_scout_moves_set_a_frontier_aside_only_for_a_while():
@@ -598,21 +620,15 @@ def test_first_city_does_not_retry_a_tile_where_founding_failed():
     assert "already failed" in skipped[0].reason
 
 
-def test_a_scout_stops_waiting_for_a_camp_that_never_leaves():
-    # Live: barbarians sat beside the capital for 30 turns, every route out passed within their
-    # radius, and the scout never left.
+def test_a_scout_does_not_sit_for_a_camp_that_never_leaves():
+    # Live: barbarians sat beside the capital for 30 turns and the scout never left. Now it
+    # moves to a tile out of their reach at once (issue 405), toward the frontier.
     scout = unit_info(unit_id=3, unit_index=3, x=10, y=12, **SCOUT)
     only = lq.StrategicMapData([lq.FogBoundary("Alpha", 10, 10, [-1, 5, -1, -1, -1, -1])], [])
-    policy = SettlingPolicy()
-    for turn in (6, 7):
-        waiting = make_game(
-            [scout], cities=[alpha()], strategic=only, threats=[barbarian(9, 13)], turn=turn
-        )
-        run(policy, waiting)
-        assert waiting.actions == []
-    going = make_game([scout], cities=[alpha()], strategic=only, threats=[barbarian(9, 13)], turn=8)
-    run(policy, going)
-    assert going.actions == [("move", 3, 14, 6)]
+    game = make_game([scout], cities=[alpha()], strategic=only, threats=[barbarian(9, 13)], turn=6)
+    run(SettlingPolicy(), game)
+    assert [a[0] for a in game.actions] == ["move"]
+    assert hex_distance(*game.actions[0][2:], 9, 13, 66) > 2
 
 
 def test_an_escorted_settler_founds_though_a_hostile_unit_shadows_it():
@@ -1661,6 +1677,9 @@ class _NoDanger:
 
     def near(self, *a):
         return False
+
+    def count_near(self, *a, **k):
+        return 0.0
 
     def on_path(self, *a):
         return False

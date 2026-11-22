@@ -556,3 +556,121 @@ def test_demand_is_unknown_when_no_builder_is_free():
     policy = BuilderPolicy()
     run(policy, ActionGame([task()], [unit_info()]))
     assert policy.demand.idle == 0 and policy.demand.spare_jobs is None
+
+
+# ----- danger and the real walk (#389) -----
+
+
+def test_danger_and_walk_turns_cost_score():
+    safe = score_job(job(), 4, 2.0, W)
+    assert score_job(job(), 4, 2.0, W, danger=2.0) == pytest.approx(safe - 2 * W.danger_cost)
+    # An explicit walk replaces the hex distance (11 turns, not 2).
+    assert score_job(job(), 4, 2.0, W, walk_turns=11) == pytest.approx(
+        safe + 2 * W.turn_cost - 11 * W.turn_cost
+    )
+
+
+def _flat_terrain(width=30, height=30, ridge=()):
+    from civ6_ai.state.reader import build_tile
+    from civ6_ai.terrain import TerrainStore
+    from fixtures.civ_state import tile
+
+    store = TerrainStore(None)
+    tiles = []
+    for x in range(width):
+        for y in range(height):
+            terrain = "TERRAIN_GRASS_MOUNTAIN" if (x, y) in ridge else "TERRAIN_GRASS"
+            tiles.append(build_tile(tile(x=x, y=y, terrain=terrain, units=[])))
+    store.learn(tiles)
+    return store
+
+
+def _chosen(policy, jobs, builder):
+    game = ActionGame(jobs, [builder])
+    run(policy, game)
+    return [a[2:] for a in game.actions if a[0] == "move"]
+
+
+def test_a_job_across_a_ridge_loses_to_a_nearer_job_of_similar_value():
+    # A wall of mountains from y=0..16 at x=12, so the job at x=14 is a long way round.
+    ridge = {(12, y) for y in range(0, 17)}
+    terrain = _flat_terrain(ridge=ridge)
+    policy = BuilderPolicy(terrain=terrain)
+    ridge_job = task(x=13, y=10)  # Three hex tiles away, but behind the wall.
+    far_near = task(x=7, y=10)  # Also three tiles, on this side.
+    assert _chosen(BuilderPolicy(), [ridge_job, far_near], worker(x=10, y=10)) == [(7, 10)]
+    assert _chosen(policy, [ridge_job, far_near], worker(x=10, y=10)) == [(7, 10)]
+    walk = policy._reach(worker_unit(10, 10))
+    assert walk[(7, 10)] < walk.get((13, 10), 99)
+
+
+def worker_unit(x, y):
+    from civ6_ai.state.reader import build_unit
+
+    return build_unit(worker(x=x, y=y))
+
+
+class StubMap:
+    def __init__(self, danger):
+        self.danger = danger
+
+    def raw_danger_at(self, x, y, turn=None):
+        return self.danger.get((x, y), 0.0)
+
+
+def test_a_job_in_camp_reach_scores_lower_than_one_under_cover():
+    stub = StubMap({(14, 10): 4.0})
+    policy = BuilderPolicy(threat_map=stub)
+    reach_job = task(x=14, y=10)
+    covered = task(x=6, y=10)  # Same distance, no danger.
+    assert _chosen(policy, [reach_job, covered], worker(x=10, y=10)) == [(6, 10)]
+    # Weighted, not banned: with nothing else on offer the builder still goes.
+    assert _chosen(BuilderPolicy(threat_map=stub), [reach_job], worker(x=10, y=10)) == [(14, 10)]
+
+
+def test_danger_on_the_way_counts_not_only_at_the_job():
+    stub = StubMap({(12, 10): 4.0})
+    policy = BuilderPolicy(threat_map=stub)
+    unit = worker_unit(10, 10)
+    assert policy._route_danger(unit, BuilderJob(**{**job().__dict__, "x": 14}), 5) == 4.0
+
+
+def test_a_lost_builder_raises_the_danger_at_its_last_tile(caplog):
+    policy = BuilderPolicy()
+    run(policy, ActionGame([task(x=20, y=10)], [worker(x=10, y=10)]))
+    assert policy.danger_at(10, 10, 5) == 0.0
+    with caplog.at_level(logging.INFO):
+        # The builder is gone the next turn, away from its job.
+        run(policy, ActionGame([task(x=20, y=10)], [worker(2, x=30, y=10)]))
+    assert policy.lost == [(10, 10, 5)]
+    assert any("builder_lost" in r.message for r in caplog.records)
+    s = policy.settings
+    assert policy.danger_at(10, 10, 6) == s.lost_danger
+    assert policy.danger_at(10 + s.lost_radius + 1, 10, 6) == 0.0
+    assert policy.danger_at(10, 10, 5 + s.lost_turns + 1) == 0.0
+
+
+def test_a_builder_finishing_on_its_job_tile_is_not_lost():
+    policy = BuilderPolicy()
+    run(policy, ActionGame([task(x=10, y=10)], [worker(x=10, y=10)]))
+    run(policy, ActionGame([], [worker(2, x=30, y=10)]))
+    assert policy.lost == []
+
+
+def test_a_builder_that_moves_and_spends_its_last_charge_is_not_lost():
+    policy = BuilderPolicy()
+    game = ActionGame([task(x=12, y=10)], [worker(x=10, y=10)])
+    game.replies["move"] = "MOVED|now_at:12,10"
+    run(policy, game)
+    assert ("improve", 1, "IMPROVEMENT_FARM") in game.actions
+    run(policy, ActionGame([], [worker(2, x=30, y=10)]))  # Gone: the last charge was spent.
+    assert policy.lost == []
+
+
+def test_a_loss_after_a_move_is_placed_where_the_move_ended():
+    policy = BuilderPolicy()
+    game = ActionGame([task(x=20, y=10)], [worker(x=10, y=10)])
+    game.replies["move"] = "MOVED|now_at:14,10"
+    run(policy, game)
+    run(policy, ActionGame([task(x=20, y=10)], [worker(2, x=30, y=10)]))
+    assert policy.lost == [(14, 10, 5)]

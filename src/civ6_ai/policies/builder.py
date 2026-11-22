@@ -21,10 +21,11 @@ import math
 import re
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import asdict, dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 
 from civ6_ai.blockers import action_succeeded, move_succeeded
 from civ6_ai.policies.game_data import REPLACES
+from civ6_ai.policies.secondary import line_tiles
 from civ6_ai.state import BuilderJob, GameReads, Threat, Unit, read_builder_jobs, read_threats
 from civ6_ai.state import read_units as _read_units
 from civ6_ai.state.reader import STANDARD_MAP_WIDTH, hex_distance
@@ -79,6 +80,11 @@ class BuilderWeights:
     # sized so a plain job (20) rises to 60, level with a bonus-resource job (60) but under any
     # luxury (90), strategic resource (140) or repair (135) job: a boost can't starve the economy.
     nudge_bonus: float = 40.0
+    # Score given up per unit of raw danger (#389: a builder was captured on a walk the score
+    # called safe and short). The danger is the worst on the job tile and the straight line to
+    # it, our cover ignored, as for a Trader route (#287). Weighted, never a ban: one unit of
+    # danger costs one and a half turns of walking, so a rich job still beats a poor safe one.
+    danger_cost: float = 6.0
 
 
 @dataclass(frozen=True)
@@ -96,13 +102,31 @@ class BuilderSettings:
     max_work_turns: int = 15  # Turns spent on one job before it is given up.
     max_hold_turns: int = 5  # Turns an idle builder keeps its claim while the job is unsafe.
     map_width: int | None = STANDARD_MAP_WIDTH
+    # A builder that vanishes away from its job is taken as lost (#389). The area around its last
+    # tile is given this much danger for `lost_turns` turns, so the next builder is not sent
+    # straight back. The unit is the threat map's: a Trader route is refused above 5.
+    lost_danger: float = 5.0
+    lost_radius: int = 3
+    lost_turns: int = 15
+    danger_cap: float = 10.0  # Danger counted per job at most, so one camp can't hide every job.
     # Take up the research policy's boost nudges (#344). Off, so nothing changes until a run
     # shows it pays. Needs `ResearchWeights.boost_judgement` on, which is what makes nudges.
     use_boost_nudges: bool = False
 
 
-def score_job(job: BuilderJob, distance: int, max_moves: float, weights: BuilderWeights) -> float:
-    """Value a job for a builder `distance` tiles away. Only visible fields are read."""
+def score_job(
+    job: BuilderJob,
+    distance: int,
+    max_moves: float,
+    weights: BuilderWeights,
+    danger: float = 0.0,
+    walk_turns: float | None = None,
+) -> float:
+    """Value a job for a builder `distance` tiles away. Only visible fields are read.
+
+    `walk_turns` is the real walk from the terrain, used over the hex distance when known, and
+    `danger` is the worst raw danger on the job and the way to it (#389).
+    """
     score = {"urgent": weights.urgent, "high": weights.high}.get(job.priority, weights.normal)
     if job.is_repair:
         score += weights.repair
@@ -112,7 +136,9 @@ def score_job(job: BuilderJob, distance: int, max_moves: float, weights: Builder
         score += weights.luxury
     elif job.resource_class == "bonus":
         score += weights.bonus
-    return score - weights.turn_cost * math.ceil(distance / max(1.0, max_moves))
+    if walk_turns is None:
+        walk_turns = math.ceil(distance / max(1.0, max_moves))
+    return score - weights.turn_cost * walk_turns - weights.danger_cost * max(0.0, danger)
 
 
 @dataclass(frozen=True)
@@ -170,6 +196,18 @@ class BuilderPolicy:
     open_jobs: list[BuilderJob] = field(default_factory=list)
     claimed: frozenset = field(default_factory=frozenset)
     jobs_turn: int | None = None
+    # The threat map and terrain store, set by the bot (#389). With none, a job is scored by hex
+    # distance and no danger, as before.
+    threat_map: Any = field(default=None, repr=False)
+    terrain: Any = field(default=None, repr=False)
+    # Where builders were lost: (x, y, turn).
+    lost: list[tuple[int, int, int]] = field(default_factory=list)
+    _seen: dict[int, tuple[int, int, tuple[int, int] | None]] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _last_turn: int = field(default=0, init=False, repr=False)
+    # Where a builder stood after this turn's move, as the move reported it (#389).
+    _moved: dict[int, tuple[int, int]] = field(default_factory=dict, init=False, repr=False)
     _built_keys: set = field(default_factory=set, init=False, repr=False)
     _nudged: set = field(default_factory=set, init=False, repr=False)
     _claims: dict[int, _Key] = field(default_factory=dict, init=False, repr=False)
@@ -187,8 +225,10 @@ class BuilderPolicy:
         free = sorted((u for u in builders if u.can_move), key=lambda u: u.unit_id)
         if not free:
             self.demand.idle, self.demand.spare_jobs = 0, None  # Busy, or none: nothing to infer.
+            self._snapshot(builders)
             return
         turn = (await game.get_game_overview()).turn
+        self._last_turn = turn
         jobs = [j for j in await read_builder_jobs(game) if self._buildable(j, turn)]
         threats = await read_threats(game)
         self._forget_finished_jobs(jobs, turn)
@@ -205,6 +245,7 @@ class BuilderPolicy:
             elif (job.x, job.y) not in held:
                 available.setdefault((job.x, job.y), job)
         await self._assign(game, free, available, turn, unsafe)
+        self._snapshot(builders)
         # A job worked this turn is counted in `built`, so it is no longer on offer or held: the
         # judgement would count it twice, as built and as a job under way.
         self.open_jobs = [j for j in self.open_jobs if _key(j) not in self._built_keys]
@@ -213,11 +254,77 @@ class BuilderPolicy:
     # ----- bookkeeping -----
 
     def _forget_gone_units(self, builders: Iterable[Unit]) -> None:
+        builders = list(builders)
         alive = {u.unit_id for u in builders}  # Including builders with no moves left this turn.
+        self._note_lost(alive)
         self._claims = {k: v for k, v in self._claims.items() if k in alive}
         self._travel = {k: v for k, v in self._travel.items() if k in alive}
         self._work = {k: v for k, v in self._work.items() if k in alive}
         self._holds = {k: v for k, v in self._holds.items() if k in alive}
+
+    def _snapshot(self, builders: Iterable[Unit]) -> None:
+        """Remember each builder where it ended its turn, which is where a loss is placed."""
+        self._seen = {
+            u.unit_id: (*self._moved.get(u.unit_id, (u.x, u.y)), self._claim_tile(u.unit_id))
+            for u in builders
+        }
+        self._moved.clear()
+
+    def _claim_tile(self, unit_id: int) -> tuple[int, int] | None:
+        claim = self._claims.get(unit_id)
+        return None if claim is None else claim[:2]
+
+    def _note_lost(self, alive: set[int]) -> None:
+        """A builder that vanished away from its job was lost (one finishing a job on its last
+        charge is gone at its job tile, which is no loss). Log it and remember the place."""
+        for uid, (x, y, claim) in self._seen.items():
+            if uid in alive or claim == (x, y):
+                continue
+            self.lost.append((x, y, self._last_turn))
+            log.info(
+                "builder_lost %s",
+                json.dumps(
+                    {"turn": self._last_turn, "unit_id": uid, "x": x, "y": y, "job": claim},
+                    sort_keys=True,
+                ),
+            )
+
+    def danger_at(self, x: int, y: int, turn: int) -> float:
+        """Raw danger for a builder on a tile: the threat map's, and the memory of a builder lost
+        near here in the last `lost_turns` turns (#389)."""
+        s = self.settings
+        danger = 0.0
+        if self.threat_map is not None:
+            danger = self.threat_map.raw_danger_at(x, y, turn)
+        for lx, ly, lturn in self.lost:
+            if (
+                turn - lturn <= s.lost_turns
+                and hex_distance(x, y, lx, ly, s.map_width) <= s.lost_radius
+            ):
+                danger = max(danger, s.lost_danger)
+        return danger
+
+    def _route_danger(self, unit: Unit, job: BuilderJob, turn: int) -> float:
+        """The worst danger on the job tile and the straight line to it, up to `danger_cap`."""
+        s = self.settings
+        tiles = line_tiles(unit.x, unit.y, job.x, job.y, s.map_width)
+        return min(s.danger_cap, max((self.danger_at(x, y, turn) for x, y in tiles), default=0.0))
+
+    def _reach(self, unit: Unit) -> dict | None:
+        """Walking turns to each tile the builder can reach, None with no terrain store."""
+        if self.terrain is None:
+            return None
+        reached = self.terrain.reach(
+            unit.x, unit.y, max(1.0, unit.max_moves), False, self.settings.max_travel_turns
+        )
+        return {tile: float(math.ceil(t)) for tile, t in reached.items()}
+
+    def _walk(self, reached: dict | None, tile: tuple[int, int]) -> float | None:
+        """Turns to walk to a tile; None (use hex distance) with no store. A tile the walk can't
+        reach within the horizon is worse than any that it can."""
+        if reached is None:
+            return None
+        return reached.get(tile, self.settings.max_travel_turns + 1.0)
 
     def _forget_finished_jobs(self, jobs: list[BuilderJob], turn: int) -> None:
         live = {_key(j) for j in jobs}
@@ -283,6 +390,8 @@ class BuilderPolicy:
         attempts = {u.unit_id: 0 for u in free}
         done: set[int] = set()
         tried: set[tuple[int, tuple[int, int]]] = set()
+        reaches: dict[int, dict | None] = {}
+        costs: dict[tuple[int, tuple[int, int]], tuple[float | None, float]] = {}
         while True:
             best = None
             for unit in free:
@@ -292,7 +401,17 @@ class BuilderPolicy:
                     if (unit.unit_id, tile) in tried:
                         continue
                     distance = hex_distance(unit.x, unit.y, job.x, job.y, s.map_width)
-                    value = score_job(job, distance, unit.max_moves, s.weights) + self._bonus(job)
+                    if (unit.unit_id, tile) not in costs:
+                        if unit.unit_id not in reaches:
+                            reaches[unit.unit_id] = self._reach(unit)
+                        reached = reaches[unit.unit_id]
+                        costs[unit.unit_id, tile] = (
+                            self._walk(reached, tile),
+                            self._route_danger(unit, job, turn),
+                        )
+                    walk, danger = costs[unit.unit_id, tile]
+                    value = score_job(job, distance, unit.max_moves, s.weights, danger, walk)
+                    value += self._bonus(job)
                     if self._claims.get(unit.unit_id) == _key(job):
                         value += s.weights.sticky
                     rank = (-value, job.x, job.y, unit.unit_id)
@@ -357,6 +476,8 @@ class BuilderPolicy:
             self._claims[unit.unit_id] = key
             self._holds.pop(unit.unit_id, None)
             reached = _NOW_AT.search(result)
+            if reached:
+                self._moved[unit.unit_id] = (int(reached.group(1)), int(reached.group(2)))
             if not reached or (int(reached.group(1)), int(reached.group(2))) != target:
                 record("move", "heading for the job", result)
                 return True

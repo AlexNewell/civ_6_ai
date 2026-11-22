@@ -655,3 +655,22 @@ def test_a_builder_finishing_on_its_job_tile_is_not_lost():
     run(policy, ActionGame([task(x=10, y=10)], [worker(x=10, y=10)]))
     run(policy, ActionGame([], [worker(2, x=30, y=10)]))
     assert policy.lost == []
+
+
+def test_a_builder_that_moves_and_spends_its_last_charge_is_not_lost():
+    policy = BuilderPolicy()
+    game = ActionGame([task(x=12, y=10)], [worker(x=10, y=10)])
+    game.replies["move"] = "MOVED|now_at:12,10"
+    run(policy, game)
+    assert ("improve", 1, "IMPROVEMENT_FARM") in game.actions
+    run(policy, ActionGame([], [worker(2, x=30, y=10)]))  # Gone: the last charge was spent.
+    assert policy.lost == []
+
+
+def test_a_loss_after_a_move_is_placed_where_the_move_ended():
+    policy = BuilderPolicy()
+    game = ActionGame([task(x=20, y=10)], [worker(x=10, y=10)])
+    game.replies["move"] = "MOVED|now_at:14,10"
+    run(policy, game)
+    run(policy, ActionGame([task(x=20, y=10)], [worker(2, x=30, y=10)]))
+    assert policy.lost == [(14, 10, 5)]

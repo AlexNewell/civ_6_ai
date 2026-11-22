@@ -206,6 +206,8 @@ class BuilderPolicy:
         default_factory=dict, init=False, repr=False
     )
     _last_turn: int = field(default=0, init=False, repr=False)
+    # Where a builder stood after this turn's move, as the move reported it (#389).
+    _moved: dict[int, tuple[int, int]] = field(default_factory=dict, init=False, repr=False)
     _built_keys: set = field(default_factory=set, init=False, repr=False)
     _nudged: set = field(default_factory=set, init=False, repr=False)
     _claims: dict[int, _Key] = field(default_factory=dict, init=False, repr=False)
@@ -223,6 +225,7 @@ class BuilderPolicy:
         free = sorted((u for u in builders if u.can_move), key=lambda u: u.unit_id)
         if not free:
             self.demand.idle, self.demand.spare_jobs = 0, None  # Busy, or none: nothing to infer.
+            self._snapshot(builders)
             return
         turn = (await game.get_game_overview()).turn
         self._last_turn = turn
@@ -242,7 +245,7 @@ class BuilderPolicy:
             elif (job.x, job.y) not in held:
                 available.setdefault((job.x, job.y), job)
         await self._assign(game, free, available, turn, unsafe)
-        self._seen = {u.unit_id: (u.x, u.y, self._claim_tile(u.unit_id)) for u in builders}
+        self._snapshot(builders)
         # A job worked this turn is counted in `built`, so it is no longer on offer or held: the
         # judgement would count it twice, as built and as a job under way.
         self.open_jobs = [j for j in self.open_jobs if _key(j) not in self._built_keys]
@@ -254,11 +257,18 @@ class BuilderPolicy:
         builders = list(builders)
         alive = {u.unit_id for u in builders}  # Including builders with no moves left this turn.
         self._note_lost(alive)
-        self._seen = {u.unit_id: (u.x, u.y, self._claim_tile(u.unit_id)) for u in builders}
         self._claims = {k: v for k, v in self._claims.items() if k in alive}
         self._travel = {k: v for k, v in self._travel.items() if k in alive}
         self._work = {k: v for k, v in self._work.items() if k in alive}
         self._holds = {k: v for k, v in self._holds.items() if k in alive}
+
+    def _snapshot(self, builders: Iterable[Unit]) -> None:
+        """Remember each builder where it ended its turn, which is where a loss is placed."""
+        self._seen = {
+            u.unit_id: (*self._moved.get(u.unit_id, (u.x, u.y)), self._claim_tile(u.unit_id))
+            for u in builders
+        }
+        self._moved.clear()
 
     def _claim_tile(self, unit_id: int) -> tuple[int, int] | None:
         claim = self._claims.get(unit_id)
@@ -466,6 +476,8 @@ class BuilderPolicy:
             self._claims[unit.unit_id] = key
             self._holds.pop(unit.unit_id, None)
             reached = _NOW_AT.search(result)
+            if reached:
+                self._moved[unit.unit_id] = (int(reached.group(1)), int(reached.group(2)))
             if not reached or (int(reached.group(1)), int(reached.group(2))) != target:
                 record("move", "heading for the job", result)
                 return True

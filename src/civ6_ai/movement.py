@@ -171,9 +171,9 @@ def attack_tiles(
     turns: int = 1,
 ) -> set[Tile]:
     """Tiles a hostile at `start` can attack within `turns` turns (default next turn): every tile
-    within `attack_range` of a tile it can stand on after that walking (a melee unit: moves plus 1; a ranged one: moves plus
-    its range). A ship also attacks the land beside the water it can stand on. Movement points
-    reset each turn. With no terrain store, by hex distance."""
+    within `attack_range` of a tile it can stand on after that walking (a melee unit: moves plus
+    1; a ranged one: moves plus its range). A ship also attacks the land beside the water it can
+    stand on. Movement points reset each turn. With no terrain store, by hex distance."""
     if terrain is None:
         reach = int(moves) * turns
         standable = {

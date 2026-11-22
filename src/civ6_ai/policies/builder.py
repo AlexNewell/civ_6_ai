@@ -232,6 +232,10 @@ class BuilderPolicy:
             return
         turn = (await game.get_game_overview()).turn
         self._last_turn = turn
+        # A builder that reached its goal under an old order closes that trip now, before the
+        # assignment can give it another job and retarget the trip.
+        for u in builders:
+            self._movement().trips.observe(u.unit_id, (u.x, u.y), turn)
         jobs = [j for j in await read_builder_jobs(game) if self._buildable(j, turn)]
         threats = await read_threats(game)
         self._forget_finished_jobs(jobs, turn)

@@ -470,3 +470,43 @@ def test_trip_report_finds_the_bot_log_from_a_turn_log_or_a_folder(tmp_path):
     assert trip_report.log_files(tmp_path / "game.jsonl") == [tmp_path / "game_bot.log"]
     assert trip_report.log_files(tmp_path) == [tmp_path / "game_bot.log"]
     assert len(trip_report.read_trips(trip_report.log_files(tmp_path))) == 1
+
+
+# ----- the step follows the same rule as the estimate (review of #402) -----
+
+
+def test_next_step_enters_a_hill_with_a_move_left_like_walk_turns():
+    m = Movement(store({(8, 10): "h"}))
+    assert m.walk_turns((6, 10), (8, 10), 2) == 1
+    assert m.next_step((6, 10), (8, 10), 2) == (8, 10)  # Flat, then the hill, in one turn.
+
+
+def test_next_step_is_always_a_tile_the_estimate_reaches_this_turn():
+    t = store({(7, 10): "h", (9, 10): "f", (10, 11): "h"})
+    m = Movement(t)
+    for goal in [(12, 10), (11, 12), (14, 9)]:
+        step = m.next_step((6, 10), goal, 2)
+        assert m.turn_field((6, 10), 2)[step] == 1
+
+
+def test_next_step_with_the_path_taken_picks_a_free_tile_reached_this_turn():
+    m = Movement(store())
+    step = m.next_step((5, 10), (10, 10), 2, occupied={(6, 10), (7, 10)})
+    assert step is not None and step not in {(6, 10), (7, 10)}
+    assert m.turn_field((5, 10), 2)[step] == 1
+
+
+def test_next_step_stops_beside_the_goal():
+    assert Movement(store()).next_step((5, 10), (7, 10), 2, stop_short=True) == (6, 10)
+
+
+def test_a_builder_that_reached_its_goal_is_observed_before_a_new_job_is_picked(caplog):
+    policy = BuilderPolicy(terrain=store())
+    asyncio.run(policy.run(ActionGame([task(x=14, y=10)], [worker(x=10, y=10)])))
+    # It walked on by its own order and stands on (14, 10), but a better job is offered elsewhere.
+    later = ActionGame([task(x=14, y=10), task("urgent", x=20, y=10)], [worker(x=14, y=10)])
+    later.data["overview"] = overview(turn=7)
+    with caplog.at_level(logging.INFO, logger="civ6_ai.movement"):
+        asyncio.run(policy.run(later))
+    first = _rows(caplog)[0]
+    assert (first["goal"], first["outcome"], first["actual"]) == ([14, 10], "arrived", 3)

@@ -415,12 +415,49 @@ class Movement:
         tiles we must not enter; `trip`'s refused tiles join them (a stacking refusal only on the
         turn it was given); `occupied` tiles can be crossed but not ended on. None when there is
         no walk (use a straight step) or no terrain store."""
-        if self.terrain is None:
+        terrain = self.terrain
+        if terrain is None:
             return None
         blocked = set(avoid)
         if trip is not None:
             blocked |= trip.blocked(turn, self.settings.transient_reasons)
-        return self.terrain.step_toward(start, goal, moves, blocked, stop_short, occupied)
+        taken = set(occupied)
+        path = terrain.path_to(start, goal, blocked, self.settings.route_max_cost)
+        if stop_short and path:
+            path = path[:-1]
+        if not path:
+            return None
+        # The same rule as `turn_field`: a tile is entered while any movement is left.
+        spent, reached = 0.0, None
+        for tile in path:
+            if spent >= max(1.0, moves):
+                break
+            spent += terrain.step_cost(tile[0], tile[1], False) or 0.0
+            if tile not in taken:
+                reached = tile
+        if reached is not None or not taken:
+            return reached
+        return self._free_step(start, goal, moves, blocked, taken, stop_short)
+
+    def _free_step(
+        self, start: Tile, goal: Tile, moves: float, blocked: set[Tile], taken: set[Tile], short
+    ) -> Tile | None:
+        """The path's reachable tiles are all taken: of every tile reachable this turn, the free
+        one with the least terrain cost left to the goal, then the nearer by hex distance, then
+        the lowest coordinates. A tile no nearer than where the unit stands is skipped."""
+        field_ = self.turn_field(start, moves, blocked) or {}
+        left = self.cost_field(goal) or {}
+        here = left.get(start)
+        ranked = []
+        for tile, t in field_.items():
+            if t != 1 or tile in taken or (short and tile == goal) or tile not in left:
+                continue
+            if here is not None and left[tile] >= here and tile != goal:
+                continue
+            ranked.append(
+                (left[tile], hex_distance(tile[0], tile[1], *goal, self.map_width), *tile)
+            )
+        return min(ranked)[2:] if ranked else None  # type: ignore[return-value]
 
     # ----- danger -----
 

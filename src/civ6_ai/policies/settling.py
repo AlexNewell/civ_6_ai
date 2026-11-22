@@ -832,19 +832,27 @@ class _Danger:
             return 1.0
         if t.ranged_strength <= 0 or self.ranged_weight <= 0 or radius <= _RANGED_REACH:
             return 0.0
-        key = (t.x, t.y, radius, _RANGED_REACH)
-        shot = self._reach.get(key)
-        if shot is None:
-            shot = self._reach[key] = movement.threat_reach(
-                (t.x, t.y), radius - _RANGED_REACH, _RANGED_REACH
-            )
-        if (x, y) not in shot:
+        # The tiles it can stand on after walking, and from which one it can see the tile.
+        key = (t.x, t.y, radius, "stand")
+        stand = self._reach.get(key)
+        if stand is None:
+            walked = movement.turn_field((t.x, t.y), radius - _RANGED_REACH) or {}
+            stand = self._reach[key] = [tile for tile, turns in walked.items() if turns <= 1]
+        if not any(self._clear_shot(px, py, x, y) for px, py in stand):
             return 0.0
-        for mx, my in straight_line(t.x, t.y, x, y, self.map_width)[1:-1]:
+        return self.ranged_weight
+
+    def _clear_shot(self, px: int, py: int, x: int, y: int) -> bool:
+        """A ranged unit standing at (px, py) can shoot (x, y): within its range and no mountain
+        on the tiles between (an approximation of line of sight)."""
+        if hex_distance(px, py, x, y, self.map_width) > _RANGED_REACH:
+            return False
+        movement = self.movement
+        for mx, my in straight_line(px, py, x, y, self.map_width)[1:-1]:
             ground = movement.terrain.get(mx, my)
             if ground is not None and ground.mountain:
-                return 0.0  # A mountain between: no line of sight.
-        return self.ranged_weight
+                return False
+        return True
 
     def near(self, x: int, y: int, radius: int) -> bool:
         return sum(self._weight(t, x, y, radius) for t in self.threats if t.hostile) >= 1.0
@@ -2056,6 +2064,7 @@ class SettlingPolicy:
 
     async def _step_and_found(self, game, settler, target, city_tiles, record) -> bool:
         goal = (target.x, target.y)
+        self._open_trip(settler, target, self._last_turn)  # A direct step is a trip too.
         result = await game.move_unit(settler.unit_index, *goal)
         if not move_succeeded(result) or f"now_at:{goal[0]},{goal[1]}" not in result:
             record(

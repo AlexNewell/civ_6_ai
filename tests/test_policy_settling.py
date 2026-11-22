@@ -2576,3 +2576,32 @@ def test_a_lost_settler_trip_is_closed_when_nothing_else_runs():
     run(policy, game)
     assert policy._movement().trips.trip(7) is None
     assert policy._movement().trips.closed[-1]["outcome"] == "gone"
+
+
+def test_a_ranged_hostile_with_a_clear_firing_position_counts_despite_a_mountain_at_its_feet():
+    from dataclasses import replace
+
+    # A mountain stands between the archer and the tile, but it can walk to a spot with a view.
+    store = _flat_store({(13, 12): "mountain"})
+    archer = replace(_hostile(12, 12, "UNIT_ARCHER"), ranged_strength=15)
+    assert _danger(store, [archer]).count_near(14, 12, 4) >= 0.5
+    # Walled in, the only firing position is its own tile, and the mountain blocks it.
+    ring = {t: "water" for t in neighbours(12, 12, 74)}
+    walled = _flat_store({**ring, (13, 12): "mountain"})
+    assert _danger(walled, [archer]).count_near(14, 12, 3) == 0
+
+
+def test_a_direct_step_and_found_logs_its_own_trip():
+    game = make_game([settler(x=13, y=10, moves_remaining=2.0)], cities=[alpha()])
+
+    async def arrives(unit_index, x, y):
+        return f"MOVING_TO|{x},{y}|from:13,10|now_at:{x},{y}"
+
+    game.move_unit = arrives
+    policy = SettlingPolicy(SettlingSettings(map_width=74))
+    policy.terrain = _flat_store()
+    policy._last_turn = 4
+    target = SettleSite(14, 10, 30, 10, "fresh", (), 0, 0, 0)
+    asyncio.run(policy._step_and_found(game, settler(x=13, y=10), target, [], lambda *a, **k: None))
+    row = policy._movement().trips.closed[-1]
+    assert (row["outcome"], row["estimated"], row["actual"]) == ("arrived", 1, 1)

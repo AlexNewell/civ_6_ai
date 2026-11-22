@@ -56,11 +56,11 @@ from types import SimpleNamespace
 from typing import Any, Protocol
 
 from civ6_ai.blockers import Blocker, BlockerType, action_succeeded, move_succeeded
+from civ6_ai.movement import Movement, MovementSettings, Trip, straight_line
 from civ6_ai.policies.game_data import COMBAT_UNITS
 from civ6_ai.policies.settling import (
     _SEA_UNITS,
     SCOUT,
-    hex_line,
     neighbours,
     spare_garrison_tiles,
     units_reserved_for_settling,
@@ -72,6 +72,12 @@ from civ6_ai.state import read_units as _read_units
 from civ6_ai.state.fog import BARBARIAN_ID
 from civ6_ai.state.models import Target
 from civ6_ai.state.reader import STANDARD_MAP_WIDTH, hex_distance
+
+# Orders that hold a city: a unit given one is that city's this turn, not the camp force's.
+CITY_ROLES = frozenset({"cover", "garrison", "heal", "retreat", "flee", "swap"})
+
+# The `movement_trip` kinds the military policy logs (#399).
+TRIP_KINDS = ("muster", "stage", "camp", "recapture", "probe", "recon", "garrison", "hunt")
 
 # Our civilians that an enemy may take (issue 280).
 _CAPTURE_KINDS = ("UNIT_SETTLER", "UNIT_TRADER")  # Ones whose vanishing may be a capture.
@@ -223,8 +229,17 @@ class MilitarySettings:
     # A force gathers this close to a camp before any unit goes in, so the first to arrive
     # does not meet the guards alone (the units of a far camp arrive on different turns).
     camp_muster_radius: int = 4
+    # Issue 399 (slice 3): a unit counts as rallied inside this WALKING cost of the camp (flat
+    # ground: the same as `camp_muster_radius` tiles), not inside a hex ring, so a unit across a
+    # bay from the camp is not "at" it. Without a terrain store the hex ring is used.
+    camp_muster_walk: float = 4.0
+    # A walk costing more than this many times the hex distance is a detour (round a bay or a
+    # ridge), and a reach counts it at its cost. Hills and forest (2 a tile) are not a detour.
+    walk_detour_factor: float = 2.0
     muster_bad_turns: int = 10  # A muster tile the game refused is not tried again for this long.
-    camp_reach: int = 14  # How far a unit is called from to a camp (idle units sat 8-14 off).
+    # How far a unit is called from to a camp (idle units sat 8-14 off), in walking cost (hex
+    # distance without a terrain store), so a unit across water with a long way round is not one.
+    camp_reach: int = 14
     # Run 15 practice save: a camp 8 tiles off sent raiders for 30 turns while twelve spare units
     # sat at home, because a camp is only known once a unit has seen it. With spare units idle and
     # no known camp, a small party walks to where barbarians were last seen, and what it sees is
@@ -249,9 +264,10 @@ class MilitarySettings:
     # Hostile units that can hit the stop tile next turn are risk: a melee unit from its moves
     # plus 1 for the attack, a ranged one from its moves plus its range. With a terrain store the
     # tiles are costed by terrain; without, these hex distances (a barbarian Warrior has 2 moves).
+    # With no terrain store these hex distances stand in for the service's `threat_reach`.
     camp_step_reach: int = 3
     camp_ranged_reach: int = 4
-    camp_hostile_moves: float = 2.0  # Moves per turn assumed for a hostile unit.
+    camp_hostile_moves: float = 2.0  # Moves per turn assumed for a hostile unit (to the service).
     camp_hostile_range: int = 2  # Range assumed for a hostile ranged unit.
     camp_step_min_net: float = 0.0
     camp_risk_weight: float = 5.0  # Per unit's whole health expected to be lost to the hostiles.
@@ -566,24 +582,35 @@ def camp_group_near(
     radius: int,
     muster: int,
     width: int | None,
+    walk: Callable[[Unit, tuple[int, int]], float | None] | None = None,
+    rallied: Callable[[Unit], bool] | None = None,
 ) -> list[Unit]:
     """The units of the force that go in with `unit` (issue 380), itself included.
 
     Those within `radius` of it, and, while it is inside the muster ring, those inside it too
     and within twice the radius (live STD_T1_04: a lead unit's mates on the far side of the ring,
     6 tiles off, made it "together" and it went in alone).
+
+    Issue 399: with `walk` (walking cost from the unit to a tile, None when it cannot walk there)
+    and `rallied` (inside the muster ring by the walk), closeness is by the walk, so a unit two
+    tiles off across water but a long way round is not near. Without them, hex distance.
     """
     here = position(unit)
-    ringed = hex_distance(*here, *camp, width) <= muster
+    ringed = rallied(unit) if rallied else hex_distance(*here, *camp, width) <= muster
     near = [unit]
     for other in force:
         if other.unit_id == unit.unit_id:
             continue
         spot = position(other)
-        gap = hex_distance(*here, *spot, width)
-        if gap <= radius or (
-            ringed and gap <= 2 * radius and hex_distance(*spot, *camp, width) <= muster
-        ):
+        if walk is not None:
+            cost = walk(unit, spot)
+            gap = float("inf") if cost is None else cost
+        else:
+            gap = hex_distance(*here, *spot, width)
+        in_ring = (
+            rallied(other) if rallied is not None else hex_distance(*spot, *camp, width) <= muster
+        )
+        if gap <= radius or (ringed and gap <= 2 * radius and in_ring):
             near.append(other)
     return near
 
@@ -692,11 +719,16 @@ def camp_step_score(
     settings: "MilitarySettings",
     advancing: bool = True,
     reach_tiles: "Callable[[Threat], set[tuple[int, int]] | None] | None" = None,
+    walk_cost: Mapping[tuple[int, int], float] | None = None,
 ) -> StepScore:
     """Weigh stepping to `tile`: gain (progress to the camp, a combined attack set up, a sure
     kill, screening a civilian, cover from friends, escaping a worse tile) against the risk
     (expected damage from hostiles that can reach it) and the penalty for a force short of
-    `needed` (`gap`, 0 to 1). All weights are in `MilitarySettings`."""
+    `needed` (`gap`, 0 to 1). All weights are in `MilitarySettings`.
+
+    Issue 399: with `walk_cost` (walking cost to the camp from each tile) progress is the walking
+    cost saved, not the hex distance, so a step along the land route round a bay is progress even
+    where it is no nearer the camp as the crow flies."""
     s = settings
     width = s.map_width
     hostiles = list(hostiles)
@@ -707,13 +739,11 @@ def camp_step_score(
         unit, here, hostiles, s.weights, width, s.camp_step_reach, s.camp_ranged_reach, reach_tiles
     )
     # Progress counts in full only with the force: alone it is a reason to wait, not to go on.
-    gain = (
-        s.camp_progress_gain
-        * (1.0 - gap)
-        * max(0, hex_distance(*here, *camp, width) - hex_distance(*tile, *camp, width))
-        if advancing
-        else 0.0
-    )
+    if walk_cost is not None and here in walk_cost and tile in walk_cost:
+        closer = walk_cost[here] - walk_cost[tile]
+    else:
+        closer = hex_distance(*here, *camp, width) - hex_distance(*tile, *camp, width)
+    gain = s.camp_progress_gain * (1.0 - gap) * max(0.0, closer) if advancing else 0.0
     if advancing and hex_distance(*tile, *camp, width) <= 1 and gap <= 0:
         gain += s.camp_setup_gain
     if kills:
@@ -875,6 +905,9 @@ class _Turn:
     camp_scanned: bool = False
     placed: dict[int, tuple[int, int]] = field(default_factory=dict)  # Where a unit moved to.
     blocked: set[tuple[int, int]] = field(default_factory=set)  # Tiles the game said are full.
+    # Issue 399: the city role (cover, garrison, ...) that ordered a unit this turn. One role per
+    # unit per turn: such a unit is not counted into the camp force the same turn.
+    roles: dict[int, str] = field(default_factory=dict)
     en_route: dict[int, int] = field(default_factory=dict)  # City id to cover units still walking.
     spare_orders: int = 0
     # What the threat map changed this turn (issue 238), for the offense line and the slice
@@ -944,6 +977,10 @@ class MilitaryPolicy:
     _gone_noted: set[tuple[int, int]] = field(default_factory=set, init=False, repr=False)
     _muster_bad: dict[tuple[int, int], int] = field(default_factory=dict, init=False, repr=False)
     _reach_cache: dict[Any, Any] = field(default_factory=dict, init=False, repr=False)
+    # The shared movement service (#399): walking turns, next steps, threat reach and trip log.
+    # Built from `terrain` when none is given (tests, no bot).
+    movement: Movement | None = field(default=None, repr=False)
+    _own_movement: Movement | None = field(default=None, init=False, repr=False)
     _mission: dict[int, tuple[tuple[int, int], int]] = field(
         default_factory=dict, init=False, repr=False
     )  # Unit id to the camp it was sent at and the turn.
@@ -997,6 +1034,7 @@ class MilitaryPolicy:
         turn = (await game.get_game_overview()).turn
         units = await _read_units(game, s.map_width)
         self._forget(units, turn)
+        self._trips_observe(units, turn)
         await self._spend_promotions(game, units, turn)
         mine = [u for u in units if is_land_military(u)]
         if not mine:
@@ -1045,45 +1083,175 @@ class MilitaryPolicy:
 
     # ----- stacks (issue 266) -----
 
-    def _hostile_reach(self, t: _Turn) -> "Callable[[Threat], set[tuple[int, int]] | None]":
-        """For each hostile, the tiles it can attack next turn: where its moves reach by terrain
-        cost, then one more tile for a melee attack or its range for a shot. None when there is
-        no terrain store, so the caller uses hex distances."""
-        s = self.settings
+    # ----- the movement service (#399) -----
+
+    def _store(self) -> Any:
+        """The terrain store when it has read anything, else None (callers use hex distance)."""
         terrain = self.terrain or getattr(self.threat_map, "terrain", None)
+        known = getattr(terrain, "__len__", None)  # A bare step-cost stub knows no walk.
+        return terrain if known is not None and len(terrain) else None
+
+    def _mv(self) -> Movement | None:
+        """The movement service, or None while no terrain is known (hex distances stand in)."""
+        if self._store() is None:
+            return None
+        if self.movement is not None and self.movement.terrain is not None:
+            return self.movement
+        store = self._store()
+        if self._own_movement is None or self._own_movement.terrain is not store:
+            self._own_movement = Movement(
+                store, self.threat_map, MovementSettings(map_width=self.settings.map_width)
+            )
+        return self._own_movement
+
+    def _walk_cost(self, here: tuple[int, int], goal: tuple[int, int]) -> float:
+        """How far `here` is from `goal` for a reach in tiles: the hex distance, unless the walk
+        is a real detour round water or a ridge (its terrain cost over `walk_detour_factor` times
+        the hex distance), when it is that cost. inf where there is no walk. Hills and forest cost
+        two a tile but are no detour: counting them in tiles of cost left a spare unit three tiles
+        from a threatened capital out of its reach (live STD_T1_03). Hex distance with no store."""
+        far = hex_distance(*here, *goal, self.settings.map_width)
+        mv = self._mv()
+        field_ = mv.cost_field(goal) if mv is not None else None
+        if field_ is None:
+            return float(far)
+        cost = field_.get(here, float("inf"))
+        return float(far) if cost <= self.settings.walk_detour_factor * far else cost
+
+    def _walk_turns(self, unit: Unit, goal: tuple[int, int], here: tuple[int, int]) -> int:
+        """Turns for the unit to walk from `here` to `goal`; the hex estimate with no walk."""
+        mv = self._mv()
+        moves = max(1.0, unit.max_moves)
+        if mv is not None:
+            got = mv.walk_turns(here, goal, moves)
+            if got is not None:
+                return got
+        return -(-hex_distance(*here, *goal, self.settings.map_width) // int(moves))
+
+    def _hostile_reach(self, t: _Turn) -> "Callable[[Threat], set[tuple[int, int]] | None]":
+        """For each hostile, the tiles it can attack next turn (the service's `threat_reach`: its
+        moves by terrain cost, then one more tile for a melee attack or its range for a shot).
+        None when no terrain is known, so the caller uses hex distances."""
+        s = self.settings
+        mv = self._mv()
         cache = self._reach_cache
         if cache.get("turn") != t.turn:
             cache.clear()
             cache["turn"] = t.turn
 
         def tiles(h: Threat) -> set[tuple[int, int]] | None:
-            if terrain is None or not len(terrain):
+            if mv is None:
                 return None
             key = (h.x, h.y, h.ranged_strength > 0)
             if key not in cache:
                 shot = s.camp_hostile_range if h.ranged_strength > 0 else 1
-                got = terrain.reach(h.x, h.y, s.camp_hostile_moves, False, 1, shot)
-                cache[key] = set(got)
+                cache[key] = mv.threat_reach((h.x, h.y), s.camp_hostile_moves, shot)
             return cache[key]
 
         return tiles
 
-    def _stop_tile(
-        self, unit: Unit, here: tuple[int, int], goal: tuple[int, int]
+    def _step_tile(
+        self,
+        unit: Unit,
+        here: tuple[int, int],
+        goal: tuple[int, int],
+        avoid: Iterable[tuple[int, int]] = (),
+        occupied: Iterable[tuple[int, int]] = (),
+        trip: Trip | None = None,
+        turn: int = 0,
     ) -> tuple[int, int]:
-        """Where the unit ends this turn walking to `goal`: along the terrain store's cheapest
-        path by movement cost (hills and forest use up moves), else along the straight line,
-        which `hex_line` starts after `here`."""
-        moves = max(1, int(unit.moves))
-        terrain = self.terrain or getattr(self.threat_map, "terrain", None)
+        """Where the unit ends this turn walking to `goal`: the farthest tile along the cheapest
+        walk that its moves reach (hills and forest use up moves), around `avoid` and the tiles the
+        trip was refused; the straight line only with no terrain known. `here` when the walk
+        cannot advance (every way is refused, held or held by a hostile)."""
         if here == goal:
             return goal
-        if terrain is not None and len(terrain):
-            found = terrain.step_toward(here, goal, unit.moves)
-            if found is not None:
-                return found
-        line = hex_line(here, goal, self.settings.map_width)
-        return line[min(moves, len(line)) - 1] if line else goal
+        mv = self._mv()
+        if mv is not None:
+            found = mv.next_step(here, goal, unit.moves, avoid, trip, turn, occupied)
+            return here if found is None else found
+        line = straight_line(*here, *goal, self.settings.map_width)[1:]
+        return line[min(max(1, int(unit.moves)), len(line)) - 1] if line else goal
+
+    def _march_tiles(
+        self, unit: Unit, here: tuple[int, int], goal: tuple[int, int]
+    ) -> list[tuple[int, int]]:
+        """The tiles of the walk to `goal` that this turn's moves reach, in order, start left out
+        (the straight line's first `moves` tiles with no terrain store)."""
+        mv = self._mv()
+        if mv is None:
+            line = straight_line(*here, *goal, self.settings.map_width)[1:]
+            return line[: max(1, int(unit.moves))]
+        reach = mv.turn_field(here, max(1.0, unit.moves)) or {}
+        route = mv.route_tiles(here, goal)[1:]
+        return [p for p in route[: max(1, int(unit.moves))] if reach.get(p) == 1]
+
+    # ----- trips (#399) -----
+
+    def _trip(
+        self, t: _Turn, unit: Unit, kind: str, goal: tuple[int, int], here: tuple[int, int]
+    ) -> Trip | None:
+        """Open (or carry on) the unit's trip to `goal`, so its estimate is judged against what
+        happened (`scripts/trip_report.py`). One to the same goal and kind goes on."""
+        walker = self._mv()
+        service = walker or self.movement
+        if service is None or here == goal:
+            return None
+        if walker is not None:
+            estimate, basis = walker.estimate(here, goal, max(1.0, unit.max_moves))
+        else:
+            estimate, basis = self._walk_turns(unit, goal, here), "hex"
+        before = service.trips.trip(unit.unit_id)
+        kept = dict(before.refused) if before is not None and before.goal != goal else {}
+        trip = service.trips.start(unit.unit_id, kind, here, goal, t.turn, estimate, basis)
+        for tile, why in kept.items():  # A tile the game refused stays refused for this unit.
+            trip.refused.setdefault(tile, why)
+        return trip
+
+    def _trip_result(
+        self,
+        t: _Turn,
+        unit: Unit,
+        goal: tuple[int, int],
+        result: str | None,
+        at: tuple[int, int] | None = None,
+    ) -> None:
+        """Close the trip when the move got there; keep a refused tile for the rest of the trip
+        (a full tile only for this turn) so it is not sent again."""
+        mv = self._mv() or self.movement
+        if mv is None:
+            return
+        trip = mv.trips.trip(unit.unit_id)
+        if trip is None:
+            return
+        if at is not None:
+            if at == trip.goal:
+                mv.trips.arrived(unit.unit_id, t.turn)
+            return
+        if result is not None:
+            reason = "stacking" if "STACKING_CONFLICT" in result else "refused"
+            mv.trips.refuse(unit.unit_id, goal, reason, t.turn)
+
+    def _trip_ring(self, t: _Turn, unit: Unit) -> None:
+        """A unit inside the muster ring has done its muster walk: it waits where it stands, so
+        the trip to the muster tile closes as arrived rather than timing out (live: 0 of 2 muster
+        trips within one turn, because the units stopped in the ring, short of the exact tile)."""
+        mv = self._mv() or self.movement
+        trip = mv.trips.trip(unit.unit_id) if mv is not None else None
+        if trip is not None and trip.kind == "muster":
+            mv.trips.arrived(unit.unit_id, t.turn)
+
+    def _trips_observe(self, units: Iterable[Unit], turn: int) -> None:
+        """Close the trips of units that stand on their goal or are gone."""
+        mv = self.movement or self._own_movement
+        if mv is None or not mv.trips.trips:
+            return
+        for u in units:
+            if u.unit_id in mv.trips.trips and mv.trips.trips[u.unit_id].kind in TRIP_KINDS:
+                mv.trips.observe(u.unit_id, (u.x, u.y), turn)
+        alive = {u.unit_id for u in units}
+        for kind in TRIP_KINDS:
+            mv.trips.sweep(alive, turn, kind)
 
     def _passable(self, p: tuple[int, int]) -> bool:
         """Whether a land unit can enter the tile, as far as the terrain store knows (issue 370).
@@ -1399,13 +1567,13 @@ class MilitaryPolicy:
             if marching:
                 # Stop on a tile this turn's walk reaches, and only if it is safe: the target
                 # being safe says nothing of the way there.
-                line = hex_line((unit.x, unit.y), where, s.map_width)
-                reach = min(max(1, int(unit.moves)), len(line))
                 goal = None
                 stop = 0.0
-                for step in reversed(line[:reach]):  # The furthest tile that can be stood on.
+                # The furthest tile of the walk this turn's moves reach (water and mountains are
+                # never on it).
+                for step in reversed(self._march_tiles(unit, (unit.x, unit.y), where)):
                     if not self._passable(step):
-                        continue  # Water or a mountain on the straight line.
+                        continue
                     stop = self.threat_map.threat_at(step[0], step[1], t.turn)
                     goal = step
                     break
@@ -1417,12 +1585,14 @@ class MilitaryPolicy:
                         stop=list(goal) if goal else None, threat=round(stop, 1),
                     )  # fmt: skip
                     continue
+            self._trip(t, unit, "recapture", where, (unit.x, unit.y))
             result = await self._order(t, unit, "recapture", game.move_unit(unit.unit_index, *goal))
             if result is not None and move_succeeded(result):
                 self._leave(t, unit)
                 t.acted.add(unit.unit_id)
                 at = self._reached(result, where)
                 t.placed[unit.unit_id] = at
+                self._trip_result(t, unit, where, None, at)
                 if at == where:
                     self._recaptured += 1
                     note = f"recapture: {civ.owner} {civ.unit} at {where[0]},{where[1]}"
@@ -1430,6 +1600,7 @@ class MilitaryPolicy:
                     note = f"recapture: stopped at {at[0]},{at[1]} short of {where[0]},{where[1]}"
                 self._log(t, unit, "recapture", note, where, result=result)
             else:
+                self._trip_result(t, unit, where, result or "")
                 self._refuse(t, unit, "recapture")
                 self._log(
                     t, unit, "recapture", "recapture: move refused", where, result=result or ""
@@ -1580,6 +1751,8 @@ class MilitaryPolicy:
         decision = MilitaryDecision(
             t.turn, unit.unit_id, unit.x, unit.y, action, reason, target, **extra
         )
+        if action in CITY_ROLES:
+            t.roles.setdefault(unit.unit_id, action)
         self._record(decision)
 
     def _available(self, t: _Turn, unit: Unit, kind: str) -> bool:
@@ -1704,8 +1877,9 @@ class MilitaryPolicy:
             ),
         )
 
-    def _reach(self, city: City) -> int:
-        """How far a spare unit is called from. Further for a city with hostile units at it.
+    def _call_cost(self, city: City) -> int:
+        """How far a spare unit is called from, in walking cost (the hex distance on flat ground
+        and with no terrain store). Further for a city with hostile units at it.
 
         Run 10 and 13: the city under attack stood short for turns while spare units sat just past
         `garrison_reach`. A city with a hostile unit within the threat radius and fewer defenders
@@ -2244,6 +2418,7 @@ class MilitaryPolicy:
             self._refuse(t, unit, kind)
             await self._fallback(game, t, unit, city, action)
             return False
+        self._trip(t, unit, "garrison", where, (unit.x, unit.y))
         result = await self._order(t, unit, kind, game.move_unit(unit.unit_index, *where))
         if result is not None and move_succeeded(result):
             t.acted.add(unit.unit_id)
@@ -2253,8 +2428,10 @@ class MilitaryPolicy:
             t.placed[unit.unit_id] = (
                 (int(reached.group(1)), int(reached.group(2))) if reached else where
             )
+            self._trip_result(t, unit, where, None, t.placed[unit.unit_id])
             self._log(t, unit, action, reason, where, result=result)
             return True
+        self._trip_result(t, unit, where, result or "")
         self._refuse(t, unit, kind)
         self._learn_full_tile(t, result)
         self._log(t, unit, action, "move refused", where, result=result or "")
@@ -2343,14 +2520,14 @@ class MilitaryPolicy:
                 if t.at_city.get((city.x, city.y), 0) > 0:
                     break  # One land unit per tile: the game refuses a second to stack.
                 candidates = [
-                    (hex_distance(u.x, u.y, city.x, city.y, s.map_width), u.unit_id, u)
+                    (self._walk_cost((u.x, u.y), (city.x, city.y)), u.unit_id, u)
                     for u in t.mine
                     if self._available(t, u, "move")
                     and (u.x, u.y) != (city.x, city.y)
                     and u.hp >= s.weights.heal_below * u.max_hp
                     and (self._spare(t, u) or self._covering(t, u) is city)
                 ]
-                candidates = [c for c in candidates if c[0] <= self._reach(city)]
+                candidates = [c for c in candidates if c[0] <= self._call_cost(city)]
                 if not candidates:
                     break
                 unit = min(candidates, key=lambda c: c[:2])[2]
@@ -2421,14 +2598,14 @@ class MilitaryPolicy:
             if inside + self._beside(t, city) + t.en_route.get(city.city_id, 0) >= WANTED_DEFENDERS:
                 return
             candidates = [
-                (hex_distance(*self._pos(t, u), city.x, city.y, s.map_width), u.unit_id, u)
+                (self._walk_cost(self._pos(t, u), (city.x, city.y)), u.unit_id, u)
                 for u in t.mine
                 if self._available(t, u, "cover")
                 and hex_distance(*self._pos(t, u), city.x, city.y, s.map_width) > 1
                 and u.hp >= s.weights.heal_below * u.max_hp
                 and self._spare(t, u)
             ]
-            candidates = [c for c in candidates if c[0] <= self._reach(city)]
+            candidates = [c for c in candidates if c[0] <= self._call_cost(city)]
             if not candidates:
                 return
             unit = min(candidates, key=lambda c: c[:2])[2]
@@ -2519,6 +2696,7 @@ class MilitaryPolicy:
             u
             for u in t.mine
             if self._available(t, u, "move")
+            and u.unit_id not in t.roles  # One role a turn: a city's unit is not the force's.
             and u.hp >= s.weights.camp_min_hp * u.max_hp
             and self._camp_available(t, u)
         ]
@@ -2531,6 +2709,7 @@ class MilitaryPolicy:
             for u in t.mine
             if u.unit_id not in counted
             and u.unit_id not in self._recon
+            and u.unit_id not in t.roles
             and self._on_camp_mission(t, u)
             and u.hp >= s.weights.camp_min_hp * u.max_hp
             and self._camp_available(t, u)
@@ -2576,7 +2755,7 @@ class MilitaryPolicy:
         defenders = self._assume_unseen(
             t, where, self._remember(t, where, self._camp_defenders(t, where))[0]
         )
-        force = [u for u in spare if hex_distance(u.x, u.y, *where, s.map_width) <= s.camp_reach]
+        force = [u for u in spare if self._walk_cost(self._pos(t, u), where) <= s.camp_reach]
         if not camp_force_ok(force, defenders, s.weights, s.camp_min_units, True):
             self._committed.pop(where, None)
             self._log_hold(t, "force short of the need", where, plan, spare)
@@ -2584,7 +2763,7 @@ class MilitaryPolicy:
         muster = s.camp_muster_radius
         # Issue 275: the force gathers at the rally ring, out of the camp's reach, and goes in
         # together once what is gathered meets the need. A unit never goes in alone.
-        rallied = [u for u in force if hex_distance(u.x, u.y, *where, s.map_width) <= muster]
+        rallied = [u for u in force if self._rallied(t, u, where)]
         committed = where in self._committed
         outgrown = plan is not None and plan.target == where and plan.needed > plan.available
         if outgrown:
@@ -2617,7 +2796,9 @@ class MilitaryPolicy:
             self._mission[unit.unit_id] = (where, t.turn)
             if not self._available(t, unit, "move"):
                 continue
-            far = hex_distance(unit.x, unit.y, *where, s.map_width) > muster
+            far = not self._rallied(t, unit, where)
+            if not far:
+                self._trip_ring(t, unit)
             adjacent = hex_distance(unit.x, unit.y, *where, s.map_width) <= 1
             if not far and not committed and not (adjacent and not occupied):
                 t.acted.add(unit.unit_id)  # Waiting for the rest; not idle, not spare.
@@ -2626,21 +2807,34 @@ class MilitaryPolicy:
                 continue
             # Run 15: a move straight onto a camp three tiles off is refused (the game only allows
             # that capture move from beside it), so walk to the tile beside it first.
+            heading: tuple[int, int] | None = None  # The tile a far unit is walking to.
+            aims: dict[tuple[int, int], tuple[int, int]] = {}  # Order tile -> trip destination.
+            kind = "camp"
             if adjacent and not occupied:
                 goals = [where]
             elif adjacent:
                 continue  # In reach of the guards: the attack step takes it from here.
             elif far:
+                kind = "muster"
                 goals = self._muster_goals(t, unit, where)
+                heading = goals[0] if goals else None
+                # Before the force is rallied the order is the next stretch of OUR walking route
+                # to a muster tile, never a tile the game has to find its own way to (issue 399:
+                # orders to tiles across a bay from 6 tiles off were refused as "path may be
+                # blocked"). With no terrain store the muster tiles are ordered as before.
+                if self._mv() is not None and goals:
+                    aims = self._stretches(t, unit, goals)
+                    goals = list(aims)
                 t.map_use["muster_moves"] = t.map_use.get("muster_moves", 0) + 1
             else:
+                kind = "stage"
                 goals = self._stage_goals(t, unit, where)
             gap = 0.0
             near = [unit]
             if committed and not far:
                 near = camp_group_near(
                     unit, force, lambda u: self._pos(t, u), where, s.camp_group_radius,
-                    muster, s.map_width,
+                    muster, s.map_width, **self._near_by_walk(t, where),
                 )  # fmt: skip
                 need = camp_attacks_needed(near, defenders, s.weights)
                 have = len(near) * s.weights.camp_strike_turns
@@ -2663,12 +2857,13 @@ class MilitaryPolicy:
             def weigh(
                 goal: tuple[int, int], unit=unit, guards=guards, here=here, base=gap, **kw: Any
             ) -> StepScore:
-                # The tile it stops on this turn. `hex_line` leaves out the start, so a unit with
-                # two moves stops at index 1.
-                stop = self._stop_tile(unit, here, goal)
+                # The tile it stops on this turn: along the walk, by the unit's moves.
+                stop = self._step_tile(unit, here, goal)
+                mv = self._mv()
                 return camp_step_score(
                     unit, here, stop, where, guards, t.units, lambda other: self._pos(t, other),
-                    kw.pop("gap", base), s, reach_tiles=self._hostile_reach(t), **kw,
+                    kw.pop("gap", base), s, reach_tiles=self._hostile_reach(t),
+                    walk_cost=mv.cost_field(where) if mv is not None else None, **kw,
                 )  # fmt: skip
 
             # Every option on one scale: advance, fight, hold, fall back (issue 380).
@@ -2683,19 +2878,25 @@ class MilitaryPolicy:
             # Falling back is toward the friends (one step along the line to the nearest) or
             # onto a muster tile no nearer the camp, never deeper in.
             mates = sorted(
-                (hex_distance(*here, *self._pos(t, u), s.map_width), u.unit_id, self._pos(t, u))
+                (self._walk_cost(here, self._pos(t, u)), u.unit_id, self._pos(t, u))
                 for u in t.mine
                 if u.unit_id != unit.unit_id
             )
+            mates = [m for m in mates if m[0] < float("inf")]  # Only friends it can walk to.
             taken_tiles = {self._pos(t, u) for u in t.units} | {(b.x, b.y) for b in t.threats}
             retreats = [
                 g for g in self._muster_goals(t, unit, where)
-                if hex_distance(*g, *where, s.map_width) >= hex_distance(*here, *where, s.map_width)
+                if self._walk_cost(g, where) >= self._walk_cost(here, where)
             ]  # fmt: skip
             if mates:
-                line = hex_line(here, mates[0][2], s.map_width)
-                if len(line) > 1 and line[0] not in taken_tiles and self._passable(line[0]):
-                    retreats.insert(0, line[0])
+                mv = self._mv()
+                route = (
+                    mv.route_tiles(here, mates[0][2])
+                    if mv is not None
+                    else straight_line(*here, *mates[0][2], s.map_width)
+                )
+                if len(route) > 2 and route[1] not in taken_tiles and self._passable(route[1]):
+                    retreats.insert(0, route[1])
             back = [
                 (g, weigh(g, gap=0.0, advancing=False))
                 for g in dict.fromkeys(retreats)
@@ -2710,7 +2911,12 @@ class MilitaryPolicy:
                     fights.append((self._target_score(t, unit, foe, odds).total, spot, odds, foe))
             if fights:
                 options["attack"] = max(f[0] for f in fights)
-            order = ["attack", "hold", "fall_back", "advance"]  # Ties go to the careful one.
+            # Ties go to the careful one, except where staying has no risk to avoid: then a step
+            # forward wins (live STD_T1_04: hold and advance both scored 1.0 at zero risk, and nine
+            # units stood still for ten turns).
+            order = ["attack", "hold", "fall_back", "advance"]
+            if hold.risk <= 0 and hold.exposure <= 0:
+                order = ["attack", "advance", "hold", "fall_back"]
             choice = max((o for o in order if o in options), key=lambda o: options[o])
             numbers = {"chosen": choice, "options": {k: round(v, 2) for k, v in options.items()}}
             step = None
@@ -2737,6 +2943,7 @@ class MilitaryPolicy:
                 best = max(back, key=lambda gs: gs[1].net)
                 goals = [best[0]]
                 step = best[1]
+                heading, kind, aims = None, "camp", {}
                 message = "falling back from the hostiles beside it"
             else:
                 goals = [g for g, _ in advance]
@@ -2748,22 +2955,30 @@ class MilitaryPolicy:
                 if result is not None and not self._available(t, unit, "move"):
                     out_of_orders = True  # The retries too count against the bounds.
                     break
+                # The trip is to where the unit is walking for the order sent (the muster tile a
+                # stretch heads for, the stage tile, the camp), not to the first one tried.
+                aim = aims.get(goal, goal)
+                self._trip(t, unit, kind, aim, here)
                 result = await self._order(t, unit, "move", game.move_unit(unit.unit_index, *goal))
                 if result is not None and move_succeeded(result):
                     t.acted.add(unit.unit_id)
                     t.placed[unit.unit_id] = self._reached(result, goal)
+                    self._trip_result(t, unit, aim, None, t.placed[unit.unit_id])
                     self._leave(t, unit)
                     self._log(t, unit, "camp", message, where, odds=numbers,
                               result=result)  # fmt: skip
                     break
                 self._learn_full_tile(t, result)  # Another unit holds it: try the next tile.
+                self._trip_result(t, unit, goal, result or "")
                 if "STACKING_CONFLICT" not in (result or ""):
                     if not far:
                         break
                     # A muster tile the game will not take us to (impassable ground, another
                     # nation's land): remember it, and try the next one now. Run 19: a unit was
-                    # refused the same unreachable tile every few turns and never arrived.
-                    self._muster_bad[goal] = t.turn + s.muster_bad_turns
+                    # refused the same unreachable tile every few turns and never arrived. A
+                    # stretch of our own route is not a muster tile to blame.
+                    if heading is None or goal == heading:
+                        self._muster_bad[goal] = t.turn + s.muster_bad_turns
             else:
                 result = result or ""
             if unit.unit_id not in t.acted and not out_of_orders:
@@ -2880,11 +3095,9 @@ class MilitaryPolicy:
         group = self._assume_unseen(t, target, self._remember(t, target, defenders)[0])
         strong = max((d.combat_strength for d in group), default=0.0)
         strong_ranged = max((d.ranged_strength for d in group), default=0.0)
-        force = [u for u in spare if hex_distance(u.x, u.y, *target, s.map_width) <= s.camp_reach]
+        force = [u for u in spare if self._walk_cost(self._pos(t, u), target) <= s.camp_reach]
         needed, have, wanted, kind = plan_camp_force(force, group, w, s)
-        walk = max(
-            (math.ceil(hex_distance(u.x, u.y, *target, s.map_width) / 2) for u in force), default=0
-        )
+        walk = max((self._walk_turns(u, target, self._pos(t, u)) for u in force), default=0)
         plan = CampPlan(
             target=target,
             distance=self._home_distance(t, target),
@@ -3067,13 +3280,16 @@ class MilitaryPolicy:
         if not self._available(t, unit, "spare"):
             return False
         t.spare_orders += 1
+        self._trip(t, unit, "recon", target, (unit.x, unit.y))
         result = await self._order(t, unit, "spare", game.move_unit(unit.unit_index, *target))
         if result is None or not move_succeeded(result):
+            self._trip_result(t, unit, target, result or "")
             self._refuse(t, unit, "spare")
             self._recon_bad[target] = t.turn + s.camp_retry_turns
             self._recon.pop(unit.unit_id, None)
             return False
         t.acted.add(unit.unit_id)
+        self._trip_result(t, unit, target, None, self._reached(result, target))
         self._leave(t, unit)
         if not self._recon:
             self._recon_started = t.turn
@@ -3100,7 +3316,7 @@ class MilitaryPolicy:
             self._released += 1  # Reported on the next offense line.
             self._note_gone(sent[0], t)
             return False
-        near = hex_distance(unit.x, unit.y, *sent[0], s.map_width) <= s.camp_reach
+        near = self._walk_cost((unit.x, unit.y), sent[0]) <= s.camp_reach
         return near and unit.hp >= s.weights.camp_leave_hp * unit.max_hp
 
     async def _scan_camps(self, game: MilitaryGame, t: _Turn, barbarians: list[Threat]) -> None:
@@ -3215,55 +3431,116 @@ class MilitaryPolicy:
             default=0,
         )
 
+    def _rallied(self, t: _Turn, unit: Unit, camp: tuple[int, int]) -> bool:
+        """Whether the unit is close enough to the camp to wait for the force: within
+        `camp_muster_walk` of walking cost, else (no terrain store) within the muster radius."""
+        here = self._pos(t, unit)
+        if self._mv() is None:
+            return hex_distance(*here, *camp, self.settings.map_width) <= (
+                self.settings.camp_muster_radius
+            )
+        return self._walk_cost(here, camp) <= self.settings.camp_muster_walk
+
+    def _near_by_walk(self, t: _Turn, camp: tuple[int, int]) -> dict[str, Any]:
+        """`camp_group_near`'s walk arguments; empty with no terrain store."""
+        if self._mv() is None:
+            return {}
+
+        def walk(unit: Unit, spot: tuple[int, int]) -> float | None:
+            cost = self._walk_cost(self._pos(t, unit), spot)
+            return None if cost == float("inf") else cost
+
+        return {"walk": walk, "rallied": lambda u: self._rallied(t, u, camp)}
+
     def _muster_goals(
         self, t: _Turn, unit: Unit, camp: tuple[int, int], tries: int = 4
     ) -> list[tuple[int, int]]:
-        """Where a far unit gathers: the first tile on its line to the camp that is within the
-        muster radius, then free tiles beside it. It stops there until the force is whole."""
+        """Where a far unit gathers: the first tile on its walking route to the camp that is
+        within the muster walk, then free tiles beside it and the rest of the ring, the ones the
+        unit reaches soonest first. It stops there until the force is whole."""
         width = self.settings.map_width
         muster = self.settings.camp_muster_radius
-        line = hex_line((unit.x, unit.y), camp, width)
-        first = next(
-            (p for p in line if hex_distance(*p, *camp, width) <= muster and self._passable(p)),
-            camp,
-        )
+        here = self._pos(t, unit)
+        mv = self._mv()
+        walk = self.settings.camp_muster_walk
+
+        def inside(p: tuple[int, int]) -> bool:
+            if hex_distance(*p, *camp, width) > muster:
+                return False
+            return mv is None or self._walk_cost(p, camp) <= walk
+
+        route = mv.route_tiles(here, camp) if mv is not None else straight_line(*here, *camp, width)
+        first = next((p for p in route[1:] if inside(p) and self._passable(p)), camp)
         taken = {self._pos(t, u) for u in t.units if u.unit_id != unit.unit_id}
         taken |= {(th.x, th.y) for th in t.threats} | t.blocked
         taken |= {p for p, until in self._muster_bad.items() if until >= t.turn}
+        turns = mv.turn_field(here, max(1.0, unit.max_moves)) if mv is not None else None
         ring = sorted(
-            (hex_distance(unit.x, unit.y, x, y, width), x, y)
+            ((turns or {}).get((x, y), 0), hex_distance(unit.x, unit.y, x, y, width), x, y)
             for y in range(camp[1] - muster, camp[1] + muster + 1)
             for x in range(camp[0] - muster - 1, camp[0] + muster + 2)
-            if hex_distance(x, y, *camp, width) <= muster
+            if inside((x, y)) and (turns is None or (x, y) in turns)
         )
-        tiles = [first, *neighbours(*first, width), *((x, y) for _, x, y in ring)]
+        tiles = [first, *neighbours(*first, width), *((x, y) for _, _, x, y in ring)]
         free = list(
-            dict.fromkeys(p for p in tiles if p not in taken and p != camp
-                          and self._passable(p) and hex_distance(*p, *camp, width) <= muster)
-        )  # fmt: skip
+            dict.fromkeys(
+                p for p in tiles if p not in taken and p != camp and self._passable(p) and inside(p)
+            )
+        )
         return free[:tries]
+
+    def _stretches(
+        self, t: _Turn, unit: Unit, heading: list[tuple[int, int]], tries: int = 4
+    ) -> dict[tuple[int, int], tuple[int, int]]:
+        """The tile each muster goal's walk reaches this turn, de-duplicated, each with the muster
+        goal it heads for: the stretch of our own route to order, around the tiles the game said
+        are full and the trip's refusals."""
+        here = self._pos(t, unit)
+        mv = self._mv()
+        trip = mv.trips.trip(unit.unit_id) if mv is not None else None
+        avoid = {(th.x, th.y) for th in t.threats}
+        occupied = {self._pos(t, u) for u in t.units if u.unit_id != unit.unit_id} | t.blocked
+        found: dict[tuple[int, int], tuple[int, int]] = {}
+        for goal in heading:
+            stretch = self._step_tile(unit, here, goal, avoid, occupied, trip, t.turn)
+            if stretch != here:
+                found.setdefault(stretch, goal)
+        return dict(list(found.items())[:tries])
 
     def _stage_goals(
         self, t: _Turn, unit: Unit, camp: tuple[int, int], tries: int = 3
     ) -> list[tuple[int, int]]:
-        """Free tiles beside the camp, nearest the unit first. One unit per tile: the game
-        refuses a second land unit on a tile, and every unit aimed at the same stage tile left
-        the rest standing where they were (Run 15: three units, one in position)."""
+        """Free tiles beside the camp the unit can walk to, the soonest first. One unit per tile:
+        the game refuses a second land unit on a tile, and every unit aimed at the same stage tile
+        left the rest standing where they were (Run 15: three units, one in position)."""
         width = self.settings.map_width
         taken = {self._pos(t, u) for u in t.units if u.unit_id != unit.unit_id}
         taken |= {(th.x, th.y) for th in t.threats} | t.blocked
         free = [p for p in neighbours(*camp, width) if p not in taken and self._passable(p)]
-        free.sort(key=lambda p: (hex_distance(unit.x, unit.y, *p, width), p))
+        mv = self._mv()
+        turns = mv.turn_field(self._pos(t, unit), max(1.0, unit.max_moves)) if mv else None
+        if turns is not None:
+            # A tile beside the camp across an inlet is not a goal; the soonest is by the walk.
+            free = [p for p in free if p in turns]
+            free.sort(key=lambda p: (turns[p], hex_distance(unit.x, unit.y, *p, width), p))
+        else:
+            free.sort(key=lambda p: (hex_distance(unit.x, unit.y, *p, width), p))
         return free[:tries]
 
     def _stage_tile(self, unit: Unit, camp: tuple[int, int]) -> tuple[int, int] | None:
-        """The tile next to the camp on the way there, or None if already adjacent."""
+        """The tile next to the camp on the way there, or None if already adjacent or there is
+        no walk to it."""
         width = self.settings.map_width
-        if hex_distance(unit.x, unit.y, *camp, width) <= 1:
+        here = (unit.x, unit.y)
+        if hex_distance(*here, *camp, width) <= 1:
             return None  # In reach, so the attack step takes it from here.
-        line = hex_line((unit.x, unit.y), camp, width)
-        # The last passable tile before the camp, so a lake or a ridge on the line is skipped.
-        return next((p for p in reversed(line[:-1]) if self._passable(p)), None)
+        mv = self._mv()
+        route = mv.route_tiles(here, camp) if mv is not None else straight_line(*here, *camp, width)
+        # The last passable tile before the camp, so a lake or a ridge on the way is skipped.
+        stage = next((p for p in reversed(route[1:-1]) if self._passable(p)), None)
+        if mv is not None and mv.walk_turns(here, camp, 1.0) is None:
+            return None  # Across water with no walk to the camp.
+        return stage
 
     # ----- idle units -----
 
@@ -3368,9 +3645,12 @@ class MilitaryPolicy:
             here = hex_distance(unit.x, unit.y, *goal, s.map_width)
             if here <= s.probe_stand:
                 continue  # Already looking.
-            line = hex_line((unit.x, unit.y), goal, s.map_width)
-            line = [p for p in line if hex_distance(*p, *goal, s.map_width) >= s.probe_stand]
-            line = line[: max(1, int(unit.moves))]
+            # The walk's tiles this turn's moves reach, short of where it would stand to look.
+            line = [
+                p
+                for p in self._march_tiles(unit, (unit.x, unit.y), goal)
+                if hex_distance(*p, *goal, s.map_width) >= s.probe_stand
+            ]
             stop = threat = None
             for step in reversed(line):
                 if not self._passable(step):
@@ -3392,12 +3672,15 @@ class MilitaryPolicy:
             )  # fmt: skip
             return
         unit, stop = chosen
+        self._trip(t, unit, "probe", stop, (unit.x, unit.y))
         result = await self._order(t, unit, "probe", game.move_unit(unit.unit_index, *stop))
         if result is None or not move_succeeded(result):
+            self._trip_result(t, unit, stop, result or "")
             self._refuse(t, unit, "probe")
             self._probe_note(t, "the move was refused", sus, result=result or "")
             return
         t.acted.add(unit.unit_id)
+        self._trip_result(t, unit, stop, None, self._reached(result, stop))
         self._leave(t, unit)
         self._fortified.pop(unit.unit_id, None)
         self._probe_unit = unit.unit_id
@@ -3545,14 +3828,17 @@ class MilitaryPolicy:
             return False
         *_, where, stage, odds = min(options, key=lambda o: o[:3])
         t.spare_orders += 1
+        self._trip(t, unit, "hunt", stage, (unit.x, unit.y))
         result = await self._order(t, unit, "move", game.move_unit(unit.unit_index, *stage))
         if result is not None and move_succeeded(result):
             t.acted.add(unit.unit_id)
+            self._trip_result(t, unit, stage, None, self._reached(result, stage))
             self._leave(t, unit)
             self._fortified.pop(unit.unit_id, None)
             self._log(t, unit, "hunt", "spare unit, moving next to a hostile unit it can beat",
                       where, odds=asdict(odds), result=result)  # fmt: skip
             return True
+        self._trip_result(t, unit, stage, result or "")
         self._refuse(t, unit, "move")
         self._log(t, unit, "hunt", "move refused", where, result=result or "")
         return False

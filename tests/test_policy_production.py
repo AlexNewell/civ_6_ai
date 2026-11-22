@@ -1979,6 +1979,42 @@ def test_demoted_camp_units_keep_their_relative_order():
     assert after[0] == "UNIT_SETTLER" and after[1:] == before
 
 
+# Issue 388: Walls in a threatened city follow the threat map's reading.
+def walls_ctx(**reading):
+    from civ6_ai.threat_map import CityReading
+
+    base = dict(threat=21.9, fog=0.0, cover=80.0, damage=8.2, net=0.0, wall_damage=4.1)
+    seen = CityReading(**{**base, **reading})
+    return replace(
+        MID, threatened=frozenset({65536}), mapped=frozenset({65536}), readings={65536: seen}
+    )
+
+
+def walls_score(ctx, c=None):
+    c = c or city(threats=[threat()])
+    return score(option("BUILDING", "BUILDING_WALLS", 10), c, ctx, ProductionWeights())
+
+
+def test_walls_in_a_city_the_map_rates_covered_do_not_beat_a_housing_building():
+    c = starving(threats=[threat()])
+    granary = score(option("BUILDING", "BUILDING_GRANARY"), c, MID, ProductionWeights())
+    assert walls_score(walls_ctx(), c) < granary
+    assert walls_score(walls_ctx()) < 3.0
+
+
+def test_walls_with_net_threat_still_rank_first():
+    menu = [option("BUILDING", "BUILDING_LIBRARY", 9), option("BUILDING", "BUILDING_WALLS", 10)]
+    ctx = walls_ctx(net=15.0, cover=10.0)
+    assert best(city(threats=[threat()]), menu, ctx) == "BUILDING_WALLS"
+    assert walls_score(ctx) == walls_score(replace(MID, threatened=frozenset({65536})))
+
+
+def test_fog_keeps_walls_high_and_a_city_without_a_reading_is_unchanged():
+    unrated = walls_score(replace(MID, threatened=frozenset({65536})))
+    assert walls_score(walls_ctx(fog=12.0)) == unrated
+    assert walls_score(walls_ctx()) < walls_score(walls_ctx(fog=5.0)) < unrated
+
+
 # --- Holy Site when the city is safe and a +3 placement is on offer (issue 375) ------------------
 
 HS = option("DISTRICT", "DISTRICT_HOLY_SITE", turns=8, cost=54)
@@ -2098,3 +2134,11 @@ def test_the_cached_adjacency_is_read_again_after_the_reread_turns():
     policy._holy_adjacency[65536] = (turn - 10, 1)
     run(policy.assign(game))
     assert policy._holy_adjacency[65536] == (turn, 3)
+
+
+def test_walls_are_worth_the_damage_they_save_not_the_damage_they_take():
+    # Codex review (issue 388): equal incoming damage, so melee (15% reaches the walls) gains more
+    # from Walls than siege (all of it reaches them).
+    melee = walls_score(walls_ctx(damage=20.0, wall_damage=3.0))
+    siege = walls_score(walls_ctx(damage=20.0, wall_damage=20.0))
+    assert melee > siege

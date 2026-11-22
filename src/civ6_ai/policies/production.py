@@ -144,6 +144,17 @@ class ProductionWeights:
     # settling (issue 284) are unchanged. False restores the old order, for a posture that wants
     # the camp cleared first.
     settler_before_camp: bool = True
+    # Issue 388: Walls in a city the threat map rates. Live (STD_T1_04, T44) Arretium built Walls at
+    # 10.8 over a Granary at 4.8 while the map said cover 80 against threat 21.9 (net 0, walls
+    # save 4 damage): the barbarians had to walk around mountains and sea. Walls are now worth
+    # `walls_covered_base` plus `walls_saving_weight` per hit point of damage they save, rising to
+    # the full threatened score as the pressure (net threat plus `walls_fog_weight` times the
+    # unseen threat) reaches `walls_full_pressure` hit points a turn. Not absolute: fog or real net
+    # threat still raises Walls to the top. A city the map did not judge keeps the full score.
+    walls_covered_base: float = 2.0
+    walls_saving_weight: float = 0.3
+    walls_fog_weight: float = 1.0
+    walls_full_pressure: float = 10.0
     # Issue 375: the player's rule, "Holy Site was a reaction to Rome being safe enough to work on
     # a district and having a good placement option (+3 from mountains)". A Holy Site is worth its
     # faith yield alone (4 x 0.5 = 2), below every other district, and the bot started none by turn
@@ -197,6 +208,9 @@ class ProductionContext:
     threatened_at: Mapping[int, tuple[int, int]] = field(default_factory=dict, compare=False)
     short: frozenset[int] = frozenset()  # Of those, the ones with fewer than two defenders.
     mapped: frozenset[int] = frozenset()  # Of those, the ones the threat map judged (issue 264).
+    # Issue 388: the threat map's reading (a `CityReading`) of each mapped city, so Walls
+    # follow the reach-aware net threat and the damage walls save, not a count of units nearby.
+    readings: Mapping[int, Any] = field(default_factory=dict, compare=False)
     wary: bool = False  # A much stronger rival at peace with us (`defence.wary_of`): walls.
     # Issue 268: combat units still to build to clear the camp the military policy has chosen,
     # and the kind most missing ("melee", "ranged" or "any"). Each army pick counts one off.
@@ -319,6 +333,7 @@ def build_context(
         threatened_at={c.city_id: (c.x, c.y) for c in cities},
         short=defence.short_ids if defence is not None else frozenset(),
         mapped=defence.mapped_ids if defence is not None else frozenset(),
+        readings=_map_readings(defence),
         wary=bool(defence is not None and defence.wary),
         districts=frozenset(_short(d.district_type) for c in cities for d in c.districts),
         science_districts=sum(
@@ -980,6 +995,31 @@ def _wonder_race_score(
     return _WONDER_VALUE * w.wonders if go else 0.0
 
 
+def _map_readings(defence: Any) -> dict[int, Any]:
+    """The threat map's reading of each city it judged (issue 388), by city id."""
+    if defence is None:
+        return {}
+    return {i: defence.cities[i].reading for i in defence.mapped_ids}
+
+
+def _walls_by_map(full: float, city: City, ctx: ProductionContext, w: ProductionWeights) -> float:
+    """Walls in a threatened city, weighed by what the threat map says (issue 388).
+
+    Without a reading the full score stands. With one, the score slides from what the walls save
+    (a covered city) up to the full score as net threat and fog grow.
+    """
+    reading = ctx.readings.get(city.city_id) if city.city_id in ctx.mapped else None
+    if reading is None:
+        return full
+    # Damage the walls turn away: what the attackers would deal to the city less what reaches the
+    # walls (`wall_damage` is the share that hits them, small for melee and all of a siege's).
+    saving = max(0.0, reading.damage - reading.wall_damage)
+    low = min(full, w.walls_covered_base + w.walls_saving_weight * saving)
+    pressure = max(0.0, reading.net) + w.walls_fog_weight * max(0.0, reading.fog)
+    share = 1.0 if w.walls_full_pressure <= 0 else min(1.0, pressure / w.walls_full_pressure)
+    return low + share * (full - low)
+
+
 def _building_score(
     option: ProductionChoice, city: City, ctx: ProductionContext, w: ProductionWeights
 ) -> float:
@@ -995,7 +1035,8 @@ def _building_score(
         return _WONDER_VALUE * w.wonders
     if name in _DEFENSIVE_BUILDINGS:
         if city.city_id in ctx.threatened and not city.has_walls:
-            return 26.0 + len(city.threats)  # Walls come right after the first defender.
+            full = 26.0 + len(city.threats)  # Walls come right after the first defender.
+            return _walls_by_map(full, city, ctx, w)
         if is_pressed(city, ctx) and not city.has_walls:
             return 17.0 + len(city.threats)
         if ctx.wary and name == "WALLS" and not city.has_walls:

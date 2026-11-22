@@ -521,3 +521,14 @@ def test_the_fallback_step_does_not_count_a_way_through_a_refused_tile():
     step = m.next_step((2, 2), (7, 2), 2, avoid={(0, 2)}, occupied={(3, 2), (4, 2)})
     assert step != (1, 2)
     assert step is None or step == (2, 2) or step[0] > 2
+
+
+def test_an_arrival_is_observed_even_when_no_builder_has_moves_left(caplog):
+    policy = BuilderPolicy(terrain=store())
+    asyncio.run(policy.run(ActionGame([task(x=14, y=10)], [worker(x=10, y=10)])))
+    spent = ActionGame([task(x=14, y=10)], [worker(x=14, y=10, moves_remaining=0.0)])
+    spent.data["overview"] = overview(turn=7)
+    with caplog.at_level(logging.INFO, logger="civ6_ai.movement"):
+        asyncio.run(policy.run(spent))
+    (row,) = _rows(caplog)
+    assert (row["outcome"], row["actual"]) == ("arrived", 3)

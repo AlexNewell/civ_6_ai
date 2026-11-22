@@ -226,16 +226,21 @@ class BuilderPolicy:
         builders = [u for u in units if is_builder(u.unit_type)]
         self._forget_gone_units(builders)
         free = sorted((u for u in builders if u.can_move), key=lambda u: u.unit_id)
+        # A builder that reached its goal under an old order closes that trip now, whether or not
+        # any builder has moves left, and before an assignment can retarget the trip (logging
+        # only; the turn is read here only when a trip is open).
+        turn = None
+        if self._movement().trips.trips:
+            turn = (await game.get_game_overview()).turn
+            for u in builders:
+                self._movement().trips.observe(u.unit_id, (u.x, u.y), turn)
         if not free:
             self.demand.idle, self.demand.spare_jobs = 0, None  # Busy, or none: nothing to infer.
             self._snapshot(builders)
             return
-        turn = (await game.get_game_overview()).turn
+        if turn is None:
+            turn = (await game.get_game_overview()).turn
         self._last_turn = turn
-        # A builder that reached its goal under an old order closes that trip now, before the
-        # assignment can give it another job and retarget the trip.
-        for u in builders:
-            self._movement().trips.observe(u.unit_id, (u.x, u.y), turn)
         jobs = [j for j in await read_builder_jobs(game) if self._buildable(j, turn)]
         threats = await read_threats(game)
         self._forget_finished_jobs(jobs, turn)

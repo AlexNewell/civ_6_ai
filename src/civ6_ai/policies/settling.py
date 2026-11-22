@@ -19,6 +19,7 @@ different settings and compare the choices.
 import json
 import logging
 import math
+import re
 from collections.abc import Collection, Iterable
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Protocol
@@ -1873,8 +1874,13 @@ class SettlingPolicy:
 
     def _note_arrival(self, settler, goal, result) -> None:
         """The move said the settler stands on the site: the trip is over."""
-        if f"now_at:{goal[0]},{goal[1]}" in str(result):
-            self._movement().trips.arrived(settler.unit_id, self._last_turn)
+        found = re.search(r"now_at:(-?\d+),(-?\d+)", str(result))
+        if found is None or (int(found[1]), int(found[2])) != tuple(goal):
+            return
+        trips = self._movement().trips
+        trip = trips.trip(settler.unit_id)
+        if trip is not None and trip.goal == tuple(goal):
+            trips.arrived(settler.unit_id, self._last_turn)
 
     def _end_trip(self, settler, outcome: str) -> None:
         """Close a trip the settler no longer follows (founded, no site, fled)."""
@@ -2023,6 +2029,7 @@ class SettlingPolicy:
                 "move", "stepping onto the site to found it, but it did not arrive", goal, result
             )
             return False
+        self._note_arrival(settler, goal, result)  # The move is confirmed: an open trip ended here.
         found = await game.found_city(settler.unit_index)
         if action_succeeded(found):
             record(

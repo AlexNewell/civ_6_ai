@@ -2501,3 +2501,33 @@ def test_a_settler_trip_open_across_turns_is_graded_by_turns_taken():
     game.data["overview"] = overview(turn=3, num_cities=1)
     run(policy, game)
     assert policy._movement().trips.closed[-1]["actual"] == 3
+
+
+def test_arrival_needs_the_whole_coordinate_pair():
+    policy = SettlingPolicy(SettlingSettings(map_width=74))
+    policy._last_turn = 3
+    policy._movement().trips.start(7, "settler", (10, 14), (10, 1), 1, 2)
+    policy._note_arrival(settler(), (10, 1), "MOVING_TO|10,1|now_at:10,10")  # Not there yet.
+    assert policy._movement().trips.trip(7) is not None
+    policy._note_arrival(settler(), (10, 1), "MOVING_TO|10,1|now_at:10,1")
+    assert policy._movement().trips.trip(7) is None
+
+
+def test_stepping_onto_the_site_to_found_records_the_arrival():
+    game = make_game(
+        [settler(x=13, y=10, moves_remaining=2.0)],
+        cities=[alpha()],
+        sites=[site(14, 10, food=40)],
+    )
+
+    async def arrives(unit_index, x, y):
+        return f"MOVING_TO|{x},{y}|from:13,10|now_at:{x},{y}"
+
+    game.move_unit = arrives
+    policy = SettlingPolicy(SettlingSettings(map_width=74))
+    policy.terrain = _flat_store()
+    policy._movement().trips.start(7, "settler", (13, 10), (14, 10), 1, 1)
+    target = SettleSite(14, 10, 30, 10, "fresh", (), 0, 0, 0)
+    policy._last_turn = 1
+    asyncio.run(policy._step_and_found(game, settler(x=13, y=10), target, [], lambda *a, **k: None))
+    assert policy._movement().trips.closed[-1]["outcome"] == "arrived"

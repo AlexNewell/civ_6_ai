@@ -91,3 +91,59 @@ def test_the_maps_own_field_follows_the_same_walk():
             t for t in m._field(src) if m.terrain.reach(13, 10, 2.0, False, 1.0, 1).get(t, 9) <= 1
         }
         assert one_turn == m.hostile_reach("UNIT_WARRIOR", 13, 10)
+
+
+# ----- live regressions (STD_T1_04, 60 turns) -----
+# T18: a new city with a barbarian four tiles off by hex but out of reach. T47: a camp plan
+# wanting a unit. The reach-aware count must lower pressure only where the map says the city
+# holds, and must not touch the camp demand.
+
+
+def _scores(ctx, city, items=("UNIT_WARRIOR", "UNIT_SLINGER", "UNIT_BUILDER")):
+    from civ6_ai.policies.production import ProductionWeights, _unit_score
+    from civ6_ai.state import ProductionChoice
+
+    w = ProductionWeights()
+    return {
+        i: round(_unit_score(ProductionChoice("UNIT", i, 50, 5), city, ctx, w), 2) for i in items
+    }
+
+
+def _scan_city():
+    return build_city(fx.city_info(garrison_unit=""), (barb(12, 12),), set(), None)
+
+
+def test_t18_a_hostile_the_map_cannot_reach_does_not_press_the_city():
+    c = _scan_city()
+    assert len(c.threats) == 1
+    held = ProductionContext(turn=18, num_cities=2, builders=1, recon=1, army=1, reach_aware=True)
+    scan = ProductionContext(turn=18, num_cities=2, builders=1, recon=1, army=1)
+    quiet = build_city(fx.city_info(garrison_unit=""), (), set(), None)
+    assert _scores(held, c) == _scores(held, quiet) == _scores(scan, quiet)
+    assert _scores(scan, c) != _scores(
+        held, c
+    )  # The scan alone pressed it: no Builder, higher units.
+
+
+def test_t18_a_hostile_the_map_can_reach_still_presses_the_city():
+    c = _scan_city()
+    reached = ProductionContext(
+        turn=18, num_cities=2, builders=1, recon=1, army=1, reach_aware=True, near={c.city_id: 1}
+    )
+    scan = ProductionContext(turn=18, num_cities=2, builders=1, recon=1, army=1)
+    assert _scores(reached, c) == _scores(scan, c)
+
+
+def test_t47_camp_demand_does_not_depend_on_the_reach_reading():
+    def camp(**kw):
+        return ProductionContext(
+            turn=47, num_cities=3, builders=2, recon=1, army=3, camp_units=1, camp_wants="melee",
+            camp_target=(14, 10), **kw,
+        )  # fmt: skip
+
+    c = build_city(fx.city_info(garrison_unit="UNIT_WARRIOR"), (barb(12, 12),), set(), None)
+    items = ("UNIT_SPEARMAN", "UNIT_ARCHER", "UNIT_BUILDER")
+    quiet = build_city(fx.city_info(garrison_unit="UNIT_WARRIOR"), (), set(), None)
+    held = _scores(camp(reach_aware=True), c, items)
+    assert held == _scores(camp(), quiet, items)  # Held by the map: the plan's demand alone.
+    assert held["UNIT_SPEARMAN"] > 10.0 > 0.0 and held["UNIT_BUILDER"] == 8.0

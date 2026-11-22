@@ -293,6 +293,14 @@ class MilitarySettings:
     camp_followup_gain: float = 2.0
     camp_followup_kill_gain: float = 1.0
     camp_unavoidable_credit: float = 2.0
+    # Issue 408: a settler of ours taken and held by a soldier next to our units. The captor is
+    # weighed like any target (`score_target`) plus `retake_gain`, the worth of getting the
+    # civilian back, and attacked when the total reaches `retake_min_score` and a high roll
+    # leaves the attacker `retake_min_hp_after` of its health (a looser floor than a plain
+    # attack's: a settler costs about a city). Seen live (STD_T1_03 T23): never tried.
+    retake_gain: float = 4.0
+    retake_min_score: float = 1.0
+    retake_min_hp_after: float = 0.2
     max_camp_turns: int = 8  # Turns spent assaulting one camp before it is set aside.
     camp_travel_turns: int = 20  # Turns a force may take to reach the muster point first.
     camp_retry_turns: int = 30
@@ -705,6 +713,24 @@ def score_target(
     return TargetScore(
         damage, kill, follow, threat, retaliation, damage + kill + follow + threat - retaliation
     )
+
+
+def retake_score(
+    unit: Unit,
+    captor: Threat,
+    hp: float,
+    odds: AttackOdds,
+    followup: float,
+    settings: "MilitarySettings",
+) -> tuple[TargetScore, float, bool]:
+    """Weigh attacking the soldier that holds a civilian of ours (issue 408), as (the target
+    score, the total with the retake gain, go). `go` needs the total at `retake_min_score` and a
+    bad roll to leave the attacker `retake_min_hp_after` of its health."""
+    s = settings
+    base = score_target(unit, captor, hp, odds, followup, s)
+    total = base.total + s.retake_gain
+    safe = odds.hp_after >= s.retake_min_hp_after * unit.max_hp
+    return base, total, total >= s.retake_min_score and safe
 
 
 def camp_step_score(
@@ -1478,6 +1504,52 @@ class MilitaryPolicy:
             ),
         )
 
+    async def _retake_from_captor(self, game: MilitaryGame, t: _Turn, civ: Any) -> bool:
+        """Attack the soldier on a hostile civilian's tile with the best of our units that can
+        hit it, when `retake_score` says go (issue 408). True if an attack landed; every weighed
+        option is logged with its numbers."""
+        s = self.settings
+        where = (civ.x, civ.y)
+        foe = self._defender_at(t, where)
+        if foe is None or where in t.dead:
+            return False
+        hp = t.target_hp.get(where, foe.hp)
+        best = None
+        for unit in t.mine:
+            if not self._available(t, unit, "attack"):
+                continue
+            target = next((g for g in unit.targets if (g.x, g.y) == where), None)
+            if target is None:
+                continue
+            live = self._live(t, target)
+            odds = assess_attack(unit, live, foe, s.weights, None, s.map_width)
+            if odds is None:
+                continue
+            base, total, go = retake_score(
+                unit, foe, hp, odds, self._followup_damage(t, unit, foe), s
+            )
+            note = {
+                "unit": unit.unit_id,
+                "total": round(total, 2),
+                "target_score": round(base.total, 2),
+                "retake_gain": s.retake_gain,
+                "dealt": round(odds.dealt),
+                "taken": round(odds.taken),
+                "hp_after": round(odds.hp_after),
+                "go": go,
+            }
+            log.info(
+                "military_retake_weigh %s", json.dumps({"turn": t.turn, "at": list(where), **note})
+            )
+            if go and (best is None or total > best[0]):
+                best = (total, unit, odds, live)
+        if best is None:
+            return False
+        _, unit, odds, live = best
+        return await self._strike(
+            game, t, unit, live, odds, f"freeing a {civ.unit} from the soldier holding it"
+        )
+
     async def _recapture(self, game: MilitaryGame, t: _Turn) -> None:
         """Move a combat unit onto a hostile civilian it can reach, to take it back.
 
@@ -1493,6 +1565,8 @@ class MilitaryPolicy:
         for civ in self._hostile_civilians(t, guarded=True):
             where = (civ.x, civ.y)
             if civ.guarded:
+                if await self._retake_from_captor(game, t, civ):
+                    continue
                 self._skip_recapture(t, civ, "a soldier stands on the tile with it")
                 continue
             if where in t.dead:

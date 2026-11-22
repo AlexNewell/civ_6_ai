@@ -20,7 +20,7 @@ import json
 import logging
 import math
 import re
-from collections.abc import Collection, Iterable
+from collections.abc import Callable, Collection, Iterable
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Protocol
 
@@ -137,6 +137,33 @@ class SettlingSettings:
     flee_radius: int = 2  # A settler this close to a hostile unit runs.
     flee_mounted_extra: int = 2  # A mounted hostile unit is this many tiles further a danger.
     flee_escorted_hostiles: int = 2  # An escort is no cover against this many hostile units near.
+    # Issue 408 (STD_T1_03 T19-23, every run): one escort led a settler out toward two hostile
+    # units 2 to 3 tiles away; it fled onto a tile one of them reached and was captured. Leaving
+    # a city is a weighed go or wait: the damage hostiles could deal the pair over the next
+    # `trip_lookahead_turns` turns of the walking route (each turn's attackers are those that can
+    # reach that turn's tile, a hostile walking `trip_hostile_pace` further each turn, later
+    # turns counting `trip_turn_discount` of the one before) against what the escort can absorb,
+    # `trip_absorb_share` of its health, and each friendly soldier near the route adds
+    # `trip_friend_credit` of that again. Waiting in the city is the default while the danger
+    # is above it; every number is logged. Hostiles that strike in the same turn focus the
+    # escort: each one past the first adds `trip_focus_penalty` of a hit, because one escort is
+    # no cover against two (issue 283) and a lone hostile over two turns is not the same risk.
+    trip_lookahead_turns: int = 2
+    trip_hostile_pace: int = 2
+    trip_turn_discount: float = 0.8
+    trip_absorb_share: float = 0.8
+    trip_friend_credit: float = 0.5
+    trip_focus_penalty: float = 0.75
+    trip_friend_radius: int = 2
+    # Issue 408: a fleeing settler weighs every tile it can reach this turn. A tile a hostile
+    # can attack next turn costs `flee_danger_weight` per such hostile (a ranged one counts its
+    # shooting range); a city is worth `flee_city_gain`, each friendly soldier on or beside the
+    # tile `flee_cover_gain` (at most two), and each tile from the nearest city costs
+    # `flee_distance_cost`. The safest tile wins, which is not always toward the city.
+    flee_danger_weight: float = 4.0
+    flee_city_gain: float = 3.0
+    flee_cover_gain: float = 1.5
+    flee_distance_cost: float = 0.4
     escort_search_radius: int = 5
     scout_threat_radius: int = 2
     # Issue 288: a hostile unit seen near a site and now out of sight has not gone, it is in the
@@ -567,6 +594,94 @@ def escort_holds_tile(
         attackers += 1
         taken += expected_damage(attack, defence) * (1 + w.damage_variance)
     return taken < escort.hp, taken, attackers
+
+
+@dataclass(frozen=True)
+class TripDanger:
+    """The weighed go or wait for a settler leaving a city with an escort (issue 408)."""
+
+    taken: float  # Expected damage to the escort over the lookahead, discounted per turn.
+    capacity: float  # What the escort and the friends near the route can absorb.
+    attackers: tuple[int, ...]  # Hostile units that can attack each turn's tile.
+    friends: int
+    go: bool
+
+
+def trip_danger(
+    escort: Unit,
+    tiles: Iterable[tuple[int, int]],
+    threats: Iterable[Threat],
+    friends: Iterable[Unit],
+    s: "SettlingSettings",
+    reach_tiles: "Callable[[Threat, int], set[tuple[int, int]] | None] | None" = None,
+) -> TripDanger:
+    """Weigh the next turns of a walk: `tiles` are where the pair would stand at the end of each
+    turn. `reach_tiles(threat, turn)` gives the tiles a hostile can attack on that turn by the
+    walk (None: hex distance, `flee_radius` growing `trip_hostile_pace` a turn, a mounted unit
+    `flee_mounted_extra` further)."""
+    from civ6_ai.policies.military import MilitaryWeights, expected_damage
+
+    w = MilitaryWeights()
+    defence = escort.combat_strength * escort.hp / max(escort.max_hp, 1) + w.assumed_defender_bonus
+    hostiles = [t for t in threats if t.hostile and _strength(t)[0] > 0]
+    taken = 0.0
+    counts = []
+    for turn, tile in enumerate(list(tiles)[: max(1, s.trip_lookahead_turns)], start=1):
+        n = 0
+        dealt = 0.0
+        for t in hostiles:
+            reach = reach_tiles(t, turn) if reach_tiles is not None else None
+            if reach is not None:
+                hits = tile in reach
+            else:
+                far = s.flee_radius + (turn - 1) * s.trip_hostile_pace
+                far += s.flee_mounted_extra if any(m in t.unit_type for m in _MOUNTED) else 0
+                hits = hex_distance(tile[0], tile[1], t.x, t.y, s.map_width) <= far
+            if hits:
+                n += 1
+                attack = _strength(t)[0] * t.hp / max(t.max_hp, 1)
+                dealt += expected_damage(attack, defence) * (1 + w.damage_variance)
+        counts.append(n)
+        dealt *= 1 + s.trip_focus_penalty * max(0, n - 1)
+        taken += dealt * s.trip_turn_discount ** (turn - 1)
+    near = sum(
+        1
+        for f in friends
+        if f.unit_id != escort.unit_id
+        and any(hex_distance(f.x, f.y, x, y, s.map_width) <= s.trip_friend_radius for x, y in tiles)
+    )
+    capacity = escort.hp * s.trip_absorb_share * (1 + s.trip_friend_credit * near)
+    return TripDanger(taken, capacity, tuple(counts), near, taken <= capacity)
+
+
+@dataclass(frozen=True)
+class FleeScore:
+    """One tile a fleeing settler could end the turn on (issue 408), every part logged."""
+
+    tile: tuple[int, int]
+    danger: float  # Hostile units that can attack the tile next turn.
+    cover: float  # City and friendly soldiers on or beside it.
+    distance: int  # Tiles from the nearest city.
+    total: float
+
+
+def flee_tile_score(
+    tile: tuple[int, int],
+    hostile_reaches: Iterable[Collection[tuple[int, int]]],
+    soldiers: Iterable[tuple[int, int]],
+    cities: Iterable[tuple[int, int]],
+    s: "SettlingSettings",
+) -> FleeScore:
+    """Weigh ending the turn on `tile`: `hostile_reaches` are the tiles each hostile can attack
+    next turn, `soldiers` the tiles of our combat units, `cities` the tiles of our cities."""
+    cities = list(cities)
+    danger = float(sum(1 for r in hostile_reaches if tile in r))
+    cover = s.flee_city_gain if tile in cities else 0.0
+    beside = sum(1 for p in soldiers if hex_distance(*tile, *p, s.map_width) <= 1)
+    cover += s.flee_cover_gain * min(beside, 2)
+    distance = min((hex_distance(*tile, *c, s.map_width) for c in cities), default=0)
+    total = cover - s.flee_danger_weight * danger - s.flee_distance_cost * distance
+    return FleeScore(tile, danger, cover, distance, total)
 
 
 def garrison_may_leave(
@@ -1604,7 +1719,7 @@ class SettlingPolicy:
             threatened
             and city_tiles
             and (not escorted or outnumbered)
-            and await self._flee(game, settler, city_tiles, record, near)
+            and await self._flee(game, settler, city_tiles, record, near, danger, units)
         ):
             return
         # Issue 291: a settler in a city never flees, but must not walk out into the units the flee
@@ -1755,6 +1870,7 @@ class SettlingPolicy:
             units,
             crowded,
             danger.threats,
+            leaving=in_city,
         )
         self._holds[settler.unit_id] = 0 if moved else holds + 1
 
@@ -1771,6 +1887,7 @@ class SettlingPolicy:
         units=(),
         crowded=False,
         danger_threats=(),
+        leaving=False,
     ) -> bool:
         """Take one step towards the site. Returns False if the settler did not get closer."""
         s = self.settings
@@ -1791,6 +1908,10 @@ class SettlingPolicy:
                     f"{attackers} hostile unit(s) can reach it for about {taken:.0f} damage",
                     goal,
                 )
+                return False
+            if leaving and self._wait_for_danger(
+                settler, escort, goal, step, units, danger_threats, record
+            ):
                 return False
             if (escort.x, escort.y) != (settler.x, settler.y):
                 if not crowded:
@@ -2089,13 +2210,104 @@ class SettlingPolicy:
         record("found_failed", "stepped onto the site but founding failed", goal, found)
         return True  # It moved; nothing more to do with it this turn.
 
-    async def _flee(self, game, settler, city_tiles, record, near: int = 0) -> bool:
+    def _wait_for_danger(self, settler, escort, goal, step, units, threats, record) -> bool:
+        """Issue 408: True (and a logged hold) when the danger along the next turns of the walk
+        is more than the escort and the friends near it can absorb. The pair stays in the city."""
+        s = self.settings
+        movement = self._movement()
+        here = (settler.x, settler.y)
+        moves = max(1, int(settler.moves))
+        tiles = [tuple(step)]
+        for _ in range(2, max(1, s.trip_lookahead_turns) + 1):
+            # Where the pair finishes each turn follows the terrain costs (Movement.next_step),
+            # not the route index times the moves: slow ground advances fewer tiles.
+            ahead = movement.next_step(tiles[-1], goal, moves)
+            if ahead is None and movement.terrain is None:  # No terrain known: the straight line.
+                line = hex_line(tiles[-1], goal, s.map_width)[1:]
+                ahead = line[min(moves, len(line)) - 1] if line else None
+            if ahead is None:
+                break
+            tiles.append(tuple(ahead))
+        tiles = [t for i, t in enumerate(tiles) if i == 0 or t != tiles[i - 1]]
+        walk = s.walk_danger and movement.terrain is not None
+
+        def reach(t, turn):
+            if not walk or any(word in t.unit_type for word in _SEA_UNITS):
+                return None
+            budget = s.flee_radius - 1 + (turn - 1) * s.trip_hostile_pace
+            if any(m in t.unit_type for m in _MOUNTED):
+                budget += s.flee_mounted_extra
+            return movement.threat_reach(
+                (t.x, t.y), budget, _RANGED_REACH if t.ranged_strength > 0 else None
+            )
+
+        # Units out on the route count; one in the city with the pair stays there.
+        friends = [u for u in units if _land_military(u) and (u.x, u.y) != here]
+        weighed = trip_danger(escort, tiles, threats, friends, s, reach)
+        log.info(
+            "settle_trip_danger %s",
+            json.dumps(
+                {
+                    "turn": self._last_turn,
+                    "unit": settler.unit_id,
+                    "escort": escort.unit_id,
+                    "tiles": [list(t) for t in tiles],
+                    "attackers": list(weighed.attackers),
+                    "friends": weighed.friends,
+                    "taken": round(weighed.taken),
+                    "capacity": round(weighed.capacity),
+                    "go": weighed.go,
+                },
+                sort_keys=True,
+            ),
+        )
+        if weighed.go:
+            return False
+        record(
+            "hold",
+            f"leaving the city would cost the escort about {weighed.taken:.0f} damage over "
+            f"{len(tiles)} turn(s) ({weighed.attackers} hostile unit(s) reach the route); it can "
+            f"absorb {weighed.capacity:.0f}, so the settler waits inside",
+            goal,
+        )
+        return True
+
+    async def _flee(
+        self, game, settler, city_tiles, record, near: int = 0, danger=None, units=()
+    ) -> bool:
         """Run for the nearest city, or the next nearest when the order is refused. A refusal is
         logged (issue 283: a settler stood in the open with hostile cavalry beside it and nothing
         said why it had not run)."""
         s = self.settings
         if (settler.x, settler.y) in city_tiles:
             return False  # Already inside walls: the usual hold and escort rules apply.
+        safest = self._safest_tile(settler, city_tiles, danger, units)
+        if safest is not None:
+            score, scores = safest
+            if score.tile == (settler.x, settler.y):
+                record(
+                    "hold",
+                    f"{near:g} hostile unit(s) close and no reachable tile is safer than this "
+                    f"one (score {score.total:.1f}, danger {score.danger:g})",
+                    score.tile,
+                )
+                return True
+            result = await game.move_unit(settler.unit_index, *score.tile)
+            if move_succeeded(result):
+                claim = self._site_claims.get(settler.unit_id)
+                if claim is not None:
+                    self._fled[settler.unit_id] = claim
+                self._end_trip(settler, "fled")
+                record(
+                    "flee",
+                    f"{near:g} hostile unit(s) close, retreating to the safest tile "
+                    f"(score {score.total:.1f}: danger {score.danger:g}, cover {score.cover:g}, "
+                    f"{score.distance} from a city; best of {len(scores)})",
+                    score.tile,
+                    result,
+                )
+                return True
+            record("hold", "fleeing to the safest tile was refused", score.tile, result)
         ordered = sorted(
             city_tiles, key=lambda c: (hex_distance(settler.x, settler.y, *c, s.map_width), c)
         )
@@ -2115,6 +2327,47 @@ class SettlingPolicy:
                 return True
             record("hold", "fleeing to a city was refused", city, result)
         return False
+
+    def _safest_tile(self, settler, city_tiles, danger, units):
+        """Issue 408: the best-scoring tile the settler can end this turn on, with every score,
+        or None when the walk is not known (the old run for the nearest city then applies)."""
+        s = self.settings
+        movement = self._movement()
+        here = (settler.x, settler.y)
+        if danger is None or not s.walk_danger or movement.terrain is None:
+            return None
+        hostiles = [t for t in danger.threats if t.hostile]
+        # A hostile-held tile is not walked through, so nothing beyond it counts as reachable.
+        field_ = movement.turn_field(
+            here, max(1.0, settler.moves), avoid={(t.x, t.y) for t in hostiles}
+        )
+        if not field_:
+            return None
+        occupied = {(t.x, t.y) for t in hostiles} | {
+            (u.x, u.y) for u in units if u.unit_id != settler.unit_id and not _land_military(u)
+        }
+        reaches = []
+        for t in hostiles:
+            if any(word in t.unit_type for word in _SEA_UNITS):
+                continue
+            budget = s.flee_radius - 1
+            if any(m in t.unit_type for m in _MOUNTED):
+                budget += s.flee_mounted_extra
+            reaches.append(
+                movement.threat_reach(
+                    (t.x, t.y), budget, _RANGED_REACH if t.ranged_strength > 0 else None
+                )
+            )
+        soldiers = [(u.x, u.y) for u in units if _land_military(u)]
+        scores = [
+            flee_tile_score(tile, reaches, soldiers, city_tiles, s)
+            for tile, turns in sorted(field_.items())
+            if (turns <= 1 and tile not in occupied)
+        ]
+        if not scores:
+            return None
+        best = max(scores, key=lambda f: (f.total, f.tile == here, f.tile))
+        return best, scores
 
     def _record(self, decision: SettleDecision) -> None:
         self.decisions.append(decision)

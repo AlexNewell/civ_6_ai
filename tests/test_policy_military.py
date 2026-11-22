@@ -3288,3 +3288,51 @@ def test_the_muster_tile_is_never_one_the_game_refused_lately():
     policy._muster_bad[first] = 10**6
     run(policy, _bay_game(units))
     assert policy._muster_pick[(21, 10)] != first
+
+
+def _cover_game(on_mission):
+    """A threatened city (threat map says not short) holding one unit, and a second unit outside
+    that is either marching on the camp or idle."""
+    from civ6_ai.policies.defence import CityThreat, DefenceState
+
+    city = city_info(city_id=65536, name="A", x=15, y=10, garrison_unit="")
+    units = [warrior(uid=1, x=15, y=10), warrior(uid=2, x=12, y=10, **STRONG)]
+    camp = tile(x=21, y=10, improvement="IMPROVEMENT_BARBARIAN_CAMP", owner_id=-1, units=[])
+    game = camp_game(units, [], camp=camp, cities=[city])
+    state = DefenceState()
+    state.cities[65536] = CityThreat(
+        city_id=65536, name="A", x=15, y=10, reasons=("hostile units near",),
+        hostile_units=1, defenders_in=1, defenders_beside=0,
+        reading=types.SimpleNamespace(pressed=lambda margin: False),
+        hostile_tiles=((18, 10),),
+    )  # fmt: skip
+    policy = MilitaryPolicy(defence=state)
+    policy.settings = dataclasses.replace(policy.settings, map_width=74)
+    policy.terrain = _bay_store()
+    if on_mission:
+        policy._camps[(21, 10)] = 5
+        policy._mission[2] = ((21, 10), 20)
+    return game, policy, state
+
+
+def test_a_unit_marching_on_the_camp_is_not_pulled_back_by_a_city_that_is_not_short():
+    game, policy, state = _cover_game(on_mission=True)
+    assert not state.cities[65536].short
+    run(policy, game)
+    assert not [d for d in policy.decisions if d.action == "cover" and d.unit_id == 2]
+    assert not [d for d in policy.decisions if d.action == "garrison" and d.unit_id == 2]
+
+
+def test_a_unit_that_is_not_on_a_mission_is_still_covered_for_a_threatened_city():
+    game, policy, _ = _cover_game(on_mission=False)
+    run(policy, game)
+    assert [d for d in policy.decisions if d.action == "cover" and d.unit_id == 2]
+
+
+def test_a_unit_ordered_by_a_city_role_is_not_counted_into_the_camp_force_that_turn():
+    game, policy, _ = _cover_game(on_mission=False)
+    run(policy, game)
+    # Unit 2 was given the cover role, so the camp force never counted it: one owner per turn.
+    assert policy.decisions and not [
+        d for d in camp_orders(policy) if d.unit_id == 2 and d.turn == policy.decisions[0].turn
+    ]

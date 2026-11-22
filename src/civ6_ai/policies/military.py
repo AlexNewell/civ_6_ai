@@ -611,6 +611,10 @@ def camp_group_near(
     return near
 
 
+# Orders that hold a city: a unit given one is that city's this turn, not the camp force's.
+CITY_ROLES = frozenset({"cover", "garrison", "heal", "retreat", "flee", "swap"})
+
+
 def walk_turns(cost: float, moves: float) -> int:
     """Whole turns to spend `cost` movement points at `moves` a turn (issue 392); 0 for no walk."""
     return 0 if cost <= 0 else max(1, math.ceil(cost / max(moves, 1.0) - 1e-9))
@@ -944,6 +948,9 @@ class _Turn:
     camp_scanned: bool = False
     placed: dict[int, tuple[int, int]] = field(default_factory=dict)  # Where a unit moved to.
     blocked: set[tuple[int, int]] = field(default_factory=set)  # Tiles the game said are full.
+    # Issue 392: the city role (cover, garrison, ...) that ordered a unit this turn. One owner per
+    # unit per turn: such a unit is not counted into the camp force the same turn.
+    roles: dict[int, str] = field(default_factory=dict)
     en_route: dict[int, int] = field(default_factory=dict)  # City id to cover units still walking.
     spare_orders: int = 0
     # What the threat map changed this turn (issue 238), for the offense line and the slice
@@ -1654,6 +1661,8 @@ class MilitaryPolicy:
         decision = MilitaryDecision(
             t.turn, unit.unit_id, unit.x, unit.y, action, reason, target, **extra
         )
+        if action in CITY_ROLES:
+            t.roles.setdefault(unit.unit_id, action)
         self._record(decision)
 
     def _available(self, t: _Turn, unit: Unit, kind: str) -> bool:
@@ -1772,6 +1781,7 @@ class MilitaryPolicy:
                     "gap": round(max(0.0, needed - have), 1),
                     "units_free": len(free),
                     "units_gathered": len(gathered) if gathered is not None else None,
+                    "city_roles": {str(k): v for k, v in sorted(t.roles.items())},
                     "held": held,
                 },
                 sort_keys=True,
@@ -2490,6 +2500,7 @@ class MilitaryPolicy:
     async def _cover(self, game: MilitaryGame, t: _Turn, city: City) -> None:
         """Get a second defender onto a tile beside the city, so two hold it (roadmap 1.36)."""
         s = self.settings
+        short = self._city_short(city)
         while t.actions < s.max_actions:
             inside = t.at_city.get((city.x, city.y), 0)
             if inside + self._beside(t, city) + t.en_route.get(city.city_id, 0) >= WANTED_DEFENDERS:
@@ -2501,6 +2512,10 @@ class MilitaryPolicy:
                 and hex_distance(*self._pos(t, u), city.x, city.y, s.map_width) > 1
                 and u.hp >= s.weights.heal_below * u.max_hp
                 and self._spare(t, u)
+                # A unit marching on the camp is the camp force's, which counts it free while the
+                # city is not short; the cover pulled it back every turn (issue 392). Only a city
+                # the threat map calls short takes it.
+                and (short or not self._on_camp_mission(t, u))
             ]
             candidates = [c for c in candidates if c[0] <= self._reach(city)]
             if not candidates:
@@ -2593,6 +2608,7 @@ class MilitaryPolicy:
             u
             for u in t.mine
             if self._available(t, u, "move")
+            and u.unit_id not in t.roles
             and u.hp >= s.weights.camp_min_hp * u.max_hp
             and self._camp_available(t, u)
         ]
@@ -2605,6 +2621,7 @@ class MilitaryPolicy:
             for u in t.mine
             if u.unit_id not in counted
             and u.unit_id not in self._recon
+            and u.unit_id not in t.roles
             and self._on_camp_mission(t, u)
             and u.hp >= s.weights.camp_min_hp * u.max_hp
             and self._camp_available(t, u)

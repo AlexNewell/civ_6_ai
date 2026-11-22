@@ -3368,3 +3368,47 @@ def test_a_refusal_survives_the_trip_being_retargeted():
     policy._trip_result(t, unit, (11, 10), "ERROR|path blocked")
     policy._trip(t, unit, "muster", (13, 11), (unit.x, unit.y))
     assert (11, 10) in policy._mv().trips.trip(unit.unit_id).refused
+
+
+def test_hills_on_the_way_do_not_put_a_unit_out_of_a_citys_call_in_reach():
+    # Live STD_T1_03: a spare unit 3 tiles from the threatened capital, over hills and forest
+    # (2 a tile), counted as 5 or 6 "tiles" away and was not called (reach is 4 tiles).
+    from civ6_ai.terrain import TerrainStore
+
+    store = TerrainStore(map_width=74)
+    store.learn(
+        [
+            build_tile(
+                tile(
+                    x=x, y=y, improvement=None, units=[], is_river=False,
+                    terrain="TERRAIN_GRASS", is_hills=True,
+                )
+            )
+            for x in range(4, 24)
+            for y in range(2, 19)
+        ]
+    )  # fmt: skip
+    policy = MilitaryPolicy()
+    policy.settings = dataclasses.replace(policy.settings, map_width=74)
+    policy.terrain = store
+    assert policy._walk_cost((10, 13), (10, 10)) == 3.0  # Hex distance: hills are no detour.
+    assert policy._walk_cost((10, 13), (10, 10)) <= policy.settings.garrison_reach
+
+
+def test_a_real_detour_still_counts_at_its_cost():
+    policy, _ = _walled()
+    cost = policy._walk_cost((10, 10), (14, 10))
+    assert cost > 2 * 4  # More than twice the hex distance: it is the way round.
+
+
+def test_a_unit_that_reaches_the_muster_ring_closes_its_muster_trip():
+    policy = MilitaryPolicy()
+    policy.settings = dataclasses.replace(policy.settings, map_width=74)
+    policy.terrain = _store(_land())
+    policy, t = _turn_for(policy, MilitaryGame([warrior(uid=1, x=7, y=10)]))
+    unit = t.mine[0]
+    policy._trip(t, unit, "muster", (11, 10), (7, 10))
+    policy._trip_ring(t, unit)
+    assert policy._mv().trips.trip(1) is None
+    row = policy._mv().trips.closed[-1]
+    assert row["outcome"] == "arrived" and row["kind"] == "muster"

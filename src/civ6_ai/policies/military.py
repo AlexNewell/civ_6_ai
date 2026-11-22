@@ -233,6 +233,9 @@ class MilitarySettings:
     # ground: the same as `camp_muster_radius` tiles), not inside a hex ring, so a unit across a
     # bay from the camp is not "at" it. Without a terrain store the hex ring is used.
     camp_muster_walk: float = 4.0
+    # A walk costing more than this many times the hex distance is a detour (round a bay or a
+    # ridge), and a reach counts it at its cost. Hills and forest (2 a tile) are not a detour.
+    walk_detour_factor: float = 2.0
     muster_bad_turns: int = 10  # A muster tile the game refused is not tried again for this long.
     # How far a unit is called from to a camp (idle units sat 8-14 off), in walking cost (hex
     # distance without a terrain store), so a unit across water with a long way round is not one.
@@ -1102,13 +1105,18 @@ class MilitaryPolicy:
         return self._own_movement
 
     def _walk_cost(self, here: tuple[int, int], goal: tuple[int, int]) -> float:
-        """Terrain cost of the cheapest walk from `here` to `goal` (flat ground: the hex
-        distance), inf where there is none. Hex distance with no terrain store."""
+        """How far `here` is from `goal` for a reach in tiles: the hex distance, unless the walk
+        is a real detour round water or a ridge (its terrain cost over `walk_detour_factor` times
+        the hex distance), when it is that cost. inf where there is no walk. Hills and forest cost
+        two a tile but are no detour: counting them in tiles of cost left a spare unit three tiles
+        from a threatened capital out of its reach (live STD_T1_03). Hex distance with no store."""
+        far = hex_distance(*here, *goal, self.settings.map_width)
         mv = self._mv()
         field_ = mv.cost_field(goal) if mv is not None else None
         if field_ is None:
-            return float(hex_distance(*here, *goal, self.settings.map_width))
-        return field_.get(here, float("inf"))
+            return float(far)
+        cost = field_.get(here, float("inf"))
+        return float(far) if cost <= self.settings.walk_detour_factor * far else cost
 
     def _walk_turns(self, unit: Unit, goal: tuple[int, int], here: tuple[int, int]) -> int:
         """Turns for the unit to walk from `here` to `goal`; the hex estimate with no walk."""
@@ -1223,6 +1231,15 @@ class MilitaryPolicy:
         if result is not None:
             reason = "stacking" if "STACKING_CONFLICT" in result else "refused"
             mv.trips.refuse(unit.unit_id, goal, reason, t.turn)
+
+    def _trip_ring(self, t: _Turn, unit: Unit) -> None:
+        """A unit inside the muster ring has done its muster walk: it waits where it stands, so
+        the trip to the muster tile closes as arrived rather than timing out (live: 0 of 2 muster
+        trips within one turn, because the units stopped in the ring, short of the exact tile)."""
+        mv = self._mv() or self.movement
+        trip = mv.trips.trip(unit.unit_id) if mv is not None else None
+        if trip is not None and trip.kind == "muster":
+            mv.trips.arrived(unit.unit_id, t.turn)
 
     def _trips_observe(self, units: Iterable[Unit], turn: int) -> None:
         """Close the trips of units that stand on their goal or are gone."""
@@ -2780,6 +2797,8 @@ class MilitaryPolicy:
             if not self._available(t, unit, "move"):
                 continue
             far = not self._rallied(t, unit, where)
+            if not far:
+                self._trip_ring(t, unit)
             adjacent = hex_distance(unit.x, unit.y, *where, s.map_width) <= 1
             if not far and not committed and not (adjacent and not occupied):
                 t.acted.add(unit.unit_id)  # Waiting for the rest; not idle, not spare.

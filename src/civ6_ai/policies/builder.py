@@ -24,8 +24,8 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
 
 from civ6_ai.blockers import action_succeeded, move_succeeded
+from civ6_ai.movement import Movement, MovementSettings
 from civ6_ai.policies.game_data import REPLACES
-from civ6_ai.policies.secondary import line_tiles
 from civ6_ai.state import BuilderJob, GameReads, Threat, Unit, read_builder_jobs, read_threats
 from civ6_ai.state import read_units as _read_units
 from civ6_ai.state.reader import STANDARD_MAP_WIDTH, hex_distance
@@ -200,6 +200,9 @@ class BuilderPolicy:
     # distance and no danger, as before.
     threat_map: Any = field(default=None, repr=False)
     terrain: Any = field(default=None, repr=False)
+    # The shared movement service (#399): walking turns, route danger and trip logging. With none,
+    # one is made over `terrain` and `threat_map` on first use.
+    movement: Movement | None = field(default=None, repr=False)
     # Where builders were lost: (x, y, turn).
     lost: list[tuple[int, int, int]] = field(default_factory=list)
     _seen: dict[int, tuple[int, int, tuple[int, int] | None]] = field(
@@ -223,11 +226,20 @@ class BuilderPolicy:
         builders = [u for u in units if is_builder(u.unit_type)]
         self._forget_gone_units(builders)
         free = sorted((u for u in builders if u.can_move), key=lambda u: u.unit_id)
+        # A builder that reached its goal under an old order closes that trip now, whether or not
+        # any builder has moves left, and before an assignment can retarget the trip (logging
+        # only; the turn is read here only when a trip is open).
+        turn = None
+        if self._movement().trips.trips:
+            turn = (await game.get_game_overview()).turn
+            for u in builders:
+                self._movement().trips.observe(u.unit_id, (u.x, u.y), turn)
         if not free:
             self.demand.idle, self.demand.spare_jobs = 0, None  # Busy, or none: nothing to infer.
             self._snapshot(builders)
             return
-        turn = (await game.get_game_overview()).turn
+        if turn is None:
+            turn = (await game.get_game_overview()).turn
         self._last_turn = turn
         jobs = [j for j in await read_builder_jobs(game) if self._buildable(j, turn)]
         threats = await read_threats(game)
@@ -277,6 +289,7 @@ class BuilderPolicy:
     def _note_lost(self, alive: set[int]) -> None:
         """A builder that vanished away from its job was lost (one finishing a job on its last
         charge is gone at its job tile, which is no loss). Log it and remember the place."""
+        self._movement().trips.sweep(alive, self._last_turn, "builder")
         for uid, (x, y, claim) in self._seen.items():
             if uid in alive or claim == (x, y):
                 continue
@@ -304,20 +317,26 @@ class BuilderPolicy:
                 danger = max(danger, s.lost_danger)
         return danger
 
+    def _movement(self) -> Movement:
+        """The shared service, or one over this policy's terrain and threat map (#399)."""
+        if self.movement is None:
+            self.movement = Movement(
+                self.terrain, self.threat_map, MovementSettings(map_width=self.settings.map_width)
+            )
+        return self.movement
+
     def _route_danger(self, unit: Unit, job: BuilderJob, turn: int) -> float:
-        """The worst danger on the job tile and the straight line to it, up to `danger_cap`."""
-        s = self.settings
-        tiles = line_tiles(unit.x, unit.y, job.x, job.y, s.map_width)
-        return min(s.danger_cap, max((self.danger_at(x, y, turn) for x, y in tiles), default=0.0))
+        """The worst danger on the job tile and the walking route to it, up to `danger_cap`."""
+        danger = self._movement().route_danger(
+            (unit.x, unit.y), (job.x, job.y), turn, danger_at=self.danger_at
+        )
+        return min(self.settings.danger_cap, danger)
 
     def _reach(self, unit: Unit) -> dict | None:
-        """Walking turns to each tile the builder can reach, None with no terrain store."""
-        if self.terrain is None:
-            return None
-        reached = self.terrain.reach(
-            unit.x, unit.y, max(1.0, unit.max_moves), False, self.settings.max_travel_turns
-        )
-        return {tile: float(math.ceil(t)) for tile, t in reached.items()}
+        """Turns to walk to each tile the builder can reach (the game's rule: a unit may enter a
+        tile while it has any movement left), None with no terrain store."""
+        found = self._movement().turn_field((unit.x, unit.y), max(1.0, unit.max_moves))
+        return None if found is None else {tile: float(t) for tile, t in found.items()}
 
     def _walk(self, reached: dict | None, tile: tuple[int, int]) -> float | None:
         """Turns to walk to a tile; None (use hex distance) with no store. A tile the walk can't
@@ -445,6 +464,7 @@ class BuilderPolicy:
                 else:
                     self._claims.pop(unit.unit_id, None)
                     self._holds.pop(unit.unit_id, None)
+                    self._movement().trips.abandon(unit.unit_id, turn, "idle")
                 self._record(BuilderDecision(turn, unit.unit_id, unit.x, unit.y, "idle", reason))
 
     async def _work_on(
@@ -462,14 +482,21 @@ class BuilderPolicy:
                 )
             )  # fmt: skip
 
+        trips = self._movement().trips
         arrived = (unit.x, unit.y) == target
+        if arrived:
+            trips.observe(unit.unit_id, target, turn)
         if not arrived:
             if self._turns(self._travel, unit.unit_id, key, turn) > self.settings.max_travel_turns:
                 self._give_up(unit, key, turn)
                 record("failed", "walked too long without arriving")
                 return False
+            self._open_trip(unit, target, turn)
             result = await game.move_unit(unit.unit_index, *target)
             if not move_succeeded(result):
+                reason = "territory" if "territory" in result.lower() else "refused"
+                trips.refuse(unit.unit_id, target, reason, turn)
+                trips.abandon(unit.unit_id, turn, "refused")
                 self._fail(key, turn)
                 record("failed", "move refused", result)
                 return False
@@ -481,6 +508,7 @@ class BuilderPolicy:
             if not reached or (int(reached.group(1)), int(reached.group(2))) != target:
                 record("move", "heading for the job", result)
                 return True
+            trips.arrived(unit.unit_id, turn)
             self._travel.pop(unit.unit_id, None)
             # The move may have used the builder's moves up, which `_build` tells apart.
         elif (
@@ -561,7 +589,19 @@ class BuilderPolicy:
         else:
             self._failures[key] = count
 
+    def _open_trip(self, unit: Unit, target: tuple[int, int], turn: int) -> None:
+        """Start logging the walk to a job (#399), unless this unit is already on it."""
+        trips = self._movement().trips
+        open_trip = trips.trip(unit.unit_id)
+        if open_trip is not None and open_trip.goal == target:
+            return
+        estimate, basis = self._movement().estimate(
+            (unit.x, unit.y), target, max(1.0, unit.max_moves)
+        )
+        trips.start(unit.unit_id, "builder", (unit.x, unit.y), target, turn, estimate, basis)
+
     def _give_up(self, unit: Unit, key: _Key, turn: int) -> None:
+        self._movement().trips.abandon(unit.unit_id, turn, "gave_up")
         self._set_aside[key] = turn + self.settings.retry_turns
         if self._claims.get(unit.unit_id) == key:
             del self._claims[unit.unit_id]

@@ -32,9 +32,9 @@ from dataclasses import dataclass, field, fields
 from typing import Any, Protocol
 
 from civ6_ai.blockers import Blocker, BlockerGame, BlockerType, move_succeeded
+from civ6_ai.movement import straight_line
 from civ6_ai.policies.game_data import REPLACES
 from civ6_ai.state import GameReads, Unit, read_units
-from civ6_ai.state.reader import hex_distance
 
 log = logging.getLogger(__name__)
 
@@ -161,43 +161,16 @@ def score_destination(dest: Any, weights: SecondaryWeights) -> float:
 def line_tiles(x1: int, y1: int, x2: int, y2: int, map_width: int | None) -> list[tuple[int, int]]:
     """Tiles on the straight hex line from one tile to another, both ends included.
 
-    A stand-in for the trade path, which the game picks. Odd rows sit half a tile east; x wraps,
-    so the line takes the shorter way round the seam.
+    Deprecated (#399): a straight line is only the fallback for a route with no known walk. Ask
+    `Movement.route_tiles` for the walking route; this is `movement.straight_line`.
     """
-    east = x2
-    if map_width is not None:
-        east = min(
-            (x2 + k * map_width for k in (-1, 0, 1)),
-            key=lambda e: hex_distance(x1, y1, e, y2, None),
-        )
-
-    def cube(x: int, y: int) -> tuple[float, float, float]:
-        q = x - (y - (y & 1)) // 2
-        return float(q), float(-q - y), float(y)
-
-    a, b = cube(x1, y1), cube(east, y2)
-    steps = hex_distance(x1, y1, east, y2, None)
-    tiles: list[tuple[int, int]] = []
-    for i in range(steps + 1):
-        t = i / steps if steps else 0.0
-        cx, cy, cz = (a[k] + (b[k] - a[k]) * t for k in range(3))
-        rx, ry, rz = round(cx), round(cy), round(cz)
-        dx, dy, dz = abs(rx - cx), abs(ry - cy), abs(rz - cz)
-        if dx > dy and dx > dz:
-            rx = -ry - rz
-        elif dy > dz:
-            ry = -rx - rz
-        else:
-            rz = -rx - ry
-        col = rx + (rz - (rz & 1)) // 2
-        tile = (col % map_width if map_width else col, rz)
-        if not tiles or tiles[-1] != tile:
-            tiles.append(tile)
-    return tiles
+    return straight_line(x1, y1, x2, y2, map_width)
 
 
 def route_danger(field_map: Any, x1: int, y1: int, x2: int, y2: int, turn: int) -> float:
-    """The worst raw civilian danger on the estimated path of a route, 0.0 with no map."""
+    """The worst raw civilian danger on the straight line of a route, 0.0 with no map.
+
+    Deprecated (#399): the line is not the walk. Use `Movement.route_danger`."""
     if field_map is None:
         return 0.0
     width = field_map.settings.map_width
@@ -208,18 +181,25 @@ def route_danger(field_map: Any, x1: int, y1: int, x2: int, y2: int, turn: int) 
 
 
 def route_check(
-    field_map: Any, x1: int, y1: int, x2: int, y2: int, turn: int
+    field_map: Any,
+    x1: int,
+    y1: int,
+    x2: int,
+    y2: int,
+    turn: int,
+    tiles: Iterable[tuple[int, int]] | None = None,
 ) -> tuple[float, list[tuple[int, int]]]:
     """(danger, camps) of a route's estimated path. Danger is the worst tile, where a tile is the
     raw threat (hostile strength that can reach it, our cover ignored: a Trader cannot defend
     itself, issue 287) or any camp's reach; the camps are the (x, y) of every camp whose reach
-    touches the path (issue 276)."""
+    touches the path (issue 276). `tiles` is the path, the walking route from `Movement` (#399);
+    without it the straight line stands in."""
     if field_map is None:
         return 0.0, []
     width = field_map.settings.map_width
     worst = 0.0
     camps: set[tuple[int, int]] = set()
-    for x, y in line_tiles(x1, y1, x2, y2, width):
+    for x, y in line_tiles(x1, y1, x2, y2, width) if tiles is None else tiles:
         worst = max(worst, field_map.raw_danger_at(x, y, turn))
         for camp, value in field_map.camps_reaching(x, y):
             worst = max(worst, value)
@@ -383,6 +363,9 @@ class SecondaryPolicy:
     weights: SecondaryWeights = field(default_factory=SecondaryWeights)
     name: str = "secondary"
     map: Any = None  # The threat map (a `ThreatMap`), or None: routes are not checked.
+    # The shared movement service (#399): the walking route of a trade route and trip logging.
+    # None: the straight line is the route, as before.
+    movement: Any = field(default=None, repr=False)
     _trade_wait: dict[int, int] = field(default_factory=dict, init=False, repr=False)
     # Trader id -> (x, y, on a route) last turn, to tell when one is lost.
     _traders: dict[int, tuple[int, int, bool]] = field(default_factory=dict, init=False, repr=False)
@@ -768,11 +751,12 @@ class SecondaryPolicy:
         self, trader: Any, dest: Any, turn: int
     ) -> tuple[float, list[tuple[int, int]]]:
         """Danger of a route now, raised to the recent max over its tiles; plus its camps."""
-        danger, camps = route_check(self.map, trader.x, trader.y, dest.x, dest.y, turn)
+        tiles = self._route_tiles(trader, dest)
+        danger, camps = route_check(self.map, trader.x, trader.y, dest.x, dest.y, turn, tiles)
         if self.map is None:
             return danger, camps
         window = self.weights.route_danger_turns
-        for tile in line_tiles(trader.x, trader.y, dest.x, dest.y, self.map.settings.map_width):
+        for tile in tiles:
             seen = self._recent.setdefault(tile, {})
             now = self.map.raw_danger_at(tile[0], tile[1], turn)
             seen[turn] = now
@@ -780,6 +764,32 @@ class SecondaryPolicy:
                 del seen[t]
             danger = max(danger, self.recent_danger(tile, turn))
         return danger, camps
+
+    def _route_tiles(self, trader: Any, dest: Any) -> list[tuple[int, int]]:
+        """The tiles a trade route is expected to cross: the walk, else the straight line."""
+        if self.movement is not None:
+            return self.movement.route_tiles((trader.x, trader.y), (dest.x, dest.y))
+        width = self.map.settings.map_width if self.map is not None else None
+        return line_tiles(trader.x, trader.y, dest.x, dest.y, width)
+
+    def _start_trip(self, trader: Any, dest: Any, turn: int) -> None:
+        """Log the trader's trip to the destination (#399); a no-op with no movement service."""
+        if self.movement is None:
+            return
+        moves = self.movement.settings.trader_moves
+        estimate, basis = self.movement.estimate((trader.x, trader.y), (dest.x, dest.y), moves)
+        self.movement.trips.start(
+            trader.unit_id, "trader", (trader.x, trader.y), (dest.x, dest.y), turn, estimate, basis
+        )
+
+    def _track_trips(self, status: Any, turn: int) -> None:
+        """Close the trip of a trader that stands at its destination or is gone (#399)."""
+        if self.movement is None:
+            return
+        trips = self.movement.trips
+        trips.sweep({t.unit_id for t in status.traders}, turn, "trader")
+        for trader in status.traders:
+            trips.observe(trader.unit_id, (trader.x, trader.y), turn)
 
     def _nearest_note(self, tiles: Iterable[tuple[int, int]], turn: int) -> str:
         """A log suffix naming the nearest hostile unit and its distance, or nothing."""
@@ -816,6 +826,7 @@ class SecondaryPolicy:
         """Send each idle trader on a route. Capacity is counted down as routes start."""
         status = await game.get_trade_routes()
         self._note_losses(status, turn)
+        self._track_trips(status, turn)
         seen = {t.unit_id for t in status.traders}
         self._trade_wait = {k: v for k, v in self._trade_wait.items() if k in seen}
         idle = sorted(
@@ -858,10 +869,9 @@ class SecondaryPolicy:
                 result = await game.make_trade_route(index, dest.x, dest.y)
                 if "TRADE_ROUTE_STARTED" in result:
                     used.add((trader.x, trader.y, dest.x, dest.y))
+                    self._start_trip(trader, dest, turn)
                     if self.map is not None:
-                        self._route_of[trader.unit_id] = line_tiles(
-                            trader.x, trader.y, dest.x, dest.y, self.map.settings.map_width
-                        )
+                        self._route_of[trader.unit_id] = self._route_tiles(trader, dest)
                     self._blocked_turn = -10_000
                     log.info(
                         "Trade route started: trader %d to %s (%d,%d), yield %s, danger %.1f%s",

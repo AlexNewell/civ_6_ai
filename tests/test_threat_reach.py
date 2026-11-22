@@ -147,3 +147,28 @@ def test_t47_camp_demand_does_not_depend_on_the_reach_reading():
     held = _scores(camp(reach_aware=True), c, items)
     assert held == _scores(camp(), quiet, items)  # Held by the map: the plan's demand alone.
     assert held["UNIT_SPEARMAN"] > 10.0 > 0.0 and held["UNIT_BUILDER"] == 8.0
+
+
+# ----- review fixes -----
+
+
+def test_a_ship_reaches_the_land_beside_the_water_it_can_stand_on():
+    sea = store({(x, 10): "w" for x in range(11, 20)})
+    m = reach_map(sea)
+    assert (10, 10) in m.hostile_reach("UNIT_GALLEY", 12, 10)  # The coast tile next to the water.
+    assert near(barb(12, 10, "UNIT_GALLEY"), sea) is not None
+    assert (9, 10) not in m.hostile_reach("UNIT_GALLEY", 12, 10)  # Nothing further inland.
+
+
+def test_multi_turn_warning_resets_movement_each_turn():
+    from civ6_ai.movement import attack_tiles
+
+    # Corridor row 10 of flat, hill, flat, hill, flat; mountains above and below.
+    rows = {(x, y): "m" for x in range(10, 20) for y in (9, 11)}
+    rows |= {(11, 10): "h", (13, 10): "h", (10, 10): "m", (16, 10): "m"}
+    t = store(rows)
+    one = attack_tiles(t, (10 + 1, 10), 2.0, 0, False, None, 1)
+    two = attack_tiles(t, (10 + 1, 10), 2.0, 0, False, None, 2)
+    assert (15, 10) in two and (15, 10) not in one
+    # Two turns of 2 moves: hill(2) ends turn 1, flat, hill(2)... not one turn of 4 points.
+    assert (13, 10) in two

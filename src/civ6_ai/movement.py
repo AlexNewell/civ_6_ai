@@ -168,12 +168,14 @@ def attack_tiles(
     attack_range: int,
     naval: bool = False,
     map_width: int | None = STANDARD_MAP_WIDTH,
+    turns: int = 1,
 ) -> set[Tile]:
-    """Tiles a hostile at `start` can attack next turn: every tile within `attack_range` of a tile
-    it can stand on after one turn of walking (a melee unit: moves plus 1; a ranged one: moves plus
-    its range). With no terrain store, by hex distance."""
+    """Tiles a hostile at `start` can attack within `turns` turns (default next turn): every tile
+    within `attack_range` of a tile it can stand on after that walking (a melee unit: moves plus 1; a ranged one: moves plus
+    its range). A ship also attacks the land beside the water it can stand on. Movement points
+    reset each turn. With no terrain store, by hex distance."""
     if terrain is None:
-        reach = int(moves)
+        reach = int(moves) * turns
         standable = {
             (x % map_width if map_width else x, y)
             for y in range(max(0, start[1] - reach), start[1] + reach + 1)
@@ -182,8 +184,15 @@ def attack_tiles(
         }
         width, height = map_width, None
     else:
-        field_ = turn_field(terrain, start, moves, (), 1.0, naval)
-        standable = {tile for tile, t in field_.items() if t <= 1}
+        field_ = turn_field(terrain, start, moves, (), float(turns), naval)
+        standable = {tile for tile, t in field_.items() if t <= turns}
+        if naval:
+            standable |= {
+                nxt
+                for tile in list(standable)
+                for nxt in neighbours(tile[0], tile[1], terrain.map_width)
+                if (g := terrain._ground.get(nxt)) is not None and not g.water
+            }
         width, height = terrain.map_width, terrain.map_height
     found = set(standable)
     frontier = set(found)

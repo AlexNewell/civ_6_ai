@@ -20,6 +20,7 @@ and comes with the stages that use it; a decision to use the map must not assume
 
 import json
 import logging
+import math
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -542,8 +543,8 @@ class ThreatMap:
         key = ("attack", unit_type, x, y, known)
         if key not in self._attacks:
             self._attacks[key] = attack_tiles(
-                self.terrain, (x, y), moves * self.settings.warn_turns, rng, naval,
-                self.settings.map_width,
+                self.terrain, (x, y), moves, rng, naval, self.settings.map_width,
+                max(1, math.ceil(self.settings.warn_turns)),
             )  # fmt: skip
         return self._attacks[key]
 

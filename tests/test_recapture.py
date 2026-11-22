@@ -327,3 +327,42 @@ def test_a_march_steps_back_from_a_mountain_on_the_line_to_a_passable_tile():
     run(policy, game)
     moves = [m for m in game.orders("move") if m[1] == 2]
     assert moves and all(m[2:] != (13, 10) for m in moves)
+
+
+# Issue 408: STD_T1_03 T23, a settler taken and held by a slinger beside our units.
+def held_by(captor_x=12, captor_y=10, **changes):
+    held = civ_tile(x=captor_x, y=captor_y, units=("Barbarian SETTLER", "Barbarian SLINGER"))
+    cap = barbarian("UNIT_SLINGER", x=captor_x, y=captor_y, cs=14, rs=0, **changes)
+    return held, cap
+
+
+def test_an_adjacent_captor_is_attacked_when_the_odds_are_reasonable(caplog):
+    from test_policy_military import target
+
+    held, cap = held_by()
+    units = [
+        warrior(uid=1, x=10, y=10),
+        warrior(uid=2, x=11, y=10, health=75, targets=[target(x=12, y=10)]),
+    ]
+    policy, game = setup(units, seen_map(held), civ=held)
+    game.data["threats"] = [cap]
+    with caplog.at_level(logging.INFO):
+        run(policy, game)
+    assert game.orders("attack")
+    assert any("freeing" in d.reason for d in policy.decisions if d.action == "attack")
+    assert any(m.startswith("military_retake_weigh") for m in caplog.messages)
+
+
+def test_a_captor_we_would_lose_to_is_left_alone():
+    from test_policy_military import target
+
+    held, _ = held_by()
+    cap = barbarian("UNIT_SLINGER", x=12, y=10, cs=60, rs=60)
+    units = [
+        warrior(uid=1, x=10, y=10),
+        warrior(uid=2, x=11, y=10, health=30, targets=[target(x=12, y=10)]),
+    ]
+    policy, game = setup(units, seen_map(held), civ=held)
+    game.data["threats"] = [cap]
+    run(policy, game)
+    assert not game.orders("attack")

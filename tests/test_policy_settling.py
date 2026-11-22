@@ -2624,3 +2624,122 @@ def test_a_direct_step_and_found_logs_its_own_trip():
     asyncio.run(policy._step_and_found(game, settler(x=13, y=10), target, [], lambda *a, **k: None))
     row = policy._movement().trips.closed[-1]
     assert (row["outcome"], row["estimated"], row["actual"]) == ("arrived", 1, 1)
+
+
+# Issue 408: STD_T1_03 T19-23, a settler led out toward a warrior and a slinger.
+def _soldier(uid, x, y, kind="UNIT_WARRIOR"):
+    from civ6_ai.state.models import Unit
+
+    return Unit(uid, uid, kind, "Warrior", x, y, 2.0, 2.0, 100, 100, 8)
+
+
+def _foe(kind, x, y, cs, rs=0):
+    from civ6_ai.state.models import Threat
+
+    return Threat(BARBARIANS, "Barbarian", kind, x, y, 100, 100, cs, rs, 3, True)
+
+
+def _t20_hostiles():
+    return [_foe("UNIT_WARRIOR", 55, 11, 8), _foe("UNIT_SLINGER", 56, 10, 5, 15)]
+
+
+def test_two_hostiles_two_to_three_tiles_from_the_route_make_the_pair_wait():
+    from civ6_ai.policies.settling import trip_danger
+
+    escort = _soldier(9, 59, 10)
+    weighed = trip_danger(
+        escort, [(58, 11), (57, 12)], _t20_hostiles(), [], SettlingSettings(map_width=None)
+    )
+    assert weighed.attackers[-1] == 2
+    assert not weighed.go and weighed.taken > weighed.capacity
+
+
+def test_a_lone_distant_hostile_lets_the_pair_go():
+    from civ6_ai.policies.settling import trip_danger
+
+    escort = _soldier(9, 59, 10)
+    weighed = trip_danger(
+        escort, [(58, 11), (57, 12)], _t20_hostiles()[:1], [], SettlingSettings(map_width=None)
+    )
+    assert weighed.go
+
+
+def test_friends_near_the_route_raise_what_can_be_absorbed():
+    from civ6_ai.policies.settling import trip_danger
+
+    s = SettlingSettings(map_width=None)
+    escort = _soldier(9, 59, 10)
+    friends = [_soldier(10 + i, 58, 10 + i) for i in range(2)]
+    alone = trip_danger(escort, [(58, 11), (57, 12)], _t20_hostiles(), [], s)
+    backed = trip_danger(escort, [(58, 11), (57, 12)], _t20_hostiles(), friends, s)
+    assert backed.friends == 2 and backed.capacity > alone.capacity and backed.go
+
+
+def test_a_flee_picks_the_tile_no_hostile_can_reach_over_the_nearer_one():
+    from civ6_ai.policies.settling import flee_tile_score
+
+    s = SettlingSettings(map_width=None)
+    reach = {(58, 11), (58, 10), (57, 11)}  # What the slinger can hit next turn.
+    near = flee_tile_score((58, 11), [reach], [], [(60, 10)], s)
+    safe = flee_tile_score((59, 12), [reach], [], [(60, 10)], s)
+    assert near.danger == 1 and safe.danger == 0 and safe.total > near.total
+
+
+def test_a_city_or_a_soldier_beside_the_tile_is_cover():
+    from civ6_ai.policies.settling import flee_tile_score
+
+    s = SettlingSettings(map_width=None)
+    bare = flee_tile_score((59, 12), [], [], [(60, 10)], s)
+    guarded = flee_tile_score((59, 12), [], [(59, 13)], [(60, 10)], s)
+    city = flee_tile_score((60, 10), [], [], [(60, 10)], s)
+    assert guarded.total > bare.total and city.cover == s.flee_city_gain
+
+
+def test_a_settler_in_a_city_waits_when_the_route_danger_is_more_than_the_escort_absorbs():
+    # Issue 408, the T19-21 layout: one escort, two hostile units 2 to 3 tiles from the route.
+    escort = unit_info(unit_id=9, unit_index=9, x=10, y=10, combat_strength=8)
+    spare = unit_info(unit_id=8, unit_index=8, x=10, y=10, combat_strength=8)
+    game = make_game(
+        [settler(), escort, spare],
+        cities=[alpha()],
+        threats=[_t("UNIT_WARRIOR", 14, 8, 8), _t("UNIT_SLINGER", 14, 12, 5)],
+        sites=[site(15, 10, food=40)],
+    )
+    policy = _policy()
+    run(policy, game)
+    moved = [a for a in game.actions if a[0] == "move_unit"]
+    assert not moved
+    assert policy.decisions[-1].action == "hold"
+
+
+def test_a_fleeing_settler_picks_a_tile_the_hostile_cannot_reach_next_turn():
+    # Issue 408: fleeing "to the nearest city" by the next step ended inside the slinger's reach.
+    game, policy = _escort_pair_game({}, x=13, y=14)
+    game.data["units"] = [settler(x=13, y=14, moves_remaining=2.0)]
+    game.data["threats"] = [barbarian(13, 12), barbarian(15, 14)]
+    run(policy, game)
+    decision = policy.decisions[-1]
+    assert decision.action == "flee"
+    assert "danger 0" in decision.reason  # A tile neither hostile can attack next turn.
+
+
+def test_flee_tiles_beyond_a_hostile_in_a_corridor_are_not_reachable():
+    # Codex on #409: a hostile on a bottleneck must not leave tiles behind it "reachable".
+    walls = {(x, y): "mountain" for x in range(8, 20) for y in range(2, 20) if y != 14}
+    game, policy = _escort_pair_game(walls, x=13, y=14)
+    policy._last_turn = 5
+    from civ6_ai.policies.settling import _Danger
+
+    settler_ = _soldier(7, 13, 14, "UNIT_SETTLER")
+
+    danger = _Danger((_foe("UNIT_WARRIOR", 14, 14, 8),), 74, movement=policy._movement())
+    _, scores = policy._safest_tile(settler_, [(10, 10)], danger, [settler_])
+    assert scores and all(f.tile[0] <= 13 for f in scores)
+
+
+def test_the_trip_projection_follows_terrain_costs_not_moves_times_turn():
+    game, policy = _escort_pair_game({}, x=10, y=14)
+    movement = policy._movement()
+    first = movement.next_step((10, 14), (14, 6), 2)
+    second = movement.next_step(first, (14, 6), 2)
+    assert second != first

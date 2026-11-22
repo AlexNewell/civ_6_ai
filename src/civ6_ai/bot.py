@@ -65,6 +65,7 @@ from civ6_ai.monitors import (
     ThreatMonitor,
     VictoryMonitor,
 )
+from civ6_ai.movement import Movement
 from civ6_ai.orchestrator import Handler, Orchestrator, TurnLog, read_core_turn
 from civ6_ai.policies import research
 from civ6_ai.policies.builder import BuilderDemand, BuilderPolicy
@@ -368,6 +369,12 @@ def build_orchestrator(
         settling.threat_map = threat_map_handler.map  # Sightings gone into the fog (issue 288).
         secondary.map = threat_map_handler.map  # Routes are checked against it (issue 269).
         defence.map = threat_map_handler.map  # The same map decides who is short (issue 264).
+    # One movement service for builders and traders (epic #399): walking turns, route danger and
+    # the `movement_trip` log. Settling and military join it in later slices.
+    movement = Movement(
+        threat_map_handler.terrain, threat_map_handler.map if use_threat_map else None
+    )
+    secondary.movement = movement
     victory_watch = VictoryWatch()
     diplomacy = DiplomacyPolicy(threats=victory_watch.threat_ids)
     # The boost judgement's inputs and nudges (#344). Both are used only when
@@ -378,6 +385,7 @@ def build_orchestrator(
         demand=builder_demand,
         nudges=nudge_board.current,
         terrain=threat_map_handler.terrain,  # The real walk to a job (issue 389).
+        movement=movement,
         threat_map=threat_map_handler.map if use_threat_map else None,  # Danger on the walk.
     )
     shared_game: list[Any] = []

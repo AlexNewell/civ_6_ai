@@ -188,24 +188,77 @@ class TerrainStore:
         moves: float,
         avoid: Iterable[tuple[int, int]] = (),
         stop_short: bool = False,
+        occupied: Iterable[tuple[int, int]] = (),
     ) -> tuple[int, int] | None:
         """The farthest tile along the cheapest path that `moves` movement points reach (at least
         one step, never more steps than whole moves). With `stop_short` the goal itself is left
-        out, so the unit ends beside it. None if no path is known; callers fall back to a
-        straight line."""
+        out, so the unit ends beside it. Tiles in `occupied` can be crossed but not ended on; the
+        next-farthest free tile is used, None when every reachable tile is taken. None also if no
+        path is known; callers fall back to a straight line."""
+        occupied = set(occupied)
+        avoid = set(avoid)
         path = self.path_to(start, goal, avoid)
         if stop_short and path:
             path = path[:-1]
         if not path:
             return None
         spent = 0.0
-        reached = path[0]
+        reached = None
         for i, tile in enumerate(path[: max(1, int(moves))]):
             spent += self.step_cost(tile[0], tile[1], naval=False) or 0.0
             if i and spent > moves:
                 break
-            reached = tile
-        return reached
+            if tile not in occupied:
+                reached = tile
+        if reached is not None or not occupied:
+            return reached
+        return self._free_step(start, goal, moves, avoid, occupied, stop_short)
+
+    def _free_step(self, start, goal, moves, avoid, occupied, stop_short):
+        """Issue 377: the farthest path tile is taken, so pick among every tile reachable this turn
+        (not water, a mountain or refused) the one with the least terrain cost left to the goal,
+        then the nearer by hex distance, then the lowest coordinates. A tile that is no nearer
+        than where the unit stands is skipped. None when nothing qualifies."""
+        limit = max(1, int(moves))
+        best: dict[tuple[int, int], float] = {start: 0.0}
+        steps = {start: 0}
+        queue: list[tuple[float, int, int]] = [(0.0, start[0], start[1])]
+        while queue:
+            cost, cx, cy = heapq.heappop(queue)
+            if cost > best.get((cx, cy), float("inf")) or steps[cx, cy] >= limit:
+                continue
+            for nxt in neighbours(cx, cy, self.map_width):
+                step = self.step_cost(nxt[0], nxt[1], naval=False)
+                if (
+                    step is None
+                    or nxt in avoid
+                    or (self.map_height is not None and nxt[1] >= self.map_height)
+                ):
+                    continue
+                total = cost + step
+                if (steps[cx, cy] and total > moves) or total >= best.get(nxt, float("inf")):
+                    continue
+                best[nxt] = total
+                steps[nxt] = steps[cx, cy] + 1
+                heapq.heappush(queue, (total, nxt[0], nxt[1]))
+        here = self._cost_left(start, goal, avoid)
+        ranked = []
+        for tile in best:
+            if tile == start or tile in occupied or (stop_short and tile == goal):
+                continue
+            left = self._cost_left(tile, goal, avoid)
+            if left is None or (here is not None and left >= here and tile != goal):
+                continue
+            ranked.append(
+                (left, hex_distance(tile[0], tile[1], *goal, self.map_width), tile[0], tile[1])
+            )
+        return min(ranked)[2:] if ranked else None
+
+    def _cost_left(self, tile, goal, avoid) -> float | None:
+        path = self.path_to(tile, goal, avoid)
+        if path is None:
+            return None
+        return sum(self.step_cost(x, y, naval=False) or 0.0 for x, y in path)
 
     def reach(
         self,

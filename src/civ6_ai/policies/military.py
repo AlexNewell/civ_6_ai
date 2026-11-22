@@ -246,8 +246,13 @@ class MilitarySettings:
     # deal ~0.55 of its health each, nothing within 2) and let a step that sets up a combined
     # attack, or a cheap unit screening a settler, win.
     camp_group_radius: int = 2  # Units this close, or inside the muster ring too, go in together.
-    camp_step_reach: int = 1  # Hostile melee units this close to the stop tile are risk.
-    camp_ranged_reach: int = 2  # Hostile units with a ranged attack shoot from this far.
+    # Hostile units that can hit the stop tile next turn are risk: a melee unit from its moves
+    # plus 1 for the attack, a ranged one from its moves plus its range. With a terrain store the
+    # tiles are costed by terrain; without, these hex distances (a barbarian Warrior has 2 moves).
+    camp_step_reach: int = 3
+    camp_ranged_reach: int = 4
+    camp_hostile_moves: float = 2.0  # Moves per turn assumed for a hostile unit.
+    camp_hostile_range: int = 2  # Range assumed for a hostile ranged unit.
     camp_step_min_net: float = 0.0
     camp_risk_weight: float = 5.0  # Per unit's whole health expected to be lost to the hostiles.
     # Walking on past hostiles that can hit it next turn is the riskiest option: nobody covers its
@@ -611,7 +616,8 @@ def step_exposure(
     weights: MilitaryWeights,
     width: int | None,
     reach: int,
-    ranged_reach: int = 2,
+    ranged_reach: int = 4,
+    reach_tiles: "Callable[[Threat], set[tuple[int, int]] | None] | None" = None,
 ) -> tuple[float, bool]:
     """Expected damage over the unit's health from hostiles within `reach` of `tile` attacking it
     next turn, and whether the unit would surely kill one of them (the outgoing estimate behind
@@ -623,9 +629,14 @@ def step_exposure(
         gap = hex_distance(h.x, h.y, *tile, width)
         # Two separate questions: can it hit this tile (its reach), and can we hit it from here
         # (ours: beside it, or a ranged unit's range).
-        if gap <= (max(reach, ranged_reach) if h.ranged_strength > 0 else reach):
+        tiles = reach_tiles(h) if reach_tiles is not None else None
+        if tiles is not None:
+            hits = tile in tiles
+        else:
+            hits = gap <= (ranged_reach if h.ranged_strength > 0 else reach)
+        if hits:
             taken += incoming_damage(unit, h)
-        if gap <= (ranged_reach if unit.ranged_strength > 0 else 1) and not kills:
+        if gap <= (min(ranged_reach, 2) if unit.ranged_strength > 0 else 1) and not kills:
             odds = assess_attack(unit, Target(h.unit_type, h.x, h.y, h.hp), h, weights, None, width)
             kills = odds is not None and odds.sure_kill
     return taken / max(unit.hp, 1), kills
@@ -680,6 +691,7 @@ def camp_step_score(
     gap: float,
     settings: "MilitarySettings",
     advancing: bool = True,
+    reach_tiles: "Callable[[Threat], set[tuple[int, int]] | None] | None" = None,
 ) -> StepScore:
     """Weigh stepping to `tile`: gain (progress to the camp, a combined attack set up, a sure
     kill, screening a civilian, cover from friends, escaping a worse tile) against the risk
@@ -689,10 +701,10 @@ def camp_step_score(
     width = s.map_width
     hostiles = list(hostiles)
     exposure, kills = step_exposure(
-        unit, tile, hostiles, s.weights, width, s.camp_step_reach, s.camp_ranged_reach
+        unit, tile, hostiles, s.weights, width, s.camp_step_reach, s.camp_ranged_reach, reach_tiles
     )
     here_exposure, _ = step_exposure(
-        unit, here, hostiles, s.weights, width, s.camp_step_reach, s.camp_ranged_reach
+        unit, here, hostiles, s.weights, width, s.camp_step_reach, s.camp_ranged_reach, reach_tiles
     )
     # Progress counts in full only with the force: alone it is a reason to wait, not to go on.
     gain = (
@@ -931,6 +943,7 @@ class MilitaryPolicy:
     _camps_gone: int = field(default=0, init=False, repr=False)
     _gone_noted: set[tuple[int, int]] = field(default_factory=set, init=False, repr=False)
     _muster_bad: dict[tuple[int, int], int] = field(default_factory=dict, init=False, repr=False)
+    _reach_cache: dict[Any, Any] = field(default_factory=dict, init=False, repr=False)
     _mission: dict[int, tuple[tuple[int, int], int]] = field(
         default_factory=dict, init=False, repr=False
     )  # Unit id to the camp it was sent at and the turn.
@@ -1031,6 +1044,29 @@ class MilitaryPolicy:
                 t.at_city[u.x, u.y] = t.at_city.get((u.x, u.y), 0) + 1
 
     # ----- stacks (issue 266) -----
+
+    def _hostile_reach(self, t: _Turn) -> "Callable[[Threat], set[tuple[int, int]] | None]":
+        """For each hostile, the tiles it can attack next turn: where its moves reach by terrain
+        cost, then one more tile for a melee attack or its range for a shot. None when there is
+        no terrain store, so the caller uses hex distances."""
+        s = self.settings
+        terrain = self.terrain or getattr(self.threat_map, "terrain", None)
+        cache = self._reach_cache
+        if cache.get("turn") != t.turn:
+            cache.clear()
+            cache["turn"] = t.turn
+
+        def tiles(h: Threat) -> set[tuple[int, int]] | None:
+            if terrain is None or not len(terrain):
+                return None
+            key = (h.x, h.y, h.ranged_strength > 0)
+            if key not in cache:
+                shot = s.camp_hostile_range if h.ranged_strength > 0 else 1
+                got = terrain.reach(h.x, h.y, s.camp_hostile_moves, False, 1, shot)
+                cache[key] = set(got)
+            return cache[key]
+
+        return tiles
 
     def _stop_tile(
         self, unit: Unit, here: tuple[int, int], goal: tuple[int, int]
@@ -2632,7 +2668,7 @@ class MilitaryPolicy:
                 stop = self._stop_tile(unit, here, goal)
                 return camp_step_score(
                     unit, here, stop, where, guards, t.units, lambda other: self._pos(t, other),
-                    kw.pop("gap", base), s, **kw,
+                    kw.pop("gap", base), s, reach_tiles=self._hostile_reach(t), **kw,
                 )  # fmt: skip
 
             # Every option on one scale: advance, fight, hold, fall back (issue 380).
@@ -2689,7 +2725,7 @@ class MilitaryPolicy:
                 choice = "hold"
             if choice == "hold":
                 t.acted.add(unit.unit_id)  # Holds the ground it stands on.
-                waiting = hold.exposure <= 0 and gap > 0
+                waiting = gap > 0
                 why = (
                     f"waiting for the force ({len(near)} of {len(force)} near)"
                     if waiting

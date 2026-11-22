@@ -2772,7 +2772,7 @@ def test_a_step_that_sets_up_a_combined_attack_wins_despite_the_risk():
 def test_a_cheap_unit_screening_a_settler_may_take_the_risk():
     me = build_unit(warrior(uid=1, x=11, y=10))
     settler = build_unit(warrior(uid=2, x=12, y=10, combat_strength=0))
-    foes = [foe(13, 9)]
+    foes = [foe(13, 9, cs=8)]
     assert _score(me, (12, 11), foes, [settler], gap=0.0).net >= 0
 
 
@@ -3027,3 +3027,41 @@ def hex_line_second(a, b):
     from civ6_ai.policies.military import hex_line
 
     return hex_line(a, b, 74)[1]
+
+
+def test_a_two_move_melee_hostile_counts_from_three_tiles_but_not_five():
+    from civ6_ai.policies.military import step_exposure
+
+    me = build_unit(warrior(uid=1, x=12, y=10))
+    near = Threat(-1, "Barbarians", "UNIT_WARRIOR", 14, 10, 100, 100, 20, 0, 3, True)
+    far = Threat(-1, "Barbarians", "UNIT_WARRIOR", 17, 10, 100, 100, 20, 0, 3, True)
+    assert step_exposure(me, (12, 10), [near], W, None, 3)[0] > 0
+    assert step_exposure(me, (12, 10), [far], W, None, 3)[0] == 0
+
+
+def test_a_hostiles_reach_follows_terrain_when_there_is_a_store():
+    from civ6_ai.terrain import TerrainStore
+
+    store = TerrainStore(map_width=74)
+    store.learn(
+        [
+            build_tile(
+                tile(
+                    x=x, y=y, improvement=None, units=[], is_river=False,
+                    terrain="TERRAIN_GRASS", is_hills=(x == 15),
+                )
+            )
+            for x in range(9, 20)
+            for y in range(7, 14)
+        ]
+    )  # fmt: skip
+    policy = MilitaryPolicy()
+    policy.terrain = store
+    t = military_module._Turn(
+        turn=20, units=(), cities=(), threats=(), mine=[], reserved=frozenset()
+    )
+    reach = policy._hostile_reach(t)
+    walker = Threat(-1, "Barbarians", "UNIT_WARRIOR", 17, 10, 100, 100, 20, 0, 3, True)
+    tiles = reach(walker)
+    assert (14, 10) not in tiles  # The hill band at x=15 uses up its moves.
+    assert (16, 10) in tiles

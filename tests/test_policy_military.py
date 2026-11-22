@@ -3327,3 +3327,44 @@ def test_with_no_terrain_orders_and_trips_fall_back_to_hex_and_lines():
     assert policy._step_tile(unit, (7, 10), (13, 10)) == hex_line_second((7, 10), (13, 10))
     walker = Threat(-1, "B", "UNIT_WARRIOR", 9, 10, 1, 1, 1, 0, 1, True)
     assert policy._hostile_reach(t)(walker) is None
+
+
+def test_a_refused_corridor_step_is_not_replaced_by_a_line_tile():
+    # A one-tile land corridor: when its only step is refused the unit stays put, it is not sent
+    # at a straight-line tile (here water) or at the refused tile again.
+    corridor = {(x, 1): "TERRAIN_GRASS" for x in range(1, 8)}
+    corridor.update({(x, y): "TERRAIN_COAST" for x in range(0, 9) for y in (0, 2)})
+    corridor[(0, 1)] = corridor[(8, 1)] = "TERRAIN_COAST"
+    policy = MilitaryPolicy()
+    policy.settings = dataclasses.replace(policy.settings, map_width=74)
+    policy.terrain = _store(corridor)
+    policy, t = _turn_for(policy, MilitaryGame([warrior(uid=1, x=1, y=1)]))
+    unit = t.mine[0]
+    assert policy._step_tile(unit, (1, 1), (7, 1)) == (3, 1)
+    policy._trip(t, unit, "muster", (7, 1), (1, 1))
+    trip = policy._mv().trips.trip(1)
+    policy._trip_result(t, unit, (3, 1), "ERROR|path blocked")
+    policy._trip_result(t, unit, (2, 1), "ERROR|path blocked")
+    assert policy._step_tile(unit, (1, 1), (7, 1), trip=trip, turn=21) == (1, 1)
+
+
+def test_each_stretch_keeps_the_muster_goal_it_heads_for_and_the_trip_follows_the_order():
+    policy, t = _walled()
+    unit = t.mine[0]
+    goals = policy._muster_goals(t, unit, (14, 10))
+    aims = policy._stretches(t, unit, goals)
+    assert aims and all(g in goals for g in aims.values())
+    stretch = list(aims)[-1]
+    policy._trip(t, unit, "muster", aims[list(aims)[0]], (unit.x, unit.y))
+    policy._trip(t, unit, "muster", aims[stretch], (unit.x, unit.y))  # The order actually sent.
+    trip = policy._mv().trips.trip(unit.unit_id)
+    assert trip.goal == aims[stretch]
+
+
+def test_a_refusal_survives_the_trip_being_retargeted():
+    policy, t = _walled()
+    unit = t.mine[0]
+    policy._trip(t, unit, "muster", (13, 10), (unit.x, unit.y))
+    policy._trip_result(t, unit, (11, 10), "ERROR|path blocked")
+    policy._trip(t, unit, "muster", (13, 11), (unit.x, unit.y))
+    assert (11, 10) in policy._mv().trips.trip(unit.unit_id).refused

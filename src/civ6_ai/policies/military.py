@@ -1154,14 +1154,14 @@ class MilitaryPolicy:
     ) -> tuple[int, int]:
         """Where the unit ends this turn walking to `goal`: the farthest tile along the cheapest
         walk that its moves reach (hills and forest use up moves), around `avoid` and the tiles the
-        trip was refused; else along the straight line. `here` when it cannot move on."""
+        trip was refused; the straight line only with no terrain known. `here` when the walk
+        cannot advance (every way is refused, held or held by a hostile)."""
         if here == goal:
             return goal
         mv = self._mv()
         if mv is not None:
             found = mv.next_step(here, goal, unit.moves, avoid, trip, turn, occupied)
-            if found is not None:
-                return found
+            return here if found is None else found
         line = straight_line(*here, *goal, self.settings.map_width)[1:]
         return line[min(max(1, int(unit.moves)), len(line)) - 1] if line else goal
 
@@ -1193,7 +1193,12 @@ class MilitaryPolicy:
             estimate, basis = walker.estimate(here, goal, max(1.0, unit.max_moves))
         else:
             estimate, basis = self._walk_turns(unit, goal, here), "hex"
-        return service.trips.start(unit.unit_id, kind, here, goal, t.turn, estimate, basis)
+        before = service.trips.trip(unit.unit_id)
+        kept = dict(before.refused) if before is not None and before.goal != goal else {}
+        trip = service.trips.start(unit.unit_id, kind, here, goal, t.turn, estimate, basis)
+        for tile, why in kept.items():  # A tile the game refused stays refused for this unit.
+            trip.refused.setdefault(tile, why)
+        return trip
 
     def _trip_result(
         self,
@@ -2784,6 +2789,7 @@ class MilitaryPolicy:
             # Run 15: a move straight onto a camp three tiles off is refused (the game only allows
             # that capture move from beside it), so walk to the tile beside it first.
             heading: tuple[int, int] | None = None  # The tile a far unit is walking to.
+            aims: dict[tuple[int, int], tuple[int, int]] = {}  # Order tile -> trip destination.
             kind = "camp"
             if adjacent and not occupied:
                 goals = [where]
@@ -2798,7 +2804,8 @@ class MilitaryPolicy:
                 # orders to tiles across a bay from 6 tiles off were refused as "path may be
                 # blocked"). With no terrain store the muster tiles are ordered as before.
                 if self._mv() is not None and goals:
-                    goals = self._stretches(t, unit, goals)
+                    aims = self._stretches(t, unit, goals)
+                    goals = list(aims)
                 t.map_use["muster_moves"] = t.map_use.get("muster_moves", 0) + 1
             else:
                 kind = "stage"
@@ -2917,6 +2924,7 @@ class MilitaryPolicy:
                 best = max(back, key=lambda gs: gs[1].net)
                 goals = [best[0]]
                 step = best[1]
+                heading, kind, aims = None, "camp", {}
                 message = "falling back from the hostiles beside it"
             else:
                 goals = [g for g, _ in advance]
@@ -2924,13 +2932,13 @@ class MilitaryPolicy:
             numbers.update(asdict(step))
             result = None
             out_of_orders = False
-            # The trip is to where the unit is walking (the muster tile, the stage tile, the
-            # camp), not to the stretch ordered today.
-            aim = heading if heading is not None else (goals[0] if goals else where)
             for goal in goals:
                 if result is not None and not self._available(t, unit, "move"):
                     out_of_orders = True  # The retries too count against the bounds.
                     break
+                # The trip is to where the unit is walking for the order sent (the muster tile a
+                # stretch heads for, the stage tile, the camp), not to the first one tried.
+                aim = aims.get(goal, goal)
                 self._trip(t, unit, kind, aim, here)
                 result = await self._order(t, unit, "move", game.move_unit(unit.unit_index, *goal))
                 if result is not None and move_succeeded(result):
@@ -3464,20 +3472,21 @@ class MilitaryPolicy:
 
     def _stretches(
         self, t: _Turn, unit: Unit, heading: list[tuple[int, int]], tries: int = 4
-    ) -> list[tuple[int, int]]:
-        """The tile each muster goal's walk reaches this turn, de-duplicated: the stretch of our
-        own route to order, around the tiles the game said are full and the trip's refusals."""
+    ) -> dict[tuple[int, int], tuple[int, int]]:
+        """The tile each muster goal's walk reaches this turn, de-duplicated, each with the muster
+        goal it heads for: the stretch of our own route to order, around the tiles the game said
+        are full and the trip's refusals."""
         here = self._pos(t, unit)
         mv = self._mv()
         trip = mv.trips.trip(unit.unit_id) if mv is not None else None
         avoid = {(th.x, th.y) for th in t.threats}
         occupied = {self._pos(t, u) for u in t.units if u.unit_id != unit.unit_id} | t.blocked
-        found: dict[tuple[int, int], None] = {}
+        found: dict[tuple[int, int], tuple[int, int]] = {}
         for goal in heading:
             stretch = self._step_tile(unit, here, goal, avoid, occupied, trip, t.turn)
             if stretch != here:
-                found[stretch] = None
-        return list(found)[:tries]
+                found.setdefault(stretch, goal)
+        return dict(list(found.items())[:tries])
 
     def _stage_goals(
         self, t: _Turn, unit: Unit, camp: tuple[int, int], tries: int = 3

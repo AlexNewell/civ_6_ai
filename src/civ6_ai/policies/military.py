@@ -578,24 +578,35 @@ def camp_group_near(
     radius: int,
     muster: int,
     width: int | None,
+    walk: Callable[[Unit, tuple[int, int]], float | None] | None = None,
+    rallied: Callable[[Unit], bool] | None = None,
 ) -> list[Unit]:
     """The units of the force that go in with `unit` (issue 380), itself included.
 
     Those within `radius` of it, and, while it is inside the muster ring, those inside it too
     and within twice the radius (live STD_T1_04: a lead unit's mates on the far side of the ring,
     6 tiles off, made it "together" and it went in alone).
+
+    Issue 392: with `walk` (movement cost from a unit to a tile, None when it cannot walk there)
+    and `rallied` (inside the muster ring by the walk), closeness is by the walk, so a unit two
+    tiles off across water but turns away by land is not near. Without them, hex distance.
     """
     here = position(unit)
-    ringed = hex_distance(*here, *camp, width) <= muster
+    ringed = rallied(unit) if rallied else hex_distance(*here, *camp, width) <= muster
     near = [unit]
     for other in force:
         if other.unit_id == unit.unit_id:
             continue
         spot = position(other)
-        gap = hex_distance(*here, *spot, width)
-        if gap <= radius or (
-            ringed and gap <= 2 * radius and hex_distance(*spot, *camp, width) <= muster
-        ):
+        if walk is not None:
+            cost = walk(unit, spot)
+            gap = float("inf") if cost is None else cost
+        else:
+            gap = hex_distance(*here, *spot, width)
+        in_ring = (
+            rallied(other) if rallied is not None else hex_distance(*spot, *camp, width) <= muster
+        )
+        if gap <= radius or (ringed and gap <= 2 * radius and in_ring):
             near.append(other)
     return near
 
@@ -2704,7 +2715,7 @@ class MilitaryPolicy:
             if committed and not far:
                 near = camp_group_near(
                     unit, force, lambda u: self._pos(t, u), where, s.camp_group_radius,
-                    muster, s.map_width,
+                    muster, s.map_width, **self._near_by_walk(t, where),
                 )  # fmt: skip
                 need = camp_attacks_needed(near, defenders, s.weights)
                 have = len(near) * s.weights.camp_strike_turns
@@ -3335,6 +3346,18 @@ class MilitaryPolicy:
             if self._pos(t, u) in field_
             and walk_turns(field_[self._pos(t, u)], u.max_moves) <= limit
         ]
+
+    def _near_by_walk(self, t: _Turn, camp: tuple[int, int]) -> dict[str, Any]:
+        """`camp_group_near`'s walk arguments (issue 392); empty with no terrain store."""
+        if self._field(t, camp) is None:
+            return {}
+
+        def walk(unit: Unit, spot: tuple[int, int]) -> float | None:
+            turns = self._unit_turns(t, unit)
+            got = None if turns is None else turns.get(spot)
+            return None if got is None else got * max(1.0, unit.max_moves)
+
+        return {"walk": walk, "rallied": lambda u: self._rallied(t, u, camp)}
 
     def _rallied(self, t: _Turn, unit: Unit, camp: tuple[int, int]) -> bool:
         """Whether the unit is close enough to the camp to wait for the force: within

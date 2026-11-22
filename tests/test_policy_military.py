@@ -3204,3 +3204,19 @@ def test_without_a_terrain_store_the_muster_is_by_hex_distance_as_before():
     game = camp_game(strong_pair(), [])
     run(policy, game)
     assert not policy._muster_pick
+
+
+def test_a_unit_two_hex_across_water_but_turns_away_by_land_is_not_near():
+    from civ6_ai.policies.military import camp_group_near
+
+    units = [warrior(uid=1, x=16, y=6, **STRONG), warrior(uid=2, x=19, y=6, **STRONG)]
+    policy = _bay_policy()  # Water at x 17-18 from row 4 down: 3 hex apart, round the bay by land.
+    policy, t = _turn_for(policy, _bay_game(units))
+    a, b = t.mine
+    camp = (21, 10)
+    pos = lambda u: policy._pos(t, u)  # noqa: E731
+    by_hex = camp_group_near(a, t.mine, pos, camp, 3, 4, 74)
+    assert {u.unit_id for u in by_hex} == {1, 2}  # Near by hex distance.
+    by_walk = camp_group_near(a, t.mine, pos, camp, 3, 4, 74, **policy._near_by_walk(t, camp))
+    assert {u.unit_id for u in by_walk} == {1}
+    assert policy._unit_turns(t, a)[(19, 6)] >= 3  # Turns away round the bay's head.

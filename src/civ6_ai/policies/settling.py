@@ -2436,8 +2436,10 @@ class SettlingPolicy:
         s = self.settings
         width = s.map_width
         here = (scout.x, scout.y)
-        moves = max(1.0, scout.max_moves)
-        field = self._movement().turn_field(here, moves)
+        full = max(1.0, scout.max_moves)
+        spent = min(max(0.0, full - scout.moves), full - 1.0) if scout.moves > 0 else 0.0
+        moves = max(1.0, full - spent)  # What is left this turn (PR 406 review).
+        field = self._movement().turn_field(here, full, spent=spent)
         if field is not None:
             tiles = [p for p, turns in field.items() if turns <= 1]
         else:  # No terrain yet: every tile within the move allowance.

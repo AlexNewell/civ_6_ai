@@ -2346,3 +2346,18 @@ def test_refused_short_settler_steps_are_not_resent():
     run(policy, game)
     again = [a[2:] for a in game.actions if a[0] == "move"]
     assert not set(again) & set(sent[1:])
+
+
+def test_a_refused_long_move_does_not_mark_the_site_as_a_refused_tile():
+    game, policy = _lone_settler_game()
+    _refuse_far_moves(game)
+    run(policy, game)
+    kept = policy._refused_steps.get(7)
+    assert kept is None or (14, 6) not in kept[1]
+    from types import SimpleNamespace
+
+    s = SimpleNamespace(unit_id=7, x=10, y=14, moves=2.0)
+    assert policy._pick_step(s, (14, 6), stop_short=False) is not None
+    game.actions.clear()
+    run(policy, game)
+    assert game.actions[0][2:] == (14, 6)  # The site is still targeted first.

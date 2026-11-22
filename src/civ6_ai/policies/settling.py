@@ -1736,7 +1736,8 @@ class SettlingPolicy:
         moved = move_succeeded(result)
         if not moved and gap > max(1, int(settler.moves)):
             # Issue 394: the long order was refused; step along the terrain path this turn.
-            self._remember_refused(settler, goal, dest, result)
+            # The refusal says the route is blocked somewhere between, not that the site is
+            # impassable, so the site is not remembered as a refused tile.
             tried = {tuple(dest)}
             for _ in range(max(0, s.refused_move_fallback_steps)):
                 step = self._pick_step(settler, goal, units=units)

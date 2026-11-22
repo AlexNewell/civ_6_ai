@@ -757,11 +757,17 @@ def camp_step_score(
     settings: "MilitarySettings",
     advancing: bool = True,
     reach_tiles: "Callable[[Threat], set[tuple[int, int]] | None] | None" = None,
+    walk_cost: Mapping[tuple[int, int], float] | None = None,
 ) -> StepScore:
     """Weigh stepping to `tile`: gain (progress to the camp, a combined attack set up, a sure
     kill, screening a civilian, cover from friends, escaping a worse tile) against the risk
     (expected damage from hostiles that can reach it) and the penalty for a force short of
-    `needed` (`gap`, 0 to 1). All weights are in `MilitarySettings`."""
+    `needed` (`gap`, 0 to 1). All weights are in `MilitarySettings`.
+
+    Issue 392: with `walk_cost` (walking cost to the camp from each tile) progress is the walking
+    cost saved, not the hex distance, so a step along the land route round a bay counts as
+    progress even where it is no nearer the camp as the crow flies (live: nine units held at
+    "step unsafe" for ten turns because every step on the route scored no gain)."""
     s = settings
     width = s.map_width
     hostiles = list(hostiles)
@@ -772,13 +778,11 @@ def camp_step_score(
         unit, here, hostiles, s.weights, width, s.camp_step_reach, s.camp_ranged_reach, reach_tiles
     )
     # Progress counts in full only with the force: alone it is a reason to wait, not to go on.
-    gain = (
-        s.camp_progress_gain
-        * (1.0 - gap)
-        * max(0, hex_distance(*here, *camp, width) - hex_distance(*tile, *camp, width))
-        if advancing
-        else 0.0
-    )
+    if walk_cost is not None and here in walk_cost and tile in walk_cost:
+        closer = walk_cost[here] - walk_cost[tile]
+    else:
+        closer = hex_distance(*here, *camp, width) - hex_distance(*tile, *camp, width)
+    gain = s.camp_progress_gain * (1.0 - gap) * max(0.0, closer) if advancing else 0.0
     if advancing and hex_distance(*tile, *camp, width) <= 1 and gap <= 0:
         gain += s.camp_setup_gain
     if kills:
@@ -2680,7 +2684,16 @@ class MilitaryPolicy:
         spent = self._camp_turns.get(key, (0, t.turn))[0] + 1
         self._camp_turns[key] = (spent, t.turn)
         if not committed:
-            self._log_hold(t, "gathering at the rally ring", where, plan, spare, rallied)
+            turns = sorted(self._walk_turns(t, u, where) for u in force if u not in rallied)
+            self._log_hold(
+                t,
+                f"gathering at the rally ring ({len(rallied)} of {len(force)} rallied"
+                + (f", the rest {turns[0]}-{turns[-1]} walk turns off)" if turns else ")"),
+                where,
+                plan,
+                spare,
+                rallied,
+            )
         if spent > limit:
             self._camp_aside[where] = t.turn + s.camp_retry_turns
             self._camp_turns.pop((where, True), None)
@@ -2743,7 +2756,8 @@ class MilitaryPolicy:
                 stop = self._stop_tile(unit, here, goal)
                 return camp_step_score(
                     unit, here, stop, where, guards, t.units, lambda other: self._pos(t, other),
-                    kw.pop("gap", base), s, reach_tiles=self._hostile_reach(t), **kw,
+                    kw.pop("gap", base), s, reach_tiles=self._hostile_reach(t),
+                    walk_cost=self._field(t, where), **kw,
                 )  # fmt: skip
 
             # Every option on one scale: advance, fight, hold, fall back (issue 380).

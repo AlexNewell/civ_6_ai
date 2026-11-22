@@ -3220,3 +3220,31 @@ def test_a_unit_two_hex_across_water_but_turns_away_by_land_is_not_near():
     by_walk = camp_group_near(a, t.mine, pos, camp, 3, 4, 74, **policy._near_by_walk(t, camp))
     assert {u.unit_id for u in by_walk} == {1}
     assert policy._unit_turns(t, a)[(19, 6)] >= 3  # Turns away round the bay's head.
+
+
+def test_a_step_along_the_land_route_is_progress_even_when_no_nearer_by_hex():
+    from civ6_ai.policies.military import camp_step_score
+
+    me = build_unit(warrior(uid=1, x=16, y=6, **STRONG))
+    s = MilitarySettings(map_width=74)
+    camp, here, tile_ = (21, 10), (16, 6), (16, 5)  # Up and away: the way round the bay's head.
+    pos = lambda u: (u.x, u.y)  # noqa: E731
+    flat = camp_step_score(me, here, tile_, camp, [], [], pos, 0.0, s)
+    assert flat.gain <= 0  # By hex distance it is a step backwards.
+    cost = _bay_store().walk_field(camp, 40.0)
+    assert cost[tile_] < cost[here]
+    routed = camp_step_score(me, here, tile_, camp, [], [], pos, 0.0, s, walk_cost=cost)
+    assert routed.gain >= s.camp_progress_gain and routed.net >= s.camp_step_min_net
+
+
+def test_the_hold_reason_says_how_many_rallied_and_how_far_the_rest_are(caplog):
+    units = [
+        warrior(uid=1, x=12, y=10, **STRONG),
+        warrior(uid=2, x=12, y=11, **STRONG),
+        warrior(uid=3, x=9, y=9),
+    ]
+    policy = _bay_policy()
+    with caplog.at_level(logging.INFO, logger=military_module.log.name):
+        run(policy, _bay_game(units))
+    lines = [r.message for r in caplog.records if "military_camp_hold" in r.message]
+    assert any("0 of 3 rallied, the rest" in m and "walk turns off" in m for m in lines)

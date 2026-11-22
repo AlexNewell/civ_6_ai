@@ -20,11 +20,14 @@ from civ6_ai.policies.military import (
     attack_landed,
     camp_attacks_needed,
     camp_force_ok,
+    camp_group_near,
     camp_matchup,
+    camp_step_score,
     choose_promotion,
     expected_damage,
     garrison_required,
     remembered_defenders,
+    score_target,
 )
 from civ6_ai.policies.settling import units_reserved_for_settling
 from civ6_ai.state import read_cities, read_threats, read_units
@@ -2699,3 +2702,366 @@ def test_stage_goals_and_stage_tile_skip_water_beside_a_camp():
     stage = policy._stage_tile(unit, camp)
     assert stage is not None and stage != (19, 10)
     assert stage in _ring_of(*camp) or stage != camp
+
+
+# ----- the camp force goes in together (issue 380) -----
+
+
+def _near(unit, others, camp=(14, 10)):
+    return camp_group_near(unit, others, lambda u: (u.x, u.y), camp, 2, 4, None)
+
+
+def test_a_lead_unit_outside_the_ring_has_no_force_near_it():
+    lead = build_unit(warrior(uid=1, x=12, y=7, **STRONG))
+    rest = build_unit(warrior(uid=2, x=4, y=10, **STRONG))
+    assert [u.unit_id for u in _near(lead, [lead, rest])] == [1]
+
+
+def test_units_in_the_ring_or_two_tiles_apart_count_as_together():
+    lead = build_unit(warrior(uid=1, x=12, y=10, **STRONG))
+    ring = build_unit(warrior(uid=2, x=11, y=13, **STRONG))
+    pair = build_unit(warrior(uid=3, x=12, y=12, **STRONG))
+    assert {u.unit_id for u in _near(lead, [lead, ring, pair])} == {1, 2, 3}
+
+
+def test_a_committed_lead_unit_waits_until_the_rest_of_the_force_is_near(caplog):
+    units = [warrior(uid=1, x=11, y=10, **STRONG), warrior(uid=2, x=3, y=10, **STRONG)]
+    game = camp_game([*units, warrior(uid=3)], [barbarian(x=14, y=10, cs=5)])
+    policy = MilitaryPolicy()
+    policy._committed[(14, 10)] = 15
+    run(policy, game)
+    assert not [o for o in game.orders("move") if o[1] == 1]
+    waits = [d for d in camp_orders(policy) if d.unit_id == 1]
+    assert waits and "waiting for the force (1 of 2 near)" in waits[0].reason
+
+
+def foe(x, y, cs=20):
+    return Threat(-1, "Barbarians", "UNIT_WARRIOR", x, y, 100, 100, cs, 0, 3, True)
+
+
+def _score(unit, tile, foes, friends=(), gap=1.0, here=None, camp=(14, 10)):
+    here = here or (unit.x, unit.y)
+    return camp_step_score(
+        unit,
+        here,
+        tile,
+        camp,
+        foes,
+        [unit, *friends],
+        lambda u: (u.x, u.y),
+        gap,
+        MilitarySettings(),
+    )
+
+
+def test_the_lone_warrior_walk_past_two_neighbours_it_would_lose_to_scores_negative():
+    me = build_unit(warrior(uid=1, x=12, y=10))
+    foes = [foe(13, 10), foe(11, 10)]
+    assert _score(me, (13, 11), foes).net < 0
+
+
+def test_a_step_that_sets_up_a_combined_attack_wins_despite_the_risk():
+    me = build_unit(warrior(uid=1, x=11, y=10))
+    mate = build_unit(warrior(uid=2, x=12, y=11))
+    foes = [foe(14, 10, cs=12)]
+    alone = _score(me, (13, 10), foes, gap=0.0)
+    covered = _score(me, (13, 10), foes, friends=[mate], gap=0.0)
+    assert covered.net > alone.net and covered.net >= 0
+
+
+def test_a_cheap_unit_screening_a_settler_may_take_the_risk():
+    me = build_unit(warrior(uid=1, x=11, y=10))
+    settler = build_unit(warrior(uid=2, x=12, y=10, combat_strength=0))
+    foes = [foe(13, 9, cs=8)]
+    assert _score(me, (12, 11), foes, [settler], gap=0.0).net >= 0
+
+
+def test_the_group_penalty_grows_as_the_force_near_falls_short():
+    me = build_unit(warrior(uid=1, x=11, y=10))
+    a = _score(me, (12, 10), [], gap=0.25)
+    b = _score(me, (12, 10), [], gap=1.0)
+    assert a.penalty < b.penalty and b.net < a.net
+
+
+def test_a_unit_walking_to_the_muster_does_not_step_beside_two_units_it_would_lose_to():
+    camp = tile(x=20, y=10, improvement="IMPROVEMENT_BARBARIAN_CAMP", owner_id=-1, units=[])
+    units = [warrior(uid=1, x=14, y=10, **STRONG), warrior(uid=2, x=14, y=11, **STRONG)]
+    foes = [barbarian(x=16, y=9, cs=45), barbarian(x=16, y=11, cs=45), barbarian(x=20, y=10, cs=5)]
+    game = camp_game([*units, warrior(uid=3)], foes, camp=camp)
+    policy = MilitaryPolicy()
+    policy._committed[(20, 10)] = 15
+    run(policy, game)
+    for _, _, x, y in [o for o in game.orders("move") if o[1] == 1]:
+        assert sum(hex_distance(x, y, *spot, None) <= 1 for spot in [(16, 9), (16, 11)]) < 2
+
+
+def test_a_plan_whose_need_outgrows_the_force_stops_the_advance():
+    camp = tile(x=20, y=10, improvement="IMPROVEMENT_BARBARIAN_CAMP", owner_id=-1, units=[])
+    units = [warrior(uid=1, x=16, y=10, **STRONG), warrior(uid=2, x=16, y=11, **STRONG)]
+    guards = [barbarian(x=20, y=10 + i % 2, cs=30) for i in range(5)]
+    game = camp_game([*units, warrior(uid=3)], guards, camp=camp)
+    policy = MilitaryPolicy()
+    policy._committed[(20, 10)] = 15
+    run(policy, game)
+    assert (20, 10) not in policy._committed
+    assert not [o for o in game.orders("move") if o[1] in (1, 2)]
+
+
+def test_a_lead_unit_in_the_ring_with_mates_across_it_and_hostiles_beside_it_does_not_go_on():
+    """The STD_T1_04 T50 position: committed, others on the far side of the ring, two hostile
+    units next to the lead. Driven through the policy's run, as the turn loop does."""
+    camp = tile(x=20, y=10, improvement="IMPROVEMENT_BARBARIAN_CAMP", owner_id=-1, units=[])
+    units = [
+        warrior(uid=1, x=16, y=10, **STRONG),
+        warrior(uid=2, x=20, y=15, **STRONG),
+        warrior(uid=3, x=21, y=15, **STRONG),
+    ]
+    foes = [barbarian(x=15, y=9, cs=30), barbarian(x=15, y=10, cs=30), barbarian(x=20, y=10, cs=5)]
+    game = camp_game(units, foes, camp=camp)
+    policy = MilitaryPolicy()
+    policy._committed[(20, 10)] = 15
+    run(policy, game)
+    assert not [o for o in game.orders("move") if o[1] == 1 and o[2] > 16]
+    held = [d for d in camp_orders(policy) if d.unit_id == 1 and d.odds]
+    assert held and held[0].odds["chosen"] in ("fall_back", "hold")
+    assert set(held[0].odds["options"]) >= {"hold", "fall_back"}
+
+
+def test_a_ranged_unit_beside_melee_hostiles_is_exposed_to_their_attacks():
+    from civ6_ai.policies.military import step_exposure
+
+    archer_unit = build_unit(archer(uid=1, x=12, y=10))
+    foes = [foe(13, 10, cs=40), foe(13, 11, cs=40)]
+    exposure, _ = step_exposure(archer_unit, (12, 10), foes, W, None, 1)
+    assert exposure > 0.5  # They attack it next turn; it takes nothing back shooting them.
+
+
+def test_the_stop_tile_is_the_second_on_the_line_for_a_two_move_unit():
+    # (10,10) toward (16,10): a unit with two moves stops at (12,10); hostiles beside (13,10)
+    # must not count, and hostiles beside (12,10) must.
+    camp = tile(x=16, y=10, improvement="IMPROVEMENT_BARBARIAN_CAMP", owner_id=-1, units=[])
+    units = [warrior(uid=1, x=10, y=10, **STRONG), warrior(uid=2, x=10, y=11, **STRONG)]
+    foes = [barbarian(x=16, y=10, cs=5), barbarian(x=12, y=9, cs=45), barbarian(x=12, y=11, cs=45)]
+    game = camp_game([*units, warrior(uid=3)], foes, camp=camp)
+    policy = MilitaryPolicy()
+    policy._committed[(16, 10)] = 15
+    run(policy, game)
+    scored = [d for d in camp_orders(policy) if d.unit_id == 1 and d.odds]
+    assert scored and scored[0].odds["options"]
+
+
+def test_a_camp_unit_beside_a_hostile_weighs_the_attack_with_the_other_options():
+    camp = tile(x=20, y=10, improvement="IMPROVEMENT_BARBARIAN_CAMP", owner_id=-1, units=[])
+    units = [
+        warrior(uid=1, x=16, y=10, combat_strength=10, targets=[target(17, 10, 100)]),
+        warrior(uid=2, x=16, y=11, **STRONG),
+    ]
+    foes = [barbarian(x=17, y=10, cs=22), barbarian(x=20, y=10, cs=5)]
+    game = camp_game([*units, warrior(uid=3)], foes, camp=camp)
+    policy = MilitaryPolicy()
+    policy._committed[(20, 10)] = 15
+    run(policy, game)
+    assert game.orders("attack") or not [o for o in game.orders("move") if o[1] == 1 and o[2] > 16]
+    weighed = [d for d in camp_orders(policy) if d.unit_id == 1 and d.odds]
+    assert not weighed or weighed[0].odds["chosen"] != "advance"
+
+
+# ----- which hostile to attack (issue 380) -----
+
+
+def _target_value(attacker, foe_unit, followup=0.0, hp=None):
+    odds = assess_attack(
+        attacker,
+        Target(foe_unit.unit_type, foe_unit.x, foe_unit.y, foe_unit.hp),
+        foe_unit,
+        W,
+        None,
+        None,
+    )
+    hp = foe_unit.hp if hp is None else hp
+    return score_target(attacker, foe_unit, hp, odds, followup, MilitarySettings())
+
+
+def test_a_target_beside_a_city_state_unit_beats_an_otherwise_equal_one():
+    me = build_unit(warrior(uid=1, combat_strength=14))
+    foe_unit = foe(11, 10, cs=12)
+    with_help = _target_value(me, foe_unit, followup=30.0)
+    alone = _target_value(me, foe_unit, followup=0.0)
+    assert with_help.total > alone.total and with_help.follow > 0
+
+
+def test_an_archer_beats_a_warrior_of_equal_health_for_a_melee_attacker():
+    me = build_unit(warrior(uid=1, combat_strength=14))
+    archer_foe = Threat(-1, "Barbarians", "UNIT_ARCHER", 11, 10, 100, 100, 15, 25, 3, True)
+    warrior_foe = Threat(-1, "Barbarians", "UNIT_WARRIOR", 11, 11, 100, 100, 20, 0, 3, True)
+    assert _target_value(me, archer_foe).total > _target_value(me, warrior_foe).total
+
+
+def test_a_near_dead_target_beats_a_full_health_one():
+    me = build_unit(warrior(uid=1, combat_strength=14))
+    weak = Threat(-1, "Barbarians", "UNIT_WARRIOR", 11, 10, 15, 100, 12, 0, 3, True)
+    full = Threat(-1, "Barbarians", "UNIT_WARRIOR", 11, 11, 100, 100, 12, 0, 3, True)
+    assert _target_value(me, weak).total > _target_value(me, full).total
+
+
+def test_an_attack_logs_the_weighing_of_its_target():
+    targets = [target(11, 10, 100)]
+    units = [warrior(uid=1, combat_strength=30, targets=targets), warrior(uid=3)]
+    game = MilitaryGame(units, [barbarian(x=11, y=10, cs=8)])
+    policy = MilitaryPolicy()
+    run(policy, game)
+    shots = [d for d in policy.decisions if d.action == "attack" and d.odds]
+    assert shots and "follow" in shots[0].odds["target_score"]
+
+
+def test_a_lone_unit_beside_an_empty_camp_captures_it():
+    units = [warrior(uid=1, x=13, y=10, **STRONG), warrior(uid=2, x=3, y=10, **STRONG)]
+    game = camp_game([*units, warrior(uid=3)], [barbarian(x=15, y=9, cs=5)])
+    policy = MilitaryPolicy()
+    policy._committed[(14, 10)] = 15
+    run(policy, game)
+    assert ("move", 1, 14, 10) in game.orders("move")
+
+
+def test_the_advance_goal_that_won_is_the_one_tried_first():
+    camp = tile(x=20, y=10, improvement="IMPROVEMENT_BARBARIAN_CAMP", owner_id=-1, units=[])
+    units = [warrior(uid=1, x=16, y=10, **STRONG), warrior(uid=2, x=16, y=11, **STRONG)]
+    foes = [barbarian(x=17, y=9, cs=20), barbarian(x=20, y=10, cs=5)]
+    game = camp_game([*units, warrior(uid=3)], foes, camp=camp)
+    policy = MilitaryPolicy()
+    policy._committed[(20, 10)] = 15
+    run(policy, game)
+    moved = [d for d in camp_orders(policy) if d.unit_id == 1 and d.odds and "options" in d.odds]
+    assert moved
+    first = [o for o in game.orders("move") if o[1] == 1][0]
+    assert first[2:] != (17, 10) or moved[0].odds["net"] >= moved[0].odds["options"]["hold"]
+
+
+def test_helpers_beside_a_target_raise_its_follow_up():
+    from civ6_ai.policies.military import _Turn
+
+    policy = MilitaryPolicy()
+    me = build_unit(warrior(uid=1))
+    foe_unit = foe(11, 10, cs=12)
+    t = _Turn.__new__(_Turn)
+    t.mine, t.threats, t.cities, t.acted = [], [], [], set()
+    t.helpers = [Threat(5, "City State", "UNIT_WARRIOR", 12, 10, 100, 100, 15, 0, 3, False, True)]
+    assert policy._followup_damage(t, me, foe_unit) > 0
+    t.helpers = []
+    assert policy._followup_damage(t, me, foe_unit) == 0
+
+
+def test_a_hostile_archer_two_tiles_away_still_exposes_the_tile():
+    from civ6_ai.policies.military import step_exposure
+
+    me = build_unit(warrior(uid=1, x=12, y=10))
+    shooter = Threat(-1, "Barbarians", "UNIT_ARCHER", 14, 10, 100, 100, 15, 25, 3, True)
+    walker = Threat(-1, "Barbarians", "UNIT_WARRIOR", 14, 10, 100, 100, 20, 0, 3, True)
+    assert step_exposure(me, (12, 10), [shooter], W, None, 1)[0] > 0
+    assert step_exposure(me, (12, 10), [walker], W, None, 1)[0] == 0
+
+
+def test_a_melee_unit_gets_no_kill_credit_for_an_archer_it_cannot_reach():
+    from civ6_ai.policies.military import step_exposure
+
+    me = build_unit(warrior(uid=1, x=12, y=10, combat_strength=30))
+    weak_archer = Threat(-1, "Barbarians", "UNIT_ARCHER", 14, 10, 5, 100, 15, 25, 3, True)
+    exposure, kills = step_exposure(me, (12, 10), [weak_archer], W, None, 1)
+    assert exposure > 0 and not kills  # It shoots us from two tiles; we cannot hit it.
+    assert step_exposure(me, (13, 10), [weak_archer], W, None, 1)[1]  # Beside it, we can.
+
+
+def test_a_hostile_already_killed_this_turn_is_not_step_risk():
+    camp = tile(x=20, y=10, improvement="IMPROVEMENT_BARBARIAN_CAMP", owner_id=-1, units=[])
+    units = [warrior(uid=1, x=16, y=10, **STRONG), warrior(uid=2, x=16, y=11, **STRONG)]
+    foes = [barbarian(x=17, y=10, cs=30), barbarian(x=20, y=10, cs=5)]
+    game = camp_game([*units, warrior(uid=3)], foes, camp=camp)
+    policy = MilitaryPolicy()
+    policy._committed[(20, 10)] = 15
+    original = policy._clear_camp
+
+    async def with_dead(game_, t):
+        t.dead.add((17, 10))
+        await original(game_, t)
+
+    policy._clear_camp = with_dead
+    run(policy, game)
+    scored = [d for d in camp_orders(policy) if d.unit_id == 1 and d.odds and "exposure" in d.odds]
+    assert scored and scored[0].odds["exposure"] == 0
+
+
+def test_an_archer_can_kill_a_weak_melee_target_two_tiles_off_that_cannot_reach_it():
+    from civ6_ai.policies.military import step_exposure
+
+    shooter = build_unit(archer(uid=1, x=12, y=10))
+    weak_melee = Threat(-1, "Barbarians", "UNIT_WARRIOR", 14, 10, 5, 100, 8, 0, 3, True)
+    exposure, kills = step_exposure(shooter, (12, 10), [weak_melee], W, None, 1)
+    assert exposure == 0 and kills  # We can hit it; it cannot hit us.
+
+
+def test_the_stop_tile_follows_terrain_costs_and_falls_back_to_the_line():
+    me = build_unit(warrior(uid=1, x=10, y=10))
+    plain = MilitaryPolicy()
+    assert plain._stop_tile(me, (10, 10), (14, 10)) == hex_line_second((10, 10), (14, 10))
+    from civ6_ai.terrain import TerrainStore
+
+    store = TerrainStore(map_width=74)
+    store.learn(
+        [
+            build_tile(
+                tile(
+                    x=x, y=y, improvement=None, units=[], is_river=False,
+                    terrain="TERRAIN_GRASS", is_hills=(x == 11),
+                )
+            )
+            for x in range(9, 16)
+            for y in range(8, 13)
+        ]
+    )  # fmt: skip
+    hilly = MilitaryPolicy()
+    hilly.terrain = store
+    assert hilly._stop_tile(me, (10, 10), (14, 10)) == (11, 10)  # The hill uses up both moves.
+
+
+def hex_line_second(a, b):
+    from civ6_ai.policies.military import hex_line
+
+    return hex_line(a, b, 74)[1]
+
+
+def test_a_two_move_melee_hostile_counts_from_three_tiles_but_not_five():
+    from civ6_ai.policies.military import step_exposure
+
+    me = build_unit(warrior(uid=1, x=12, y=10))
+    near = Threat(-1, "Barbarians", "UNIT_WARRIOR", 14, 10, 100, 100, 20, 0, 3, True)
+    far = Threat(-1, "Barbarians", "UNIT_WARRIOR", 17, 10, 100, 100, 20, 0, 3, True)
+    assert step_exposure(me, (12, 10), [near], W, None, 3)[0] > 0
+    assert step_exposure(me, (12, 10), [far], W, None, 3)[0] == 0
+
+
+def test_a_hostiles_reach_follows_terrain_when_there_is_a_store():
+    from civ6_ai.terrain import TerrainStore
+
+    store = TerrainStore(map_width=74)
+    store.learn(
+        [
+            build_tile(
+                tile(
+                    x=x, y=y, improvement=None, units=[], is_river=False,
+                    terrain="TERRAIN_GRASS", is_hills=(x == 15),
+                )
+            )
+            for x in range(9, 20)
+            for y in range(7, 14)
+        ]
+    )  # fmt: skip
+    policy = MilitaryPolicy()
+    policy.terrain = store
+    t = military_module._Turn(
+        turn=20, units=(), cities=(), threats=(), mine=[], reserved=frozenset()
+    )
+    reach = policy._hostile_reach(t)
+    walker = Threat(-1, "Barbarians", "UNIT_WARRIOR", 17, 10, 100, 100, 20, 0, 3, True)
+    tiles = reach(walker)
+    assert (14, 10) not in tiles  # The hill band at x=15 uses up its moves.
+    assert (16, 10) in tiles

@@ -510,3 +510,14 @@ def test_a_builder_that_reached_its_goal_is_observed_before_a_new_job_is_picked(
         asyncio.run(policy.run(later))
     first = _rows(caplog)[0]
     assert (first["goal"], first["outcome"], first["actual"]) == ([14, 10], "arrived", 3)
+
+
+def test_the_fallback_step_does_not_count_a_way_through_a_refused_tile():
+    # Wrapped, one walkable row: the short way west is refused, so the way is east. With the east
+    # path tiles taken, the fallback must not step back toward the refused shortcut.
+    rows = {(x, y): "m" for x in range(10) for y in range(6) if y != 2}
+    t = store(rows, width=10, height=6, map_width=10, map_height=6)
+    m = Movement(t)
+    step = m.next_step((2, 2), (7, 2), 2, avoid={(0, 2)}, occupied={(3, 2), (4, 2)})
+    assert step != (1, 2)
+    assert step is None or step == (2, 2) or step[0] > 2

@@ -132,11 +132,14 @@ def turn_field(
     return {tile: (0 if tile == start else state[0]) for tile, state in best.items()}
 
 
-def cost_to_goal(terrain: TerrainStore, goal: Tile, max_cost: float = 40.0) -> dict[Tile, float]:
+def cost_to_goal(
+    terrain: TerrainStore, goal: Tile, max_cost: float = 40.0, avoid: Iterable[Tile] = ()
+) -> dict[Tile, float]:
     """Terrain cost from each tile to `goal`: what a walker standing there spends entering the
     tiles on its cheapest way, `goal` included. One search from the goal answers it for every tile,
     so a tile across a bay from the goal costs the way round. The goal costs 0; tiles past
-    `max_cost` are left out."""
+    `max_cost` are left out. `avoid` tiles are never entered, so no way through them counts."""
+    blocked = set(avoid)
     best: dict[Tile, float] = {goal: 0.0}
     queue: list[tuple[float, int, int]] = [(0.0, goal[0], goal[1])]
     while queue:
@@ -149,7 +152,7 @@ def cost_to_goal(terrain: TerrainStore, goal: Tile, max_cost: float = 40.0) -> d
         for nxt in neighbours(cx, cy, terrain.map_width):
             if terrain.map_height is not None and nxt[1] >= terrain.map_height:
                 continue
-            if terrain.step_cost(nxt[0], nxt[1], False) is None:
+            if nxt in blocked or terrain.step_cost(nxt[0], nxt[1], False) is None:
                 continue  # A walker never stands on water or a mountain.
             total = cost + enter
             if total <= max_cost and total < best.get(nxt, float("inf")):
@@ -446,7 +449,10 @@ class Movement:
         one with the least terrain cost left to the goal, then the nearer by hex distance, then
         the lowest coordinates. A tile no nearer than where the unit stands is skipped."""
         field_ = self.turn_field(start, moves, blocked) or {}
-        left = self.cost_field(goal) or {}
+        if blocked and self.terrain is not None:  # Costs must not run through refused tiles.
+            left = cost_to_goal(self.terrain, goal, self.settings.cost_field_max, blocked)
+        else:
+            left = self.cost_field(goal) or {}
         here = left.get(start)
         ranked = []
         for tile, t in field_.items():

@@ -19,11 +19,13 @@ different settings and compare the choices.
 import json
 import logging
 import math
+import re
 from collections.abc import Collection, Iterable
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Protocol
 
 from civ6_ai.blockers import action_succeeded, move_succeeded
+from civ6_ai.movement import Movement, MovementSettings, straight_line
 from civ6_ai.policies.expansion import ExpansionState
 from civ6_ai.policies.game_data import COMBAT_UNITS
 from civ6_ai.state import (
@@ -41,6 +43,7 @@ from civ6_ai.state import (
 )
 from civ6_ai.state.models import RivalCity, SettleSite
 from civ6_ai.state.reader import STANDARD_MAP_WIDTH, FogCount, hex_distance
+from civ6_ai.terrain import TerrainStore
 
 log = logging.getLogger(__name__)
 
@@ -55,6 +58,7 @@ SETTLER = "UNIT_SETTLER"
 SCOUT = "UNIT_SCOUT"
 # Decisions that leave a settler waiting with nowhere to go this turn (issue 283).
 _HELD_ACTIONS = frozenset({"hold", "no_site"})
+_WAIT_ACTIONS = frozenset({"hold", "flee", "escort_gather"})  # Turns not spent walking.
 
 # Fog rays follow civ6-mcp's strategic map query, which steps along these offsets from a city.
 _FOG_RAYS = ((0, -1), (1, -1), (1, 1), (0, 1), (-1, 1), (-1, -1))
@@ -121,6 +125,15 @@ class SettlingSettings:
     overlap_penalty: float = 0.0  # Off per workable tile (radius 3) an own city already covers.
     # Safety.
     threat_radius: int = 3  # A tile this close to a hostile unit is unsafe to stand on.
+    # Epic #399: a hostile unit counts as "this close" only if it can walk there (terrain costs,
+    # water and mountains in the way), by `Movement.threat_reach`; a route is checked along the
+    # walking route, not the straight line. False is the old hex radius and straight line.
+    walk_danger: bool = True
+    # A ranged hostile that cannot walk to a tile but can shoot it (within 2 of where it can
+    # stand, no mountain between) counts this share of a hostile in the danger count; 0 ignores
+    # it, 1 counts it in full. Live: full counting cut the STD_T1_04 T60 score 8.6% (settlers
+    # waited for escorts); 0.5 lets one archer across water pass unremarked, two still count.
+    ranged_reach_weight: float = 0.5
     flee_radius: int = 2  # A settler this close to a hostile unit runs.
     flee_mounted_extra: int = 2  # A mounted hostile unit is this many tiles further a danger.
     flee_escorted_hostiles: int = 2  # An escort is no cover against this many hostile units near.
@@ -771,41 +784,99 @@ def frontier_points(
     return points
 
 
+_RANGED_REACH = 2  # How far a ranged hostile strikes beyond where it stands.
 _MOUNTED = ("HORSE", "COURSER", "KNIGHT", "CAVALRY", "CHARIOT", "CAMEL", "ELEPHANT")
 
 
 @dataclass
 class _Danger:
-    """Hostile units in sight, and tests for tiles and routes near them."""
+    """Hostile units in sight, and tests for tiles and routes near them. With a movement service
+    (#399) "near" is what a hostile can walk to and attack, and a route is the walking route."""
 
     threats: tuple[Threat, ...]
     map_width: int | None
     # (x, y) of hostile units seen within the last few turns and now out of sight.
     recent: tuple[tuple[int, int], ...] = ()
+    movement: Movement | None = None
+    walk: bool = True
+    ranged_weight: float = 0.5
+    _reach: dict = field(default_factory=dict, init=False, repr=False)
 
     def recent_near(self, x: int, y: int, radius: int) -> bool:
         return any(hex_distance(x, y, rx, ry, self.map_width) <= radius for rx, ry in self.recent)
 
-    def near(self, x: int, y: int, radius: int) -> bool:
-        return any(
-            hex_distance(x, y, t.x, t.y, self.map_width) <= radius
-            for t in self.threats
-            if t.hostile
-        )
+    def _weight(self, t: Threat, x: int, y: int, radius: int) -> float:
+        """How much hostile `t` counts toward danger at tile (x, y): 1.0 within `radius` by hex
+        distance and (with terrain) by the walk. The radius is the old rule generosity: a unit
+        walks `radius - 1` moves and then strikes one tile further, so on open ground this equals
+        the hex radius, and water or a mountain in the way shortens it. A ranged unit that cannot
+        walk there but can still shoot the tile (within its range of where it can stand, no
+        mountain between) counts `ranged_reach_weight` of a hostile: counting it in full made
+        settlers too cautious (live, STD_T1_04), ignoring it ignored real fire across water."""
+        if hex_distance(x, y, t.x, t.y, self.map_width) > radius:
+            return 0.0
+        movement = self.movement
+        if (
+            not self.walk
+            or movement is None
+            or movement.terrain is None
+            or radius <= 1
+            or any(word in t.unit_type for word in _SEA_UNITS)
+        ):
+            return 1.0
+        key = (t.x, t.y, radius, 1)
+        reach = self._reach.get(key)
+        if reach is None:
+            reach = self._reach[key] = movement.threat_reach((t.x, t.y), radius - 1, 1)
+        if (x, y) in reach:
+            return 1.0
+        if t.ranged_strength <= 0 or self.ranged_weight <= 0 or radius <= _RANGED_REACH:
+            return 0.0
+        # The tiles it can stand on after walking, and from which one it can see the tile.
+        key = (t.x, t.y, radius, "stand")
+        stand = self._reach.get(key)
+        if stand is None:
+            walked = movement.turn_field((t.x, t.y), radius - _RANGED_REACH) or {}
+            stand = self._reach[key] = [tile for tile, turns in walked.items() if turns <= 1]
+        if not any(self._clear_shot(px, py, x, y) for px, py in stand):
+            return 0.0
+        return self.ranged_weight
 
-    def count_near(self, x: int, y: int, radius: int, mounted_extra: int = 0) -> int:
-        """Hostile units that can be on the tile next turn: a mounted one reaches further."""
+    def _clear_shot(self, px: int, py: int, x: int, y: int) -> bool:
+        """A ranged unit standing at (px, py) can shoot (x, y): within its range and no mountain
+        on the tiles between (an approximation of line of sight)."""
+        if hex_distance(px, py, x, y, self.map_width) > _RANGED_REACH:
+            return False
+        movement = self.movement
+        for mx, my in straight_line(px, py, x, y, self.map_width)[1:-1]:
+            ground = movement.terrain.get(mx, my)
+            if ground is not None and ground.mountain:
+                return False
+        return True
+
+    def near(self, x: int, y: int, radius: int) -> bool:
+        return sum(self._weight(t, x, y, radius) for t in self.threats if t.hostile) >= 1.0
+
+    def count_near(self, x: int, y: int, radius: int, mounted_extra: int = 0) -> float:
+        """Hostile units that can be on the tile next turn (a ranged one that can only shoot it
+        counts part of one): a mounted one reaches further."""
         return sum(
-            1
+            self._weight(
+                t,
+                x,
+                y,
+                radius + (mounted_extra if any(w in t.unit_type for w in _MOUNTED) else 0),
+            )
             for t in self.threats
             if t.hostile
-            and hex_distance(x, y, t.x, t.y, self.map_width)
-            <= radius + (mounted_extra if any(w in t.unit_type for w in _MOUNTED) else 0)
         )
 
     def on_path(self, start: tuple[int, int], end: tuple[int, int], radius: int) -> bool:
-        line = hex_line(start, end, self.map_width)
-        return any(self.near(x, y, radius) for x, y in line)
+        if self.walk and self.movement is not None:
+            route = self.movement.route_tiles(start, end)[1:]  # The walk, not the straight line.
+        else:
+            route = hex_line(start, end, self.map_width)
+        return any(self.near(x, y, radius) for x, y in route)
 
 
 @dataclass
@@ -827,11 +898,13 @@ class SettlingPolicy:
     # Escort orders the game refused, as (escort, from, to, military units on `to`): not sent again
     # until one of those changes.
     _refused: set = field(default_factory=set, init=False, repr=False)
-    # Issue 368: tiles the game refused an escorted step onto (terrain or foreign borders the
-    # store cannot see, not stacking), as {settler id: (goal, tiles)}. Kept for the whole trip, so
-    # the path routes around them instead of bouncing back once the pair has moved; dropped when
-    # the settler's goal changes or the settler is gone.
-    _refused_steps: dict = field(default_factory=dict, init=False, repr=False)
+    # Issue 368: tiles the game refused a step onto (terrain or foreign borders the store cannot
+    # see) are kept for the whole trip, so the path routes around them instead of bouncing back
+    # once the pair has moved. Since #399 the movement service's `TripLog` holds them per trip,
+    # with the reason (a stacking refusal counts for its own turn only); a new goal starts a new
+    # trip, and a settler that is gone closes its trip.
+    movement: Movement | None = field(default=None, repr=False)
+    _last_turn: int = field(default=0, init=False, repr=False)
     # The threat state, or None to play without it (a war is then unknown, so no lone garrison
     # leaves). `_lone_ok` is this turn's cities whose last defender may leave; `_stripped` maps a
     # city tile whose last defender left with a settler to that escort's id.
@@ -910,6 +983,9 @@ class SettlingPolicy:
         # settlers built, none used). Survey every turn while below the city target; it is
         # re-checked as the map changes, not on a timer.
         if not settlers and not scouts and not below_target:
+            if any(trip.kind == "settler" for trip in self._movement().trips.trips.values()):
+                turn = (await game.get_game_overview()).turn
+                self._movement().trips.sweep({u.unit_id for u in units}, turn, "settler")
             return
         turn = (await game.get_game_overview()).turn
         try:
@@ -920,7 +996,15 @@ class SettlingPolicy:
                 raise
             log.warning("Survey read failed; production keeps its last survey", exc_info=True)
             return
-        danger = _Danger(threats, self.settings.map_width, self._recent_sightings(turn))
+        self._last_turn = turn
+        danger = _Danger(
+            threats,
+            self.settings.map_width,
+            self._recent_sightings(turn),
+            self._movement(),
+            self.settings.walk_danger,
+            self.settings.ranged_reach_weight,
+        )
         city_tiles = [(c.x, c.y) for c in cities]
         self._lone_ok = (
             spare_garrison_tiles(
@@ -1135,7 +1219,11 @@ class SettlingPolicy:
         """Drop what is kept per unit once the unit is gone, and any expired set-asides."""
         alive = {u.unit_id for u in units}  # Including units with no moves left this turn.
         self._site_claims = {k: v for k, v in self._site_claims.items() if k in alive}
-        self._refused_steps = {k: v for k, v in self._refused_steps.items() if k in alive}
+        trips = self._movement().trips
+        for u in units:
+            if u.unit_type == SETTLER:
+                trips.observe(u.unit_id, (u.x, u.y), turn)
+        trips.sweep(alive, turn, "settler")
         self._holds = {k: v for k, v in self._holds.items() if k in alive}
         self._no_site_turns = {k: v for k, v in self._no_site_turns.items() if k in alive}
         self._scout_targets = {k: v for k, v in self._scout_targets.items() if k in alive}
@@ -1276,10 +1364,11 @@ class SettlingPolicy:
         found = []
         # The first own city listed stands for the capital in the distance component (logged only).
         capital = self._own_cities[0][:2] if self._own_cities else None
+        walk_avoid = self._trip_blocked(settler, turn)
         for site in exploration.settle_sites:
             site_score = score_site(site, s)
             distance = hex_distance(settler.x, settler.y, site.x, site.y, s.map_width)
-            turns = math.ceil(distance / max(1.0, settler.max_moves))
+            turns = self._site_turns(settler, site, distance, walk_avoid)
             # The first city can't be picky: a rival's pull is only counted once we have a city.
             margin, rate, safe = 0.0, 0.0, 0.0
             sources = self._pressure_sources()
@@ -1445,6 +1534,8 @@ class SettlingPolicy:
         def record(action: str, reason: str, target=None, result: str = "") -> None:
             if action in _HELD_ACTIONS:
                 self._held_now.add(settler.unit_id)
+            if action in _WAIT_ACTIONS:
+                self._movement().trips.wait(settler.unit_id, turn)
             self._record(
                 SettleDecision(
                     turn=turn,
@@ -1503,7 +1594,7 @@ class SettlingPolicy:
         ):
             return
         near = danger.count_near(settler.x, settler.y, s.flee_radius, s.flee_mounted_extra)
-        threatened = near > 0 and not found_now_ok
+        threatened = near >= 1.0 and not found_now_ok
         # Live (Run 12): an escorted settler stepped out, then fled back to the city next turn
         # and the pair repeated it. A settler with its escort on the tile goes on instead. Live
         # (issue 283): two settlers were taken with an escort on the tile or beside it, with two
@@ -1582,6 +1673,7 @@ class SettlingPolicy:
                 self._holds.pop(settler.unit_id, None)
                 self._no_site_turns.pop(settler.unit_id, None)
                 self._founded.add(settler.unit_id)
+                self._end_trip(settler, "founded")
                 city_tiles.append((settler.x, settler.y))  # Later settlers this turn see it.
                 return
             self._failed_sites.add((settler.x, settler.y))
@@ -1590,6 +1682,7 @@ class SettlingPolicy:
 
         if not better:
             self._site_claims.pop(settler.unit_id, None)
+            self._end_trip(settler, "no_site")
             idle = self._no_site_turns.get(settler.unit_id, 0) + 1
             self._no_site_turns[settler.unit_id] = idle
             if idle >= s.no_site_disband_turns and await self._disband(game, settler, record, idle):
@@ -1682,8 +1775,9 @@ class SettlingPolicy:
         """Take one step towards the site. Returns False if the settler did not get closer."""
         s = self.settings
         goal = (target.x, target.y)
+        self._open_trip(settler, target, turn)
         if target.path_threat and escort is not None:
-            step = self._pick_step(settler, goal, units=units, escort=escort)
+            step = self._next_step(settler, goal, units=units, escort=escort)
             claimed.add(escort.unit_id)
             if step is None:
                 record("hold", "every step towards the site was refused", goal)
@@ -1705,7 +1799,10 @@ class SettlingPolicy:
                     # The escort waits on the free tile; a civilian may join it there.
                     result = await game.move_unit(settler.unit_index, *step)
                     record("escort_move", "the settler joins the escort on the route", goal, result)
-                    return move_succeeded(result)
+                    if move_succeeded(result):
+                        self._note_arrival(settler, goal, result)
+                        return True
+                    return False
                 else:
                     meet = step  # Two combat units can't share a tile, so meet on the route.
                 result = await game.move_unit(escort.unit_index, *meet)
@@ -1716,13 +1813,15 @@ class SettlingPolicy:
                 return False
             result = await game.move_unit(escort.unit_index, *step)
             if not move_succeeded(result):
-                self._remember_refused(settler, goal, step, result)
+                self._refuse(settler, step, result)
                 record("hold", "the escort could not move", goal, result)
                 return False
             result = await game.move_unit(settler.unit_index, *step)
             moved = move_succeeded(result)
             if not moved:
-                self._remember_refused(settler, goal, step, result)
+                self._refuse(settler, step, result)
+            else:
+                self._note_arrival(settler, goal, result)
             record("escort_move", "route is threatened, so the escort leads", goal, result)
             return moved
         # Issue 288: a settler that reaches the site with no moves left spends a turn there
@@ -1730,22 +1829,25 @@ class SettlingPolicy:
         dest = goal
         gap = hex_distance(settler.x, settler.y, *goal, s.map_width)
         if target.recent_near and 2 <= gap <= max(1, int(settler.moves)):
-            dest = self._pick_step(settler, goal, stop_short=True) or goal
+            dest = self._next_step(settler, goal, stop_short=True) or goal
             reason = "a hostile unit was seen near the site, so stopping a tile short"
         result = await game.move_unit(settler.unit_index, *dest)
         moved = move_succeeded(result)
+        if moved:
+            self._note_arrival(settler, goal, result)
         if not moved and gap > max(1, int(settler.moves)):
             # Issue 394: the long order was refused; step along the terrain path this turn.
             # The refusal says the route is blocked somewhere between, not that the site is
             # impassable, so the site is not remembered as a refused tile.
             tried = {tuple(dest)}
             for _ in range(max(0, s.refused_move_fallback_steps)):
-                step = self._pick_step(settler, goal, units=units)
+                step = self._next_step(settler, goal, units=units)
                 if step is None or tuple(step) in tried:
                     break
                 tried.add(tuple(step))
                 short = await game.move_unit(settler.unit_index, *step)
                 if move_succeeded(short):
+                    self._note_arrival(settler, goal, short)
                     self._move_failures.pop(goal, None)
                     record(
                         "move",
@@ -1754,7 +1856,7 @@ class SettlingPolicy:
                         short,
                     )
                     return True
-                self._remember_refused(settler, goal, step, short)
+                self._refuse(settler, step, short)
         if moved:
             self._move_failures.pop(goal, None)
         else:
@@ -1767,17 +1869,73 @@ class SettlingPolicy:
         record("move", reason if moved else "move refused, trying again later", goal, result)
         return moved
 
-    def _remember_refused(self, settler, goal, step, result) -> None:
-        """Keep a step the game refused for the trip to `goal`, unless only a stacking conflict
-        (which passes once the blocker moves) stopped it."""
-        if "STACKING" in str(result):
-            return
-        kept = self._refused_steps.get(settler.unit_id)
-        tiles = set(kept[1]) if kept is not None and kept[0] == tuple(goal) else set()
-        tiles.add(tuple(step))
-        self._refused_steps[settler.unit_id] = (tuple(goal), tiles)
+    def _movement(self) -> Movement:
+        """The shared movement service (#399), or one made here from the terrain store and the
+        threat map when the bot did not inject one (a stub store means no terrain)."""
+        terrain = self.terrain if isinstance(self.terrain, TerrainStore) else None
+        if self.movement is None or self.movement.terrain is not terrain:
+            self.movement = Movement(
+                terrain, self.threat_map, MovementSettings(map_width=self.settings.map_width)
+            )
+        return self.movement
 
-    def _pick_step(
+    def _trip_blocked(self, settler, turn: int) -> frozenset:
+        """Tiles the game refused this settler on its trip, still in force on `turn`."""
+        movement = self._movement()
+        trip = movement.trips.trip(settler.unit_id)
+        if trip is None:
+            return frozenset()
+        return frozenset(trip.blocked(turn, movement.settings.transient_reasons))
+
+    def _site_turns(self, settler, site, distance: int, avoid) -> int:
+        """Turns for the settler to walk to the site: the walk by terrain (the game's rule, a
+        tile is entered while any movement is left), not the hex distance. Already there is 0. A
+        site no walk reaches within the horizon reads as the horizon, which the travel cost then
+        weighs; with no terrain it is the hex estimate."""
+        moves = max(1.0, settler.max_moves)
+        if distance == 0:
+            return 0
+        movement = self._movement()
+        if movement.terrain is None:
+            return math.ceil(distance / moves)
+        walked = movement.walk_turns((settler.x, settler.y), (site.x, site.y), moves, avoid)
+        return walked if walked is not None else math.ceil(movement.settings.horizon_turns)
+
+    def _open_trip(self, settler, target, turn: int) -> None:
+        """Start logging the walk to the site, unless this settler is already on it."""
+        goal = (target.x, target.y)
+        trips = self._movement().trips
+        open_trip = trips.trip(settler.unit_id)
+        if open_trip is not None and open_trip.goal == goal:
+            return
+        estimate, basis = self._movement().estimate(
+            (settler.x, settler.y), goal, max(1.0, settler.max_moves)
+        )
+        trips.start(settler.unit_id, "settler", (settler.x, settler.y), goal, turn, estimate, basis)
+
+    def _note_arrival(self, settler, goal, result) -> None:
+        """The move said the settler stands on the site: the trip is over."""
+        found = re.search(r"now_at:(-?\d+),(-?\d+)", str(result))
+        if found is None or (int(found[1]), int(found[2])) != tuple(goal):
+            return
+        trips = self._movement().trips
+        trip = trips.trip(settler.unit_id)
+        if trip is not None and trip.goal == tuple(goal):
+            trips.arrived(settler.unit_id, self._last_turn)
+
+    def _end_trip(self, settler, outcome: str) -> None:
+        """Close a trip the settler no longer follows (founded, no site, fled)."""
+        trips = self._movement().trips
+        trips.observe(settler.unit_id, (settler.x, settler.y), self._last_turn)
+        trips.abandon(settler.unit_id, self._last_turn, outcome)
+
+    def _refuse(self, settler, step, result) -> None:
+        """Keep a step the game refused for the trip. A stacking conflict passes once the blocker
+        moves, so it holds for this turn only."""
+        reason = "stacking" if "STACKING" in str(result) else "refused"
+        self._movement().trips.refuse(settler.unit_id, tuple(step), reason, self._last_turn)
+
+    def _next_step(
         self, settler, goal, stop_short=False, units=(), escort=None
     ) -> tuple[int, int] | None:
         """The tile to send the settler (and escort) to this turn. Issue 368: the first stretch of
@@ -1787,16 +1945,22 @@ class SettlingPolicy:
         hold."""
         here = (settler.x, settler.y)
         moves = max(1, int(settler.moves))
-        kept = self._refused_steps.get(settler.unit_id)
-        avoid = set(kept[1]) if kept is not None and kept[0] == tuple(goal) else set()
+        movement = self._movement()
+        trip = movement.trips.trip(settler.unit_id)
+        if trip is not None and trip.goal != tuple(goal):
+            trip = None  # Another site's refusals do not apply.
+        turn = self._last_turn
+        avoid = trip.blocked(turn, movement.settings.transient_reasons) if trip else ()
         keep = escort.unit_id if escort is not None else None
         occupied = {
             (u.x, u.y)
             for u in units
             if _holds_tile(u) and u.unit_id != keep and u.unit_id != settler.unit_id
         }
-        if self.terrain is not None and len(self.terrain):
-            found = self.terrain.step_toward(here, goal, moves, avoid, stop_short, occupied)
+        if movement.terrain is not None and len(movement.terrain):
+            found = movement.next_step(
+                here, goal, moves, trip=trip, turn=turn, occupied=occupied, stop_short=stop_short
+            )
             if found is not None or avoid or occupied:
                 return found  # None with refusals: the route is used up, so the caller holds.
         line = hex_line(here, goal, self.settings.map_width)
@@ -1817,7 +1981,7 @@ class SettlingPolicy:
         if not crowded:
             meet = (settler.x, settler.y)
         else:
-            meet = self._pick_step(settler, (target.x, target.y), units=units, escort=escort)
+            meet = self._next_step(settler, (target.x, target.y), units=units, escort=escort)
             if meet is None:
                 return False
         return self._order_key(escort, meet, units) in self._refused
@@ -1900,12 +2064,14 @@ class SettlingPolicy:
 
     async def _step_and_found(self, game, settler, target, city_tiles, record) -> bool:
         goal = (target.x, target.y)
+        self._open_trip(settler, target, self._last_turn)  # A direct step is a trip too.
         result = await game.move_unit(settler.unit_index, *goal)
         if not move_succeeded(result) or f"now_at:{goal[0]},{goal[1]}" not in result:
             record(
                 "move", "stepping onto the site to found it, but it did not arrive", goal, result
             )
             return False
+        self._note_arrival(settler, goal, result)  # The move is confirmed: an open trip ended here.
         found = await game.found_city(settler.unit_index)
         if action_succeeded(found):
             record(
@@ -1915,6 +2081,7 @@ class SettlingPolicy:
             self._holds.pop(settler.unit_id, None)
             self._no_site_turns.pop(settler.unit_id, None)
             self._founded.add(settler.unit_id)
+            self._end_trip(settler, "founded")
             city_tiles.append(goal)
             return True
         # Not blacklisted: the step may have used the moves founding needs (the terrain cost is
@@ -1938,9 +2105,10 @@ class SettlingPolicy:
                 claim = self._site_claims.get(settler.unit_id)
                 if claim is not None:
                     self._fled[settler.unit_id] = claim
+                self._end_trip(settler, "fled")
                 record(
                     "flee",
-                    f"{near} hostile unit(s) close, retreating to the nearest city",
+                    f"{near:g} hostile unit(s) close, retreating to the nearest city",
                     city,
                     result,
                 )

@@ -213,6 +213,8 @@ class Trip:
     estimated: int | None  # Turns the walk is expected to take; None when nothing could say.
     basis: str = "walk"  # "walk" (terrain) or "hex" (distance only).
     refused: dict[Tile, tuple[str, int]] = field(default_factory=dict)  # tile -> (reason, turn)
+    waits: int = 0  # Turns spent waiting (hold, flee, gathering an escort), not walking.
+    last_wait: int = -1
 
     def blocked(self, turn: int, transient: Iterable[str] = ("stacking",)) -> set[Tile]:
         """Tiles the game refused that still hold on `turn`: a transient reason (stacking) holds
@@ -265,6 +267,14 @@ class TripLog:
         if trip is not None:
             trip.refused[tile] = (reason, turn)
 
+    def wait(self, unit_id: int, turn: int) -> None:
+        """The unit spent `turn` waiting rather than walking (counted once per turn), so the
+        trip can be judged on its moving turns."""
+        trip = self.trips.get(unit_id)
+        if trip is not None and trip.last_wait != turn:
+            trip.last_wait = turn
+            trip.waits += 1
+
     def observe(self, unit_id: int, at: Tile, turn: int) -> None:
         """The unit stands at `at` on `turn`: close its trip if that is the goal, or if it has
         been open longer than `trip_timeout_turns`."""
@@ -310,6 +320,7 @@ class TripLog:
             "actual": turn - trip.start_turn + 1,
             "outcome": outcome,
             "basis": trip.basis,
+            "waits": trip.waits,
             "refused": sorted([x, y, reason] for (x, y), (reason, _) in trip.refused.items()),
         }
         self.closed.append(row)

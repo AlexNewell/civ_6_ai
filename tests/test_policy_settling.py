@@ -2743,3 +2743,42 @@ def test_the_trip_projection_follows_terrain_costs_not_moves_times_turn():
     first = movement.next_step((10, 14), (14, 6), 2)
     second = movement.next_step(first, (14, 6), 2)
     assert second != first
+
+
+def test_a_chased_scout_is_not_lured_home_and_cover_is_not_a_bonus():
+    # PR 406 (STD_T1_03): the scout circled the capital and the barbarians came with it.
+    s = SettlingSettings()
+    home = score_scout_tile(0, 0, 0, True, s, chased=True, near_city=True)
+    away = score_scout_tile(0, 0, 0, False, s, chased=True, near_city=False)
+    assert away > home
+    # Unchased, cover is still a mild bonus.
+    assert score_scout_tile(0, 0, 0, True, s) > score_scout_tile(0, 0, 0, False, s)
+    scout = unit_info(unit_id=3, unit_index=3, x=59, y=12, **SCOUT)
+    capital = city_info(x=59, y=10, buildings=[])
+    fog = lq.StrategicMapData([lq.FogBoundary("Alpha", 59, 10, [-1, -1, -1, 8, -1, -1])], [])
+    game = make_game([scout], cities=[capital], strategic=fog, threats=[barbarian(59, 14)], turn=17)
+    run(SettlingPolicy(), game)
+    _, _, x, y = game.actions[0]
+    assert hex_distance(x, y, 59, 10, 66) >= 3  # Not back around the capital.
+    assert hex_distance(x, y, 59, 14, 66) > 2
+
+
+def test_a_scout_does_not_flip_between_two_safe_tiles():
+    s = SettlingSettings()
+    assert score_scout_tile(0, 1, 1, False, s, revisit=True) < score_scout_tile(0, 1, 1, False, s)
+    assert s.scout_revisit_weight < s.scout_danger_weight  # Danger still overrides.
+    scout = unit_info(unit_id=3, unit_index=3, x=58, y=8, **SCOUT)
+    capital = city_info(x=59, y=10, buildings=[])
+    fog = lq.StrategicMapData([lq.FogBoundary("Alpha", 59, 10, [-1, -1, -1, -1, 8, -1])], [])
+    policy = SettlingPolicy()
+    first = make_game(
+        [scout], cities=[capital], strategic=fog, threats=[barbarian(58, 11)], turn=23
+    )
+    run(policy, first)
+    went = first.actions[0][2:]
+    moved = unit_info(unit_id=3, unit_index=3, x=went[0], y=went[1], **SCOUT)
+    second = make_game(
+        [moved], cities=[capital], strategic=fog, threats=[barbarian(58, 11)], turn=24
+    )
+    run(policy, second)
+    assert not second.actions or second.actions[0][2:] != (58, 8)

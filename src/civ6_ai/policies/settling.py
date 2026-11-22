@@ -276,6 +276,15 @@ class SettlingSettings:
     scout_reveal_radius: int = 2
     scout_cover_weight: float = 0.5  # A mild bonus for an own city or unit within cover radius.
     scout_cover_radius: int = 2
+    # STD_T1_03 (PR 406): the chosen safe tiles circled the capital and the barbarians chasing the
+    # scout came with it (capital short, map threat 3, warriors instead of scout and monument).
+    # While hostiles chase it, ending near an own city lures them in: that costs score instead
+    # of earning cover. A tile just left costs a little, so it does not flip between two tiles;
+    # danger (weight above) still overrides both.
+    scout_chase_radius: int = 5  # Hostiles this close to the scout count as chasing it.
+    scout_lure_weight: float = 3.0  # Score lost for ending a chased turn near an own city.
+    scout_lure_radius: int = 3
+    scout_revisit_weight: float = 2.0  # Score lost for going back to the tile it just left.
     automate_retry_turns: int = 3  # Before an idle scout is handed to the game's explorer again.
     map_width: int | None = STANDARD_MAP_WIDTH
 
@@ -896,16 +905,24 @@ def score_scout_tile(
     revealed: int,
     covered: bool,
     settings: "SettlingSettings",
+    chased: bool = False,
+    near_city: bool = False,
+    revisit: bool = False,
 ) -> float:
     """Issue 405: one reachable tile for a scout that cannot explore safely. `danger` counts the
     hostiles that can attack it next turn, `progress` is the hex distance toward the nearest
     frontier gained by going there (negative for a retreat), `revealed` the frontier points within
-    sight of it and `covered` whether an own city or unit is close. Every term is a weight."""
+    sight of it and `covered` whether an own city or unit is close. Chased by hostiles, cover is
+    not a bonus and `near_city` is a cost (it leads them home); `revisit` marks the tile the
+    scout just left. Every term is a weight."""
+    cover = 0.0 if chased else (settings.scout_cover_weight if covered else 0.0)
     return (
         -settings.scout_danger_weight * danger
         + settings.scout_explore_weight * progress
         + settings.scout_reveal_weight * revealed
-        + (settings.scout_cover_weight if covered else 0.0)
+        + cover
+        - (settings.scout_lure_weight if chased and near_city else 0.0)
+        - (settings.scout_revisit_weight if revisit else 0.0)
     )
 
 
@@ -1064,6 +1081,7 @@ class SettlingPolicy:
     _stripped: dict[tuple[int, int], int] = field(default_factory=dict, init=False, repr=False)
     _automated: dict[int, int] = field(default_factory=dict, init=False, repr=False)
     _scout_targets: dict[int, tuple[int, int]] = field(default_factory=dict, init=False, repr=False)
+    _scout_left: dict[int, tuple[int, int]] = field(default_factory=dict, init=False, repr=False)
     # Shared with production and the expansion log. `run` fills it when it surveys the map.
     expansion: ExpansionState = field(default_factory=ExpansionState)
     _own_cities: list[tuple[int, int, int]] = field(default_factory=list, init=False, repr=False)
@@ -1194,7 +1212,7 @@ class SettlingPolicy:
                     ]
                     look = short[-1] if short else None
                     log.info("scout %s sent toward the suspected camp at %s", scout.unit_id, look)
-            await self._explore(game, scout, exploration, danger, turn, look, friends)
+            await self._explore(game, scout, exploration, danger, turn, look, friends, city_tiles)
 
     def _recent_sightings(self, turn: int) -> tuple[tuple[int, int], ...]:
         """Where hostile land units were last seen in recent turns and are not in sight now."""
@@ -1370,6 +1388,7 @@ class SettlingPolicy:
         self._holds = {k: v for k, v in self._holds.items() if k in alive}
         self._no_site_turns = {k: v for k, v in self._no_site_turns.items() if k in alive}
         self._scout_targets = {k: v for k, v in self._scout_targets.items() if k in alive}
+        self._scout_left = {k: v for k, v in self._scout_left.items() if k in alive}
         self._automated = {k: v for k, v in self._automated.items() if k in alive}
         self._set_aside = {k: v for k, v in self._set_aside.items() if v >= turn}
         self._bad_frontiers = {k: v for k, v in self._bad_frontiers.items() if v >= turn}
@@ -2409,6 +2428,7 @@ class SettlingPolicy:
         frontier: Sequence[tuple[int, int]],
         danger: _Danger,
         friends: Sequence[tuple[int, int]],
+        cities: Sequence[tuple[int, int]] = (),
     ) -> bool:
         """Issue 405: move the scout to the best-scored tile it can reach this turn (see
         `score_scout_tile`), onward into the fog as readily as back toward a city. True when it
@@ -2434,6 +2454,8 @@ class SettlingPolicy:
             return min((hex_distance(*p, *f, width) for f in frontier), default=0)
 
         gap = nearest(here)
+        chased = danger.count_near(*here, s.scout_chase_radius) >= 1.0
+        left = self._scout_left.get(scout.unit_id)
         scored = []
         for tile in tiles:
             d = danger.count_near(*tile, s.scout_threat_radius)
@@ -2443,6 +2465,9 @@ class SettlingPolicy:
                 sum(hex_distance(*tile, *f, width) <= s.scout_reveal_radius for f in frontier),
                 any(hex_distance(*tile, *f, width) <= s.scout_cover_radius for f in friends),
                 s,
+                chased,
+                any(hex_distance(*tile, *c, width) <= s.scout_lure_radius for c in cities),
+                tile == left,
             )
             scored.append((-score, tile != here, tile, d))
         scored.sort()
@@ -2452,6 +2477,7 @@ class SettlingPolicy:
                 return False
             if move_succeeded(await game.move_unit(scout.unit_index, *tile)):
                 self._scout_targets.pop(scout.unit_id, None)
+                self._scout_left[scout.unit_id] = here
                 log.info(
                     "scout %s moves %s -> %s: every frontier is near a hostile unit "
                     "(score %.1f, danger %g)",
@@ -2473,6 +2499,7 @@ class SettlingPolicy:
         turn: int,
         look: tuple[int, int] | None = None,
         friends: Sequence[tuple[int, int]] = (),
+        cities: Sequence[tuple[int, int]] = (),
     ) -> None:
         s = self.settings
         taken = {t for uid, t in self._scout_targets.items() if uid != scout.unit_id}
@@ -2521,7 +2548,7 @@ class SettlingPolicy:
         in_reach = danger.count_near(scout.x, scout.y, s.scout_threat_radius) >= 1.0
         if (blocked_by_threat and not tried) or in_reach:
             # Issue 405: score every tile it can reach, in any direction, and go to the best.
-            if await self._scout_to_safety(game, scout, reachable, danger, friends):
+            if await self._scout_to_safety(game, scout, reachable, danger, friends, cities):
                 return
             return  # Staying is the best tile, or in reach: never hand it over (issue 405).
         last = self._automated.get(scout.unit_id)

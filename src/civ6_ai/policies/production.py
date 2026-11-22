@@ -19,6 +19,22 @@ from typing import Any, Protocol
 from civ6_ai.blockers import Blocker, BlockerGame, BlockerType
 from civ6_ai.city_tiles import REFRESH_TURNS, CityTiles, read_city_tiles
 from civ6_ai.construction import ProductionRefused, ProductionSet
+from civ6_ai.era import (
+    EraClock,
+    EraSettings,
+    district_nudge,
+    eligible_districts,
+    outlook,
+)
+from civ6_ai.era_moments import (
+    READ_TRIES as MOMENT_TRIES,
+)
+from civ6_ai.era_moments import (
+    cheapest_by_kind,
+    log_moments,
+    moment_nudge,
+    read_moments,
+)
 from civ6_ai.monitors import Event, EventBus
 from civ6_ai.placement import (
     ELSEWHERE,
@@ -144,6 +160,17 @@ class ProductionWeights:
     # settling (issue 284) are unchanged. False restores the old order, for a posture that wants
     # the camp cleared first.
     settler_before_camp: bool = True
+    # Issue 311: while the era outlook says push (about 10 turns before the era ends, the score
+    # within reach of a Dark or Golden breakpoint), the first district of a kind earns a Historic
+    # Moment. This adds to its score, about one ordinary building. The district would be built
+    # sooner or later; the nudge only moves it up. 0 turns it off.
+    era_district_bonus: float = 3.0
+    # Issue 311: other kinds of Historic Moment the bot can steer toward (a first Trader, a
+    # wonder), read from the game's Moments table. While the push is on, such a build scores
+    # `per_point` more for each era score point its kind gives, at most `cap`. The first live
+    # check (era score 1 at turns 40 and 50) showed the district gate alone reached nothing.
+    era_moment_per_point: float = 1.0
+    era_moment_cap: float = 4.0
     # Issue 388: Walls in a city the threat map rates. Live (STD_T1_04, T44) Arretium built Walls at
     # 10.8 over a Granary at 4.8 while the map said cover 80 against threat 21.9 (net 0, walls
     # save 4 damage): the barbarians had to walk around mountains and sea. Walls are now worth
@@ -246,6 +273,14 @@ class ProductionContext:
     rivals: int = 0
     rival_progress: Mapping[str, tuple[float, ...]] = field(default_factory=dict, compare=False)
     wonder_alternative: float = 5.0
+    era_push: bool = False  # Issue 311: the era outlook says to favour cheap Historic Moments.
+    era_turns_left: int | None = None  # Turns to the era boundary; a build must beat it.
+    # The districts whose best tile in this city earns a Historic Moment (set per city, only while
+    # the push is on, by `choose_for_city`), and the kinds already chosen for one.
+    era_districts: frozenset[str] = frozenset()
+    era_claimed: frozenset[str] = frozenset()
+    # Era score of the cheapest moment per kind in this era (`era_moments.cheapest_by_kind`).
+    era_moments: Mapping[str, int] = field(default_factory=dict, compare=False)
     # Where `rivals` came from, for the log: "rankings" (living majors but us, as last read) or
     # "default" (no rankings read yet). Not a decision input.
     rivals_source: str = field(default="", compare=False)
@@ -1167,10 +1202,35 @@ def _raw_value(
     elif option.category == "UNIT":
         value = _unit_score(option, city, ctx, weights)
     elif option.category == "DISTRICT":
-        value = _district_score(option, city, weights, ctx)
+        value = _district_score(option, city, weights, ctx) + district_nudge(
+            _short(option.item),
+            ctx.era_districts,
+            option.turns,
+            ctx.era_turns_left,
+            weights.era_district_bonus,
+        )
     else:
         value = _building_score(option, city, ctx, weights)
+    if value > 0:
+        value += _era_moment_nudge(option, ctx, weights)
     return value
+
+
+def _era_moment_nudge(
+    option: ProductionChoice, ctx: ProductionContext, w: ProductionWeights
+) -> float:
+    """Issue 311: while the era push is on, a build that earns a Historic Moment scores a little
+    more: the empire's first Trader (a first trade route) or a wonder. Not the settler branch."""
+    if not ctx.era_push or not ctx.era_moments:
+        return 0.0
+    if option.item == "UNIT_TRADER" and ctx.traders == 0 and ctx.trade_capacity > 0:
+        kind = "trade"
+    elif option.item in WONDERS:
+        kind = "wonder"
+    else:
+        return 0.0
+    fits = ctx.era_turns_left is not None and option.turns <= ctx.era_turns_left
+    return moment_nudge(kind, ctx.era_moments, w.era_moment_per_point, w.era_moment_cap, fits)
 
 
 def _is_floor_unit(option: ProductionChoice) -> bool:
@@ -1578,6 +1638,37 @@ async def _explain(
     return reason, needs, signature
 
 
+async def _with_era_districts(
+    game: ProductionGame,
+    city: City,
+    options: list[ProductionChoice],
+    context: ProductionContext,
+    claimed: frozenset[str] = frozenset(),
+) -> ProductionContext:
+    """The context with the districts that would earn a Historic Moment in this city (issue 311).
+
+    Reads the district advisor for each district on offer whose kind is not yet claimed, only
+    while the era push is on, so the extra calls are limited to the last turns of an era.
+    """
+    claimed = claimed | context.era_claimed  # The shared set is newer than the snapshot.
+    best: dict[str, int] = {}
+    for option in options:
+        if option.category != "DISTRICT" or option.is_repair:
+            continue
+        name = _short(option.item)
+        if name in claimed or name in best:
+            continue
+        try:
+            placements = await game.get_district_advisor(city.city_id, option.item)
+        except Exception:  # A failed read only loses the nudge.
+            log.debug("era moment read failed for %s", option.item, exc_info=True)
+            continue
+        if isinstance(placements, list) and placements:
+            best[name] = max(p.total_adjacency for p in placements)
+    eligible = eligible_districts(best, claimed, EraSettings())
+    return replace(context, era_districts=eligible)
+
+
 async def choose_for_city(
     game: ProductionGame,
     city: City,
@@ -1589,6 +1680,7 @@ async def choose_for_city(
     emit: Callable[[Event], None] | None = None,
     reads: PlacementReads | None = None,
     planner: Planner | None = None,
+    era_claimed: set[str] | None = None,
 ) -> ProductionChoice | None:
     """Start the best option that the game accepts. Returns it, or None if all were refused.
 
@@ -1599,6 +1691,10 @@ async def choose_for_city(
     """
     options = list(options)
     base_context = context
+    if context.era_push and weights.era_district_bonus > 0 and not only_defence:
+        base_context = await _with_era_districts(
+            game, city, options, context, frozenset(era_claimed or ())
+        )
 
     def with_race(gone: frozenset[str] = frozenset()) -> ProductionContext:
         """The context with the race alternative, over the same filter and dominance pass as
@@ -1716,6 +1812,8 @@ async def choose_for_city(
                         placements_offered=trace.placements,
                     )
                 )
+            if era_claimed is not None and _short(option.item) in context.era_districts:
+                era_claimed.add(_short(option.item))  # Its moment is spoken for.
             if memory is not None:
                 memory.accepted(city, option.item)
             placed = option.category == "DISTRICT" or trace.placements is not None
@@ -1796,12 +1894,16 @@ class CityProductionPolicy:
         builder_demand: Any = None,
         trade_blocked: Any = None,
         rankings: Any = None,
+        era: Any = None,
     ) -> None:
         self.rankings = rankings  # A `RankingsHolder`, or None: the rivals count for wonder races.
         self.trade_blocked = (
             trade_blocked  # `SecondaryPolicy.trade_blocked` (turn -> bool), or None.
         )
         self.builder_demand = builder_demand  # `builder.BuilderDemand`, or None.
+        self.era = era  # An `EraHolder`, or None: the turn loop's era outlook (issue 311).
+        self._era_clock = EraClock()  # Own clock when there is no holder (a test).
+        self._era_claimed: set[str] = set()  # District kinds chosen for a Historic Moment.
         self.scouts_built = 0  # Scouts queued so far; caps the early rebuilds (issue 301).
         self._food_focus: set[int] = set()  # Cities this policy set to a food focus.
         self._reset: set[int] = set()  # Cities returned to default, which may starve again.
@@ -1823,6 +1925,8 @@ class CityProductionPolicy:
         self._tiles_age = REFRESH_TURNS  # Turns since the last read.
         self._replace_tries = 0  # Reads of the game's replacement tables tried.
         self._replace_done = False
+        self._moments: tuple = ()  # The game's Historic Moments, read once (issue 311).
+        self._moment_tries = 0
         self._tiles_seen: dict[int, tuple[int, bool]] = {}  # (pop, starving) at the last read.
         self.planner = Planner(
             emit=self._emit
@@ -1851,6 +1955,7 @@ class CityProductionPolicy:
             trade_safe=not (self.trade_blocked is not None and self.trade_blocked(empire.turn)),
         )
         self.expansion.target_cities = self.weights.target_cities
+        era = self._era_outlook(empire)
         growth = self.growth.update(cities, empire, self.weights.target_cities, tiles=self._tiles)
         context = replace(
             context,
@@ -1858,6 +1963,10 @@ class CityProductionPolicy:
             held_settlers=self.expansion.held_settlers,
             scouts_built=self.scouts_built,
             growth=growth,
+            era_push=era.push,
+            era_turns_left=era.turns_left,
+            era_claimed=frozenset(self._era_claimed),
+            era_moments=cheapest_by_kind(self._moments, empire.era) if era.push else {},
         )
         if self.weights.wonder_races:
             # Issue 328: the race inputs are read only when the setting is on. The difficulty
@@ -1870,6 +1979,24 @@ class CityProductionPolicy:
             )
         return context
 
+    def _era_outlook(self, empire):
+        """Issue 311: the era outlook for this turn. The turn loop's when it set one (it sees
+        every era change), else one from this policy's own clock."""
+        held = self.era.last if self.era is not None else None
+        if held is not None and held.turn == empire.turn:
+            return held
+        # The holder's clock sees every turn the turn loop plays, so share it when there is one.
+        clock = self.era.clock if self.era is not None else self._era_clock
+        return outlook(
+            empire.turn,
+            empire.era_score,
+            empire.dark_threshold,
+            empire.golden_threshold,
+            empire.game_speed,
+            EraSettings(),
+            clock.observe(empire.turn, empire.era),
+        )
+
     async def assign(self, game: ProductionGame) -> list[str]:
         """Choose for each idle city, and return the names of any left without a choice.
 
@@ -1879,6 +2006,7 @@ class CityProductionPolicy:
         """
         cities = await _read_cities(game)
         await self._read_replacements(game)
+        await self._read_moments(game)
         await self._read_tiles(game, cities)
         await self._feed_starving(game, cities)
         await self._focus_at_caps(game, cities)
@@ -1919,6 +2047,7 @@ class CityProductionPolicy:
                 only_defence=True,
                 memory=self.refusals,
                 emit=self._emit,
+                era_claimed=self._era_claimed,
                 reads=reads,
             )
             if picked is not None:
@@ -1941,6 +2070,7 @@ class CityProductionPolicy:
                 self.weights,
                 memory=self.refusals,
                 emit=self._emit,
+                era_claimed=self._era_claimed,
                 reads=reads,
             )
             if picked is not None:
@@ -1973,6 +2103,7 @@ class CityProductionPolicy:
                 self.weights,
                 memory=self.refusals,
                 emit=self._emit,
+                era_claimed=self._era_claimed,
                 reads=reads,
                 planner=self.planner,
             )
@@ -1995,6 +2126,7 @@ class CityProductionPolicy:
                 self.weights,
                 memory=self.refusals,
                 emit=self._emit,
+                era_claimed=self._era_claimed,
                 reads=reads,
                 planner=self.planner,
             )
@@ -2146,6 +2278,25 @@ class CityProductionPolicy:
             len(read.districts),
             len(read.units),
         )
+
+    async def _read_moments(self, game: ProductionGame) -> None:
+        """Read the game's Historic Moments once per game and log the earnable ones (issue 311).
+        A failed read is retried up to `MOMENT_TRIES` times, then there are no moment nudges."""
+        execute = getattr(game, "execute_lua", None)
+        if self._moments or execute is None or self._moment_tries >= MOMENT_TRIES:
+            return
+        self._moment_tries += 1
+        try:
+            moments = await read_moments(game)
+        except ConnectionError:
+            raise
+        except Exception as err:
+            log.warning("Moment read failed, no moment nudges: %s", err)
+            return
+        self._moments = moments
+        if self.era is not None:
+            self.era.moments = moments
+        log_moments(moments, self._era_clock.era or "")
 
     async def _read_tiles(self, game: ProductionGame, cities: list[City]) -> None:
         """Refresh the per-city tile foods: every `REFRESH_TURNS`, or when a city's size changed or

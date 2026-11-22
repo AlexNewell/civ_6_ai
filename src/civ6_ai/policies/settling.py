@@ -1822,7 +1822,7 @@ class SettlingPolicy:
         s = self.settings
         goal = (target.x, target.y)
         if target.path_threat and escort is not None:
-            step = self._pick_step(settler, goal)
+            step = self._pick_step(settler, goal, units=units, escort=escort)
             claimed.add(escort.unit_id)
             if step is None:
                 record("hold", "every step towards the site was refused", goal)
@@ -1897,24 +1897,34 @@ class SettlingPolicy:
         tiles.add(tuple(step))
         self._refused_steps[settler.unit_id] = (tuple(goal), tiles)
 
-    def _pick_step(self, settler, goal, stop_short=False) -> tuple[int, int] | None:
+    def _pick_step(
+        self, settler, goal, stop_short=False, units=(), escort=None
+    ) -> tuple[int, int] | None:
         """The tile to send the settler (and escort) to this turn. Issue 368: the first stretch of
         a cheapest terrain path, never water or a mountain nor a step the game refused; the
-        straight line when no path is known."""
+        straight line when no path is known. Issue 377: a tile one of our own combat units (other
+        than the escort) stands on is passed over for the next-farthest free tile; none free means
+        hold."""
         here = (settler.x, settler.y)
         moves = max(1, int(settler.moves))
         kept = self._refused_steps.get(settler.unit_id)
         avoid = set(kept[1]) if kept is not None and kept[0] == tuple(goal) else set()
+        keep = escort.unit_id if escort is not None else None
+        occupied = {
+            (u.x, u.y)
+            for u in units
+            if _holds_tile(u) and u.unit_id != keep and u.unit_id != settler.unit_id
+        }
         if self.terrain is not None and len(self.terrain):
-            found = self.terrain.step_toward(here, goal, moves, avoid, stop_short)
-            if found is not None or avoid:
+            found = self.terrain.step_toward(here, goal, moves, avoid, stop_short, occupied)
+            if found is not None or avoid or occupied:
                 return found  # None with refusals: the route is used up, so the caller holds.
         line = hex_line(here, goal, self.settings.map_width)
         if stop_short:
             step = line[-2] if len(line) >= 2 else None
         else:
             step = line[min(moves, len(line)) - 1] if line else None
-        return None if step in avoid else step
+        return None if step in avoid or step in occupied else step
 
     def _order_key(self, escort, dest, units) -> tuple:
         crowd = sum(1 for u in units if _holds_tile(u) and (u.x, u.y) == tuple(dest))
@@ -1927,7 +1937,7 @@ class SettlingPolicy:
         if not crowded:
             meet = (settler.x, settler.y)
         else:
-            meet = self._pick_step(settler, (target.x, target.y))
+            meet = self._pick_step(settler, (target.x, target.y), units=units, escort=escort)
             if meet is None:
                 return False
         return self._order_key(escort, meet, units) in self._refused

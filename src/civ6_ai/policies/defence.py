@@ -148,6 +148,16 @@ class DefenceState:
             i for i, c in self.cities.items() if c.reading is not None and bool(c.hostile_tiles)
         )
 
+    @property
+    def reach_aware(self) -> bool:
+        """The near-unit counts are by the threat map's reach, not a hex radius."""
+        return self.map is not None
+
+    @property
+    def reach_counts(self) -> dict[int, int]:
+        """Hostile units that can attack each threatened city soon (see `assess`)."""
+        return {i: len(c.hostile_tiles) for i, c in self.cities.items()}
+
     def is_threatened(self, city_id: int) -> bool:
         return city_id in self.cities
 
@@ -236,6 +246,16 @@ def wary_of(civs: list[Any]) -> tuple[str, ...]:
     return tuple(sorted(found))
 
 
+def _reaches(
+    threat: Threat, city: City, threat_map: Any, radius: int, map_width: int | None
+) -> bool:
+    """Whether a unit is near a city: it can attack the city within the map's warning turns
+    (terrain costed, its own moves and range: #399), or by hex `radius` with no map."""
+    if threat_map is None:
+        return hex_distance(city.x, city.y, threat.x, threat.y, map_width) <= radius
+    return (city.x, city.y) in threat_map.hostile_reach(threat.unit_type, threat.x, threat.y)
+
+
 def assess(
     cities: list[City],
     units: list[Unit],
@@ -262,7 +282,7 @@ def assess(
         near = [
             t
             for t in threats
-            if hex_distance(city.x, city.y, t.x, t.y, map_width) <= radius
+            if _reaches(t, city, threat_map, radius, map_width)
             and (t.hostile or t.owner_id in hostile_owners)
         ]
         if any(t.hostile for t in near):

@@ -6,6 +6,7 @@ import random
 import pytest
 from civ_mcp import lua as lq
 
+from civ6_ai.movement import straight_line
 from civ6_ai.policies import builder as builder_module
 from civ6_ai.policies.builder import (
     BuilderPolicy,
@@ -14,7 +15,6 @@ from civ6_ai.policies.builder import (
     is_builder,
     score_job,
 )
-from civ6_ai.policies.settling import hex_line
 from civ6_ai.state import BuilderJob
 from civ6_ai.state.reader import build_unit
 from fixtures.civ_state import BARBARIANS, FakeGame, overview, resources, threat_info, unit_info
@@ -426,7 +426,7 @@ class SimGame(ActionGame):
         self.actions.append(("move", unit_index, target_x, target_y))
         b = self.builders[unit_index]
         b["target"] = (target_x, target_y)
-        steps = hex_line((b["x"], b["y"]), (target_x, target_y), None)[:2]
+        steps = straight_line(b["x"], b["y"], target_x, target_y, None)[1:3]
         if steps:
             b["x"], b["y"] = steps[-1]
         self.moved.add(unit_index)

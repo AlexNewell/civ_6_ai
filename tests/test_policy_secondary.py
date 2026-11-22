@@ -858,24 +858,6 @@ def camp_map(x=15, y=10):
     return m
 
 
-def test_line_tiles_run_between_the_ends_and_wrap_the_seam():
-    from civ6_ai.policies.secondary import line_tiles
-
-    row = line_tiles(10, 10, 14, 10, 44)
-    assert row == [(10, 10), (11, 10), (12, 10), (13, 10), (14, 10)]
-    seam = line_tiles(42, 10, 1, 10, 44)
-    assert seam[0] == (42, 10) and seam[-1] == (1, 10) and len(seam) == 4
-
-
-def test_route_danger_is_zero_without_a_map_and_high_through_a_camp():
-    from civ6_ai.policies.secondary import route_danger
-
-    assert route_danger(None, 10, 10, 20, 10, 50) == 0.0
-    m = camp_map()
-    assert route_danger(m, 10, 10, 20, 10, 50) > SecondaryWeights().route_danger_max
-    assert route_danger(m, 10, 30, 10, 36, 50) < SecondaryWeights().route_danger_max
-
-
 def test_a_route_through_a_camp_is_skipped_for_a_safe_domestic_one(caplog):
     game = trade_game(
         [trader()],

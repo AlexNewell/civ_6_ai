@@ -211,6 +211,11 @@ class ProductionContext:
     # Issue 388: the threat map's reading (a `CityReading`) of each mapped city, so Walls
     # follow the reach-aware net threat and the damage walls save, not a count of units nearby.
     readings: Mapping[int, Any] = field(default_factory=dict, compare=False)
+    # Issue 399: hostile units each city can be attacked by within the threat map's warning turns
+    # (terrain costed), by city id. Only read when `reach_aware`; without the map a city counts the
+    # hostile units the scan puts within a few tiles of it (`City.threats`).
+    near: Mapping[int, int] = field(default_factory=dict, compare=False)
+    reach_aware: bool = False
     wary: bool = False  # A much stronger rival at peace with us (`defence.wary_of`): walls.
     # Issue 268: combat units still to build to clear the camp the military policy has chosen,
     # and the kind most missing ("melee", "ranged" or "any"). Each army pick counts one off.
@@ -334,6 +339,8 @@ def build_context(
         short=defence.short_ids if defence is not None else frozenset(),
         mapped=defence.mapped_ids if defence is not None else frozenset(),
         readings=_map_readings(defence),
+        near=defence.reach_counts if defence is not None else {},
+        reach_aware=bool(defence is not None and defence.reach_aware),
         wary=bool(defence is not None and defence.wary),
         districts=frozenset(_short(d.district_type) for c in cities for d in c.districts),
         science_districts=sum(
@@ -601,9 +608,16 @@ def is_defence(option: ProductionChoice) -> bool:
 _MAX_DEFENDERS_PER_CITY = 3
 
 
+def hostiles_near(city: City, ctx: ProductionContext) -> int:
+    """Hostile units that can attack the city soon. With the threat map these are the ones that
+    reach it by their own moves over the terrain (#399); without it, those the scan puts within
+    a few tiles of it."""
+    return ctx.near.get(city.city_id, 0) if ctx.reach_aware else len(city.threats)
+
+
 def under_threat(city: City, ctx: ProductionContext) -> bool:
-    """Hostile units in range, or the threat state marks the city (a war, a rival's units)."""
-    return city.is_threatened or city.city_id in ctx.threatened
+    """Hostile units in reach, or the threat state marks the city (a war, a rival's units)."""
+    return hostiles_near(city, ctx) > 0 or city.city_id in ctx.threatened
 
 
 def is_pressed(city: City, ctx: ProductionContext) -> bool:
@@ -619,9 +633,9 @@ def is_pressed(city: City, ctx: ProductionContext) -> bool:
         return True
     if city.city_id in ctx.mapped:
         return False  # The map weighed what is near against what holds the city, and it holds.
-    if not city.is_threatened:
+    if hostiles_near(city, ctx) <= 0:
         return False
-    wanted = min(len(city.threats) + 1, _MAX_DEFENDERS_PER_CITY) * max(1, ctx.num_cities)
+    wanted = min(hostiles_near(city, ctx) + 1, _MAX_DEFENDERS_PER_CITY) * max(1, ctx.num_cities)
     return ctx.army < wanted
 
 
@@ -748,7 +762,7 @@ def _unit_score(
     if threatened:
         # In a marked city a ranged unit, which shoots from behind the front one, gets a lift.
         ranged = 3.0 if stats[4] == "RANGED" and city.city_id in ctx.threatened else 0.0
-        return 14.0 + strength / 2.0 + 2.0 * len(city.threats) + ranged
+        return 14.0 + strength / 2.0 + 2.0 * hostiles_near(city, ctx) + ranged
     if city.garrison_unit is None:
         return (16.0 if ctx.turn <= _EARLY_TURNS else 12.0) + strength / 10.0
     wanted = w.army_per_city * ctx.num_cities - ctx.army
@@ -1035,10 +1049,10 @@ def _building_score(
         return _WONDER_VALUE * w.wonders
     if name in _DEFENSIVE_BUILDINGS:
         if city.city_id in ctx.threatened and not city.has_walls:
-            full = 26.0 + len(city.threats)  # Walls come right after the first defender.
+            full = 26.0 + hostiles_near(city, ctx)  # Walls come right after the first defender.
             return _walls_by_map(full, city, ctx, w)
         if is_pressed(city, ctx) and not city.has_walls:
-            return 17.0 + len(city.threats)
+            return 17.0 + hostiles_near(city, ctx)
         if ctx.wary and name == "WALLS" and not city.has_walls:
             # A stronger neighbour can declare any turn (Run 13: Coba fell six turns after the
             # second declaration with no wall). Above a typical building, below a marked city's.

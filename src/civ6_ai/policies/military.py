@@ -869,6 +869,9 @@ class _Turn:
     barb_before: set[tuple[int, int]] = field(default_factory=set)
     # Per target, the best attack turned down: its odds, the unit and the reason.
     rejected: dict[tuple[int, int], tuple[AttackOdds, Unit, str]] = field(default_factory=dict)
+    # Friendly units (city-state soldiers, at war with the barbarians) that hit a target before it
+    # acts. The threat scan lists only units at war with us, so nothing fills this yet (issue 380).
+    helpers: list[Threat] = field(default_factory=list)
 
 
 @dataclass
@@ -2110,9 +2113,9 @@ class MilitaryPolicy:
                 continue
             if any((tg.x, tg.y) == where for tg in u.targets):
                 total += expected_damage(max(u.combat_strength, u.ranged_strength), guard)
-        for th in t.threats:
+        for th in t.helpers:
             near = hex_distance(th.x, th.y, *where, s.map_width) <= 1
-            if th.is_city_state and not th.hostile and near and th.combat_strength > 0:
+            if near and th.combat_strength > 0:
                 total += expected_damage(max(th.combat_strength, th.ranged_strength), guard)
         for city in t.cities:
             in_range = hex_distance(city.x, city.y, *where, s.map_width) <= s.city_strike_range
@@ -2582,6 +2585,8 @@ class MilitaryPolicy:
                 gap = max(0.0, 1.0 - have / need) if need > 0 else 0.0
                 if len(near) < s.camp_min_units:
                     gap = 1.0  # A lone unit is the whole shortfall.
+                if adjacent and not occupied:
+                    gap = 0.0  # Taking an empty camp from beside it needs no force.
             # With the force together the camp's own barbarian guards are the fight it came for;
             # every other hostile unit, of any nation at war with us, is risk. On the walk to the
             # muster all of them are.
@@ -2608,6 +2613,7 @@ class MilitaryPolicy:
             # Every option on one scale: advance, fight, hold, fall back (issue 380).
             advance = [(g, weigh(g)) for g in goals]
             advance = [(g, sc) for g, sc in advance if sc.net >= s.camp_step_min_net]
+            advance.sort(key=lambda gs: -gs[1].net)  # The goal that won is the one tried first.
             options: dict[str, float] = {}
             if advance:
                 options["advance"] = max(sc.net for _, sc in advance)

@@ -2912,3 +2912,40 @@ def test_an_attack_logs_the_weighing_of_its_target():
     run(policy, game)
     shots = [d for d in policy.decisions if d.action == "attack" and d.odds]
     assert shots and "follow" in shots[0].odds["target_score"]
+
+
+def test_a_lone_unit_beside_an_empty_camp_captures_it():
+    units = [warrior(uid=1, x=13, y=10, **STRONG), warrior(uid=2, x=3, y=10, **STRONG)]
+    game = camp_game([*units, warrior(uid=3)], [barbarian(x=15, y=9, cs=5)])
+    policy = MilitaryPolicy()
+    policy._committed[(14, 10)] = 15
+    run(policy, game)
+    assert ("move", 1, 14, 10) in game.orders("move")
+
+
+def test_the_advance_goal_that_won_is_the_one_tried_first():
+    camp = tile(x=20, y=10, improvement="IMPROVEMENT_BARBARIAN_CAMP", owner_id=-1, units=[])
+    units = [warrior(uid=1, x=16, y=10, **STRONG), warrior(uid=2, x=16, y=11, **STRONG)]
+    foes = [barbarian(x=17, y=9, cs=20), barbarian(x=20, y=10, cs=5)]
+    game = camp_game([*units, warrior(uid=3)], foes, camp=camp)
+    policy = MilitaryPolicy()
+    policy._committed[(20, 10)] = 15
+    run(policy, game)
+    moved = [d for d in camp_orders(policy) if d.unit_id == 1 and d.odds and "options" in d.odds]
+    assert moved
+    first = [o for o in game.orders("move") if o[1] == 1][0]
+    assert first[2:] != (17, 10) or moved[0].odds["net"] >= moved[0].odds["options"]["hold"]
+
+
+def test_helpers_beside_a_target_raise_its_follow_up():
+    from civ6_ai.policies.military import _Turn
+
+    policy = MilitaryPolicy()
+    me = build_unit(warrior(uid=1))
+    foe_unit = foe(11, 10, cs=12)
+    t = _Turn.__new__(_Turn)
+    t.mine, t.threats, t.cities, t.acted = [], [], [], set()
+    t.helpers = [Threat(5, "City State", "UNIT_WARRIOR", 12, 10, 100, 100, 15, 0, 3, False, True)]
+    assert policy._followup_damage(t, me, foe_unit) > 0
+    t.helpers = []
+    assert policy._followup_damage(t, me, foe_unit) == 0

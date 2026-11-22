@@ -730,3 +730,37 @@ Findings:
 - **Settlers stall on refused orders.** A settler in Rome resends a refused long move for 6 turns (STD_T1_04 T55-60; issue 394, PR 395).
 - **The Holy Site loses to Builders.** On current main Rome's Holy Site, at adjacency 2, scores 4.4-4.8 behind Builders (6.7-8.7). The +3 placement the player used isn't available to Rome on this map.
 - **Eras run 40 turns.** In both the bot's and the player's games on these saves, eras turned at T41, T81 and T121.
+
+
+## Loop 6: movement and reach service, settler capture (2026-11-22)
+
+A topic review of all PRs found three topics still looping: camps, production constants and opt-in features. Movement and reach logic had also been duplicated across policies. The work was consolidated into #398 (camp mission), #399 (movement and reach service), #400 (production in yield-turns) and #401 (opt-in freeze).
+
+The merge gate changed: the outcome metric decides, on at least two saves. A save that came out worse after the game diverged gets a check, not an explanation. Losses count captured civilians from the bot log (`civilians_captured`), because the events file misses them.
+
+All rows are 60 turns, each against a baseline rerun on the same main.
+
+| Change | Save | Focus metric | Score at T60 (change / baseline) | Verdict |
+|---|---|---|---|---|
+| Movement service, builders and traders (PR 402) | STD_T1_04 | builder trips within ±1 turn: 11/11 | 116 / 113 | merged |
+| | STD_T1_03 | no builder or trader trips occurred | identical | |
+| Military on the service (PR 404) | STD_T1_03 | military trips within ±1 turn: 7/8 | 59 / 60 | merged |
+| | STD_T1_04 | 3rd city T48 / T50 | 115 / 116 | |
+| Settling on the service (PR 403) | STD_T1_04 | cities T18, T35, T50 / T23, T48; 4 cities / 3 | 122 / 115 | merged |
+| | STD_T1_03 | 3rd city T53 / none; settler trips 4/5 within ±1 | 67 / 60 | |
+| Threat map and production reach (PR 407) | STD_T1_03 | identical | 67 / 67 | merged (owner's call) |
+| | STD_T1_04 | | 108 / 122 | |
+| | STD_T1_01 | | 147 / 127 | |
+| | STD_T1_04_TURN78 (score at T107) | | 368 / 368 | |
+| Settler capture (PR 409) | STD_T1_03 | settlers captured 0 / 1 (two runs); 2nd city T24 / T26 | 66 and 65 / 67 | merged |
+| | STD_T1_04 | identical | 122 / 122 | |
+| Scout out of reach (PR 406) | STD_T1_04 | scout survives to T54+ / T51 | 122 / 122 | draft |
+| | STD_T1_01 | baseline needed a second scout | 132 / 127 | |
+| | STD_T1_03 | scout survives to T26 / T16 | 46 / 67, then 58 / 65 | |
+| Camp clearing (PR 397, five versions) | STD_T1_04, 90 turns | camps cleared 0 in all five | | draft; becomes #398 |
+
+Findings:
+- **Settler and builder estimates.** With travel turns taken from walking paths, settler and builder trips arrive within about ±1 turn. Expansion improved on both saves: STD_T1_04 has 4 cities by T60, against 3 on the earlier main.
+- **Settler captures on STD_T1_03.** Before #409, every STD_T1_03 run lost its first settler: an escort led it out toward two barbarians, and it then fled into their reach.
+- **Captures were under-counted.** The guardrail read only the events file, which doesn't log a captured civilian. The `civilians_captured` counter in the bot log does.
+- **Single runs are noisy.** PR 407's four samples ran from -11% to +16% around an average of about +1%. A single-run guardrail at ±3% will sometimes block a correct change.

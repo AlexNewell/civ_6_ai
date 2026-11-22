@@ -2949,3 +2949,13 @@ def test_helpers_beside_a_target_raise_its_follow_up():
     assert policy._followup_damage(t, me, foe_unit) > 0
     t.helpers = []
     assert policy._followup_damage(t, me, foe_unit) == 0
+
+
+def test_a_hostile_archer_two_tiles_away_still_exposes_the_tile():
+    from civ6_ai.policies.military import step_exposure
+
+    me = build_unit(warrior(uid=1, x=12, y=10))
+    shooter = Threat(-1, "Barbarians", "UNIT_ARCHER", 14, 10, 100, 100, 15, 25, 3, True)
+    walker = Threat(-1, "Barbarians", "UNIT_WARRIOR", 14, 10, 100, 100, 20, 0, 3, True)
+    assert step_exposure(me, (12, 10), [shooter], W, None, 1)[0] > 0
+    assert step_exposure(me, (12, 10), [walker], W, None, 1)[0] == 0

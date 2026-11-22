@@ -246,7 +246,8 @@ class MilitarySettings:
     # deal ~0.55 of its health each, nothing within 2) and let a step that sets up a combined
     # attack, or a cheap unit screening a settler, win.
     camp_group_radius: int = 2  # Units this close, or inside the muster ring too, go in together.
-    camp_step_reach: int = 1  # Hostile units this close to the stop tile are counted as risk.
+    camp_step_reach: int = 1  # Hostile melee units this close to the stop tile are risk.
+    camp_ranged_reach: int = 2  # Hostile units with a ranged attack shoot from this far.
     camp_step_min_net: float = 0.0
     camp_risk_weight: float = 5.0  # Per unit's whole health expected to be lost to the hostiles.
     # Walking on past hostiles that can hit it next turn is the riskiest option: nobody covers its
@@ -610,6 +611,7 @@ def step_exposure(
     weights: MilitaryWeights,
     width: int | None,
     reach: int,
+    ranged_reach: int = 2,
 ) -> tuple[float, bool]:
     """Expected damage over the unit's health from hostiles within `reach` of `tile` attacking it
     next turn, and whether the unit would surely kill one of them (the outgoing estimate behind
@@ -618,7 +620,8 @@ def step_exposure(
     taken = 0.0
     kills = False
     for h in hostiles:
-        if hex_distance(h.x, h.y, *tile, width) > reach:
+        far = max(reach, ranged_reach) if h.ranged_strength > 0 else reach
+        if hex_distance(h.x, h.y, *tile, width) > far:
             continue
         taken += incoming_damage(unit, h)
         odds = assess_attack(unit, Target(h.unit_type, h.x, h.y, h.hp), h, weights, None, width)
@@ -683,8 +686,12 @@ def camp_step_score(
     s = settings
     width = s.map_width
     hostiles = list(hostiles)
-    exposure, kills = step_exposure(unit, tile, hostiles, s.weights, width, s.camp_step_reach)
-    here_exposure, _ = step_exposure(unit, here, hostiles, s.weights, width, s.camp_step_reach)
+    exposure, kills = step_exposure(
+        unit, tile, hostiles, s.weights, width, s.camp_step_reach, s.camp_ranged_reach
+    )
+    here_exposure, _ = step_exposure(
+        unit, here, hostiles, s.weights, width, s.camp_step_reach, s.camp_ranged_reach
+    )
     # Progress counts in full only with the force: alone it is a reason to wait, not to go on.
     gain = (
         s.camp_progress_gain

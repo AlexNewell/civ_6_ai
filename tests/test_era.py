@@ -2,6 +2,8 @@ import asyncio
 import logging
 from types import SimpleNamespace
 
+import pytest
+
 from civ6_ai.era import (
     EraClock,
     EraHolder,
@@ -13,6 +15,7 @@ from civ6_ai.era import (
     outlook_from_standing,
     turns_left_in_era,
 )
+from civ6_ai.era_moments import cheapest_by_kind, moment_nudge, parse_moments
 from civ6_ai.policies.production import (
     CityProductionPolicy,
     ProductionContext,
@@ -25,15 +28,21 @@ from civ6_ai.state.reader import build_city
 from fixtures import civ_state as fx
 
 
-def test_turns_left_scales_with_speed():
+def test_turns_left_ignores_game_speed():
     s = EraSettings()
-    # Standard: eras begin on turns 1, 41, 81 (observed), 40 turns each.
-    assert turns_left_in_era(1, "GAMESPEED_STANDARD", s) == 40
-    assert turns_left_in_era(40, "GAMESPEED_STANDARD", s) == 1
-    assert turns_left_in_era(41, "GAMESPEED_STANDARD", s) == 40
-    assert turns_left_in_era(72, "GAMESPEED_STANDARD", s) == 9
-    # Quick: 0.67 * 40 = 27 turns an era.
-    assert turns_left_in_era(20, "GAMESPEED_QUICK", s) == 8
+    # Eras begin on turns 1, 41, 81 (observed), 40 turns each, whatever speed the overview names.
+    for speed in ("GAMESPEED_STANDARD", "GAMESPEED_QUICK", ""):
+        assert turns_left_in_era(1, speed, s) == 40
+        assert turns_left_in_era(40, speed, s) == 1
+        assert turns_left_in_era(41, speed, s) == 40
+        assert turns_left_in_era(72, speed, s) == 9
+
+
+def test_live_log_values_turn_18_quick_speed():
+    # The live check logged turns_left 10 at turn 18 (a 0.67 multiplier); the Classical era began
+    # on turn 41, so 23 turns were left.
+    got = outlook(18, 1, 9, 22, "GAMESPEED_QUICK")
+    assert got.turns_left == 23 and not got.push
 
 
 def test_observed_start_overrides_the_grid():
@@ -182,3 +191,54 @@ def test_policy_uses_the_turn_loops_outlook_across_an_era_change():
     # Without a holder, the policy's own clock still works.
     alone = CityProductionPolicy()
     assert alone._era_outlook(_empire(35, "ERA_ANCIENT")).turns_left == 6
+
+
+MOMENT_REPLY = """MO|MOMENT_PANTHEON_FOUNDED|2|ERA_ANCIENT|
+MO|MOMENT_FIRST_TRADE_ROUTE|1||
+MO|MOMENT_WONDER_BUILT|3|ERA_CLASSICAL|
+MO|MOMENT_SOMETHING_ELSE|5||
+MO|MOMENT_DISTRICT_WONDER|bad||
+MODONE
+"""
+
+
+def test_parse_and_classify_moments():
+    moments = parse_moments(MOMENT_REPLY)
+    assert [m.kind for m in moments] == ["pantheon", "trade", "wonder", "other"]
+    assert moments[1].score == 1
+    with pytest.raises(ValueError):
+        parse_moments("MO|A|1||\n")
+
+
+def test_cheapest_by_kind_respects_the_era():
+    moments = parse_moments(MOMENT_REPLY)
+    assert cheapest_by_kind(moments, "ERA_ANCIENT") == {"pantheon": 2, "trade": 1}
+    assert cheapest_by_kind(moments, "ERA_CLASSICAL")["wonder"] == 3
+    assert "other" not in cheapest_by_kind(moments, "ERA_CLASSICAL")
+
+
+def test_moment_nudge_is_bounded_and_needs_time():
+    assert moment_nudge("trade", {"trade": 2}, 1.0, 4.0) == 2.0
+    assert moment_nudge("trade", {"trade": 9}, 1.0, 4.0) == 4.0
+    assert moment_nudge("trade", {}, 1.0, 4.0) == 0.0
+    assert moment_nudge("trade", {"trade": 2}, 1.0, 4.0, fits=False) == 0.0
+
+
+def test_first_trader_scores_higher_while_the_push_is_on():
+    option = ProductionChoice("UNIT", "UNIT_TRADER", 40, 5)
+    city = build_city(fx.city_info(), (), set())
+
+    def value(push, traders=0):
+        ctx = ProductionContext(
+            turn=35,
+            num_cities=3,
+            traders=traders,
+            trade_capacity=1,
+            era_push=push,
+            era_turns_left=8,
+            era_moments={"trade": 2},
+        )
+        return score(option, city, ctx, ProductionWeights())
+
+    assert value(True) > value(False) > 0
+    assert value(True, traders=1) == value(False, traders=1)

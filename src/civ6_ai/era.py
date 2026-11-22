@@ -11,16 +11,14 @@ for the player.
 Reads that exist: the overview carries the era name, the era score and both thresholds (see
 `orchestrator.read_standing`, `state.Empire`). Nothing readable gives the turns left in the era,
 so turns left is the turn the era name last changed (`EraClock`; the first era starts on turn 1)
-plus `EraSettings.era_length`, the Standard-speed era length scaled by the game speed. A game whose
-eras do not follow that length corrects itself at the next change.
+plus `EraSettings.era_length`. A game whose eras do not follow that length corrects itself at the
+next change.
 """
 
 import json
 import logging
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
-
-from civ6_ai.placement import speed_scale
 
 log = logging.getLogger(__name__)
 
@@ -29,9 +27,11 @@ log = logging.getLogger(__name__)
 class EraSettings:
     """When the bot pushes for Historic Moments. Zero `window` turns the push off."""
 
-    # Turns per world era at Standard speed. Observed, not read from the game: in both a bot run
-    # and the player's game the era name changed on turns 41, 81 and 121 (Ancient to Classical to
-    # Medieval to Renaissance), so 40 turns an era. The first guess of 50 was wrong (issue 311).
+    # Turns per world era. Observed, not read from the game: in both a bot run and the player's
+    # game the era name changed on turns 41, 81 and 121 (Ancient to Classical to Medieval to
+    # Renaissance), so 40 turns an era. Not scaled by game speed: the saves report a Quick speed
+    # and still change era every 40 turns, and a speed multiplier of 0.67 put the push 13 turns
+    # early on the live check. The clock corrects itself at each observed change (issue 311).
     era_length: int = 40
     # The player looks at the timer with about 10 turns left, so the push starts there.
     window: int = 10
@@ -67,12 +67,12 @@ class EraOutlook:
 
 def turns_left_in_era(
     turn: int, game_speed: str, settings: EraSettings, era_start: int | None = None
-) -> int | None:
+) -> int | None:  # `game_speed` is kept for callers and is not used (see `era_length`).
     """Turns until the next era boundary, counted from the turn the era began.
 
     With no observed start the eras are taken to begin on turn 1, 1 + length, and so on.
     """
-    length = round(settings.era_length * speed_scale(game_speed))
+    length = settings.era_length
     if length <= 0:
         return None
     if era_start is None:
@@ -171,6 +171,7 @@ class EraHolder:
     def __init__(self) -> None:
         self.clock = EraClock()
         self.last: EraOutlook | None = None
+        self.moments: tuple = ()  # `era_moments.Moment` rows, read once per game.
 
 
 def eligible_districts(

@@ -26,6 +26,15 @@ from civ6_ai.era import (
     eligible_districts,
     outlook,
 )
+from civ6_ai.era_moments import (
+    READ_TRIES as MOMENT_TRIES,
+)
+from civ6_ai.era_moments import (
+    cheapest_by_kind,
+    log_moments,
+    moment_nudge,
+    read_moments,
+)
 from civ6_ai.monitors import Event, EventBus
 from civ6_ai.placement import (
     ELSEWHERE,
@@ -156,6 +165,12 @@ class ProductionWeights:
     # Moment. This adds to its score, about one ordinary building. The district would be built
     # sooner or later; the nudge only moves it up. 0 turns it off.
     era_district_bonus: float = 3.0
+    # Issue 311: other kinds of Historic Moment the bot can steer toward (a first Trader, a
+    # wonder), read from the game's Moments table. While the push is on, such a build scores
+    # `per_point` more for each era score point its kind gives, at most `cap`. The first live
+    # check (era score 1 at turns 40 and 50) showed the district gate alone reached nothing.
+    era_moment_per_point: float = 1.0
+    era_moment_cap: float = 4.0
 
     def __post_init__(self) -> None:
         for item in fields(self):
@@ -226,6 +241,8 @@ class ProductionContext:
     # the push is on, by `choose_for_city`), and the kinds already chosen for one.
     era_districts: frozenset[str] = frozenset()
     era_claimed: frozenset[str] = frozenset()
+    # Era score of the cheapest moment per kind in this era (`era_moments.cheapest_by_kind`).
+    era_moments: Mapping[str, int] = field(default_factory=dict, compare=False)
     # Where `rivals` came from, for the log: "rankings" (living majors but us, as last read) or
     # "default" (no rankings read yet). Not a decision input.
     rivals_source: str = field(default="", compare=False)
@@ -1085,7 +1102,26 @@ def _raw_value(
         )
     else:
         value = _building_score(option, city, ctx, weights)
+    if value > 0:
+        value += _era_moment_nudge(option, ctx, weights)
     return value
+
+
+def _era_moment_nudge(
+    option: ProductionChoice, ctx: ProductionContext, w: ProductionWeights
+) -> float:
+    """Issue 311: while the era push is on, a build that earns a Historic Moment scores a little
+    more: the empire's first Trader (a first trade route) or a wonder. Not the settler branch."""
+    if not ctx.era_push or not ctx.era_moments:
+        return 0.0
+    if option.item == "UNIT_TRADER" and ctx.traders == 0 and ctx.trade_capacity > 0:
+        kind = "trade"
+    elif option.item in WONDERS:
+        kind = "wonder"
+    else:
+        return 0.0
+    fits = ctx.era_turns_left is not None and option.turns <= ctx.era_turns_left
+    return moment_nudge(kind, ctx.era_moments, w.era_moment_per_point, w.era_moment_cap, fits)
 
 
 def _is_floor_unit(option: ProductionChoice) -> bool:
@@ -1776,6 +1812,8 @@ class CityProductionPolicy:
         self._tiles_age = REFRESH_TURNS  # Turns since the last read.
         self._replace_tries = 0  # Reads of the game's replacement tables tried.
         self._replace_done = False
+        self._moments: tuple = ()  # The game's Historic Moments, read once (issue 311).
+        self._moment_tries = 0
         self._tiles_seen: dict[int, tuple[int, bool]] = {}  # (pop, starving) at the last read.
         self.planner = Planner(
             emit=self._emit
@@ -1812,6 +1850,7 @@ class CityProductionPolicy:
             era_push=era.push,
             era_turns_left=era.turns_left,
             era_claimed=frozenset(self._era_claimed),
+            era_moments=cheapest_by_kind(self._moments, empire.era) if era.push else {},
         )
         if self.weights.wonder_races:
             # Issue 328: the race inputs are read only when the setting is on. The difficulty
@@ -1849,6 +1888,7 @@ class CityProductionPolicy:
         """
         cities = await _read_cities(game)
         await self._read_replacements(game)
+        await self._read_moments(game)
         await self._read_tiles(game, cities)
         await self._feed_starving(game, cities)
         await self._focus_at_caps(game, cities)
@@ -2066,6 +2106,25 @@ class CityProductionPolicy:
             len(read.districts),
             len(read.units),
         )
+
+    async def _read_moments(self, game: ProductionGame) -> None:
+        """Read the game's Historic Moments once per game and log the earnable ones (issue 311).
+        A failed read is retried up to `MOMENT_TRIES` times, then there are no moment nudges."""
+        execute = getattr(game, "execute_lua", None)
+        if self._moments or execute is None or self._moment_tries >= MOMENT_TRIES:
+            return
+        self._moment_tries += 1
+        try:
+            moments = await read_moments(game)
+        except ConnectionError:
+            raise
+        except Exception as err:
+            log.warning("Moment read failed, no moment nudges: %s", err)
+            return
+        self._moments = moments
+        if self.era is not None:
+            self.era.moments = moments
+        log_moments(moments, self._era_clock.era or "")
 
     async def _read_tiles(self, game: ProductionGame, cities: list[City]) -> None:
         """Refresh the per-city tile foods: every `REFRESH_TURNS`, or when a city's size changed or

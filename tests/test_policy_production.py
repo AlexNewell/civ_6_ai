@@ -1183,6 +1183,8 @@ class TileGame(FocusGame):
     async def execute_lua(self, code, context="gamecore"):
         if "BuildingReplaces" in code:  # The once-per-game replacement read (issue 354).
             return "RPDONE"
+        if "GameInfo.Moments" in code:  # The once-per-game moments read (issue 311).
+            return "MODONE"
         self.lua_calls += 1
         return self.reply
 

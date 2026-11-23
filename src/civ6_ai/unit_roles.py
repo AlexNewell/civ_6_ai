@@ -144,10 +144,57 @@ def _by_state(policy: Any, t: Any, unit: Any) -> tuple[str, str]:
     return "spare", _unavailable(policy, t, unit) or "spare outside, nothing to do"
 
 
+def record_camp_force(policy: Any, t: Any, first: list[Any], counted: list[Any]) -> None:
+    """Called by `_clear_camp` with the force it made (`counted`) and the list before the
+    one-garrison cut (`first`): keep the ids, and for every other unit the first test it failed,
+    in the order the stage applies them. The roles line logs this record, so it cannot disagree
+    with the stage. Never raises."""
+    try:
+        s = policy.settings
+        ids = {u.unit_id for u in counted}
+        before = {u.unit_id for u in first}
+        left = {}
+        for unit in t.mine:
+            if unit.unit_id in ids:
+                continue
+            if unit.unit_id in before:
+                left[unit.unit_id] = "kept as its city's one garrison"
+            elif not policy._available(t, unit, "move"):
+                refused = policy._refused.get((unit.unit_id, "move"), -1) >= t.turn
+                left[unit.unit_id] = (
+                    "move order refused lately" if refused else _unavailable(policy, t, unit) or ""
+                )
+            elif unit.unit_id in t.roles:
+                left[unit.unit_id] = f"city role {t.roles[unit.unit_id]} this turn"
+            elif unit.hp < s.weights.camp_min_hp * unit.max_hp:
+                left[unit.unit_id] = "too hurt"
+            else:
+                left[unit.unit_id] = _why_not_available(policy, t, unit)
+        t.camp_counted, t.camp_left = ids, left
+    except Exception:
+        log.warning("camp force record failed", exc_info=True)
+
+
+def _why_not_available(policy: Any, t: Any, unit: Any) -> str:
+    city = policy._city_at(t, unit)
+    if city is not None:
+        return "city short" if policy._city_short(city) else "sole defender of its city"
+    return "holds a short or threatened city"
+
+
 def _counted(policy: Any, t: Any, unit: Any, plan: Any, decision: Any) -> tuple[bool, str]:
-    """Whether the unit is in the camp plan's force, and if not why. This is read again at the
-    end of the turn from the same tests `_clear_camp` applies, so a unit that has since moved may
-    differ from what the plan counted; the line's `plan.units` is the plan's own count."""
+    """Whether the unit is in the camp force, and if not why: the camp stage's own record
+    (`record_camp_force`). Only when the stage never made its list (it did not run) is it
+    recomputed at the end of the turn, and the reason then starts with "recomputed"."""
+    if t.camp_counted is not None:  # The camp stage's own record.
+        if unit.unit_id in t.camp_counted:
+            return True, ""
+        return False, t.camp_left.get(unit.unit_id) or "not in the camp stage's list"
+    ok, why = _recomputed(policy, t, unit, plan, decision)
+    return ok, f"recomputed: {why}" if why else ""
+
+
+def _recomputed(policy: Any, t: Any, unit: Any, plan: Any, decision: Any) -> tuple[bool, str]:
     if decision is not None and decision.action == "camp":
         return True, ""
     if plan is None:
@@ -208,11 +255,13 @@ def _counts(policy: Any, t: Any, plan: Any) -> dict[int, tuple[bool, str]]:
         if decision is not None:
             sent.add(unit.unit_id)
         found[unit.unit_id] = _counted(policy, t, unit, plan, decision)
+    if t.camp_counted is not None:
+        return found
     passing = [u for u in t.mine if found[u.unit_id][0] and u.unit_id not in sent]
     kept = {u.unit_id for u in policy._keep_one_garrison(t, passing)}
     for unit in passing:
         if unit.unit_id not in kept:
-            found[unit.unit_id] = (False, "kept as its city's one garrison")
+            found[unit.unit_id] = (False, "recomputed: kept as its city's one garrison")
     return found
 
 
@@ -257,7 +306,7 @@ def _entry(
         if city is not None:
             row["city"] = _city_view(policy, t, city)
         row["cnt"], reason = counts[uid]
-        if reason and plan is not None:  # With no plan, the line's `plan: null` says it.
+        if reason:
             row["cnt_why"] = reason
         if role == "spare":
             need = _need_walk(policy, t, unit, plan)
@@ -270,6 +319,8 @@ def log_unit_roles(policy: Any, t: Any) -> None:
     """Log one `military_roles` line for the turn. Never raises."""
     try:
         line = build_line(policy, t)
+        if not line["units"] and "gone" not in line:
+            return  # No combat unit now or before: nothing to say.
         log.info("military_roles %s", json.dumps(line, sort_keys=True, separators=(",", ":")))
     except Exception:  # Logging must never change play.
         log.warning("military_roles failed", exc_info=True)

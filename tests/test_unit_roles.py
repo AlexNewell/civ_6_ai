@@ -163,3 +163,45 @@ def test_the_line_stays_compact(caplog):
         r.getMessage() for r in caplog.records if r.getMessage().startswith("military_roles ")
     )
     assert len(text) / 7 < 260  # Bytes a unit; seven units here.
+
+
+def test_the_line_is_written_when_no_land_military_unit_remains(caplog):
+    caplog.set_level(logging.INFO)
+    policy = MilitaryPolicy()
+    cities = [city_info()]
+    galley = warrior(uid=6, x=20, y=20, unit_type="UNIT_GALLEY", name="Galley")
+    run(policy, MilitaryGame([warrior(uid=1), galley], [], cities=cities))
+    game = MilitaryGame([galley], [], cities=cities, turn=21)
+    run(policy, game)  # The last land unit is gone.
+    line = lines(caplog)[-1]
+    assert line["turn"] == 21 and [g["u"] for g in line["gone"]] == [1]
+    assert by_id(line)[6]["role"] == "other" and not game.orders()
+    run(policy, MilitaryGame([], [], cities=cities, turn=22))
+    assert [g["u"] for g in lines(caplog)[-1]["gone"]] == [6]  # The loss of the last one.
+    run(policy, MilitaryGame([], [], cities=cities, turn=23))
+    assert lines(caplog)[-1]["turn"] == 22  # Nothing left to say: no line.
+
+
+def test_the_camp_stage_records_who_it_counted_and_why_not(caplog):
+    caplog.set_level(logging.INFO)
+    game, policy, state = run20_turn100()
+    policy._refused[(1, "move")] = 103  # Unit 1's move order is on a refusal cooldown.
+    run(policy, game)
+    units = by_id(lines(caplog)[-1])
+    assert units[1]["cnt"] is False and units[1]["cnt_why"] == "move order refused lately"
+    assert units[2]["cnt"] is True  # The one the stage counted, which `plan.units` says.
+    assert units[3]["cnt_why"] == "sole defender of its city"
+    assert not any("recomputed" in u.get("cnt_why", "") for u in units.values())
+
+
+def test_without_the_camp_stage_the_membership_is_recomputed_and_labelled(caplog):
+    caplog.set_level(logging.INFO)
+    game, policy, _ = run20_turn100()
+
+    async def skip(game, t):
+        return None
+
+    policy._clear_camp = skip
+    run(policy, game)
+    whys = [u["cnt_why"] for u in lines(caplog)[-1]["units"] if not u["cnt"]]
+    assert whys and all(w.startswith("recomputed: ") for w in whys)

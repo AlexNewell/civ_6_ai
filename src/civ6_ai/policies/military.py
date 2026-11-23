@@ -72,7 +72,7 @@ from civ6_ai.state import read_units as _read_units
 from civ6_ai.state.fog import BARBARIAN_ID
 from civ6_ai.state.models import Target
 from civ6_ai.state.reader import STANDARD_MAP_WIDTH, hex_distance
-from civ6_ai.unit_roles import log_unit_roles
+from civ6_ai.unit_roles import log_unit_roles, record_camp_force
 
 # Orders that hold a city: a unit given one is that city's this turn, not the camp force's.
 CITY_ROLES = frozenset({"cover", "garrison", "heal", "retreat", "flee", "swap"})
@@ -953,6 +953,10 @@ class _Turn:
     # Friendly units (city-state soldiers, at war with the barbarians) that hit a target before it
     # acts. The threat scan lists only units at war with us, so nothing fills this yet (issue 380).
     helpers: list[Threat] = field(default_factory=list)
+    # Issue 416: the units `_clear_camp` counted into the camp force, and for each other unit of
+    # `mine` why not. None until that stage has made its list.
+    camp_counted: set[int] | None = None
+    camp_left: dict[int, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -1069,6 +1073,9 @@ class MilitaryPolicy:
         await self._spend_promotions(game, units, turn)
         mine = [u for u in units if is_land_military(u)]
         if not mine:
+            # No land military unit: the line still says what the other combat units are, and
+            # which ones were lost since the last one (issue 416).
+            log_unit_roles(self, _Turn(turn, tuple(units), (), (), [], frozenset()))
             return
         cities = await _read_cities(game, s.map_width)
         threats = await _read_threats(game)
@@ -2794,10 +2801,12 @@ class MilitaryPolicy:
             and u.hp >= s.weights.camp_min_hp * u.max_hp
             and self._camp_available(t, u)
         ]
+        first = spare
         spare = self._keep_one_garrison(t, spare)
         if t.camp_scanned:
             return
         t.camp_scanned = True
+        record_camp_force(self, t, first, spare)  # Issue 416: who this stage counted, and why not.
         await self._scan_camps(game, t, barbarians)
         if self.defence is not None:  # The strongest barbarian about, for the army floor (279).
             self.defence.hostile = (

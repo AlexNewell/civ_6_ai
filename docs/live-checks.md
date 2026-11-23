@@ -785,3 +785,27 @@ Recomputed from `military_camp_gone`, `military_offense` (summed) and `builder_l
 | Every STD_T1_03 run lost its first settler | Captures were 0 on dc35850 and c604788, 2 on 6ee7f2d, 1 on e55cd6b and 0 with PR 409 |
 
 PR 407 was not tested together with PR 409 before merging. Main 1e66db1 against e55cd6b at T60: STD_T1_04 108 / 122, STD_T1_03 56 / 67, STD_T1_01 147 / 127. The mean is -4.1%, outside the agreed -3%.
+
+
+## Loop 7: camp mission, yield logging, one-flag runs (2026-11-23)
+
+Numbers come from `military_camp_gone`, summed `military_offense` counters and `builder_lost`. Combat-unit drops are lower bounds.
+
+**Camp mission (PR 411, draft), 90 turns, against main 1e66db1 / 7771883.** Gate: 1 camp cleared by us by T60 and 2 by T90 on STD_T1_03.
+
+| Version | STD_T1_03 clear | Unit drops (main 4) | Score T90 (main 101) | STD_T1_04 clear | Score T90 (main 202) |
+|---|---|---|---|---|---|
+| 914b11a | T79 | 5 | 117 | not run | |
+| 25ef1b3 | T87 | 8 | 120 | none | 220 |
+| 710b91c | T52 | 13 | 104 | none | 221 |
+| a5e8ea3 | T79 | 8 | 94 | none | 177 |
+
+Every version clears one camp where main clears none, none clears two, and all lose more units. a5e8ea3 on STD_T1_01 at T60: 134 against 147. Proven causes on the way: a force with no melee unit was given no order (T60 to T71); 20-turn cutoffs aborted missions that had the strength; a rallied front unit in a one-tile corridor blocked the units behind it (T56 to T66).
+
+**What removed the STD_T1_04 T50 clear.** Present on dc35850, absent on 1ae47d9 (with PR 372 only), absent on e9ea87e (with PR 371 too). One run per commit, so this shows where, not why.
+
+**`settler_before_camp` off on main fd40bcd, 60 turns, three saves.** Scores identical (108, 56, 147), no camp either way, empire yield-turns +0.1%, 0.0%, 0.0%. The rule is close to inert on current main.
+
+**PR 407 alone, on the code it merged into (e5f36cf without, 1e66db1 with), T60.** STD_T1_01 127 to 147, STD_T1_03 65 to 56, STD_T1_04 122 to 108: mean -3.2%, with one more builder lost on two saves. The STD_T1_04 run without it is PR 409's first commit, not its final one.
+
+**Yield logging (PR 412) and build replay (PR 414), both merged.** Each left the game identical (20 and 60 turns on STD_T1_04). Yield-turns by T60 on main: STD_T1_04 2114, STD_T1_01 1975, STD_T1_03 1075. Replay can judge 8 of 22 decisions; 122 of 237 options have no value. With measured city growth and a 60-turn horizon, a settler is net negative until about T35, which contradicts the live runs, so the horizon needs work before production uses it.

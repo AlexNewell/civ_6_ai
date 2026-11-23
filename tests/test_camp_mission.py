@@ -420,3 +420,16 @@ def test_a_unit_the_mission_holds_still_flees_when_exposed_but_does_not_fortify(
     run(policy, game)
     assert game.orders("move") == [("move", 1, 10, 10)]  # The safety flee runs.
     assert [d.action for d in policy.decisions if d.unit_id == 1][-1] == "flee"
+
+
+def test_switching_targets_releases_the_previous_missions_units():
+    units = [warrior(uid=1, x=12, y=10, **STRONG), warrior(uid=2, x=12, y=11, **STRONG)]
+    policy, t = _turn_for(MilitaryPolicy(), MilitaryGame(units))
+    old = policy._missions.open((14, 10), 19)
+    new = policy._missions.open((30, 10), 19)
+    old.units = {1: "march", 2: "march"}
+    policy._plan_target = (30, 10)  # An urgent camp replaced the target.
+    policy._claim_missions(t)
+    assert old.units == {} and "not the target" in old.reason
+    assert t.roles == {}  # Nobody is held for the abandoned mission.
+    assert new.units == {}

@@ -3780,6 +3780,12 @@ class MilitaryPolicy:
             m.reason = ""
             if not m.units:
                 continue
+            if m.confirmed and self._plan_target is not None and m.camp != self._plan_target:
+                # The plan chose another camp (an urgent one, or the rank): this mission is no
+                # longer pursued, so its marching units are released, not renewed (issue 398).
+                m.units = {u: r for u, r in m.units.items() if r == "discover"}
+                m.reason = f"not the target (the plan is on {self._plan_target}): units released"
+                continue
             marching = {uid for uid, role in m.units.items() if role == "march"}
             eligible = {
                 uid: uid in by_id

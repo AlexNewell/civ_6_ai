@@ -431,3 +431,19 @@ def test_a_changed_pick_lists_the_assumed_settings_it_rests_on():
     assert "x0.5" in joined and "x2" in joined and "pick" in joined
     text = rb.render("r", report, 10)
     assert text.startswith("assumed settings:") and "rests on assumed settings" in text
+
+
+def test_a_scout_unblocks_a_waiting_settler_and_a_capped_empire():
+    scout = opt("UNIT_SCOUT", "UNIT", 30, 3)
+    base = dict(sites_ok=False, turn=5, pop=3)
+    assert value_option(scout, inputs(held_settlers=1, **base), S).benefit > 0
+    assert (
+        value_option(scout, inputs(num_cities=4, settlers=1, settler_cap=4, **base), S).benefit > 0
+    )
+
+
+def test_a_defender_that_finishes_after_the_game_ends_adds_nothing():
+    sword = opt("UNIT_SWORDSMAN", "UNIT", 80, 5)
+    v = value_option(sword, inputs(turn=328, last_turn=330, reading={**READING, "turns": 9.0}), S)
+    assert v.benefit == 0
+    assert value_option(sword, inputs(reading=READING), S).benefit > 0

@@ -458,6 +458,11 @@ def replace_sites(inputs: DecisionInputs) -> DecisionInputs:
     """The inputs as if a safe site were known, to value what a scout would unblock."""
     data = inputs.to_dict()
     data["sites_ok"] = True
+    # The gates that stop another settler being trained are not what a scout unblocks: a settler
+    # already waiting for a site, or the city-plus-settler cap, is the very case it would free.
+    data["held_settlers"] = 0
+    data["settlers"] = 0
+    data["settler_cap"] = max(inputs.settler_cap, inputs.num_cities + 1)
     return DecisionInputs.from_dict(data)
 
 
@@ -477,7 +482,7 @@ def _defender_value(
     risk = min(1.0, pressure / s.full_pressure) if s.full_pressure > 0 else 1.0
     cover = max(float(reading.get("cover", 0.0)), 0.0)
     share = strength / (strength + cover)
-    city_value = city_yield(inputs, w) * discounted_turns(0.0, _left(inputs), s)
+    city_value = city_yield(inputs, w) * discounted_turns(option.turns, _left(inputs), s)
     turns = reading.get("turns")
     # With walls `turns` is when the walls break, not when the city falls, so it is no deadline.
     late = turns is not None and not inputs.has_walls and float(turns) < option.turns

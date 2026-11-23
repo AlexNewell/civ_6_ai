@@ -11,6 +11,8 @@ ranked first. Reported:
 
 - every changed pick: turn, city, old pick and score, new pick and value, and the reason;
 - how many options had no value (and the reasons), since those cannot be compared;
+- for each changed pick, the assumed settings its value rests on, with the old and new pick's
+  value at half and double each and whether the pick still changes (the first line lists them all);
 - any change that would displace a settler, or a defender or walls in a threatened city.
 
 An old pick with no value is never replaced. A new pick always has a higher value than the old one
@@ -33,12 +35,16 @@ from pathlib import Path
 from typing import Any
 
 from civ6_ai.policies.build_value import (
+    ASSUMED_SETTINGS,
     LOG_TAG,
+    BuildValueSettings,
     DecisionInputs,
     OptionInput,
     is_defence_option,
     options_from_record,
     rerank,
+    scaled,
+    value_option,
 )
 from civ6_ai.policies.production import canonical
 from yield_report import _bot_lines, resolve
@@ -57,6 +63,7 @@ class Change:
     old_value: float | None
     reason: str
     flags: list[str] = field(default_factory=list)
+    sensitivity: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -86,6 +93,36 @@ def _flags(old: OptionInput, new: OptionInput, inputs: DecisionInputs) -> list[s
     if is_defence_option(old) and not is_defence_option(new) and inputs.under_threat:
         flags.append("displaces a defender in a threatened city")
     return flags
+
+
+def sensitivity(
+    options: list[OptionInput],
+    inputs: DecisionInputs,
+    old: OptionInput,
+    new: OptionInput,
+    defence_only: bool,
+) -> list[str]:
+    """For each assumed setting that moves the old or new pick's value: both values at half and
+    double the setting, and whether the pick still changes."""
+    base = BuildValueSettings()
+    lines = []
+    for name in ASSUMED_SETTINGS:
+        parts = []
+        moved = False
+        for factor in (0.5, 2.0):
+            s = scaled(base, name, factor)
+            a, b = value_option(old, inputs, s), value_option(new, inputs, s)
+            a0, b0 = value_option(old, inputs, base), value_option(new, inputs, base)
+            if (a.value, b.value) != (a0.value, b0.value):
+                moved = True
+            again = rerank(options, inputs, s, defence_only=defence_only)
+            holds = "holds" if again.changed and again.new.item == new.item else "changes"
+            av = "n/a" if a.value is None else f"{a.value:+.2f}"
+            bv = "n/a" if b.value is None else f"{b.value:+.2f}"
+            parts.append(f"x{factor:g} ({getattr(s, name):g}): old {av}, new {bv}, pick {holds}")
+        if moved:
+            lines.append(f"{name} = {getattr(base, name):g}: " + "; ".join(parts))
+    return lines
 
 
 def replay_records(label: str, records: list[dict[str, Any]]) -> Replay:
@@ -120,6 +157,9 @@ def replay_records(label: str, records: list[dict[str, Any]]) -> Replay:
                 old_value=old_value,
                 reason=result.new_value.reason,
                 flags=_flags(result.old, result.new, inputs),
+                sensitivity=sensitivity(
+                    options, inputs, result.old, result.new, bool(record.get("defence_only"))
+                ),
             )
         )
     return report
@@ -138,7 +178,9 @@ def analyse(spec: str) -> Replay | None:
 def render(label: str, report: Replay | None, limit: int) -> str:
     if report is None:
         return f"{label}: {NO_OPTIONS}"
+    base = BuildValueSettings()
     lines = [
+        "assumed settings: " + ", ".join(f"{n}={getattr(base, n):g}" for n in ASSUMED_SETTINGS),
         f"{label}: {report.decisions} decisions, {len(report.changes)} changed picks, "
         f"{len(report.displaced)} displacing a settler or a defender",
         f"  options with no value: {report.options_unvalued} of {report.options_total}; "
@@ -154,6 +196,11 @@ def render(label: str, report: Replay | None, limit: int) -> str:
             f"  T{change.turn} {change.city}: {change.old} (score {old_score}, value {old_value})"
             f" -> {change.new} (value {change.new_value:+.2f}) because {change.reason}{flag}"
         )
+        if change.sensitivity:
+            lines.append("    rests on assumed settings:")
+            lines += [f"      {text}" for text in change.sensitivity]
+        else:
+            lines.append("    rests on no assumed setting")
     if len(report.changes) > limit:
         lines.append(f"  ... {len(report.changes) - limit} more changed picks (--limit)")
     return "\n".join(lines)

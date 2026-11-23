@@ -134,7 +134,7 @@ def test_a_settler_is_the_expected_city_and_worthless_without_a_site():
     ok = value_option(settler, inputs(), S)
     none = value_option(settler, inputs(sites_ok=False), S)
     capped = value_option(settler, inputs(num_cities=4), S)
-    assert ok.benefit > 80 and "expected city" in ok.reason
+    assert ok.benefit > 0 and "expected city" in ok.reason
     assert none.benefit == 0 and none.value < 0 and "no safe site" in none.reason
     assert capped.benefit == 0 and "cap" in capped.reason
 
@@ -376,3 +376,58 @@ def test_the_script_reads_a_run_log(tmp_path, capsys):
     assert rb.main([str(tmp_path / "new")]) == 0
     out = capsys.readouterr().out
     assert "1 decisions, 1 changed picks" in out and "BUILDING_LIBRARY" in out
+
+
+def test_a_settler_is_net_negative_on_a_young_capital_and_positive_on_a_rich_one():
+    """Reported plainly, not tuned away: with one 60-turn horizon the settler (80 production) loses
+    at the capital yields measured at turns 10 to 30 (25 to 31) and wins from about 40 (39)."""
+    settler = opt("UNIT_SETTLER", "UNIT", 80, 10)
+    young = inputs(turn=20, pop=2, yields=(6.0, 8.0, 4.0, 5.0, 3.0, 0.0))  # About 28.5 weighted.
+    rich = inputs(turn=40, pop=3, yields=(8.0, 10.0, 6.0, 8.0, 5.0, 1.0))  # About 39.5.
+    assert value_option(settler, young, S).net < 0
+    assert value_option(settler, rich, S).net > 0
+
+
+def test_walls_make_the_map_turns_a_wall_breach_not_a_fall_deadline():
+    sword = opt("UNIT_SWORDSMAN", "UNIT", 80, 5)
+    reading = {**READING, "turns": 2.0}
+    assert value_option(sword, inputs(reading=reading), S).benefit == 0
+    assert value_option(sword, inputs(reading=reading, has_walls=True), S).benefit > 0
+
+
+def test_a_camp_unit_is_not_valued_as_a_defender():
+    sword = opt("UNIT_SWORDSMAN", "UNIT", 80, 5)
+    v = value_option(sword, inputs(reading={**READING, "net": 0.0}, camp_in_reach=True), S)
+    assert v.value is None and "camp" in v.reason
+    r = rerank([sword, opt("BUILDING_MONUMENT", cost=30)], inputs(camp_in_reach=True), S)
+    assert not r.changed
+
+
+def test_a_defence_only_decision_follows_the_live_guard():
+    sword = opt("UNIT_SWORDSMAN", "UNIT", 80, 5)
+    monument = opt("BUILDING_MONUMENT", cost=30)
+    # The best option is not a defence option: live changes nothing, so there is no pick.
+    assert rerank([monument, sword], inputs(reading=READING), S, defence_only=True).old is None
+    # A defence option scored zero is refused live too.
+    zero = opt("UNIT_SWORDSMAN", "UNIT", 80, 5, score=0.0)
+    assert rerank([zero, monument], inputs(reading=READING), S, defence_only=True).old is None
+    assert rerank([sword, monument], inputs(reading=READING), S, defence_only=True).old is sword
+
+
+def test_a_changed_pick_lists_the_assumed_settings_it_rests_on():
+    record = make_record(
+        [
+            ("UNIT_BUILDER", "UNIT", 50, 5, 9.0, 0),
+            ("DISTRICT_HOLY_SITE", "DISTRICT", 60, 3, 5.0, 0),
+        ],
+        unimproved=1,
+        holy_site_adjacency=3,
+    )
+    report = rb.replay_records("r", [record])
+    change = report.changes[0]
+    joined = " | ".join(change.sensitivity)
+    assert "improvement_yield" in joined and "district_unlock_share" in joined
+    assert "scout_unblock_share" not in joined  # Not used by either pick.
+    assert "x0.5" in joined and "x2" in joined and "pick" in joined
+    text = rb.render("r", report, 10)
+    assert text.startswith("assumed settings:") and "rests on assumed settings" in text

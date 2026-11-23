@@ -34,7 +34,7 @@ those that are neither are marked "assumption" and are the first to tune.
 import json
 import math
 from collections.abc import Iterable
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from typing import Any
 
 from civ6_ai.policies.expansion import settler_cap
@@ -42,6 +42,7 @@ from civ6_ai.policies.game_data import WONDERS
 from civ6_ai.policies.growth import CityGrowth, GrowthWeights, Stance, food_multiplier
 from civ6_ai.policies.production import (
     _BUILDING_YIELDS,
+    _CAMP_CITY_REACH,
     _DEFENSIVE_BUILDINGS,
     _DISTRICT_YIELDS,
     _EARLY_TURNS,
@@ -58,6 +59,7 @@ from civ6_ai.policies.production import (
     under_threat,
 )
 from civ6_ai.policies.valuation import _EXTRA_BUILDINGS, DISCOUNT, HORIZON_CAP
+from civ6_ai.state.reader import hex_distance
 
 _YIELD_NAMES = ("food", "production", "gold", "science", "culture", "faith")
 # What the production policy's `food` profile stands for in these items: citizens' room, not food.
@@ -95,18 +97,22 @@ class BuildValueSettings:
     # before it runs (assumption: build, walk, set up).
     route_yield: float = 2.0
     trader_setup_turns: int = 8
-    # Settlers: the expected city. It starts at nothing, grows linearly to `new_city_share` of the
-    # yield of the city that builds the settler (measured: that city's own per-turn yields this
-    # turn; the empire mean is not in the production context) over `new_city_ramp_turns`, after
-    # `settler_travel_turns`. All three are assumptions; the share below 1 because a new city is
-    # smaller than the one that makes settlers. The settler also costs a citizen, regrown over
-    # `settler_pop_regrow_turns` (assumption; the same order as `housing_fill_turns`).
-    new_city_share: float = 0.6
-    new_city_ramp_turns: int = 30
+    # Settlers: the expected city, measured from per-city yields (STD_T1_04, STD_T1_03, STD_T1_01,
+    # turns 1 to 60, 7 non-capital cities). Weighted yield of a non-capital city as a share of the
+    # capital's at the same turn: 0.28 at ages 0 to 4 (sd 0.07, 34 city-turns), 0.35 at 5 to 9,
+    # 0.45 at 10 to 19 (sd 0.10), 0.51 at 20 to 29 (sd 0.19, 5 cities), 0.54 at 30 and over
+    # (sd 0.20, 3 cities). A city is not worth nothing at founding (its centre tile gives about
+    # 10.7 yield-turns a turn). The curve is linear from `new_city_start_share` to
+    # `new_city_mature_share` over `new_city_ramp_turns` (0.45 at age 15 falls on the line) and is
+    # flat after. Past age 25 the data is 3 cities with a wide spread, so no figure is claimed
+    # there. The shares are of the building city's yield; they were measured against the capital,
+    # so they hold for a capital-built settler and are an assumption for any other city.
+    new_city_start_share: float = 0.28
+    new_city_mature_share: float = 0.5
+    new_city_ramp_turns: int = 20
+    # Turns from the build to the city working (assumption: walk and found).
     settler_travel_turns: int = 8
-    # A city yields for the rest of the game, not for the 60 turns a building is counted over, so
-    # its benefit is counted over this many turns (assumption; the discount still cuts the far end).
-    city_horizon_cap: int = 150
+    # The settler also costs a citizen, regrown over this many turns (assumption).
     settler_pop_regrow_turns: int = 10
     min_settler_pop: int = _SETTLER_MIN_POP  # Production's own floor.
     # Defence: the threat map's pressure is net hit points lost a turn plus the unseen threat, a
@@ -135,6 +141,32 @@ class BuildValueSettings:
                 continue
             if value < 0 or not math.isfinite(value):
                 raise ValueError(f"Setting {item.name} must be a finite number of at least 0")
+
+
+# The settings that are assumptions, not measurements or game rules: `replay_builds.py` lists them
+# and shows a changed pick's value at half and double each.
+ASSUMED_SETTINGS = (
+    "new_city_start_share",
+    "new_city_mature_share",
+    "new_city_ramp_turns",
+    "settler_travel_turns",
+    "settler_pop_regrow_turns",
+    "improvement_yield",
+    "builder_setup_turns",
+    "route_yield",
+    "trader_setup_turns",
+    "housing_per_item",
+    "housing_fill_turns",
+    "scout_unblock_share",
+    "district_unlock_share",
+)
+
+
+def scaled(settings: BuildValueSettings, name: str, factor: float) -> BuildValueSettings:
+    """The settings with one assumed setting multiplied (a whole-number setting stays whole)."""
+    value = getattr(settings, name)
+    new = max(1, round(value * factor)) if isinstance(value, int) else value * factor
+    return replace(settings, **{name: new})
 
 
 @dataclass(frozen=True)
@@ -191,6 +223,7 @@ class DecisionInputs:
     under_threat: bool = False
     pressed: bool = False
     holy_site_adjacency: int = 0  # 0: not read, or none fits.
+    camp_in_reach: bool = False  # A camp force is short and this city is in reach of the camp.
     growth: dict[str, Any] | None = None  # stance, housing_gap, food_gap, gap.
     reading: dict[str, Any] | None = None  # Threat map: threat, fog, cover, damage, net, turns.
 
@@ -353,19 +386,23 @@ def _settler_value(
         gate = "the city is pressed"
     if gate:
         return _result(0.0, option, f"settler adds no city: {gate}", s, w)
-    reference = city_yield(inputs, w) * s.new_city_share
+    base = city_yield(inputs, w)
     start = option.turns + s.settler_travel_turns
     ramp = max(s.new_city_ramp_turns, 1)
     left = _left(inputs)
-    n = s.city_horizon_cap if left is None else int(max(0.0, min(left - start, s.city_horizon_cap)))
+    n = s.horizon_cap if left is None else int(max(0.0, min(left - start, s.horizon_cap)))
     keep = 1.0 - s.discount
-    benefit = sum(reference * min(1.0, (k + 1) / ramp) * keep ** (start + k) for k in range(n))
+    span = s.new_city_mature_share - s.new_city_start_share
+    benefit = sum(
+        base * (s.new_city_start_share + span * min(1.0, k / ramp)) * keep ** (start + k)
+        for k in range(n)
+    )
     # The settler also takes a citizen, regrown over `settler_pop_regrow_turns`.
     per_citizen = city_yield(inputs, w) / max(inputs.pop, 1)
     benefit -= per_citizen * s.settler_pop_regrow_turns
     reason = (
-        f"expected city {reference:.1f} a turn (this city's {city_yield(inputs, w):.1f} x "
-        f"{s.new_city_share:g}), ramp {ramp} turns, minus a citizen"
+        f"expected city {s.new_city_start_share:g} to {s.new_city_mature_share:g} of this city's "
+        f"{base:.1f} over {ramp} turns, minus a citizen"
     )
     return _result(benefit, option, reason, s, w)
 
@@ -428,6 +465,8 @@ def _defender_value(
     option: OptionInput, inputs: DecisionInputs, s: BuildValueSettings, w: ProductionWeights
 ) -> BuildValue:
     """Expected loss avoided: the share of the city's future yield at risk, from the threat map."""
+    if inputs.camp_in_reach:
+        return _unvalued("camp unit: a camp force is short in reach; the mission is not modelled")
     reading = inputs.reading
     if reading is None:
         return _unvalued("military unit: no threat-map reading, so the risk is not measured")
@@ -440,7 +479,8 @@ def _defender_value(
     share = strength / (strength + cover)
     city_value = city_yield(inputs, w) * discounted_turns(0.0, _left(inputs), s)
     turns = reading.get("turns")
-    late = turns is not None and float(turns) < option.turns
+    # With walls `turns` is when the walls break, not when the city falls, so it is no deadline.
+    late = turns is not None and not inputs.has_walls and float(turns) < option.turns
     benefit = 0.0 if late else risk * share * s.fall_loss_share * city_value
     reason = (
         "arrives after the city falls"
@@ -519,6 +559,10 @@ def rerank(
     """
     live = [o for o in options if o.score is not None]
     if defence_only:
+        # The live guard: a defence-only call changes nothing unless the best option is a defence
+        # option that scores above zero.
+        if not live or not is_defence_option(live[0]) or live[0].score <= 0:
+            return Reranked(None, None, None, None)
         live = [o for o in live if is_defence_option(o)]
     if not live:
         return Reranked(None, None, None, None)
@@ -603,6 +647,11 @@ def decision_record(
         under_threat=under_threat(city, ctx),
         pressed=is_pressed(city, ctx),
         holy_site_adjacency=ctx.holy_site_adjacency,
+        camp_in_reach=ctx.camp_units > 0
+        and (
+            ctx.camp_target is None
+            or hex_distance(city.x, city.y, *ctx.camp_target) <= _CAMP_CITY_REACH
+        ),
         growth=None
         if plan is None
         else {

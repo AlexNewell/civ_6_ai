@@ -702,7 +702,9 @@ def test_a_camp_is_left_alone_when_the_odds_are_not_clear():
     game = camp_game(units, [barbarian(x=14, y=10, cs=14), barbarian(x=14, y=11, cs=14)])
     policy = MilitaryPolicy()
     run(policy, game)
-    assert not camp_orders(policy)
+    # Issue 398: a short force closes up at the muster and waits there, it does not go in.
+    assert not policy._committed
+    assert all("waiting" in d.reason for d in camp_orders(policy))
 
 
 def test_no_camp_means_no_camp_order():
@@ -745,14 +747,18 @@ def test_a_failed_camp_scan_is_logged_and_the_turn_goes_on(caplog):
     assert "barbarian camp failed" in caplog.text
 
 
-def test_a_camp_that_will_not_fall_is_set_aside_after_the_turn_limit():
+def test_a_force_with_setbacks_is_called_off_by_the_weights_not_a_turn_limit():
     game = camp_game(strong_pair(), [barbarian(x=15, y=10, cs=5)])
-    policy = MilitaryPolicy(MilitarySettings(max_camp_turns=2))
-    for _ in range(5):
-        run(policy, game)
-    assert len(camp_orders(policy)) == 4  # Two turns of two moves, then set aside.
-    assert (14, 10) in policy._camp_aside
-    assert (14, 10) not in policy._camp_turns
+    policy = MilitaryPolicy()
+    run(policy, game)
+    mission = policy._missions.get((14, 10))
+    assert mission.phase is not military_module.Phase.ABORT
+    mission.setbacks = 10  # The need rose, units were lost, a way closed: ten setbacks.
+    mission.since = 5
+    game.data["overview"] = overview(turn=21, num_cities=1)
+    run(policy, game)
+    assert mission.phase is military_module.Phase.ABORT
+    assert "setbacks" in mission.reason
 
 
 def test_a_unit_on_a_camp_mission_does_not_flee_the_guards_until_it_is_hurt():
@@ -1018,17 +1024,6 @@ def test_a_unit_that_attacked_fortifies_again_in_a_threatened_city():
     game.data["units"] = [archer()]
     run(policy, game)
     assert game.orders("fortify") == [("fortify", 2)]
-
-
-def test_a_camp_count_starts_again_after_the_camp_is_forgotten():
-    game = camp_game(strong_pair(), [barbarian(x=15, y=10, cs=5)])
-    policy = MilitaryPolicy()
-    run(policy, game)
-    assert any(where == (14, 10) for where, _ in policy._camp_turns)
-    game.data["units"] = []
-    game.data["overview"] = overview(turn=20 + policy.settings.camp_idle_turns + 1, num_cities=1)
-    run(policy, game)
-    assert policy._camp_turns == {}
 
 
 # ----- refused moves fall back -----
@@ -1616,18 +1611,21 @@ def test_a_force_still_walking_to_a_far_camp_is_not_cut_off_by_the_assault_limit
     units = [warrior(uid=1, x=2, y=10, **STRONG), warrior(uid=2, x=2, y=11, **STRONG)]
     game = camp_game(units, [])
     policy = MilitaryPolicy()
-    for _ in range(policy.settings.max_camp_turns + 3):  # More turns than the assault limit.
+    for turn in range(20, 33):  # Many turns, but a far force with margin is not called off yet.
+        game.data["overview"] = overview(turn=turn, num_cities=1)
         run(policy, game)
-    assert (14, 10) not in policy._camp_aside  # Still on its way: not set aside.
+    assert policy._missions.get((14, 10)).phase is not military_module.Phase.ABORT
 
 
-def test_a_force_that_never_arrives_is_set_aside_after_the_travel_limit():
+def test_a_force_that_waits_with_nothing_getting_worse_is_never_called_off_for_waiting():
     units = [warrior(uid=1, x=2, y=10, **STRONG), warrior(uid=2, x=2, y=11, **STRONG)]
     game = camp_game(units, [])
     policy = MilitaryPolicy()
-    for _ in range(policy.settings.camp_travel_turns + 2):
+    for turn in range(20, 80):  # The fake game never moves the units, and nothing changes.
+        game.data["overview"] = overview(turn=turn, num_cities=1)
         run(policy, game)
-    assert (14, 10) in policy._camp_aside
+    mission = policy._missions.get((14, 10))
+    assert mission.phase is not military_module.Phase.ABORT and mission.setbacks == 0
 
 
 def test_a_unit_marching_on_a_camp_is_not_sent_exploring_when_only_it_is_free_to_move():
@@ -2223,7 +2221,11 @@ def camp_force_at(rallied_x, far_x):
 def test_the_gathered_force_waits_until_it_meets_the_need():
     # The whole force (3 units, 9 attacks) is enough for a remembered defender needing 7, but the
     # two gathered (6) are not, so they wait and the third walks to the rally ring.
-    game = camp_game(camp_force_at(11, 5), [])
+    # The camp is fogged, so the defender seen there lately is still believed (issue 398: a camp
+    # seen empty clears the memory, a camp out of sight keeps it).
+    fogged = tile(x=14, y=10, improvement="IMPROVEMENT_BARBARIAN_CAMP", owner_id=-1, units=[],
+                  visibility="revealed")  # fmt: skip
+    game = camp_game(camp_force_at(11, 5), [], camp=fogged)
     policy = MilitaryPolicy()
     policy._camp_memory[(14, 10)] = [(20, (man_at_arms(24),))]
     run(policy, game)
@@ -2273,15 +2275,16 @@ def test_a_wounded_unit_of_the_campaign_pulls_back_instead_of_attacking():
     assert game.orders("attack")  # Above the setting it fights on.
 
 
-def test_a_campaign_that_loses_units_without_hurting_the_camp_is_dropped(caplog):
+def test_a_campaign_that_loses_units_without_hurting_the_camp_counts_the_losses():
     game, policy, state = run20_turn100()
     for uid in (91, 92, 93):  # Three units of the mission that no longer exist.
         policy._mission[uid] = ((55, 7), 98)
-    with caplog.at_level(logging.INFO, logger=military_module.log.name):
-        run(policy, game)
-    assert (55, 7) in policy._camp_aside  # Set aside, so defence comes first.
-    assert state.camp_plan is None  # Production stops building for it.
-    assert any("military_camp_suspended" in r.message for r in caplog.records)
+    run(policy, game)
+    assert len(policy._losses[(55, 7)]) == 3
+    t = military_module._Turn(
+        turn=100, units=(), cities=(), threats=(), mine=[], reserved=frozenset()
+    )
+    assert policy._recent_losses(t, (55, 7)) == 3  # They weigh on the mission's abort score.
 
 
 def test_a_campaign_that_is_hurting_the_camp_is_kept_through_losses():
@@ -2290,7 +2293,10 @@ def test_a_campaign_that_is_hurting_the_camp_is_kept_through_losses():
         policy._mission[uid] = ((55, 7), 98)
     policy._camp_hit[(55, 7)] = 97  # One of our attacks hit its defenders lately.
     run(policy, game)
-    assert (55, 7) not in policy._camp_aside
+    t = military_module._Turn(
+        turn=100, units=(), cities=(), threats=(), mine=[], reserved=frozenset()
+    )
+    assert policy._recent_losses(t, (55, 7)) == 0  # The hit excuses the losses.
     assert state.camp_plan is not None
 
 
@@ -2615,18 +2621,15 @@ def test_an_urgent_redirect_sticks_while_its_force_is_short(caplog):
     assert targets == [(53, 11)] * 5
 
 
-def test_an_urgent_redirect_restarts_the_far_camps_campaign_clock():
+def test_an_urgent_redirect_moves_the_plan_to_the_nearer_camp():
     near = tile(x=53, y=11, improvement="IMPROVEMENT_BARBARIAN_CAMP", owner_id=-1, units=[])
     game, policy, state = two_camp_game(second=near)
     run(policy, game)
     policy._plan_target = (55, 7)
     policy._committed[(55, 7)] = 100
-    policy._camp_turns[(55, 7), False] = (5, 100)
-    policy._camp_turns[(55, 7), True] = (7, 100)
     at_turn(game, 101, [])
     run(policy, game)
     assert state.camp_plan.target == (53, 11)
-    assert (55, 7) not in {k[0] for k in policy._camp_turns}
 
 
 # ----- fallback and approach tiles skip water and mountains (issue 370) -----

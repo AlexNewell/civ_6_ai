@@ -119,16 +119,17 @@ def test_the_garrison_is_never_sent_and_the_reason_is_logged(caplog):
         run(policy, game)
     assert not [d for d in policy.decisions if d.action == "probe"]
     lines = [r.getMessage() for r in caplog.records if "military_probe_skip" in r.getMessage()]
-    assert json.loads(lines[0].split(" ", 1)[1])["reason"] == "no spare unit"
+    assert json.loads(lines[0].split(" ", 1)[1])["reason"] == "no unit available to look"
 
 
-def test_a_free_scout_is_left_to_settling(caplog):
+def test_a_scout_settling_left_with_moves_is_sent_to_look():
+    # Issue 398: settling moves its scout first; one it left with moves goes (live STD_T1_03: the
+    # scout waited at a frontier, no soldier was spare, and the camp was never located).
     units = [warrior(uid=1, x=10, y=10), warrior(uid=2, x=11, y=9), scout(uid=9, x=9, y=9)]
     policy, game = policy_for(suspecting_map(), units)
-    with caplog.at_level(logging.INFO):
-        run(policy, game)
-    assert not [d for d in policy.decisions if d.action == "probe"]
-    assert "we have a scout" in caplog.text
+    run(policy, game)
+    (decision,) = [d for d in policy.decisions if d.action == "probe"]
+    assert decision.unit_id == 9
 
 
 def test_no_unit_is_sent_to_a_stop_under_threat(caplog):
@@ -138,7 +139,7 @@ def test_no_unit_is_sent_to_a_stop_under_threat(caplog):
     with caplog.at_level(logging.INFO):
         run(policy, game)
     assert not [d for d in policy.decisions if d.action == "probe"]
-    assert "no safe stop" in caplog.text
+    assert "too risky" in caplog.text
 
 
 def test_no_suspicion_sends_nobody(caplog):

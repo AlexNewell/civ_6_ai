@@ -1592,6 +1592,30 @@ async def _explain(
     return reason, needs, signature
 
 
+def _log_options(
+    city: City,
+    options: list[ProductionChoice],
+    ranked: list[ProductionChoice],
+    context: ProductionContext,
+    weights: ProductionWeights,
+    planner: Planner | None,
+    only_defence: bool,
+) -> None:
+    """One structured line with every offered option, for the offline replay (issue 400). It reads
+    only what is already held, and a failure here must never change the pick."""
+    from civ6_ai.policies.build_value import LOG_TAG, decision_record, log_line  # Avoids a cycle.
+
+    try:
+        scores = {id(o): score(o, city, context, weights) for o in ranked}
+        last_turn = getattr(planner, "last_turn", None)
+        record = decision_record(
+            city, options, ranked, scores, context, weights, last_turn, only_defence
+        )
+        log.info("%s %s", LOG_TAG, log_line(record))
+    except Exception:
+        log.debug("Could not log the options for %s", city.name, exc_info=True)
+
+
 async def choose_for_city(
     game: ProductionGame,
     city: City,
@@ -1634,6 +1658,7 @@ async def choose_for_city(
             _early_monument_note(city, ranked, context, weights),
             _camp_demand_note(city, ranked, context, weights),
         )
+        _log_options(city, options, ranked, context, weights, planner, only_defence)
     chain = PlanContext(planner, reads) if planner is not None and reads is not None else None
     if only_defence:
         if not ranked or not is_defence(ranked[0]) or score(ranked[0], city, context, weights) <= 0:

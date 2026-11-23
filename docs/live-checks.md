@@ -809,3 +809,25 @@ Every version clears one camp where main clears none, none clears two, and all l
 **PR 407 alone, on the code it merged into (e5f36cf without, 1e66db1 with), T60.** STD_T1_01 127 to 147, STD_T1_03 65 to 56, STD_T1_04 122 to 108: mean -3.2%, with one more builder lost on two saves. The STD_T1_04 run without it is PR 409's first commit, not its final one.
 
 **Yield logging (PR 412) and build replay (PR 414), both merged.** Each left the game identical (20 and 60 turns on STD_T1_04). Yield-turns by T60 on main: STD_T1_04 2114, STD_T1_01 1975, STD_T1_03 1075. Replay can judge 8 of 22 decisions; 122 of 237 options have no value. With measured city growth and a 60-turn horizon, a settler is net negative until about T35, which contradicts the live runs, so the horizon needs work before production uses it.
+
+
+## Loop 8: idle military (issue 416, 2026-11-23)
+
+Role logging (PR 417, merged) left play identical: 60 turns on three saves (c904491) and 30 turns on STD_T1_04 for the merged head.
+
+Unit-turns T30-T60 doing little, without scouts, on main: STD_T1_04 70%, STD_T1_01 61%, STD_T1_03 30%. Most of it is one garrison per city (71 of 233 and 80 of 190). Of 16 military builds T20-T60 on STD_T1_04 and STD_T1_01, camp demand won 8, an empty city 6, threat 1 and the army floor 1. An earlier figure of 57% spare on issue 416 misread a field and was corrected there.
+
+**Production camp demand off (local experiment 0225b2c; gold unchanged).** At T60: scores 108 to 118, 147 to 152 and 56 to 56 (STD_T1_04, 01, 03); empire yield-turns +3.2%, +1.7%, 0%; STD_T1_04 has 3 cities against 4.
+
+
+
+| T90 | main | Scaled (PR 418) | Off (local experiment) |
+|---|---|---|---|
+| STD_T1_04 score / unit drops (lower bound) | 202 / 6 | 202 / 6 | 257 / 10 |
+| STD_T1_01 score / cities / camp by us | 258 / 5 / T83 | 256 / 4 / T73 | 321 / 5 / none |
+| STD_T1_03 score / builders lost | 101 / 1 | 101 / 1 | 101 / 2 |
+| Military builds, STD_T1_04 / STD_T1_01 | 10 / 12 | 10 / 11 | 8 / 6 |
+
+Empire yield-turns T1-T60: 0.0%, -0.4%, 0.0%. Idle camp plus spare unit-turns T30-T60: STD_T1_04 93 to 92, STD_T1_01 35 to 34.
+
+Verdict: PR 418 is parked. The switch-off gains a mean 17% of score at T90 but misses the loss guardrail on STD_T1_04 and STD_T1_03 and gives up the STD_T1_01 camp, so it waits for a decision. Another player took the STD_T1_04 camp on T48 in the switch-off run, which may be part of its gain. One run per save and variant.

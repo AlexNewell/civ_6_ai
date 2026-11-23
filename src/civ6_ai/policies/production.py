@@ -132,9 +132,6 @@ class ProductionWeights:
     # Attacks one more unit adds to the plan's `available`: `MilitaryWeights.camp_strike_turns`
     # (3), the scale `CampPlan.available` and `needed` are in.
     camp_unit_attacks: float = 3.0
-    # Gold buys a camp unit only if its matchup value times that scale is at least this (not used
-    # with power 0). A perfect match (1.5) at readiness 0.58 clears it; at readiness 0.1, not.
-    camp_buy_min_worth: float = 0.5
     # Turns a one-city empire holds back builders to put the first settler first. 0 turns it off.
     builder_hold_turns: int = _FIRST_SETTLER_TURNS
     # Issue 299: score of a Monument in a city with no culture building and no threat, in place of

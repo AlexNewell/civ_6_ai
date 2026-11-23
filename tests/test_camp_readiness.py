@@ -4,15 +4,11 @@ The numbers are the plan lines of two live 90-turn runs: STD_T1_01 (camp units b
 with the plan at need 19, have 3) and STD_T1_04 (T26 at need 10, have 6).
 """
 
-import asyncio
-import logging
 from dataclasses import replace
 
 import pytest
 
-from civ6_ai.policies.defence import DefenceState
-from civ6_ai.policies.gold import GoldPolicy
-from civ6_ai.policies.military import CampPlan, MilitaryWeights
+from civ6_ai.policies.military import MilitaryWeights
 from civ6_ai.policies.production import (
     ProductionContext,
     ProductionWeights,
@@ -20,8 +16,6 @@ from civ6_ai.policies.production import (
     camp_scale,
     score,
 )
-from fixtures import civ_state as fx
-from test_policy_gold import GoldGame, option
 from test_policy_production import best, city
 from test_policy_production import option as menu_option
 
@@ -120,27 +114,3 @@ def test_a_threatened_defender_build_does_not_fall():
     far = ctx(19, 3.0, threatened=frozenset({65536}), short=frozenset({65536}))
     spearman = menu_option("UNIT", "UNIT_SPEARMAN", 4)
     assert score(spearman, garrisoned, far, W) == score(spearman, garrisoned, far, OFF)
-
-
-def gold_buys(needed, available, caplog):
-    state = DefenceState()
-    state.camp_plan = CampPlan(
-        (13, 10), 3, 1, float(needed), float(available), 2, 2, "any", 10, 0.1, defender=45.0
-    )
-    game = GoldGame(
-        gold_amount=500,
-        cities=[fx.city_info(currently_building="BUILDING_MONUMENT", garrison_unit="UNIT_WARRIOR")],
-        production=[option("UNIT_ARCHER", 130, "UNIT", cost=60)],
-        units=[fx.unit_info(unit_type="UNIT_WARRIOR"), fx.unit_info(unit_id=2, unit_index=2)],
-    )
-    caplog.clear()
-    with caplog.at_level(logging.INFO):
-        asyncio.run(GoldPolicy(defence=state).run(game))
-    return any(
-        "camp force" in r.getMessage() and "Bought" in r.getMessage() for r in caplog.records
-    )
-
-
-def test_gold_buys_for_a_plan_close_to_acting_and_not_for_one_far_from_it(caplog):
-    assert gold_buys(10, 6.0, caplog)  # STD_T1_04 T26: readiness 0.9.
-    assert not gold_buys(19, 3.0, caplog)  # STD_T1_01 T40: readiness 0.32.

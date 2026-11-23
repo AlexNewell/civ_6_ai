@@ -392,3 +392,22 @@ def test_confirming_the_camp_frees_the_look_out_to_join_the_force():
     m.units = {7: "discover"}
     book.confirm((20, 20), (21, 21), 6)
     assert m.phase is Phase.GATHER and m.units == {}
+
+
+def test_a_called_off_mission_does_not_reopen_while_the_hostile_risk_that_ended_it_stands():
+    units = [warrior(uid=1, x=12, y=10, **STRONG), warrior(uid=2, x=12, y=11, **STRONG)]
+    policy = MilitaryPolicy()
+    mission_weights = dataclasses.replace(policy.settings.mission, risk_weight=30.0)
+    policy.settings = dataclasses.replace(policy.settings, mission=mission_weights)
+    policy, t = _turn_for(policy, MilitaryGame(units))
+    mission = policy._missions.open((14, 10), 19)
+    # Another nation's soldier beside both units: the whole force is exposed.
+    t.threats = (
+        Threat(5, "Rival", "UNIT_SWORDSMAN", 13, 10, 100, 100, 30, 0, 3, True),
+        Threat(5, "Rival", "UNIT_SWORDSMAN", 13, 11, 100, 100, 30, 0, 3, True),
+    )
+    assert policy._force_risk(t, t.mine, (14, 10)) == 1.0
+    defenders = [Threat(-1, "Barbarians", "UNIT_WARRIOR", 14, 10, 100, 100, 5, 0, 3, True)]
+    assert not policy._reopens(t, mission, t.mine, defenders)
+    t.threats = ()
+    assert policy._reopens(t, mission, t.mine, defenders)

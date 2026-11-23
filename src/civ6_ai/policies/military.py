@@ -3961,13 +3961,15 @@ class MilitaryPolicy:
         self, t: _Turn, mission: CampMission, force: list[Unit], defenders: list[Threat]
     ) -> bool:
         """A called-off mission reopens when its facts have improved by enough: more force, a
-        smaller need, fewer losses. No timer."""
+        smaller need, fewer losses, less risk about. No timer."""
         s = self.settings
         need = camp_attacks_needed(force, defenders, s.weights)
         have = float(len(force) * s.weights.camp_strike_turns)
         walk = max((self._walk_turns(u, mission.camp, self._pos(t, u)) for u in force), default=0)
         losses = len(self._losses.get(mission.camp, []))
-        verdict = should_reopen(have, need, walk, 0.0, losses, s.mission)
+        verdict = should_reopen(
+            have, need, walk, self._force_risk(t, force, mission.camp), losses, s.mission
+        )
         mission.score = verdict.score
         if verdict.go:
             mission.outcome = ""

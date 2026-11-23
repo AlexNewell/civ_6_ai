@@ -264,3 +264,31 @@ def test_every_action_the_military_policy_logs_has_a_role():
     assert unit_roles._decision_role("skip", "no attack: odds") is None
     assert unit_roles._decision_role("promote", "promotion spent") is None
     assert unit_roles._decision_role("probe", "move refused") is None
+
+
+def test_a_successful_fallback_move_keeps_its_role_and_a_refusal_does_not():
+    ok = "city tile refused, so went to a tile beside it"
+    assert unit_roles._decision_role("garrison", ok) == "garrison"
+    assert unit_roles._decision_role("garrison", "move refused") is None
+    assert unit_roles._decision_role("garrison", "fallback move refused") is None
+    assert unit_roles._decision_role("attack", "attack failed: no damage") is None
+    # A fortify in place of a refused move takes the role of the order that was refused.
+    assert (
+        unit_roles._decision_role("fortify", "move refused, so fortified where it stands") is None
+    )
+    assert unit_roles._decision_role("fortify", "city has hostile units near it") == "garrison"
+    assert unit_roles._decision_role("skip", "spare, fortify refused") == "spare"
+
+
+def test_a_garrison_whose_move_was_refused_but_fallback_worked_stays_garrison(caplog):
+    caplog.set_level(logging.INFO)
+    cities = [city_info(garrison_unit="")]
+    game = MilitaryGame([warrior(uid=1, x=12, y=10), warrior(uid=2, x=12, y=11)],
+                        [barbarian(x=11, y=11)], cities=cities)  # fmt: skip
+    game.refuse_moves_to = {(10, 10)}  # The city tile is refused; a tile beside it works.
+    policy = MilitaryPolicy()
+    run(policy, game)
+    done = [d for d in policy.decisions if d.reason.startswith("city tile refused")]
+    assert done
+    entry = by_id(lines(caplog)[-1])[done[0].unit_id]
+    assert entry["role"] == "garrison" and entry["act"] == "garrison"

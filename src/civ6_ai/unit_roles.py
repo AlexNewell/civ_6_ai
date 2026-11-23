@@ -50,17 +50,35 @@ _BY_ACTION = {
 }  # fmt: skip
 
 
+# The reasons of orders that did not happen, written whole in `policies/military.py`. A reason
+# that merely mentions an earlier refusal ("city tile refused, so went to a tile beside it") is a
+# successful order and is not here. Matched whole, never as a substring.
+REJECTED = frozenset({
+    "move refused", "healing refused", "fallback move refused", "attack refused",
+    "strike refused", "stack split: move refused", "fortify refused after a refused move",
+    "spare, fortify refused",
+})  # fmt: skip
+# Fortify orders given in place of a move a role asked for (`_fallback`).
+FORTIFY_INSTEAD = frozenset({"move refused, so fortified where it stands"}) | {
+    "fortify refused after a refused move"
+}
+
+
+def rejected(reason: str) -> bool:
+    return reason in REJECTED or reason.startswith("attack failed")
+
+
 def _decision_role(action: str, reason: str) -> str | None:
-    """The role an order or a reason names, or None when it names none (a promotion, a rejected
-    attack, a refused order: the unit is then read by where it stands)."""
-    if "refused" in reason or "failed" in reason:
+    """The role an order or a reason names, or None when it names none (a promotion, an order
+    that did not happen: the unit is then read by where it stands)."""
+    if (action != "skip" and rejected(reason)) or reason in FORTIFY_INSTEAD:
         return None
     if action in _BY_ACTION:
         return _BY_ACTION[action]
     if action == "fortify":
-        if "hostile units near" in reason:
+        if reason == "city has hostile units near it":
             return "garrison"
-        if "covering" in reason:
+        if reason == "covering a threatened city":
             return "cover"
         return "spare"
     if action == "skip":
@@ -290,7 +308,7 @@ def _entry(
     why = ""
     for i, d in enumerate(reversed(made)):  # The last order that names a role.
         role = _decision_role(d.action, d.reason)
-        if role is None and d.action == "fortify" and "refused" in d.reason:
+        if role is None and d.action == "fortify" and d.reason in FORTIFY_INSTEAD:
             # `_fallback`: the move a role asked for was refused, so it fortified in place.
             asked = [e.action for e in made[: len(made) - 1 - i] if e.action in _BY_ACTION]
             role = _BY_ACTION[asked[-1]] if asked else None

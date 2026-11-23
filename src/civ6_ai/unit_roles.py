@@ -149,14 +149,16 @@ def _by_state(policy: Any, t: Any, unit: Any) -> tuple[str, str]:
     if hurt:
         return "heal_retreat", f"heal_not_available: {_unavailable(policy, t, unit) or 'refused'}"
     city = policy._city_at(t, unit)
+    # Current duties first: a retained camp mission does not make a city's sole defender a camper.
+    if city is not None and not policy._spare(t, unit):
+        return "garrison", "held_city_garrison (no stage orders it)"
     sent = policy._mission.get(uid)
-    if sent is not None and t.turn - sent[1] <= s.camp_mission_turns:
+    on_mission = sent is not None and t.turn - sent[1] <= s.camp_mission_turns
+    if on_mission and policy._covering(t, unit) is None:
         return "camp", "on_camp_mission (no order this turn)"
     if uid in policy._explorers and city is None:
         return "recon", "game_explorer (_spare_units leaves it)"
     if city is not None:
-        if not policy._spare(t, unit):
-            return "garrison", "held_city_garrison (no stage orders it)"
         return "spare", _unavailable(policy, t, unit) or "spare in city, nothing to do"
     cover = policy._covering(t, unit)
     if cover is not None:

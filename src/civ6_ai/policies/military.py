@@ -1075,7 +1075,13 @@ class MilitaryPolicy:
         if not mine:
             # No land military unit: the line still says what the other combat units are, and
             # which ones were lost since the last one (issue 416).
-            cities = await _read_cities(game, s.map_width)
+            try:  # `get_cities` is a shared read: the turn's handlers have read it already.
+                cities = await _read_cities(game, s.map_width)
+            except ConnectionError:
+                raise
+            except Exception:
+                log.warning("Role line: could not read the cities", exc_info=True)
+                cities = ()
             reserved = units_reserved_for_settling(
                 units, [(c.x, c.y) for c in cities], map_width=s.map_width
             )  # Scouts stay settling's, as with land units present.

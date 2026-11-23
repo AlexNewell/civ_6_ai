@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import types
@@ -292,3 +293,38 @@ def test_a_garrison_whose_move_was_refused_but_fallback_worked_stays_garrison(ca
     assert done
     entry = by_id(lines(caplog)[-1])[done[0].unit_id]
     assert entry["role"] == "garrison" and entry["act"] == "garrison"
+
+
+def test_a_retained_camp_mission_does_not_hide_a_sole_garrison(caplog):
+    caplog.set_level(logging.INFO)
+    policy = MilitaryPolicy()
+    policy._mission[1] = ((14, 10), 20)  # Sent at a camp, then healed in this city.
+    run(policy, MilitaryGame([warrior(uid=1)], [], cities=[city_info()]))
+    entry = by_id(lines(caplog)[-1])[1]
+    assert entry["role"] == "garrison" and entry["why"].startswith("held_city_garrison")
+
+
+def test_the_no_land_unit_path_reads_cities_from_the_turns_shared_read(caplog):
+    from civ6_ai.bot import SharedReads
+
+    caplog.set_level(logging.INFO)
+    galley = warrior(uid=6, x=20, y=20, unit_type="UNIT_GALLEY", name="Galley")
+    game = MilitaryGame([galley], [], cities=two_cities())
+    shared = SharedReads(game)
+    asyncio.run(shared.get_cities())  # What an earlier handler of the turn does.
+    run(MilitaryPolicy(), shared)
+    assert game.calls.count("get_cities") == 1  # The policy's read came from memory.
+    assert lines(caplog)[-1]["cities"] == 2
+
+
+def test_a_failed_city_read_does_not_break_the_no_land_unit_turn(caplog):
+    caplog.set_level(logging.INFO)
+    galley = warrior(uid=6, x=20, y=20, unit_type="UNIT_GALLEY", name="Galley")
+    game = MilitaryGame([galley], [], cities=two_cities())
+
+    async def broken():
+        raise ValueError("bad read")
+
+    game.get_cities = broken
+    run(MilitaryPolicy(), game)
+    assert lines(caplog)[-1]["cities"] == 0

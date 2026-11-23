@@ -122,6 +122,49 @@ def read_standing(overview: object) -> dict:
     return standing
 
 
+YIELD_KINDS = ("food", "production", "gold", "science", "culture", "faith")
+
+
+def read_yields(cities: object) -> dict:
+    """Totals and per-city rows from a `get_cities` read's city list. Never raises.
+
+    Returns {} when `cities` isn't a list of cities with these fields, so the record keeps None.
+    A city missing a field is left out whole, so the totals never mix full and partial rows.
+    """
+    rows: list[dict] = []
+    try:
+        for city in cities:  # type: ignore[attr-defined]
+            row = {
+                "city_id": int(city.city_id),
+                "name": str(city.name),
+                "pop": int(city.population),
+                **{kind: round(float(getattr(city, kind)), 2) for kind in YIELD_KINDS},
+                "housing": round(float(city.housing), 2),
+                "amenities": int(city.amenities),
+            }
+            rows.append(row)
+    except (AttributeError, TypeError, ValueError):
+        return {}
+    if not rows:
+        return {}
+    totals = {kind: round(sum(r[kind] for r in rows), 2) for kind in YIELD_KINDS}
+    return {"yields": totals, "city_yields": rows}
+
+
+class CitiesHolder:
+    """The newest `get_cities` list the turn's reads returned, for the turn record.
+
+    `SharedReads` sets it on each answer. The orchestrator clears it before the handlers run and
+    reads it after them, so the record costs no game call and never carries an older turn's list.
+    """
+
+    def __init__(self) -> None:
+        self.last: list | None = None
+
+    def clear(self) -> None:
+        self.last = None
+
+
 _standing_warned: list[bool] = []  # Set after the first failure, so it logs once per process.
 
 
@@ -155,6 +198,13 @@ class TurnRecord:
     all_scores: list[int] | None = None
     rank: int | None = None
     leader_score: int | None = None
+    # Our empire's yields per turn (issue 400): the sum over our cities of food, production, gold,
+    # science, culture and faith, and each city's own row (`city_id`, `name`, `pop`, the six
+    # yields, `housing`, `amenities`). From the turn's own `get_cities` read (the newest one the
+    # turn made; no call of its own), so the figures are the city screens' per-turn yields as the
+    # game reported them early in the turn. None when no handler read the cities that turn.
+    yields: dict[str, float] | None = None
+    city_yields: list[dict] | None = None
 
 
 @dataclass
@@ -201,7 +251,9 @@ class Orchestrator:
         screenshots: Screenshotter | None = None,
         rankings: RankingsHolder | None = None,
         core_turn: CoreTurn | None = None,
+        cities: CitiesHolder | None = None,
     ) -> None:
+        self._cities = cities
         self._core_turn = core_turn
         self._rankings = rankings
         self._call_timer = call_timer
@@ -233,9 +285,13 @@ class Orchestrator:
         started = time.perf_counter()
         turn = max(await self._read_turn(), self._confirmed_turn)
         standing = read_standing(self._overview)
+        if self._cities is not None:
+            self._cities.clear()
         seconds, errors = await self._run_handlers()
         if self._rankings is not None and self._rankings.last is not None:
             standing.update(self._rankings.last.fields())
+        if self._cities is not None and self._cities.last is not None:
+            standing.update(read_yields(self._cities.last))
         calls = self._call_timer.take() if self._call_timer else {}
         if self.turn_shots is not None:
             await asyncio.to_thread(self.turn_shots.take, turn, "end-of-turn")

@@ -764,3 +764,24 @@ Findings:
 - **Settler captures on STD_T1_03.** Before #409, every STD_T1_03 run lost its first settler: an escort led it out toward two barbarians, and it then fled into their reach.
 - **Captures were under-counted.** The guardrail read only the events file, which doesn't log a captured civilian. The `civilians_captured` counter in the bot log does.
 - **Single runs are noisy.** PR 407's four samples ran from -11% to +16% around an average of about +1%. A single-run guardrail at ±3% will sometimes block a correct change.
+
+
+## Correction to loops 4-6: camp and loss counts (2026-11-23)
+
+Two guardrail checks in the sections above were broken, so their "no losses" and "no camp cleared" statements should not be relied on.
+
+- **Camps.** `camps_cleared_by_us` resets every turn. It was read from the last log line, which is nearly always 0. The `military_camp_gone` line with `"by": "us"` is the event to count.
+- **Units and captures.** The events file records neither unit losses nor captures, so searching it for them always gave 0. City losses were checked again from the city count: no run lost a city.
+
+Recomputed from `military_camp_gone`, `military_offense` (summed) and `builder_lost`. Combat-unit drops are turn-to-turn falls in the count, so they are lower bounds. Runs whose logs were deleted can't be recomputed: the solo runs of PRs 371, 372 and 373, and slice 1 (PR 402).
+
+| Statement above | What the logs show |
+|---|---|
+| No camp cleared in any run | STD_T1_04 cleared (62,17) on T50 in three dc35850-era runs and on T89 on faff385; the turn-78 save cleared two on e55cd6b; one STD_T1_03 run (PR 406) cleared one on T52. All five PR 397 versions did clear none |
+| PR 371: nothing lost | The T50 clear was gone once PRs 371 and 372 merged, so issue 369's guardrail "camps cleared not fewer" was missed |
+| PR 378: no losses | STD_T1_03: 2 settlers captured against 0, unit drops at least 4 against 2 |
+| PR 395: no losses | Builders lost 2 against 1, unit drops at least 7 against 6 |
+| PR 407: nothing lost | STD_T1_04: unit drops at least 6 against 4, builders lost 1 against 0 |
+| Every STD_T1_03 run lost its first settler | Captures were 0 on dc35850 and c604788, 2 on 6ee7f2d, 1 on e55cd6b and 0 with PR 409 |
+
+PR 407 was not tested together with PR 409 before merging. Main 1e66db1 against e55cd6b at T60: STD_T1_04 108 / 122, STD_T1_03 56 / 67, STD_T1_01 147 / 127. The mean is -4.1%, outside the agreed -3%.

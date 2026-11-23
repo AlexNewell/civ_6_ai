@@ -42,6 +42,7 @@ Order within a turn:
 """
 
 import asyncio
+import contextlib
 import inspect
 import json
 import logging
@@ -66,7 +67,7 @@ from civ6_ai.monitors import (
     VictoryMonitor,
 )
 from civ6_ai.movement import Movement
-from civ6_ai.orchestrator import Handler, Orchestrator, TurnLog, read_core_turn
+from civ6_ai.orchestrator import CitiesHolder, Handler, Orchestrator, TurnLog, read_core_turn
 from civ6_ai.policies import research
 from civ6_ai.policies.builder import BuilderDemand, BuilderPolicy
 from civ6_ai.policies.defence import DefencePolicy, DefenceReport, DefenceState
@@ -216,9 +217,10 @@ class SharedReads:
     outlives a change or a turn. A read that raises isn't kept.
     """
 
-    def __init__(self, game: Any) -> None:
+    def __init__(self, game: Any, cities: CitiesHolder | None = None) -> None:
         self._game = game
         self._kept: dict[str, Any] = {}
+        self._cities = cities  # Told of each fresh `get_cities` answer, for the turn record.
 
     def __getattr__(self, name: str) -> Any:
         attribute = getattr(self._game, name)
@@ -248,15 +250,24 @@ class SharedReads:
             # short one, so both are dropped and the next ask reads them again.
             overview = await self.get_game_overview()
             if overview is None:
+                self._note_cities(value)
                 return value
             try:
                 check_cities_complete(value[0], overview)
             except IncompleteRead:
                 self._kept.pop("get_game_overview", None)
                 raise
+        if name == "get_cities":
+            self._note_cities(value)
         if not _is_empty(value):
             self._kept[name] = value  # An empty answer may be a timeout, so ask again next time.
         return value
+
+    def _note_cities(self, value: Any) -> None:
+        if self._cities is None:
+            return
+        with contextlib.suppress(TypeError, IndexError, KeyError):  # Odd shape: yields stay None.
+            self._cities.last = list(value[0])
 
     async def _changing(self, call: Callable[..., Awaitable[Any]], *args: Any, **kwargs: Any):
         self._kept.clear()
@@ -482,7 +493,10 @@ def build_orchestrator(
         *([EventFlush(event_log)] if event_log is not None else []),
     ]
     timer = CallTimer(game)  # Under SharedReads, so it times real calls and not remembered ones.
-    shared = ResolvingGame(SharedReads(timer), resolver, defeat_check=partial(is_defeated, game))
+    cities_seen = CitiesHolder()
+    shared = ResolvingGame(
+        SharedReads(timer, cities_seen), resolver, defeat_check=partial(is_defeated, game)
+    )
     shared_game.append(shared)
     return Orchestrator(
         shared,
@@ -493,4 +507,5 @@ def build_orchestrator(
         screenshots=screenshots,
         rankings=rankings,
         core_turn=partial(read_core_turn, game),
+        cities=cities_seen,
     )

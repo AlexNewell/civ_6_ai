@@ -395,3 +395,79 @@ def test_turn_record_holds_the_era_score_and_thresholds(tmp_path):
         5,
         14,
     )
+
+
+def city(city_id, name, **over):
+    row = {
+        "city_id": city_id,
+        "name": name,
+        "population": 3,
+        "food": 4.0,
+        "production": 2.5,
+        "gold": 3.0,
+        "science": 1.5,
+        "culture": 1.0,
+        "faith": 0.5,
+        "housing": 5.0,
+        "amenities": 1,
+    }
+    return SimpleNamespace(**{**row, **over})
+
+
+def test_read_yields_totals_and_rows():
+    got = orchestrator.read_yields([city(1, "A"), city(2, "B", science=2.5)])
+    assert got["yields"]["science"] == 4.0
+    assert got["yields"]["production"] == 5.0
+    assert got["city_yields"][1] == {
+        "city_id": 2,
+        "name": "B",
+        "pop": 3,
+        "food": 4.0,
+        "production": 2.5,
+        "gold": 3.0,
+        "science": 2.5,
+        "culture": 1.0,
+        "faith": 0.5,
+        "housing": 5.0,
+        "amenities": 1,
+    }
+
+
+def test_read_yields_leaves_nothing_for_a_city_missing_a_field():
+    broken = SimpleNamespace(city_id=1, name="A", population=1)
+    assert orchestrator.read_yields([city(1, "A"), broken]) == {}
+    assert orchestrator.read_yields([]) == {}
+    assert orchestrator.read_yields(None) == {}
+
+
+class CityReadingHandler:
+    name = "cities"
+
+    def __init__(self, holder):
+        self.holder = holder
+
+    async def run(self, game):
+        if game.turn == 1:  # The second turn reads no cities.
+            self.holder.last = [city(1, "A")]
+
+
+def test_turn_record_carries_the_yields_the_turn_read_and_none_otherwise(tmp_path):
+    holder = orchestrator.CitiesHolder()
+    turn_log = TurnLog(tmp_path / "runs" / "game.jsonl")
+    game = FakeGame()
+    handlers = [CityReadingHandler(holder)]
+    asyncio.run(Orchestrator(game, handlers, turn_log, cities=holder).play(2))
+    first, second = turn_log.records
+    assert first.yields["science"] == 1.5
+    assert first.city_yields[0]["name"] == "A"
+    # The list from turn 1 must not leak into turn 2's record.
+    assert second.yields is None and second.city_yields is None
+    on_disk = [json.loads(x) for x in turn_log.path.read_text().splitlines()]
+    assert on_disk[0]["yields"]["faith"] == 0.5
+
+
+def test_old_records_without_yield_fields_still_load():
+    record = orchestrator.TurnRecord(
+        turn=3, handler_seconds={}, handler_errors={}, end_turn_seconds=0.1, total_seconds=0.2
+    )
+    assert record.yields is None and record.city_yields is None

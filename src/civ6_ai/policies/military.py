@@ -72,6 +72,7 @@ from civ6_ai.state import read_units as _read_units
 from civ6_ai.state.fog import BARBARIAN_ID
 from civ6_ai.state.models import Target
 from civ6_ai.state.reader import STANDARD_MAP_WIDTH, hex_distance
+from civ6_ai.unit_roles import log_unit_roles, record_camp_force
 
 # Orders that hold a city: a unit given one is that city's this turn, not the camp force's.
 CITY_ROLES = frozenset({"cover", "garrison", "heal", "retreat", "flee", "swap"})
@@ -952,6 +953,10 @@ class _Turn:
     # Friendly units (city-state soldiers, at war with the barbarians) that hit a target before it
     # acts. The threat scan lists only units at war with us, so nothing fills this yet (issue 380).
     helpers: list[Threat] = field(default_factory=list)
+    # Issue 416: the units `_clear_camp` counted into the camp force, and for each other unit of
+    # `mine` why not. None until that stage has made its list.
+    camp_counted: set[int] | None = None
+    camp_left: dict[int, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -1045,6 +1050,10 @@ class MilitaryPolicy:
     # Issue 293: the last reason no probe was sent (logged on change), and the unit walking out.
     _probe_why: tuple[Any, ...] | None = field(default=None, init=False, repr=False)
     _probe_unit: int | None = field(default=None, init=False, repr=False)
+    # Issue 416: the combat units the last `military_roles` line listed, to name the ones now gone.
+    _roles_seen: dict[int, tuple[str, int, int]] = field(
+        default_factory=dict, init=False, repr=False
+    )
 
     def blocker_policies(self) -> Mapping[str, Any]:
         """Policies to pass to `BlockerResolver`, which takes over the promotion blocker."""
@@ -1064,6 +1073,19 @@ class MilitaryPolicy:
         await self._spend_promotions(game, units, turn)
         mine = [u for u in units if is_land_military(u)]
         if not mine:
+            # No land military unit: the line still says what the other combat units are, and
+            # which ones were lost since the last one (issue 416).
+            try:  # `get_cities` is a shared read: the turn's handlers have read it already.
+                cities = await _read_cities(game, s.map_width)
+            except ConnectionError:
+                raise
+            except Exception:
+                log.warning("Role line: could not read the cities", exc_info=True)
+                cities = ()
+            reserved = units_reserved_for_settling(
+                units, [(c.x, c.y) for c in cities], map_width=s.map_width
+            )  # Scouts stay settling's, as with land units present.
+            log_unit_roles(self, _Turn(turn, tuple(units), cities, (), [], reserved))
             return
         cities = await _read_cities(game, s.map_width)
         threats = await _read_threats(game)
@@ -1097,6 +1119,7 @@ class MilitaryPolicy:
         await self._idle(game, t)
         self._publish_defence(t)
         self._log_offense(t)
+        log_unit_roles(self, t)  # Issue 416: one role per combat unit, with the reason.
 
     @staticmethod
     def _count_defenders(t: _Turn) -> None:
@@ -2788,6 +2811,7 @@ class MilitaryPolicy:
             and u.hp >= s.weights.camp_min_hp * u.max_hp
             and self._camp_available(t, u)
         ]
+        first = spare
         spare = self._keep_one_garrison(t, spare)
         if t.camp_scanned:
             return
@@ -2815,6 +2839,7 @@ class MilitaryPolicy:
             and self._home_distance(t, c) <= s.camp_home_radius
         ]
         plan = self._plan_camps(t, camps, spare)
+        record_camp_force(self, t, first, spare, plan)  # Issue 416: who counted, and why not.
         if len(spare) < s.camp_min_units or not camps:
             if plan is not None:
                 self._log_hold(t, "too few units available", plan.target, plan, spare)

@@ -155,7 +155,7 @@ def test_food_building_worth_more_when_food_limits_and_less_at_target():
     pw = ProductionWeights()
     harbor = option("BUILDING", "BUILDING_GRANARY")
     flat = city(population=5, housing=10.0, food_surplus=0.4, turns_to_grow=0)
-    settled = city(population=9, housing=9.0, food_surplus=3.0, turns_to_grow=30)
+    settled = city(population=9, housing=14.0, food_surplus=3.0, turns_to_grow=30)
     flat_plan, settled_plan = plan(flat), plan(settled)
     assert flat_plan.food_gap > 0
     assert score(harbor, flat, ctx_with(flat, flat_plan), pw) > score(
@@ -309,3 +309,33 @@ def test_a_city_with_a_harbor_district_has_no_pending_harbor_food():
     assert pending_food(c, t) == 2
     harbor = replace(c, districts=(District("DISTRICT_HARBOR", 1, 1),))
     assert pending_food(harbor, t) == 0
+
+
+def test_granary_housing_counts_in_a_city_held_at_its_cap():
+    # Issue 381: STD_T1_04 held a city at pop 3 of housing 3 for 35 turns; the Granary scored 1.3.
+    granary = option("BUILDING", "BUILDING_GRANARY")
+    pw = ProductionWeights()
+    capped = city(population=3, housing=3.0, food_surplus=4.0, turns_to_grow=8)
+    roomy = city(population=3, housing=9.0, food_surplus=4.0, turns_to_grow=8)
+    p_capped = plan(capped, turn=47, num_cities=3, target=12)
+    p_roomy = plan(roomy, turn=47, num_cities=3, target=12)
+    assert p_capped.housing_gap > 0 and p_roomy.housing_gap == 0
+    s_capped = score(granary, capped, ctx_with(capped, p_capped), pw)
+    s_roomy = score(granary, roomy, ctx_with(roomy, p_roomy), pw)
+    assert s_capped > s_roomy + 3.0
+    # A roomy city is unchanged by the new weight.
+    off = replace(pw, housing_building_value=0.0)
+    assert score(granary, roomy, ctx_with(roomy, p_roomy), pw) == score(
+        granary, roomy, ctx_with(roomy, p_roomy), off
+    )
+
+
+def test_granary_housing_needs_a_plan_and_the_weight():
+    granary = option("BUILDING", "BUILDING_GRANARY")
+    pw = ProductionWeights()
+    capped = city(population=3, housing=3.0, food_surplus=4.0, turns_to_grow=8)
+    p = plan(capped, turn=47, num_cities=3, target=12)
+    base = score(granary, capped, ctx_with(capped), pw)
+    assert score(granary, capped, ctx_with(capped, p), pw) > base + 3.0
+    off = replace(pw, housing_building_value=0.0)
+    assert score(granary, capped, ctx_with(capped, p), off) <= base

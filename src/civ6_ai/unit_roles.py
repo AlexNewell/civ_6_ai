@@ -46,7 +46,7 @@ _BY_ACTION = {
     "garrison": "garrison", "swap": "garrison", "cover": "cover", "heal": "heal_retreat",
     "retreat": "heal_retreat", "flee": "heal_retreat", "camp": "camp", "attack": "attack",
     "city_strike": "attack", "hunt": "attack", "recapture": "recapture", "recon": "recon",
-    "explore": "recon", "stack": "stack",
+    "explore": "recon", "probe": "recon", "stack": "stack",
 }  # fmt: skip
 
 

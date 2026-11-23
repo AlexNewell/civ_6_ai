@@ -237,3 +237,30 @@ def test_a_calm_city_and_a_threatened_one_with_no_reading_are_told_apart(caplog)
     units = by_id(lines(caplog)[-1])
     assert units[1]["city"]["rd"] == "none"  # Threatened, no map reading.
     assert units[3]["city"]["rd"] == "calm"
+
+
+def test_scouts_stay_settlings_when_no_land_unit_remains(caplog):
+    caplog.set_level(logging.INFO)
+    run(MilitaryPolicy(), MilitaryGame([scout(uid=9, x=40, y=40)], [], cities=two_cities()))
+    entry = by_id(lines(caplog)[-1])[9]
+    assert entry["role"] == "recon" and entry["own"] == "settling"
+    assert entry["why"].startswith("settling_reserved")
+
+
+def test_every_action_the_military_policy_logs_has_a_role():
+    # Every action string `_log` and `MilitaryDecision` carry in policies/military.py.
+    mapped = {
+        "garrison": "garrison", "swap": "garrison", "cover": "cover", "heal": "heal_retreat",
+        "retreat": "heal_retreat", "flee": "heal_retreat", "camp": "camp", "attack": "attack",
+        "city_strike": "attack", "hunt": "attack", "recapture": "recapture", "recon": "recon",
+        "explore": "recon", "probe": "recon", "stack": "stack",
+    }  # fmt: skip
+    for action, role in mapped.items():
+        assert unit_roles._decision_role(action, "ordered") == role
+    # Read by the reason: fortify and skip. No role of their own: a promotion, and any refusal.
+    assert unit_roles._decision_role("fortify", "spare unit, nothing to attack") == "spare"
+    assert unit_roles._decision_role("fortify", "covering a threatened city") == "cover"
+    assert unit_roles._decision_role("skip", "spare, already fortified") == "spare"
+    assert unit_roles._decision_role("skip", "no attack: odds") is None
+    assert unit_roles._decision_role("promote", "promotion spent") is None
+    assert unit_roles._decision_role("probe", "move refused") is None

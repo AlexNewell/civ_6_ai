@@ -747,18 +747,18 @@ def test_a_failed_camp_scan_is_logged_and_the_turn_goes_on(caplog):
     assert "barbarian camp failed" in caplog.text
 
 
-def test_a_force_that_makes_no_progress_is_called_off_by_the_stall_weight_not_a_turn_limit():
+def test_a_force_with_setbacks_is_called_off_by_the_weights_not_a_turn_limit():
     game = camp_game(strong_pair(), [barbarian(x=15, y=10, cs=5)])
     policy = MilitaryPolicy()
     run(policy, game)
     mission = policy._missions.get((14, 10))
     assert mission.phase is not military_module.Phase.ABORT
-    mission.stalled = 40  # Forty checks without progress.
+    mission.setbacks = 10  # The need rose, units were lost, a way closed: ten setbacks.
     mission.since = 5
     game.data["overview"] = overview(turn=21, num_cities=1)
     run(policy, game)
     assert mission.phase is military_module.Phase.ABORT
-    assert "checks without progress" in mission.reason
+    assert "setbacks" in mission.reason
 
 
 def test_a_unit_on_a_camp_mission_does_not_flee_the_guards_until_it_is_hurt():
@@ -1617,15 +1617,15 @@ def test_a_force_still_walking_to_a_far_camp_is_not_cut_off_by_the_assault_limit
     assert policy._missions.get((14, 10)).phase is not military_module.Phase.ABORT
 
 
-def test_a_force_that_never_arrives_is_called_off_when_it_stops_making_progress():
+def test_a_force_that_waits_with_nothing_getting_worse_is_never_called_off_for_waiting():
     units = [warrior(uid=1, x=2, y=10, **STRONG), warrior(uid=2, x=2, y=11, **STRONG)]
     game = camp_game(units, [])
     policy = MilitaryPolicy()
-    for turn in range(20, 50):  # The fake game never moves the units: no progress after the first.
+    for turn in range(20, 80):  # The fake game never moves the units, and nothing changes.
         game.data["overview"] = overview(turn=turn, num_cities=1)
         run(policy, game)
     mission = policy._missions.get((14, 10))
-    assert mission.phase is military_module.Phase.ABORT and mission.aborted_for_stall
+    assert mission.phase is not military_module.Phase.ABORT and mission.setbacks == 0
 
 
 def test_a_unit_marching_on_a_camp_is_not_sent_exploring_when_only_it_is_free_to_move():
@@ -2275,15 +2275,16 @@ def test_a_wounded_unit_of_the_campaign_pulls_back_instead_of_attacking():
     assert game.orders("attack")  # Above the setting it fights on.
 
 
-def test_a_campaign_that_loses_units_without_hurting_the_camp_is_dropped(caplog):
+def test_a_campaign_that_loses_units_without_hurting_the_camp_counts_the_losses():
     game, policy, state = run20_turn100()
     for uid in (91, 92, 93):  # Three units of the mission that no longer exist.
         policy._mission[uid] = ((55, 7), 98)
-    with caplog.at_level(logging.INFO, logger=military_module.log.name):
-        run(policy, game)
-    assert (55, 7) in policy._camp_aside  # Set aside, so defence comes first.
-    assert state.camp_plan is None  # Production stops building for it.
-    assert any("military_camp_suspended" in r.message for r in caplog.records)
+    run(policy, game)
+    assert len(policy._losses[(55, 7)]) == 3
+    t = military_module._Turn(
+        turn=100, units=(), cities=(), threats=(), mine=[], reserved=frozenset()
+    )
+    assert policy._recent_losses(t, (55, 7)) == 3  # They weigh on the mission's abort score.
 
 
 def test_a_campaign_that_is_hurting_the_camp_is_kept_through_losses():
@@ -2292,7 +2293,10 @@ def test_a_campaign_that_is_hurting_the_camp_is_kept_through_losses():
         policy._mission[uid] = ((55, 7), 98)
     policy._camp_hit[(55, 7)] = 97  # One of our attacks hit its defenders lately.
     run(policy, game)
-    assert (55, 7) not in policy._camp_aside
+    t = military_module._Turn(
+        turn=100, units=(), cities=(), threats=(), mine=[], reserved=frozenset()
+    )
+    assert policy._recent_losses(t, (55, 7)) == 0  # The hit excuses the losses.
     assert state.camp_plan is not None
 
 

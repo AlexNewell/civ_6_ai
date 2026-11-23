@@ -57,13 +57,25 @@ class MissionSettings:
     walk_weight: float = 0.4  # Per turn of walking still to do.
     risk_weight: float = 3.0  # Per unit of risk, 0 to 1 (the share of the force exposed).
     loss_weight: float = 1.5  # Per unit lost on this camp (abort score only).
-    # Per check with no progress (the force's mean walk to the camp did not fall, nobody newly
-    # rallied or joined, no hit on the camp). Issue 398, live: a 20-turn cutoff ended [55,7] at
-    # T72 (need 9, available 9, walk turns 7 -> 2 over the 20) and [62,17] at T47 (need 8,
-    # available 12): elapsed turns say nothing about progress. At 0.3 a force with margin +0.5
-    # and 5 walk turns left is called off after about 17 checks without progress, and one with
-    # no margin and 2 walk turns after about 8; any progress starts the count again.
-    stall_weight: float = 0.3
+    # Per setback: evidence that the mission got worse (the need rose, a defender reinforced the
+    # camp, a unit was lost, a unit's way to the camp closed). A force waiting for a reinforcement
+    # that is in production has none, so it is never called off for waiting. Progress (the mean
+    # walk fell, a unit rallied or joined, a hit landed) clears them. Issue 398, live: a 20-turn
+    # cutoff ended [55,7] at T72 (need 9, available 9) and [62,17] at T47 (need 8, available 12),
+    # both forces that were not worse off, only slow. At 1.0 three setbacks call off a force with
+    # no margin, five one with a margin of +0.5 and a short walk.
+    setback_weight: float = 1.0
+    # Muster capacity (live STD_T1_03 T56-66: the first unit rallied in a one-tile corridor and
+    # stopped, the two behind it could not pass and never counted). A muster tile that cannot
+    # hold the force costs this per unit it has no room for.
+    muster_capacity_weight: float = 1.5
+    # A unit this near (tiles of route) behind a rallied unit, in an unbroken line of our own
+    # units, is as close to the camp as the ground allows and counts as rallied. The corridor
+    # units stood one tile apart ((61,8), (60,8), (59,7)).
+    queue_gap: int = 2
+    # A melee unit the capture needs weighs this against leaving the force to fight (its attack
+    # option scores camp_attack_gain 4 and a sure kill 2 more on the same scale).
+    melee_stay_weight: float = 3.0
     # Commit when the score is at least this. Below zero, so a force just big enough that is a
     # turn or two from the camp may go in; a thin margin with a long walk or hostiles about may not.
     commit_floor: float = -1.5
@@ -132,12 +144,12 @@ def abort_score(
     risk: float,
     losses: int,
     s: MissionSettings,
-    stalled: int = 0,
+    setbacks: int = 0,
     supplying: bool = False,
 ) -> float:
-    """`stalled` counts checks without progress. `supplying` is a force still gathering, whose
+    """`setbacks` counts evidence of getting worse. `supplying` is a force still gathering, whose
     shortfall production is building: a short margin is then no reason to call it off (floor 0),
-    only a stall is."""
+    only a setback is."""
     m = clamp(margin(have, need))
     if supplying:
         m = max(m, 0.0)
@@ -146,7 +158,7 @@ def abort_score(
         - s.walk_weight * walk_turns
         - s.risk_weight * risk
         - s.loss_weight * losses
-        - s.stall_weight * stalled
+        - s.setback_weight * setbacks
     )
 
 
@@ -157,15 +169,15 @@ def abort_verdict(
     risk: float,
     losses: int,
     s: MissionSettings,
-    stalled: int = 0,
+    setbacks: int = 0,
     supplying: bool = False,
 ) -> Verdict:
     """Call off the force? `go` is True to abort."""
-    score = abort_score(have, need, walk_turns, risk, losses, s, stalled, supplying)
+    score = abort_score(have, need, walk_turns, risk, losses, s, setbacks, supplying)
     stop = score < s.abort_floor
     why = (
         f"margin {margin(have, need):+.2f}, walk {walk_turns:g} turns, risk {risk:.2f}, "
-        f"{losses} lost, {stalled} checks without progress: score {score:.1f} "
+        f"{losses} lost, {setbacks} setbacks: score {score:.1f} "
         f"{'is under' if stop else 'holds above'} {s.abort_floor:g}"
     )
     return Verdict(stop, score, why)
@@ -202,6 +214,63 @@ def progressed(
         or hit
         or phase_changed
     )
+
+
+def setback_events(
+    last_need: float | None,
+    need: float,
+    last_losses: int,
+    losses: int,
+    last_open: bool,
+    ways_open: bool,
+    eps: float = 0.5,
+) -> int:
+    """Evidence the mission got worse since the last check: the need rose (a defender joined the
+    camp or was seen), a unit was lost on it, or a unit's way to the camp closed."""
+    return (
+        (1 if last_need is not None and need > last_need + eps else 0)
+        + max(0, losses - last_losses)
+        + (1 if last_open and not ways_open else 0)
+    )
+
+
+def column_rallied(
+    rallied: Collection[int],
+    positions: Mapping[int, Tile],
+    routes: Mapping[int, list[Tile]],
+    gap: int,
+) -> set[int]:
+    """Who counts as rallied: those at the muster, and those in an unbroken line of our own units
+    on their route behind one of them. A unit queued within `gap` route tiles behind a rallied
+    unit (or behind a queued one) is as near the camp as the ground allows, a one-tile corridor
+    taking one unit at a time. `routes` are each unit's route to the camp, own tile first."""
+    counted = set(rallied)
+    spots = dict(positions)
+    changed = True
+    while changed:
+        changed = False
+        for uid, route in routes.items():
+            if uid in counted:
+                continue
+            ahead = route[1 : gap + 1]
+            if any(spots[o] in ahead for o in counted if o in spots and o != uid):
+                counted.add(uid)
+                changed = True
+    return counted
+
+
+def muster_capacity(
+    tile: Tile,
+    cost: Mapping[Tile, float],
+    limit: float,
+    usable: Callable[[Tile], bool],
+    around: Callable[[Tile], Iterable[Tile]],
+) -> int:
+    """How many units can stand rallied at and beside the tile: the tile and its neighbours that
+    are usable and within `limit` walking cost of the camp. A one-tile corridor holds two or
+    three, open ground six or seven."""
+    spots = [tile, *around(tile)]
+    return sum(1 for p in spots if p in cost and cost[p] <= limit and usable(p))
 
 
 def facts_improved(
@@ -258,16 +327,22 @@ def choose_discoverer(
 
 
 def muster_score(
-    walks: Iterable[float], camp_cost: float, exposed: int, s: MissionSettings
+    walks: Iterable[float],
+    camp_cost: float,
+    exposed: int,
+    s: MissionSettings,
+    no_room: int = 0,
 ) -> float:
     """What a muster tile costs, lower being better: the mean turns the force takes to reach it,
-    its walking cost on to the camp, and the hostile units that can strike it next turn."""
+    its walking cost on to the camp, the hostile units that can strike it next turn, and the
+    units of the force that have no room to stand rallied there (`no_room`)."""
     turns = list(walks)
     mean = sum(turns) / len(turns) if turns else 0.0
     return (
         s.muster_walk_weight * mean
         + s.muster_near_weight * camp_cost
         + s.muster_exposure_weight * exposed
+        + s.muster_capacity_weight * no_room
     )
 
 
@@ -358,8 +433,11 @@ class CampMission:
     last_cost: float | None = None
     last_rallied: int = 0
     last_units: int = 0
-    stalled: int = 0
-    aborted_for_stall: bool = False
+    setbacks: int = 0
+    last_need: float | None = None
+    last_losses: int = 0
+    last_open: bool = True
+    aborted_for_setback: bool = False
     aborted_risk: float = 0.0
 
     def move_to(self, phase: Phase, turn: int, reason: str = "") -> bool:
@@ -391,7 +469,7 @@ class CampMission:
             "shortfall": self.shortfall,
             "score": None if self.score is None else round(self.score, 2),
             "outcome": self.outcome,
-            "stalled": self.stalled,
+            "setbacks": self.setbacks,
             "reason": self.reason,
         }
 

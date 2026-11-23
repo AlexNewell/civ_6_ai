@@ -21,6 +21,7 @@ from civ6_ai.camp_mission import (
     muster_candidates,
     muster_score,
     progressed,
+    setback_events,
     should_reopen,
 )
 from civ6_ai.policies import military as military_module
@@ -541,10 +542,10 @@ def test_a_mission_that_is_not_the_target_says_so_in_its_line(caplog):
 # ----- live runs on 710b91c: progress, not elapsed turns -----
 
 
-def test_a_force_making_progress_is_not_called_off_however_long_it_takes():
-    # STD_T1_03 [55,7], T72: need 9, available 9, walk turns 7 -> 2 over 20 turns: the 20-turn
-    # cutoff ended it. With progress each check the stall count stays at 0.
-    assert not abort_verdict(9, 9, 2, 0.0, 0, S, stalled=0, supplying=True).go
+def test_waiting_is_not_a_setback_and_progress_is_recognised():
+    # STD_T1_03 [55,7], T72: need 9, available 9, walk turns 7 to 2 over 20 turns: the cutoff
+    # ended it. Waiting adds nothing: setbacks come from evidence only.
+    assert not abort_verdict(9, 9, 2, 0.0, 0, S, setbacks=0, supplying=True).go
     assert progressed(3.0, 4.0, 1, 1, 3, 3, False, False)  # The mean walk fell by one tile.
     assert not progressed(4.0, 4.0, 1, 1, 3, 3, False, False)  # Nothing changed.
     assert progressed(4.0, 4.0, 2, 1, 3, 3, False, False)  # Another unit rallied.
@@ -553,41 +554,51 @@ def test_a_force_making_progress_is_not_called_off_however_long_it_takes():
     assert progressed(4.0, None, 0, 0, 3, 0, False, False)  # The first check.
 
 
-def test_a_stalled_force_is_called_off_by_the_numbers_with_its_reason():
-    # [55,7]: margin 0, walk 2, no progress for 8 checks. [62,17]: margin +0.5, walk 5, 11 checks.
-    assert not abort_verdict(9, 9, 2, 0.0, 0, S, stalled=7, supplying=True).go
-    assert abort_verdict(9, 9, 2, 0.0, 0, S, stalled=8, supplying=True).go
-    assert not abort_verdict(12, 8, 5, 0.0, 0, S, stalled=5, supplying=True).go
-    verdict = abort_verdict(12, 8, 5, 0.0, 0, S, stalled=11, supplying=True)
-    assert verdict.go and "11 checks without progress" in verdict.reason
+def test_setbacks_are_the_need_rising_a_unit_lost_or_a_way_closing():
+    assert setback_events(8.0, 8.0, 0, 0, True, True) == 0  # Nothing changed.
+    assert setback_events(8.0, 15.0, 0, 0, True, True) == 1  # STD_T1_03 T42: need 9 to 15+.
+    assert setback_events(8.0, 8.0, 0, 2, True, True) == 2  # Two units lost.
+    assert setback_events(8.0, 8.0, 0, 0, True, False) == 1  # A way closed.
+    assert setback_events(8.0, 8.0, 0, 0, False, False) == 0  # Already closed: not new.
+    assert setback_events(None, 8.0, 0, 0, True, True) == 0  # The first check.
+
+
+def test_a_force_with_setbacks_is_called_off_by_the_numbers_with_its_reason():
+    # [55,7]: margin 0, walk 2. [62,17]: margin +0.5, walk 5.
+    assert not abort_verdict(9, 9, 2, 0.0, 0, S, setbacks=2, supplying=True).go
+    assert abort_verdict(9, 9, 2, 0.0, 0, S, setbacks=3, supplying=True).go
+    assert not abort_verdict(12, 8, 5, 0.0, 0, S, setbacks=2, supplying=True).go
+    verdict = abort_verdict(12, 8, 5, 0.0, 0, S, setbacks=5, supplying=True)
+    assert verdict.go and "5 setbacks" in verdict.reason
 
 
 def test_a_short_gathering_force_is_not_called_off_for_being_short_only():
     # Production is building the shortfall: margin -1 would otherwise end every gather at once.
-    assert abort_verdict(3, 9, 2, 0.0, 0, S, stalled=0, supplying=False).go
-    assert not abort_verdict(3, 9, 2, 0.0, 0, S, stalled=0, supplying=True).go
+    assert abort_verdict(3, 9, 2, 0.0, 0, S, setbacks=0, supplying=False).go
+    assert not abort_verdict(3, 9, 2, 0.0, 0, S, setbacks=0, supplying=True).go
 
 
-def test_a_force_called_off_for_a_stall_reopens_only_when_the_facts_change():
+def test_a_force_called_off_for_a_setback_reopens_only_when_the_facts_change():
     assert not facts_improved(9, 9, 0.0, (9.0, 9.0, 0.0))
     assert facts_improved(12, 9, 0.0, (9.0, 9.0, 0.0))  # More force.
     assert facts_improved(9, 5, 0.0, (9.0, 9.0, 0.0))  # A smaller need.
     assert facts_improved(9, 9, 0.0, (9.0, 9.0, 1.0))  # Less risk about.
 
 
-def test_the_policy_counts_checks_without_progress_and_resets_on_progress():
+def test_the_policy_clears_setbacks_on_progress_and_adds_them_on_evidence():
     units = [warrior(uid=1, x=2, y=10, **STRONG), warrior(uid=2, x=2, y=11, **STRONG)]
     policy, t = _turn_for(MilitaryPolicy(), MilitaryGame(units))
     mission = policy._missions.open((14, 10), 5)
     where = (14, 10)
-    policy._note_progress(t, mission, t.mine, [], where, False)
-    assert mission.stalled == 0  # The first check.
-    policy._note_progress(t, mission, t.mine, [], where, False)
-    policy._note_progress(t, mission, t.mine, [], where, False)
-    assert mission.stalled == 2
+    policy._note_progress(t, mission, t.mine, [], where, False, 6.0)
+    for _ in range(50):  # Waiting turn after turn adds nothing.
+        policy._note_progress(t, mission, t.mine, [], where, False, 6.0)
+    assert mission.setbacks == 0
+    policy._note_progress(t, mission, t.mine, [], where, False, 12.0)  # The need doubled.
+    assert mission.setbacks == 1
     t.placed = {1: (8, 10), 2: (8, 11)}  # They walked six tiles.
-    policy._note_progress(t, mission, t.mine, [], where, False)
-    assert mission.stalled == 0
+    policy._note_progress(t, mission, t.mine, [], where, False, 12.0)
+    assert mission.setbacks == 0
 
 
 def test_a_unit_that_cannot_step_says_so_instead_of_step_unsafe():
@@ -599,3 +610,101 @@ def test_a_unit_that_cannot_step_says_so_instead_of_step_unsafe():
     assert why([(1, 1)], scored, types.SimpleNamespace(risk=2.0, exposure=0.5)) == (
         "step unsafe, holding"
     )
+
+
+# ----- the corridor deadlock (live STD_T1_03 T56-66, STD_T1_04 T36-43) -----
+
+CORRIDOR = {  # The ground around (55,7), rows 5 to 12, columns 54 to 63, as the run's dump gave it.
+    5: "..wwwwww...", 6: "...wwwwwww", 7: "whhhsgwwww", 8: "whhmgfgggg", 9: "hhmgrgrfgrg"[:10],
+    10: "hhhggggggg", 11: "hhhggggggg", 12: "mhfggggfgg",
+}  # fmt: skip
+
+
+def corridor_store():
+    from civ6_ai.state.reader import build_tile
+    from civ6_ai.terrain import TerrainStore
+    from fixtures.civ_state import tile as make_tile
+
+    store = TerrainStore(map_width=74)
+    tiles = []
+    for y, row in CORRIDOR.items():
+        for dx, ch in enumerate(row):
+            x = 54 + dx
+            if ch == ".":
+                continue
+            terrain = {"w": "TERRAIN_COAST", "m": "TERRAIN_GRASS_MOUNTAIN"}.get(ch, "TERRAIN_GRASS")
+            feature = {"f": "FEATURE_FOREST", "s": "FEATURE_MARSH"}.get(ch)
+            tiles.append(
+                build_tile(
+                    make_tile(
+                        x=x, y=y, terrain=terrain, feature=feature, is_hills=ch == "h",
+                        is_river=ch == "r", improvement=None, units=[],
+                    )
+                )
+            )  # fmt: skip
+    store.learn(tiles)
+    return store
+
+
+def corridor_game():
+    units = [
+        warrior(uid=1, x=59, y=7, **STRONG),  # The front unit, rallied.
+        warrior(uid=2, x=60, y=8, **STRONG),  # Directly behind it.
+        warrior(uid=3, x=61, y=8, **STRONG),  # Behind that.
+        warrior(uid=4, x=59, y=10),  # The capital's garrison.
+    ]
+    from fixtures.civ_state import tile
+
+    camp = tile(x=55, y=7, improvement="IMPROVEMENT_BARBARIAN_CAMP", owner_id=-1, units=[])
+    cities = [city_info(city_id=65536, name="C", x=59, y=10, garrison_unit="")]
+    return camp_game(units, [], camp=camp, cities=cities)
+
+
+def corridor_policy():
+    policy = MilitaryPolicy()
+    policy.settings = dataclasses.replace(policy.settings, map_width=74)
+    policy.terrain = corridor_store()
+    return policy
+
+
+def test_three_units_single_file_in_a_corridor_count_as_rallied_and_commit():
+    policy = corridor_policy()
+    run(policy, corridor_game())
+    assert (55, 7) in policy._committed  # The column commits; it no longer waits for the back.
+    assert policy._column_ids >= {1, 2, 3}
+
+
+def test_the_unit_behind_the_front_one_counts_as_rallied_only_in_an_unbroken_line():
+    policy = corridor_policy()
+    game = corridor_game()
+    units = [u for u in game.data["units"] if u.unit_id != 2]  # A gap in the line,
+    for u in units:
+        if u.unit_id == 3:
+            u.x = 62  # and the back unit further off: three route tiles from the front one.
+    game.data["units"] = units
+    run(policy, game)
+    assert 3 not in policy._column_ids
+
+
+def test_a_muster_that_cannot_hold_the_force_scores_worse_than_one_that_can():
+    from civ6_ai.camp_mission import muster_capacity
+
+    cost = {(1, 1): 2.0, (2, 1): 3.0, (1, 2): 3.0, (0, 1): 3.0, (5, 5): 3.0}
+    around = lambda p: [(p[0] + 1, p[1]), (p[0] - 1, p[1]), (p[0], p[1] + 1)]  # noqa: E731
+    room = muster_capacity((1, 1), cost, 4.0, lambda p: True, around)
+    assert room == 4
+    corridor = muster_capacity((1, 1), {(1, 1): 2.0, (2, 1): 3.0}, 4.0, lambda p: True, around)
+    assert corridor == 2
+    wide = muster_score([2.0] * 3, 2.0, 0, S, no_room=max(0, 3 - room))
+    narrow = muster_score([2.0] * 3, 2.0, 0, S, no_room=max(0, 3 - corridor))
+    assert narrow > wide
+
+
+def test_the_only_melee_unit_weighs_leaving_the_force_to_fight():
+    # T59: the melee unit left the force to fight and the capture lost its unit.
+    assert S.melee_stay_weight > 0
+    from civ6_ai.camp_mission import column_rallied
+
+    got = column_rallied({1}, {1: (5, 5), 2: (6, 5), 3: (7, 5)},
+                         {2: [(6, 5), (5, 5)], 3: [(7, 5), (6, 5)]}, 2)  # fmt: skip
+    assert got == {1, 2, 3}

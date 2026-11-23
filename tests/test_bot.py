@@ -691,3 +691,19 @@ def test_build_orchestrator_switches_on_the_named_features(tmp_path):
     plain = bot.build_orchestrator(WiredGame(), EventBus(), TurnLog(tmp_path / "h.jsonl"))
     production = next(h for h in plain._handlers if isinstance(h, bot.CityProductionPolicy))
     assert production.weights.wonder_races is False
+
+
+def test_shared_reads_tell_the_holder_the_cities_without_another_read():
+    from civ6_ai.orchestrator import CitiesHolder
+
+    game = WiredGame()
+    holder = CitiesHolder()
+    shared = bot.SharedReads(game, holder)
+
+    async def go():
+        await shared.get_cities()
+        await shared.get_cities()
+        assert game.reads.count("get_cities") == 1
+        assert holder.last is not None and len(holder.last) == len(game.cities)
+
+    asyncio.run(go())

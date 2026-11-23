@@ -56,6 +56,22 @@ from types import SimpleNamespace
 from typing import Any, Protocol
 
 from civ6_ai.blockers import Blocker, BlockerType, action_succeeded, move_succeeded
+from civ6_ai.camp_mission import (
+    CampMission,
+    CommittedView,
+    Discoverer,
+    MissionBook,
+    MissionSettings,
+    Phase,
+    abort_verdict,
+    assign_roles,
+    choose_discoverer,
+    choose_muster,
+    commit_verdict,
+    muster_candidates,
+    muster_score,
+    should_reopen,
+)
 from civ6_ai.movement import Movement, MovementSettings, Trip, straight_line
 from civ6_ai.policies.game_data import COMBAT_UNITS
 from civ6_ai.policies.settling import (
@@ -75,6 +91,12 @@ from civ6_ai.state.reader import STANDARD_MAP_WIDTH, hex_distance
 
 # Orders that hold a city: a unit given one is that city's this turn, not the camp force's.
 CITY_ROLES = frozenset({"cover", "garrison", "heal", "retreat", "flee", "swap"})
+# Issue 398: the roles the camp mission gives a unit: "camp" (marching with the force) and
+# "discover" (sent to look at an inferred camp). Of the city roles, only these may take it back.
+MISSION_ROLES = frozenset({"camp", "discover"})
+SAFETY_ROLES = frozenset({"heal", "retreat", "flee"})
+# What each mission role keeps other policies from ordering (their `_available` kinds).
+_MISSION_BLOCKS = {"camp": ("spare", "idle", "probe"), "discover": ("spare", "idle")}
 
 # The `movement_trip` kinds the military policy logs (#399).
 TRIP_KINDS = ("muster", "stage", "camp", "recapture", "probe", "recon", "garrison", "hunt")
@@ -203,6 +225,8 @@ class MilitarySettings:
     """Bounds on reach, retrying and work per turn, so nothing stalls or runs away."""
 
     weights: MilitaryWeights = field(default_factory=MilitaryWeights)
+    # Issue 398: the weights of the camp mission's decisions (commit, abort, discover, muster).
+    mission: MissionSettings = field(default_factory=MissionSettings)
     max_garrison: int = 2  # Defenders wanted in a city under heavy threat.
     reinforce_threat_count: int = 3  # Hostile units near a city that call for a second defender.
     garrison_reach: int = 4  # How far a spare unit is called from.
@@ -217,7 +241,6 @@ class MilitarySettings:
     # Issue 293: a spare unit goes to look at where the threat map suspects an unseen camp.
     probe: bool = True
     probe_stand: int = 2  # It stops this many tiles short of the guess: it looks, never attacks.
-    probe_threat: float = 4.0  # The most threat-map strength allowed on a tile it stops on.
     capture_radius: int = 4  # Tiles from where a settler was last seen that a captor may stand.
     capture_window: int = 4  # Turns a vanished settler waits for a hostile civilian to show.
     capture_creep: int = 2  # Tiles added to that radius for each turn a captor may have moved.
@@ -1020,7 +1043,10 @@ class MilitaryPolicy:
     )
     _known_last: set[tuple[int, int]] | None = field(default=None, init=False, repr=False)
     _camps_ours: int = field(default=0, init=False, repr=False)
-    _committed: dict[tuple[int, int], int] = field(default_factory=dict, init=False, repr=False)
+    # Issue 398: one mission per camp, carried across turns (phase, units, muster tile). The
+    # `_committed` view over it answers whether a camp's force is going in.
+    _missions: MissionBook = field(default_factory=MissionBook, init=False, repr=False)
+    _commit_view: CommittedView | None = field(default=None, init=False, repr=False)
     # Issue 295: the camp the plan chose last, kept while the force is on it; and the last turn
     # each camp's own tile was in sight (an empty camp seen is not an unseen garrison).
     _plan_target: tuple[int, int] | None = field(default=None, init=False, repr=False)
@@ -1045,6 +1071,12 @@ class MilitaryPolicy:
     # Issue 293: the last reason no probe was sent (logged on change), and the unit walking out.
     _probe_why: tuple[Any, ...] | None = field(default=None, init=False, repr=False)
     _probe_unit: int | None = field(default=None, init=False, repr=False)
+
+    @property
+    def _committed(self) -> CommittedView:
+        if self._commit_view is None:
+            self._commit_view = CommittedView(self._missions)
+        return self._commit_view
 
     def blocker_policies(self) -> Mapping[str, Any]:
         """Policies to pass to `BlockerResolver`, which takes over the promotion blocker."""
@@ -1086,6 +1118,8 @@ class MilitaryPolicy:
             t.threats = await _read_threats(game)  # A move may reveal a new target.
             t.mine = [u for u in units if is_land_military(u) and u.unit_id not in t.reserved]
             self._count_defenders(t)
+        self._committed.now = turn
+        self._claim_missions(t)  # One role per unit, before any other policy moves one.
         await self._attack(game, t)
         await self._recapture(game, t)
         await self._heal(game, t)
@@ -1093,6 +1127,7 @@ class MilitaryPolicy:
         self._note_sightings(t)
         await self._clear_camp(game, t)
         await self._probe_suspect(game, t)
+        self._log_missions(t)
         await self._spare_units(game, t)
         await self._idle(game, t)
         self._publish_defence(t)
@@ -1826,12 +1861,19 @@ class MilitaryPolicy:
             t.turn, unit.unit_id, unit.x, unit.y, action, reason, target, **extra
         )
         if action in CITY_ROLES:
-            t.roles.setdefault(unit.unit_id, action)
+            # A unit hurt or in danger leaves its mission (issue 398); any other city role waits
+            # for a unit the mission does not hold (`_held_off`).
+            if action in SAFETY_ROLES and t.roles.get(unit.unit_id) in MISSION_ROLES:
+                t.roles[unit.unit_id] = action
+            else:
+                t.roles.setdefault(unit.unit_id, action)
         self._record(decision)
 
     def _available(self, t: _Turn, unit: Unit, kind: str) -> bool:
         """True if the unit may be ordered now: not acted on, not refused, within the bounds."""
         s = self.settings
+        if kind in _MISSION_BLOCKS.get(t.roles.get(unit.unit_id, ""), ()):
+            return False  # Held by a camp mission this turn: one role per unit.
         return (
             unit.unit_id not in t.acted
             and unit.can_move
@@ -1933,6 +1975,10 @@ class MilitaryPolicy:
             }
         needed = plan.needed if plan is not None else 0.0
         have = plan.available if plan is not None else 0.0
+        held_by = self._missions.get(camp)
+        if held_by is not None:
+            held_by.needed, held_by.available = needed, have
+            held_by.reason = f"{reason}; {held_by.reason}" if held_by.reason else reason
         log.info(
             "military_camp_hold %s",
             json.dumps(
@@ -2597,6 +2643,7 @@ class MilitaryPolicy:
                     (self._walk_cost((u.x, u.y), (city.x, city.y)), u.unit_id, u)
                     for u in t.mine
                     if self._available(t, u, "move")
+                    and not self._held_off(t, u, city)
                     and (u.x, u.y) != (city.x, city.y)
                     and u.hp >= s.weights.heal_below * u.max_hp
                     and (self._spare(t, u) or self._covering(t, u) is city)
@@ -2675,6 +2722,7 @@ class MilitaryPolicy:
                 (self._walk_cost(self._pos(t, u), (city.x, city.y)), u.unit_id, u)
                 for u in t.mine
                 if self._available(t, u, "cover")
+                and not self._held_off(t, u, city)
                 and hex_distance(*self._pos(t, u), city.x, city.y, s.map_width) > 1
                 and u.hp >= s.weights.heal_below * u.max_hp
                 and self._spare(t, u)
@@ -2711,6 +2759,7 @@ class MilitaryPolicy:
             for u in t.mine
             if u.unit_id != holder.unit_id
             and self._available(t, u, "move")
+            and not self._held_off(t, u, city)
             and u.hp >= s.weights.heal_below * u.max_hp
             and _hold_strength(u) >= max(weak * SWAP_MARGIN, weak + 1)
             and (self._spare(t, u) or self._covering(t, u) is city)
@@ -2770,7 +2819,8 @@ class MilitaryPolicy:
             u
             for u in t.mine
             if self._available(t, u, "move")
-            and u.unit_id not in t.roles  # One role a turn: a city's unit is not the force's.
+            and t.roles.get(u.unit_id, "camp") == "camp"  # One role a turn: a city's unit or a
+            # look-out is not the force's.
             and u.hp >= s.weights.camp_min_hp * u.max_hp
             and self._camp_available(t, u)
         ]
@@ -2783,7 +2833,7 @@ class MilitaryPolicy:
             for u in t.mine
             if u.unit_id not in counted
             and u.unit_id not in self._recon
-            and u.unit_id not in t.roles
+            and t.roles.get(u.unit_id, "camp") == "camp"
             and self._on_camp_mission(t, u)
             and u.hp >= s.weights.camp_min_hp * u.max_hp
             and self._camp_available(t, u)
@@ -2814,9 +2864,16 @@ class MilitaryPolicy:
             if self._camp_aside.get(c, -1) < t.turn
             and self._home_distance(t, c) <= s.camp_home_radius
         ]
-        plan = self._plan_camps(t, camps, spare)
+        suspect = self._suspect_spot()
+        self._sync_missions(t, camps, suspect)
+        # With no camp seen the inferred spot is planned for, so production builds the force
+        # while the look-out walks (issue 398: a camp never located was never planned for).
+        searching = not camps and suspect is not None
+        plan = self._plan_camps(t, camps or ([suspect] if searching else []), spare)
+        if searching and suspect is not None:
+            self._note_discovery(suspect, plan, t)
         if len(spare) < s.camp_min_units or not camps:
-            if plan is not None:
+            if plan is not None and camps:
                 self._log_hold(t, "too few units available", plan.target, plan, spare)
             return
         where = (
@@ -2830,6 +2887,11 @@ class MilitaryPolicy:
             t, where, self._remember(t, where, self._camp_defenders(t, where))[0]
         )
         force = [u for u in spare if self._walk_cost(self._pos(t, u), where) <= s.camp_reach]
+        mission = self._missions.open(where, t.turn)
+        self._hold_force(t, mission, force, plan)
+        if mission.phase is Phase.ABORT and not self._reopens(t, mission, force, defenders):
+            self._log_hold(t, "called off, waiting for a stronger force", where, plan, spare)
+            return
         if not camp_force_ok(force, defenders, s.weights, s.camp_min_units, True):
             self._committed.pop(where, None)
             self._log_hold(t, "force short of the need", where, plan, spare)
@@ -2844,10 +2906,19 @@ class MilitaryPolicy:
             self._committed.pop(where, None)  # Issue 380: the need outgrew the force; regroup.
             committed = False
         ready = camp_force_ok(rallied, defenders, s.weights, s.camp_min_units, True)
-        if not committed and not outgrown and ready:
-            committed = True
-            self._committed[where] = t.turn
-            t.map_use["camp_committed"] = 1
+        self._pick_muster(t, mission, force, where)
+        if ready and not committed and not outgrown:
+            verdict = self._commit_verdict(t, rallied, defenders, where)
+            mission.score = verdict.score
+            if verdict.go:
+                committed = True
+                self._committed[where] = t.turn
+                mission.move_to(Phase.APPROACH, t.turn, f"committed: {verdict.reason}")
+                t.map_use["camp_committed"] = 1
+            else:
+                mission.reason = f"waiting to commit: {verdict.reason}"
+        if committed and self._abort_check(t, mission, force, defenders, where):
+            return
         if self.defence is not None and self.defence.camp_plan is not None:
             self.defence.camp_plan = replace(self.defence.camp_plan, committed=committed)
         # Two limits. The walk to the muster point has its own, longer one (Run 18: a far camp's
@@ -2864,8 +2935,15 @@ class MilitaryPolicy:
             self._camp_turns.pop((where, True), None)
             self._camp_turns.pop((where, False), None)
             self._committed.pop(where, None)
+            self._end_mission(
+                t, mission, f"set aside: {spent - 1} turns spent, over the limit of {limit}"
+            )
             return
         occupied = any((b.x, b.y) == where for b in t.threats if b.hostile)
+        if committed and any(self._adjacent(t, u, where) for u in force):
+            mission.move_to(Phase.ASSAULT, t.turn, "a unit stands beside the camp")
+        elif committed:
+            mission.reason = f"approaching: {len(force)} units walking in"
         for unit in sorted(force, key=lambda u: u.unit_id):
             self._mission[unit.unit_id] = (where, t.turn)
             if not self._available(t, unit, "move"):
@@ -3093,6 +3171,9 @@ class MilitaryPolicy:
                 continue
             self._camp_aside[camp] = t.turn + s.camp_suspend_turns
             self._committed.pop(camp, None)
+            failing = self._missions.get(camp)
+            if failing is not None:
+                self._end_mission(t, failing, f"{len(lost)} units lost with no hit on the camp")
             self._losses.pop(camp, None)
             for uid in [u for u, m in self._mission.items() if m[0] == camp]:
                 del self._mission[uid]
@@ -3474,6 +3555,12 @@ class MilitaryPolicy:
             kept.pop(camp, None)  # A camp that is gone leaves nothing to remember.
         for uid in [u for u, m in self._mission.items() if m[0] == camp]:
             del self._mission[uid]  # Released: the units are free for the next order.
+        self._missions.close(
+            camp,
+            t.turn if t is not None else self._committed.now,
+            "cleared" if ours else "by_other",
+            "camp cleared by us" if ours else "camp gone: another nation or the map took it",
+        )  # fmt: skip
         if camp in self._gone_noted:
             return
         self._gone_noted.add(camp)
@@ -3545,6 +3632,9 @@ class MilitaryPolicy:
 
         route = mv.route_tiles(here, camp) if mv is not None else straight_line(*here, *camp, width)
         first = next((p for p in route[1:] if inside(p) and self._passable(p)), camp)
+        mission = self._missions.get(camp)
+        if mission is not None and mission.muster is not None and inside(mission.muster):
+            first = mission.muster  # The tile the mission chose on the walking route.
         taken = {self._pos(t, u) for u in t.units if u.unit_id != unit.unit_id}
         taken |= {(th.x, th.y) for th in t.threats} | t.blocked
         taken |= {p for p, until in self._muster_bad.items() if until >= t.turn}
@@ -3655,6 +3745,274 @@ class MilitaryPolicy:
                     game, t, unit, home, "flee", "alone outside with hostile units near"
                 )
 
+    # ----- the camp mission (issue 398) -----
+
+    def _held_off(self, t: _Turn, unit: Unit, city: City) -> bool:
+        """True if a camp mission holds the unit, so the city's cover, garrison or swap does not
+        take it, unless the threat state calls that city short (then the mission let it go)."""
+        return t.roles.get(unit.unit_id) in MISSION_ROLES and not self._city_short(city)
+
+    def _adjacent(self, t: _Turn, unit: Unit, where: tuple[int, int]) -> bool:
+        return hex_distance(*self._pos(t, unit), *where, self.settings.map_width) <= 1
+
+    def _suspect_spot(self) -> tuple[int, int] | None:
+        """Where the threat map suspects an unseen camp, or None."""
+        if not self.settings.probe or self.threat_map is None:
+            return None
+        found = getattr(self.threat_map, "suspected_camp", lambda: None)()
+        return None if found is None else (found.x, found.y)
+
+    def _claim_missions(self, t: _Turn) -> None:
+        """Give each unit a live mission held last turn its one role again, before any policy
+        moves a unit (so a city's cover cannot take it back, issue 397), or let it go with the
+        reason: gone, hurt, its city short by the threat map, or out of the camp's reach."""
+        s = self.settings
+        by_id = {u.unit_id: u for u in t.mine}
+        for m in self._missions.live():
+            m.losses = len(self._losses.get(m.camp, []))
+            m.reason = ""
+            if not m.units:
+                continue
+            marching = {uid for uid, role in m.units.items() if role == "march"}
+            eligible = {
+                uid: uid in by_id
+                and by_id[uid].hp >= s.weights.camp_min_hp * by_id[uid].max_hp
+                and self._camp_available(t, by_id[uid])
+                for uid in marching
+            }
+            short = {
+                uid
+                for uid in marching
+                if uid in by_id
+                and (c := self._city_at(t, by_id[uid])) is not None
+                and self._city_short(c)
+            }
+            reach = {
+                uid
+                for uid in marching
+                if uid in by_id
+                and self._walk_cost(self._pos(t, by_id[uid]), m.camp) <= s.camp_reach
+            }
+            kept, released = assign_roles(marching, eligible, t.roles, short, reach)
+            for uid, role in m.units.items():
+                if role == "discover" and uid in {u.unit_id for u in t.units}:
+                    kept[uid] = role
+            m.units = kept
+            for uid, role in kept.items():
+                t.roles[uid] = "camp" if role == "march" else role
+            if released:
+                m.reason = "released: " + ", ".join(
+                    f"{uid} ({why})" for uid, why in sorted(released.items())
+                )
+
+    def _hold_force(
+        self, t: _Turn, mission: CampMission, force: list[Unit], plan: "CampPlan | None"
+    ) -> None:
+        """The mission's units this turn are the force, each with the one role `march`."""
+        taken = {uid: r for uid, r in t.roles.items() if r not in MISSION_ROLES}
+        ids = {u.unit_id for u in force}
+        units, released = assign_roles(mission.units, {i: True for i in ids}, taken, (), ids, ids)
+        mission.units = {**{k: v for k, v in mission.units.items() if v == "discover"}, **units}
+        for uid in units:
+            t.roles[uid] = "camp"
+        if plan is not None and plan.target == mission.camp:
+            mission.needed, mission.available = plan.needed, plan.available
+            mission.shortfall = plan.units_wanted
+        mission.walk_turns = max(
+            (self._walk_turns(u, mission.muster or mission.camp, self._pos(t, u)) for u in force),
+            default=0,
+        )
+        for uid, why in released.items():
+            mission.reason = f"released {uid}: {why}"
+
+    def _sync_missions(
+        self, t: _Turn, camps: list[tuple[int, int]], suspect: tuple[int, int] | None
+    ) -> None:
+        """Open a mission for each camp in play; a DISCOVER mission whose camp is now seen moves
+        to it, and one whose suspicion is gone ends. A camp set aside or out of range is called
+        off (it comes back when the facts do)."""
+        s = self.settings
+        known = self._known_camps()
+        found = self._missions.discover_of()
+        if found is not None:
+            seen = next(
+                (
+                    c
+                    for c in sorted(known)
+                    if hex_distance(*c, *found.camp, s.map_width) <= s.mission.confirm_radius
+                ),
+                None,
+            )
+            if seen is not None:
+                self._missions.confirm(found.camp, seen, t.turn)
+            elif suspect is None:
+                self._missions.close(
+                    found.camp, t.turn, "no_camp", "the suspicion is gone and no camp was seen"
+                )
+        for camp in camps:
+            self._missions.open(camp, t.turn)
+        for m in self._missions.live():
+            if (
+                m.confirmed
+                and m.camp not in camps
+                and m.phase is not Phase.ABORT
+                and m.camp in known
+            ):
+                self._end_mission(t, m, "set aside or out of range")
+
+    def _note_discovery(self, spot: tuple[int, int], plan: "CampPlan | None", t: _Turn) -> None:
+        mission = self._missions.discover(spot, t.turn)
+        if plan is not None and plan.target == spot:
+            mission.needed, mission.available = plan.needed, plan.available
+            mission.shortfall = plan.units_wanted
+
+    def _end_mission(self, t: _Turn, mission: CampMission, why: str) -> None:
+        """Call a mission off: its units are released (they go home), the facts at that time are
+        kept, and it reopens when they improve (`_reopens`), not after a wait."""
+        mission.aborted_at = (mission.available, mission.needed)
+        mission.units = {}
+        mission.outcome = "aborted"
+        mission.move_to(Phase.ABORT, t.turn, why)
+        for uid in [u for u, m in self._mission.items() if m[0] == mission.camp]:
+            del self._mission[uid]
+        log.info("military_camp_abort %s", json.dumps(mission.as_row(t.turn), sort_keys=True))
+
+    def _force_risk(self, t: _Turn, units: list[Unit], where: tuple[int, int]) -> float:
+        """The share of the units standing where a hostile unit that is not the camp's own guard
+        can strike them next turn: 0 to 1. The guards are the fight the force came for."""
+        s = self.settings
+        if not units:
+            return 0.0
+        reach = self._hostile_reach(t)
+        others = [
+            b
+            for b in t.threats
+            if b.hostile
+            and (b.x, b.y) not in t.dead
+            and (
+                b.owner_id != BARBARIAN_ID
+                or hex_distance(b.x, b.y, *where, s.map_width) > s.camp_defender_radius
+            )
+        ]
+        w = s.map_width
+        exposed = 0
+        for u in units:
+            here = self._pos(t, u)
+            for b in others:
+                tiles = reach(b)
+                hit = (
+                    here in tiles
+                    if tiles is not None
+                    else hex_distance(b.x, b.y, *here, w) <= s.camp_step_reach
+                )
+                if hit:
+                    exposed += 1
+                    break
+        return exposed / len(units)
+
+    def _commit_verdict(
+        self,
+        t: _Turn,
+        rallied: list[Unit],
+        defenders: list[Threat],
+        where: tuple[int, int],
+    ) -> Any:
+        """Commit the rallied force? Its margin over the need, less the walk still ahead and the
+        risk of the hostiles about, scored on the mission weights (issue 398)."""
+        s = self.settings
+        need = camp_attacks_needed(rallied, defenders, s.weights)
+        have = float(len(rallied) * s.weights.camp_strike_turns)
+        walk = max((self._walk_turns(u, where, self._pos(t, u)) for u in rallied), default=0)
+        return commit_verdict(have, need, walk, self._force_risk(t, rallied, where), s.mission)
+
+    def _abort_check(
+        self,
+        t: _Turn,
+        mission: CampMission,
+        force: list[Unit],
+        defenders: list[Threat],
+        where: tuple[int, int],
+    ) -> bool:
+        """Call the committed force off when its margin, less the walk, the risk and the units
+        lost, falls under the floor. True if it was called off."""
+        s = self.settings
+        need = camp_attacks_needed(force, defenders, s.weights)
+        have = float(len(force) * s.weights.camp_strike_turns)
+        walk = (
+            0
+            if mission.phase is Phase.ASSAULT
+            else max((self._walk_turns(u, where, self._pos(t, u)) for u in force), default=0)
+        )
+        losses = len(self._losses.get(where, []))
+        verdict = abort_verdict(
+            have, need, walk, self._force_risk(t, force, where), losses, s.mission
+        )
+        mission.score = verdict.score
+        if not verdict.go:
+            return False
+        mission.available, mission.needed = have, need
+        self._committed.pop(where, None)
+        self._end_mission(t, mission, f"called off: {verdict.reason}")
+        return True
+
+    def _reopens(
+        self, t: _Turn, mission: CampMission, force: list[Unit], defenders: list[Threat]
+    ) -> bool:
+        """A called-off mission reopens when its facts have improved by enough: more force, a
+        smaller need, fewer losses. No timer."""
+        s = self.settings
+        need = camp_attacks_needed(force, defenders, s.weights)
+        have = float(len(force) * s.weights.camp_strike_turns)
+        walk = max((self._walk_turns(u, mission.camp, self._pos(t, u)) for u in force), default=0)
+        losses = len(self._losses.get(mission.camp, []))
+        verdict = should_reopen(have, need, walk, 0.0, losses, s.mission)
+        mission.score = verdict.score
+        if verdict.go:
+            mission.outcome = ""
+            mission.move_to(Phase.GATHER, t.turn, f"reopened: {verdict.reason}")
+        return verdict.go
+
+    def _pick_muster(
+        self, t: _Turn, mission: CampMission, force: list[Unit], where: tuple[int, int]
+    ) -> None:
+        """Choose the one muster tile of the mission on the walking route to the camp: the tile
+        the force reaches soonest and that is nearest the camp, with the fewest hostiles able to
+        strike it, kept while it scores within a margin of the best (issue 398, issue 392)."""
+        mv = self._mv()
+        s = self.settings
+        cost = mv.cost_field(where) if mv is not None else None
+        if mv is None or cost is None or not force:
+            mission.muster = None
+            return
+        slowest = max(force, key=lambda u: (cost.get(self._pos(t, u), float("inf")), u.unit_id))
+        taken = {self._pos(t, u) for u in t.units if u.unit_id not in {x.unit_id for x in force}}
+        taken |= {(th.x, th.y) for th in t.threats} | t.blocked
+        taken |= {p for p, until in self._muster_bad.items() if until >= t.turn}
+        route = mv.route_tiles(self._pos(t, slowest), where)
+        tiles = muster_candidates(
+            route, cost, s.camp_muster_walk, s.mission.muster_slack,
+            lambda p: p not in taken and p != where and self._passable(p),
+        )  # fmt: skip
+        reach = self._hostile_reach(t)
+        hostiles = [th for th in t.threats if th.hostile and (th.x, th.y) not in t.dead]
+        scores: dict[tuple[int, int], float] = {}
+        for p in tiles:
+            walks = [
+                float(mv.walk_turns(self._pos(t, u), p, max(1.0, u.max_moves)) or 0) for u in force
+            ]
+            exposed = sum(1 for th in hostiles if p in (reach(th) or ()))
+            scores[p] = muster_score(walks, cost[p], exposed, s.mission)
+        mission.muster = choose_muster(scores, mission.muster, s.mission.muster_keep_margin)
+
+    def _log_missions(self, t: _Turn) -> None:
+        """One `camp_mission` line per mission per turn: phase, units, walk turns, the reason for
+        any wait. A mission that closed this turn writes its last line and is dropped."""
+        for m in sorted(self._missions.missions.values(), key=lambda m: m.camp):
+            if not m.reason:
+                m.reason = "nothing to decide this turn"
+            log.info("%s", m.log_line(t.turn))
+        self._missions.sweep()
+
     # ----- suspected camp (issue 293) -----
 
     def _probe_note(self, t: _Turn, why: str, sus: Any = None, **extra: Any) -> None:
@@ -3690,9 +4048,14 @@ class MilitaryPolicy:
             self._probe_note(t, "no suspicion: no area keeps sending barbarian units")
             return
         goal = (sus.x, sus.y)
-        if any(u.unit_type == "UNIT_SCOUT" for u in t.units):
-            self._probe_note(t, "we have a scout, and settling sends it", sus)
-            return
+        mission = self._missions.discover(goal, t.turn)
+        # Issue 398: a scout settling left with moves is a look-out too (live STD_T1_03: settling's
+        # scout waited at a frontier, no soldier was spare, and the camp was never located). Each
+        # candidate is scored on the mission weights: walk, threat at its stop tile, its cost.
+        scouts = [
+            u for u in t.units
+            if u.unit_type == SCOUT and u.can_move and self._available(t, u, "probe")
+        ]  # fmt: skip
         pool = [
             u
             for u in t.mine
@@ -3703,48 +4066,37 @@ class MilitaryPolicy:
             and u.unit_id not in self._explorers
             and not self._on_camp_mission(t, u)
         ]
-        if not pool:
-            self._probe_note(t, "no spare unit", sus)
-            return
-        pool.sort(
-            key=lambda u: (
-                u.unit_id != self._probe_unit,  # The one already walking out goes on.
-                -u.max_moves,
-                max(u.combat_strength, u.ranged_strength),
-                u.unit_id,
-            )
-        )
-        stops = []
-        for unit in pool[:3]:
-            here = hex_distance(unit.x, unit.y, *goal, s.map_width)
-            if here <= s.probe_stand:
+        found: list[Discoverer] = []
+        stops: dict[int, tuple[Unit, tuple[int, int]]] = {}
+        for unit in [*scouts, *pool]:
+            if hex_distance(unit.x, unit.y, *goal, s.map_width) <= s.probe_stand:
                 continue  # Already looking.
-            # The walk's tiles this turn's moves reach, short of where it would stand to look.
             line = [
                 p
                 for p in self._march_tiles(unit, (unit.x, unit.y), goal)
-                if hex_distance(*p, *goal, s.map_width) >= s.probe_stand
+                if hex_distance(*p, *goal, s.map_width) >= s.probe_stand and self._passable(p)
             ]
-            stop = threat = None
-            for step in reversed(line):
-                if not self._passable(step):
-                    continue
-                threat = self.threat_map.threat_at(step[0], step[1], t.turn)
-                if threat <= s.probe_threat:
-                    stop = step
-                    break
-            if stop is None:
-                stops.append((unit, None, threat))
+            if not line:
                 continue
-            stops.append((unit, stop, threat))
-            break
-        chosen = next(((u, p) for u, p, _ in stops if p is not None), None)
-        if chosen is None:
-            self._probe_note(
-                t, "no safe stop on the way (threatened, impassable, or already close)", sus,
-                tried=[u.unit_id for u, _, _ in stops],
+            threats = {p: self.threat_map.threat_at(p[0], p[1], t.turn) for p in line}
+            stop = min(reversed(line), key=lambda p: threats[p])  # The least threat, farthest on.
+            stops[unit.unit_id] = (unit, stop)
+            found.append(
+                Discoverer(
+                    unit.unit_id, unit.unit_type == SCOUT,
+                    float(self._walk_turns(unit, goal, (unit.x, unit.y))), threats[stop],
+                    0.0 if unit.unit_type == SCOUT
+                    else float(max(unit.combat_strength, unit.ranged_strength)),
+                    stop,
+                )
             )  # fmt: skip
+        best, why = choose_discoverer(found, s.mission, self._probe_unit)
+        mission.reason = why
+        if best is None:
+            mission.units = {}
+            self._probe_note(t, why, sus, tried=[d.unit_id for d in found])
             return
+        chosen = stops[best.unit_id]
         unit, stop = chosen
         self._trip(t, unit, "probe", stop, (unit.x, unit.y))
         result = await self._order(t, unit, "probe", game.move_unit(unit.unit_index, *stop))
@@ -3759,6 +4111,8 @@ class MilitaryPolicy:
         self._fortified.pop(unit.unit_id, None)
         self._probe_unit = unit.unit_id
         self._probe_why = None
+        mission.units = {unit.unit_id: "discover"}
+        t.roles[unit.unit_id] = "discover"
         self._log(
             t, unit, "probe",
             f"barbarians keep first appearing near {goal[0]},{goal[1]} "

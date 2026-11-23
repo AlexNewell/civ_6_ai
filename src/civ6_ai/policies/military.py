@@ -2888,10 +2888,12 @@ class MilitaryPolicy:
         )
         force = [u for u in spare if self._walk_cost(self._pos(t, u), where) <= s.camp_reach]
         mission = self._missions.open(where, t.turn)
-        self._hold_force(t, mission, force, plan)
+        # A called-off mission holds no unit: it is asked before the force is claimed, so units
+        # it is not using stay free for cover, garrison and idle orders.
         if mission.phase is Phase.ABORT and not self._reopens(t, mission, force, defenders):
             self._log_hold(t, "called off, waiting for a stronger force", where, plan, spare)
             return
+        self._hold_force(t, mission, force, plan)
         if not camp_force_ok(force, defenders, s.weights, s.camp_min_units, True):
             self._committed.pop(where, None)
             self._log_hold(t, "force short of the need", where, plan, spare)

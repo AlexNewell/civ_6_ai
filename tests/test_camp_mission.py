@@ -366,3 +366,29 @@ def test_the_mission_row_is_json_and_names_every_field_the_log_promises():
     assert {"phase", "units", "walk_turns", "reason", "camp", "shortfall"} <= set(row)
     assert row["phase_turns"] == 3
     json.dumps(row)
+
+
+def test_a_called_off_mission_that_does_not_reopen_holds_no_unit():
+    game = camp_game(
+        [
+            warrior(uid=1, x=12, y=10, **STRONG),
+            warrior(uid=2, x=12, y=11, **STRONG),
+            warrior(uid=3),
+        ],
+        [barbarian(x=15, y=10, cs=5)],
+    )
+    policy = MilitaryPolicy()
+    mission = policy._missions.open((14, 10), 19)
+    policy._end_mission(types.SimpleNamespace(turn=19), mission, "lost the margin")
+    mission.aborted_at = (0.0, 10.0)
+    policy._losses[(14, 10)] = [19, 19, 19, 19]
+    run(policy, game)
+    assert mission.phase is Phase.ABORT and mission.units == {}
+
+
+def test_confirming_the_camp_frees_the_look_out_to_join_the_force():
+    book = MissionBook()
+    m = book.discover((20, 20), 5)
+    m.units = {7: "discover"}
+    book.confirm((20, 20), (21, 21), 6)
+    assert m.phase is Phase.GATHER and m.units == {}

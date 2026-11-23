@@ -390,6 +390,8 @@ class MissionBook:
             return self.missions.get(camp)
         mission.camp = camp
         mission.confirmed = True
+        # The look is done: its look-out is free to join the force (or any other order).
+        mission.units = {u: r for u, r in mission.units.items() if r != "discover"}
         mission.move_to(Phase.GATHER, turn, "camp seen: gathering the force")
         self.missions[camp] = mission
         return mission

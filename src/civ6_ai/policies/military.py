@@ -72,6 +72,7 @@ from civ6_ai.state import read_units as _read_units
 from civ6_ai.state.fog import BARBARIAN_ID
 from civ6_ai.state.models import Target
 from civ6_ai.state.reader import STANDARD_MAP_WIDTH, hex_distance
+from civ6_ai.unit_roles import log_unit_roles
 
 # Orders that hold a city: a unit given one is that city's this turn, not the camp force's.
 CITY_ROLES = frozenset({"cover", "garrison", "heal", "retreat", "flee", "swap"})
@@ -1045,6 +1046,10 @@ class MilitaryPolicy:
     # Issue 293: the last reason no probe was sent (logged on change), and the unit walking out.
     _probe_why: tuple[Any, ...] | None = field(default=None, init=False, repr=False)
     _probe_unit: int | None = field(default=None, init=False, repr=False)
+    # Issue 416: the combat units the last `military_roles` line listed, to name the ones now gone.
+    _roles_seen: dict[int, tuple[str, int, int]] = field(
+        default_factory=dict, init=False, repr=False
+    )
 
     def blocker_policies(self) -> Mapping[str, Any]:
         """Policies to pass to `BlockerResolver`, which takes over the promotion blocker."""
@@ -1097,6 +1102,7 @@ class MilitaryPolicy:
         await self._idle(game, t)
         self._publish_defence(t)
         self._log_offense(t)
+        log_unit_roles(self, t)  # Issue 416: one role per combat unit, with the reason.
 
     @staticmethod
     def _count_defenders(t: _Turn) -> None:

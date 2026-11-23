@@ -1075,7 +1075,8 @@ class MilitaryPolicy:
         if not mine:
             # No land military unit: the line still says what the other combat units are, and
             # which ones were lost since the last one (issue 416).
-            log_unit_roles(self, _Turn(turn, tuple(units), (), (), [], frozenset()))
+            cities = await _read_cities(game, s.map_width)
+            log_unit_roles(self, _Turn(turn, tuple(units), cities, (), [], frozenset()))
             return
         cities = await _read_cities(game, s.map_width)
         threats = await _read_threats(game)
@@ -2806,7 +2807,6 @@ class MilitaryPolicy:
         if t.camp_scanned:
             return
         t.camp_scanned = True
-        record_camp_force(self, t, first, spare)  # Issue 416: who this stage counted, and why not.
         await self._scan_camps(game, t, barbarians)
         if self.defence is not None:  # The strongest barbarian about, for the army floor (279).
             self.defence.hostile = (
@@ -2830,6 +2830,7 @@ class MilitaryPolicy:
             and self._home_distance(t, c) <= s.camp_home_radius
         ]
         plan = self._plan_camps(t, camps, spare)
+        record_camp_force(self, t, first, spare, plan)  # Issue 416: who counted, and why not.
         if len(spare) < s.camp_min_units or not camps:
             if plan is not None:
                 self._log_hold(t, "too few units available", plan.target, plan, spare)

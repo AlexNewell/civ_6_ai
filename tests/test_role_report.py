@@ -72,3 +72,14 @@ def test_a_run_with_no_lines_and_the_command_line(tmp_path, capsys):
     assert "no military_roles lines (not measured)" in capsys.readouterr().out
     assert rr.main([write(tmp_path, full_rows()) + ".jsonl", "--to", "30"]) == 0
     assert "unit-turns 3" in capsys.readouterr().out
+
+
+def test_garrison_in_a_city_not_short_is_split_by_map_reading(tmp_path, capsys):
+    calm = {"short": False, "rd": "calm"}
+    read = {"short": False, "rd": "map", "net": 0.0}
+    rows = [{"turn": 30, "cities": 3, "units": [
+        unit("garrison", 1, city=calm), unit("garrison", 2, city=read),
+        unit("garrison", 3, city=read), unit("garrison", 4, city={"short": True, "rd": "map"}),
+    ]}]  # fmt: skip
+    rr.report(write(tmp_path, rows), None, None)
+    assert "by map reading: calm 1, map 2" in capsys.readouterr().out

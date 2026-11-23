@@ -79,14 +79,18 @@ def _tile(policy: Any, t: Any, unit: Any) -> tuple[int, int]:
 def _city_view(policy: Any, t: Any, city: Any) -> dict[str, Any]:
     """A city as the threat map reads it: short or not, net damage a turn, defenders present."""
     found = policy.defence.cities.get(city.city_id) if policy.defence is not None else None
-    if found is None:
+    if found is None:  # Not threatened this turn: no reading is made.
         return {
-            "id": city.city_id, "short": False, "net": None,
+            "id": city.city_id, "short": False, "net": None, "rd": "calm",
             "def": t.at_city.get((city.x, city.y), 0) + policy._beside(t, city),
         }  # fmt: skip
     reading = found.reading
     net = None if reading is None else round(reading.net, 1)
-    return {"id": city.city_id, "short": bool(found.short), "net": net, "def": found.defenders}
+    # `rd`: the map read the city (net may be 0), or the city is threatened with no map reading.
+    return {
+        "id": city.city_id, "short": bool(found.short), "net": net,
+        "rd": "map" if reading is not None else "none", "def": found.defenders,
+    }  # fmt: skip
 
 
 def _served(policy: Any, t: Any, unit: Any, decision: Any) -> Any:
@@ -144,20 +148,30 @@ def _by_state(policy: Any, t: Any, unit: Any) -> tuple[str, str]:
     return "spare", _unavailable(policy, t, unit) or "spare outside, nothing to do"
 
 
-def record_camp_force(policy: Any, t: Any, first: list[Any], counted: list[Any]) -> None:
+def record_camp_force(
+    policy: Any, t: Any, first: list[Any], counted: list[Any], plan: Any = None
+) -> None:
     """Called by `_clear_camp` with the force it made (`counted`) and the list before the
     one-garrison cut (`first`): keep the ids, and for every other unit the first test it failed,
     in the order the stage applies them. The roles line logs this record, so it cannot disagree
     with the stage. Never raises."""
     try:
         s = policy.settings
-        ids = {u.unit_id for u in counted}
+        # The plan's force is the units within reach of its target (`_plan_camps`).
+        far = {
+            u.unit_id
+            for u in counted
+            if plan is not None and policy._walk_cost(policy._pos(t, u), plan.target) > s.camp_reach
+        }
+        ids = {u.unit_id for u in counted} - far
         before = {u.unit_id for u in first}
         left = {}
         for unit in t.mine:
             if unit.unit_id in ids:
                 continue
-            if unit.unit_id in before:
+            if unit.unit_id in far:
+                left[unit.unit_id] = "beyond the camp's reach"
+            elif unit.unit_id in before:
                 left[unit.unit_id] = "kept as its city's one garrison"
             elif not policy._available(t, unit, "move"):
                 refused = policy._refused.get((unit.unit_id, "move"), -1) >= t.turn

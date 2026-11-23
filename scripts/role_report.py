@@ -81,6 +81,11 @@ def summarise(rows: list[dict]) -> dict:
         "spare_plan_short": sum(1 for r, _ in spare if plan_short(r)) if has_plan else None,
         "spare_city_short": sum(1 for r, _ in spare if r.get("short")) if has_short else None,
         "per_city": len(units) / city_turns if city_turns else None,
+        "garrison_calm": Counter(
+            u["city"].get("rd", "unknown")
+            for _, u in units
+            if u.get("role") == "garrison" and u.get("city") and not u["city"].get("short")
+        ),
         "need": len(need),
         "walks": Counter(walks),
         "any_walk": any("nw" in u for _, u in spare),
@@ -109,6 +114,9 @@ def report(spec: str, first: int | None, last: int | None) -> None:
     print(f"  spare while any city is short: {show(s['spare_city_short'])}")
     per_city = None if s["per_city"] is None else f"{s['per_city']:.2f}"
     print(f"  units per city: {show(per_city)}")
+    if s["garrison_calm"]:
+        kinds = ", ".join(f"{k} {n}" for k, n in sorted(s["garrison_calm"].items()))
+        print(f"  garrison unit-turns in a city not short, by map reading: {kinds}")
     if not s["need"]:
         print("  walk to the nearest unmet need: no spare unit-turn had an unmet need")
     elif not s["any_walk"]:

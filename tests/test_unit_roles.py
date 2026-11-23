@@ -205,3 +205,35 @@ def test_without_the_camp_stage_the_membership_is_recomputed_and_labelled(caplog
     run(policy, game)
     whys = [u["cnt_why"] for u in lines(caplog)[-1]["units"] if not u["cnt"]]
     assert whys and all(w.startswith("recomputed: ") for w in whys)
+
+
+def test_a_unit_beyond_the_camps_reach_is_not_counted(caplog):
+    caplog.set_level(logging.INFO)
+    game, policy, state = run20_turn100()
+    policy.settings = MilitarySettings(camp_reach=2)  # The camp is five tiles off.
+    run(policy, game)
+    line = lines(caplog)[-1]
+    assert line["plan"]["units"] == 0
+    assert not any(u["cnt"] for u in line["units"])
+    assert "beyond the camp's reach" in {u.get("cnt_why") for u in line["units"]}
+
+
+def test_the_no_land_unit_line_keeps_the_city_count(caplog):
+    caplog.set_level(logging.INFO)
+    galley = warrior(uid=6, x=20, y=20, unit_type="UNIT_GALLEY", name="Galley")
+    run(MilitaryPolicy(), MilitaryGame([galley], [], cities=two_cities()))
+    assert lines(caplog)[-1]["cities"] == 2
+
+
+def test_a_calm_city_and_a_threatened_one_with_no_reading_are_told_apart(caplog):
+    from civ6_ai.policies.defence import CityThreat, DefenceState
+
+    caplog.set_level(logging.INFO)
+    state = DefenceState()
+    policy = MilitaryPolicy(defence=state)
+    game = MilitaryGame([warrior(uid=1), warrior(uid=3, x=30, y=20)], [], cities=two_cities())
+    state.cities = {65536: CityThreat(65536, "Rome", 10, 10, ("hostile near",), 1)}
+    run(policy, game)
+    units = by_id(lines(caplog)[-1])
+    assert units[1]["city"]["rd"] == "none"  # Threatened, no map reading.
+    assert units[3]["city"]["rd"] == "calm"

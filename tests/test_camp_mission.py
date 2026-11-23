@@ -411,3 +411,12 @@ def test_a_called_off_mission_does_not_reopen_while_the_hostile_risk_that_ended_
     assert not policy._reopens(t, mission, t.mine, defenders)
     t.threats = ()
     assert policy._reopens(t, mission, t.mine, defenders)
+
+
+def test_a_unit_the_mission_holds_still_flees_when_exposed_but_does_not_fortify():
+    game = MilitaryGame([warrior(x=14, y=10)], [barbarian(x=15, y=10)])
+    policy = MilitaryPolicy()
+    policy._claim_missions = lambda t: t.roles.update({1: "camp"})  # Held, with no camp order.
+    run(policy, game)
+    assert game.orders("move") == [("move", 1, 10, 10)]  # The safety flee runs.
+    assert [d.action for d in policy.decisions if d.unit_id == 1][-1] == "flee"

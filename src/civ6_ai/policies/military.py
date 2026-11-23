@@ -96,7 +96,9 @@ CITY_ROLES = frozenset({"cover", "garrison", "heal", "retreat", "flee", "swap"})
 MISSION_ROLES = frozenset({"camp", "discover"})
 SAFETY_ROLES = frozenset({"heal", "retreat", "flee"})
 # What each mission role keeps other policies from ordering (their `_available` kinds).
-_MISSION_BLOCKS = {"camp": ("spare", "idle", "probe"), "discover": ("spare", "idle")}
+# `idle` is not blocked: the idle step still runs the safety flee for a unit a mission holds
+# (it skips the ordinary fortify duties for it, see `_idle`).
+_MISSION_BLOCKS = {"camp": ("spare", "probe"), "discover": ("spare",)}
 
 # The `movement_trip` kinds the military policy logs (#399).
 TRIP_KINDS = ("muster", "stage", "camp", "recapture", "probe", "recon", "garrison", "hunt")
@@ -3716,9 +3718,12 @@ class MilitaryPolicy:
             if not self._available(t, unit, "idle"):
                 continue
             city = self._city_at(t, unit)
+            held = t.roles.get(unit.unit_id) in MISSION_ROLES  # Keeps only the safety flee.
             if city is not None:
-                if (city.is_threatened or self._state_threatened(city)) and (
-                    self._fortified.get(unit.unit_id) != (unit.x, unit.y)
+                if (
+                    not held
+                    and (city.is_threatened or self._state_threatened(city))
+                    and (self._fortified.get(unit.unit_id) != (unit.x, unit.y))
                 ):
                     result = await self._order(t, unit, "idle", game.fortify_unit(unit.unit_index))
                     if result is not None and action_succeeded(result):
@@ -3732,7 +3737,7 @@ class MilitaryPolicy:
                 continue
             beside = self._covering(t, unit)
             if beside is not None:  # Holding a threatened city from beside it: stay and dig in.
-                if self._fortified.get(unit.unit_id) != self._pos(t, unit):
+                if not held and self._fortified.get(unit.unit_id) != self._pos(t, unit):
                     result = await self._order(t, unit, "idle", game.fortify_unit(unit.unit_index))
                     if result is not None and action_succeeded(result):
                         t.acted.add(unit.unit_id)

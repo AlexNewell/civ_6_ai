@@ -2896,10 +2896,28 @@ class MilitaryPolicy:
             self._log_hold(t, "called off, waiting for a stronger force", where, plan, spare)
             return
         self._hold_force(t, mission, force, plan)
-        if not camp_force_ok(force, defenders, s.weights, s.camp_min_units, True):
+        # Issue 398 (live STD_T1_03, T60-71: need 5-8, available 9-12, yet "force short of the need"
+        # for 12 turns and nobody ordered): strength and the melee unit that takes the tile are
+        # weighed apart from the walk. A force that cannot go in yet still closes up at the muster
+        # (the tail below walks the far units and holds the rallied ones); only the commit waits
+        # for strength and a melee unit. Fewer than `camp_min_units` in reach is no force at all.
+        if len(force) < s.camp_min_units:
             self._committed.pop(where, None)
-            self._log_hold(t, "force short of the need", where, plan, spare)
+            self._log_hold(t, "too few units in reach of the camp", where, plan, spare)
             return
+        if not camp_force_ok(force, defenders, s.weights, s.camp_min_units, False):
+            self._committed.pop(where, None)
+            self._log_hold(
+                t, "force short of the need, closing up at the muster", where, plan, spare
+            )
+        elif not any(_is_melee(u) for u in force):
+            self._log_hold(
+                t,
+                "no melee unit yet to take the tile, closing up at the muster",
+                where,
+                plan,
+                spare,
+            )
         muster = s.camp_muster_radius
         # Issue 275: the force gathers at the rally ring, out of the camp's reach, and goes in
         # together once what is gathered meets the need. A unit never goes in alone.
@@ -3148,9 +3166,17 @@ class MilitaryPolicy:
 
         The strongest group seen at the camp in the last `camp_memory_turns` (issue 279).
         """
-        memory, group = remembered_defenders(
-            self._camp_memory.get(camp, []), t.turn, defenders, self.settings.camp_memory_turns
-        )
+        if self._camp_seen.get(camp, -999) == t.turn:
+            # In sight now, what stands there is the truth, and an empty camp is a camp seen
+            # empty: the memory is replaced by evidence, not by a timer (issue 398).
+            group = list(defenders)
+            memory = [(t.turn, tuple(defenders))] if defenders else []
+        else:
+            # Out of sight the strongest group last seen stands until the tile is seen again.
+            # Live STD_T1_03: the need swung 22 -> 7 when a sighting aged out of the window.
+            memory, group = remembered_defenders(
+                self._camp_memory.get(camp, []), t.turn, defenders, 1_000_000
+            )
         if memory:
             self._camp_memory[camp] = memory
         else:
@@ -3789,7 +3815,10 @@ class MilitaryPolicy:
             marching = {uid for uid, role in m.units.items() if role == "march"}
             eligible = {
                 uid: uid in by_id
-                and by_id[uid].hp >= s.weights.camp_min_hp * by_id[uid].max_hp
+                # A held unit that is hurt but past `camp_leave_hp` is healing, not released:
+                # it rejoins the force once healthy (live STD_T1_03: units released as "not
+                # healthy" every few turns, so the mission never kept a force).
+                and by_id[uid].hp >= s.weights.camp_leave_hp * by_id[uid].max_hp
                 and self._camp_available(t, by_id[uid])
                 for uid in marching
             }
@@ -3824,7 +3853,19 @@ class MilitaryPolicy:
         """The mission's units this turn are the force, each with the one role `march`."""
         taken = {uid: r for uid, r in t.roles.items() if r not in MISSION_ROLES}
         ids = {u.unit_id for u in force}
-        units, released = assign_roles(mission.units, {i: True for i in ids}, taken, (), ids, ids)
+        by_id = {u.unit_id: u for u in t.mine}
+        s = self.settings
+        resting = {  # Held and hurt: healing, so kept (not counted in the force).
+            uid
+            for uid, role in mission.units.items()
+            if role == "march"
+            and uid in by_id
+            and uid not in ids
+            and t.roles.get(uid) == "camp"
+            and by_id[uid].hp >= s.weights.camp_leave_hp * by_id[uid].max_hp
+        }
+        held = ids | resting
+        units, released = assign_roles(mission.units, {i: True for i in held}, taken, (), held, ids)
         mission.units = {**{k: v for k, v in mission.units.items() if v == "discover"}, **units}
         for uid in units:
             t.roles[uid] = "camp"
@@ -4024,7 +4065,12 @@ class MilitaryPolicy:
         any wait. A mission that closed this turn writes its last line and is dropped."""
         for m in sorted(self._missions.missions.values(), key=lambda m: m.camp):
             if not m.reason:
-                m.reason = "nothing to decide this turn"
+                other = self._plan_target is not None and m.camp != self._plan_target
+                m.reason = (
+                    f"not the target: the plan is on {self._plan_target}"
+                    if other
+                    else "nothing to decide this turn"
+                )
             log.info("%s", m.log_line(t.turn))
         self._missions.sweep()
 

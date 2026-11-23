@@ -433,3 +433,104 @@ def test_switching_targets_releases_the_previous_missions_units():
     assert old.units == {} and "not the target" in old.reason
     assert t.roles == {}  # Nobody is held for the abandoned mission.
     assert new.units == {}
+
+
+# ----- live STD_T1_03 (914b11a): the diagnosis, as tests -----
+
+
+def slinger(uid, x, y):
+    return warrior(
+        uid=uid, x=x, y=y, unit_type="UNIT_SLINGER", combat_strength=15, ranged_strength=25
+    )
+
+
+def test_a_force_that_beats_the_need_but_has_no_melee_unit_still_closes_up_at_the_muster(caplog):
+    # T60-71: need 5-8, available 9-12, "force short of the need" with shortfall 1 (melee), and
+    # nobody ordered for 12 turns. Strength and the melee unit are not a gate on the walk.
+    units = [slinger(1, 6, 10), slinger(2, 6, 11), slinger(3, 6, 9), warrior(uid=4)]
+    game = camp_game(units, [barbarian(x=15, y=10, cs=5)])
+    policy = MilitaryPolicy()
+    with caplog.at_level(logging.INFO):
+        run(policy, game)
+    moved = {m[1] for m in game.orders("move")}
+    assert moved & {1, 2, 3}  # They walk toward the muster.
+    assert not policy._committed  # No melee unit to take the tile: the commit waits for one.
+    assert "no melee unit yet" in caplog.text
+
+
+def test_a_force_too_weak_for_the_camp_still_closes_up_but_does_not_commit():
+    # T49-71: units stood at "march" with no order for 20 turns while the force was short.
+    units = [warrior(uid=1, x=6, y=10), warrior(uid=2, x=6, y=11), warrior(uid=3)]
+    game = camp_game(units, [barbarian(x=15, y=10, cs=40), barbarian(x=15, y=11, cs=40)])
+    policy = MilitaryPolicy()
+    run(policy, game)
+    assert {m[1] for m in game.orders("move")} & {1, 2}
+    assert not policy._committed
+
+
+def test_one_unit_in_reach_is_no_force_and_is_not_walked_out_alone():
+    game = camp_game([warrior(uid=1, x=6, y=10, **STRONG), warrior(uid=3)], [])
+    policy = MilitaryPolicy()
+    run(policy, game)
+    assert not [m for m in game.orders("move") if m[1] == 1]
+
+
+def threats(n, cs=20):
+    return [
+        Threat(-1, "Barbarians", "UNIT_WARRIOR", 65, 10 + i, 100, 100, cs, 0, 3, True)
+        for i in range(n)
+    ]
+
+
+def test_the_defenders_remembered_do_not_age_out_and_a_camp_seen_empty_clears_them():
+    # The need went 22 -> 7 when two defenders seen at T49 aged out of a ten turn window at T60.
+    policy, t = _turn_for(MilitaryPolicy(), MilitaryGame([warrior()]))
+    camp = (65, 10)
+    t.turn = 49
+    policy._camp_seen[camp] = 49
+    assert len(policy._remember(t, camp, threats(2))[0]) == 2
+    for turn in (50, 55, 60, 70):  # Out of sight: the memory stands.
+        t.turn = turn
+        assert len(policy._remember(t, camp, [])[0]) == 2
+    t.turn = 71
+    policy._camp_seen[camp] = 71  # Seen again, and empty: that is the evidence.
+    assert policy._remember(t, camp, [])[0] == []
+    t.turn = 72
+    assert policy._remember(t, camp, [])[0] == []  # And it stays gone.
+
+
+def test_a_seen_group_replaces_the_memory_so_a_killed_defender_lowers_the_need():
+    policy, t = _turn_for(MilitaryPolicy(), MilitaryGame([warrior()]))
+    camp = (65, 10)
+    policy._camp_seen[camp] = t.turn
+    assert len(policy._remember(t, camp, threats(2))[0]) == 2
+    assert len(policy._remember(t, camp, threats(1))[0]) == 1
+
+
+def test_a_hurt_unit_of_the_mission_stays_held_while_it_heals():
+    # T50-69: units were released as "not healthy or not free" every few turns.
+    policy, t = _turn_for(MilitaryPolicy(), MilitaryGame([warrior(uid=1, x=12, y=10, health=60)]))
+    mission = policy._missions.open((14, 10), 19)
+    mission.units = {1: "march"}
+    policy._claim_missions(t)
+    assert t.roles == {1: "camp"} and mission.units == {1: "march"}
+    policy._hold_force(t, mission, [], None)  # Not healthy enough for the force this turn.
+    assert mission.units == {1: "march"}
+
+
+def test_a_badly_hurt_unit_is_released_from_the_mission():
+    policy, t = _turn_for(MilitaryPolicy(), MilitaryGame([warrior(uid=1, x=12, y=10, health=30)]))
+    mission = policy._missions.open((14, 10), 19)
+    mission.units = {1: "march"}
+    policy._claim_missions(t)
+    assert mission.units == {} and "not healthy" in mission.reason
+
+
+def test_a_mission_that_is_not_the_target_says_so_in_its_line(caplog):
+    policy, t = _turn_for(MilitaryPolicy(), MilitaryGame([warrior()]))
+    policy._missions.open((55, 7), 19)
+    policy._plan_target = (65, 10)
+    with caplog.at_level(logging.INFO):
+        policy._log_missions(t)
+    (line,) = mission_lines(caplog)
+    assert "not the target" in line["reason"]

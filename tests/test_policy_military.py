@@ -702,7 +702,9 @@ def test_a_camp_is_left_alone_when_the_odds_are_not_clear():
     game = camp_game(units, [barbarian(x=14, y=10, cs=14), barbarian(x=14, y=11, cs=14)])
     policy = MilitaryPolicy()
     run(policy, game)
-    assert not camp_orders(policy)
+    # Issue 398: a short force closes up at the muster and waits there, it does not go in.
+    assert not policy._committed
+    assert all("waiting" in d.reason for d in camp_orders(policy))
 
 
 def test_no_camp_means_no_camp_order():
@@ -2223,7 +2225,11 @@ def camp_force_at(rallied_x, far_x):
 def test_the_gathered_force_waits_until_it_meets_the_need():
     # The whole force (3 units, 9 attacks) is enough for a remembered defender needing 7, but the
     # two gathered (6) are not, so they wait and the third walks to the rally ring.
-    game = camp_game(camp_force_at(11, 5), [])
+    # The camp is fogged, so the defender seen there lately is still believed (issue 398: a camp
+    # seen empty clears the memory, a camp out of sight keeps it).
+    fogged = tile(x=14, y=10, improvement="IMPROVEMENT_BARBARIAN_CAMP", owner_id=-1, units=[],
+                  visibility="revealed")  # fmt: skip
+    game = camp_game(camp_force_at(11, 5), [], camp=fogged)
     policy = MilitaryPolicy()
     policy._camp_memory[(14, 10)] = [(20, (man_at_arms(24),))]
     run(policy, game)

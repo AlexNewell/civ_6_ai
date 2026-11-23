@@ -747,14 +747,18 @@ def test_a_failed_camp_scan_is_logged_and_the_turn_goes_on(caplog):
     assert "barbarian camp failed" in caplog.text
 
 
-def test_a_camp_that_will_not_fall_is_set_aside_after_the_turn_limit():
+def test_a_force_that_makes_no_progress_is_called_off_by_the_stall_weight_not_a_turn_limit():
     game = camp_game(strong_pair(), [barbarian(x=15, y=10, cs=5)])
-    policy = MilitaryPolicy(MilitarySettings(max_camp_turns=2))
-    for _ in range(5):
-        run(policy, game)
-    assert len(camp_orders(policy)) == 4  # Two turns of two moves, then set aside.
-    assert (14, 10) in policy._camp_aside
-    assert (14, 10) not in policy._camp_turns
+    policy = MilitaryPolicy()
+    run(policy, game)
+    mission = policy._missions.get((14, 10))
+    assert mission.phase is not military_module.Phase.ABORT
+    mission.stalled = 40  # Forty checks without progress.
+    mission.since = 5
+    game.data["overview"] = overview(turn=21, num_cities=1)
+    run(policy, game)
+    assert mission.phase is military_module.Phase.ABORT
+    assert "checks without progress" in mission.reason
 
 
 def test_a_unit_on_a_camp_mission_does_not_flee_the_guards_until_it_is_hurt():
@@ -1020,17 +1024,6 @@ def test_a_unit_that_attacked_fortifies_again_in_a_threatened_city():
     game.data["units"] = [archer()]
     run(policy, game)
     assert game.orders("fortify") == [("fortify", 2)]
-
-
-def test_a_camp_count_starts_again_after_the_camp_is_forgotten():
-    game = camp_game(strong_pair(), [barbarian(x=15, y=10, cs=5)])
-    policy = MilitaryPolicy()
-    run(policy, game)
-    assert any(where == (14, 10) for where, _ in policy._camp_turns)
-    game.data["units"] = []
-    game.data["overview"] = overview(turn=20 + policy.settings.camp_idle_turns + 1, num_cities=1)
-    run(policy, game)
-    assert policy._camp_turns == {}
 
 
 # ----- refused moves fall back -----
@@ -1618,18 +1611,21 @@ def test_a_force_still_walking_to_a_far_camp_is_not_cut_off_by_the_assault_limit
     units = [warrior(uid=1, x=2, y=10, **STRONG), warrior(uid=2, x=2, y=11, **STRONG)]
     game = camp_game(units, [])
     policy = MilitaryPolicy()
-    for _ in range(policy.settings.max_camp_turns + 3):  # More turns than the assault limit.
+    for turn in range(20, 33):  # Many turns, but a far force with margin is not called off yet.
+        game.data["overview"] = overview(turn=turn, num_cities=1)
         run(policy, game)
-    assert (14, 10) not in policy._camp_aside  # Still on its way: not set aside.
+    assert policy._missions.get((14, 10)).phase is not military_module.Phase.ABORT
 
 
-def test_a_force_that_never_arrives_is_set_aside_after_the_travel_limit():
+def test_a_force_that_never_arrives_is_called_off_when_it_stops_making_progress():
     units = [warrior(uid=1, x=2, y=10, **STRONG), warrior(uid=2, x=2, y=11, **STRONG)]
     game = camp_game(units, [])
     policy = MilitaryPolicy()
-    for _ in range(policy.settings.camp_travel_turns + 2):
+    for turn in range(20, 50):  # The fake game never moves the units: no progress after the first.
+        game.data["overview"] = overview(turn=turn, num_cities=1)
         run(policy, game)
-    assert (14, 10) in policy._camp_aside
+    mission = policy._missions.get((14, 10))
+    assert mission.phase is military_module.Phase.ABORT and mission.aborted_for_stall
 
 
 def test_a_unit_marching_on_a_camp_is_not_sent_exploring_when_only_it_is_free_to_move():
@@ -2621,18 +2617,15 @@ def test_an_urgent_redirect_sticks_while_its_force_is_short(caplog):
     assert targets == [(53, 11)] * 5
 
 
-def test_an_urgent_redirect_restarts_the_far_camps_campaign_clock():
+def test_an_urgent_redirect_moves_the_plan_to_the_nearer_camp():
     near = tile(x=53, y=11, improvement="IMPROVEMENT_BARBARIAN_CAMP", owner_id=-1, units=[])
     game, policy, state = two_camp_game(second=near)
     run(policy, game)
     policy._plan_target = (55, 7)
     policy._committed[(55, 7)] = 100
-    policy._camp_turns[(55, 7), False] = (5, 100)
-    policy._camp_turns[(55, 7), True] = (7, 100)
     at_turn(game, 101, [])
     run(policy, game)
     assert state.camp_plan.target == (53, 11)
-    assert (55, 7) not in {k[0] for k in policy._camp_turns}
 
 
 # ----- fallback and approach tiles skip water and mountains (issue 370) -----

@@ -16,9 +16,11 @@ from civ6_ai.camp_mission import (
     choose_discoverer,
     choose_muster,
     commit_verdict,
+    facts_improved,
     margin,
     muster_candidates,
     muster_score,
+    progressed,
     should_reopen,
 )
 from civ6_ai.policies import military as military_module
@@ -219,14 +221,14 @@ def test_a_unit_the_mission_holds_is_not_taken_by_cover_unless_the_city_is_short
     assert not policy._held_off(t, t.mine[0], c)
 
 
-def test_a_unit_that_heals_or_flees_leaves_its_mission_role():
+def test_a_unit_given_a_city_role_leaves_its_mission_role():
     policy, t = _turn_for(MilitaryPolicy(), MilitaryGame([warrior(uid=1, x=12, y=10)]))
     t.roles[1] = "camp"
     policy._log(t, t.mine[0], "heal", "hurt")
     assert t.roles[1] == "heal"
     t.roles[1] = "camp"
     policy._log(t, t.mine[0], "cover", "city short")
-    assert t.roles[1] == "camp"  # Cover does not take it back.
+    assert t.roles[1] == "cover"  # Only reachable for a short city: the unit leaves the force.
 
 
 def test_the_claim_comes_before_other_policies_and_marks_the_marching_units():
@@ -534,3 +536,66 @@ def test_a_mission_that_is_not_the_target_says_so_in_its_line(caplog):
         policy._log_missions(t)
     (line,) = mission_lines(caplog)
     assert "not the target" in line["reason"]
+
+
+# ----- live runs on 710b91c: progress, not elapsed turns -----
+
+
+def test_a_force_making_progress_is_not_called_off_however_long_it_takes():
+    # STD_T1_03 [55,7], T72: need 9, available 9, walk turns 7 -> 2 over 20 turns: the 20-turn
+    # cutoff ended it. With progress each check the stall count stays at 0.
+    assert not abort_verdict(9, 9, 2, 0.0, 0, S, stalled=0, supplying=True).go
+    assert progressed(3.0, 4.0, 1, 1, 3, 3, False, False)  # The mean walk fell by one tile.
+    assert not progressed(4.0, 4.0, 1, 1, 3, 3, False, False)  # Nothing changed.
+    assert progressed(4.0, 4.0, 2, 1, 3, 3, False, False)  # Another unit rallied.
+    assert progressed(4.0, 4.0, 1, 1, 4, 3, False, False)  # Another unit joined.
+    assert progressed(4.0, 4.0, 1, 1, 3, 3, True, False)  # A hit landed on the camp.
+    assert progressed(4.0, None, 0, 0, 3, 0, False, False)  # The first check.
+
+
+def test_a_stalled_force_is_called_off_by_the_numbers_with_its_reason():
+    # [55,7]: margin 0, walk 2, no progress for 8 checks. [62,17]: margin +0.5, walk 5, 11 checks.
+    assert not abort_verdict(9, 9, 2, 0.0, 0, S, stalled=7, supplying=True).go
+    assert abort_verdict(9, 9, 2, 0.0, 0, S, stalled=8, supplying=True).go
+    assert not abort_verdict(12, 8, 5, 0.0, 0, S, stalled=5, supplying=True).go
+    verdict = abort_verdict(12, 8, 5, 0.0, 0, S, stalled=11, supplying=True)
+    assert verdict.go and "11 checks without progress" in verdict.reason
+
+
+def test_a_short_gathering_force_is_not_called_off_for_being_short_only():
+    # Production is building the shortfall: margin -1 would otherwise end every gather at once.
+    assert abort_verdict(3, 9, 2, 0.0, 0, S, stalled=0, supplying=False).go
+    assert not abort_verdict(3, 9, 2, 0.0, 0, S, stalled=0, supplying=True).go
+
+
+def test_a_force_called_off_for_a_stall_reopens_only_when_the_facts_change():
+    assert not facts_improved(9, 9, 0.0, (9.0, 9.0, 0.0))
+    assert facts_improved(12, 9, 0.0, (9.0, 9.0, 0.0))  # More force.
+    assert facts_improved(9, 5, 0.0, (9.0, 9.0, 0.0))  # A smaller need.
+    assert facts_improved(9, 9, 0.0, (9.0, 9.0, 1.0))  # Less risk about.
+
+
+def test_the_policy_counts_checks_without_progress_and_resets_on_progress():
+    units = [warrior(uid=1, x=2, y=10, **STRONG), warrior(uid=2, x=2, y=11, **STRONG)]
+    policy, t = _turn_for(MilitaryPolicy(), MilitaryGame(units))
+    mission = policy._missions.open((14, 10), 5)
+    where = (14, 10)
+    policy._note_progress(t, mission, t.mine, [], where, False)
+    assert mission.stalled == 0  # The first check.
+    policy._note_progress(t, mission, t.mine, [], where, False)
+    policy._note_progress(t, mission, t.mine, [], where, False)
+    assert mission.stalled == 2
+    t.placed = {1: (8, 10), 2: (8, 11)}  # They walked six tiles.
+    policy._note_progress(t, mission, t.mine, [], where, False)
+    assert mission.stalled == 0
+
+
+def test_a_unit_that_cannot_step_says_so_instead_of_step_unsafe():
+    hold = types.SimpleNamespace(risk=0.0, exposure=0.0)
+    why = MilitaryPolicy._why_held
+    assert "no free step" in why([], [], hold)
+    scored = [((1, 1), types.SimpleNamespace(net=-0.5))]
+    assert "no step scores better" in why([(1, 1)], scored, hold)
+    assert why([(1, 1)], scored, types.SimpleNamespace(risk=2.0, exposure=0.5)) == (
+        "step unsafe, holding"
+    )

@@ -57,6 +57,13 @@ class MissionSettings:
     walk_weight: float = 0.4  # Per turn of walking still to do.
     risk_weight: float = 3.0  # Per unit of risk, 0 to 1 (the share of the force exposed).
     loss_weight: float = 1.5  # Per unit lost on this camp (abort score only).
+    # Per check with no progress (the force's mean walk to the camp did not fall, nobody newly
+    # rallied or joined, no hit on the camp). Issue 398, live: a 20-turn cutoff ended [55,7] at
+    # T72 (need 9, available 9, walk turns 7 -> 2 over the 20) and [62,17] at T47 (need 8,
+    # available 12): elapsed turns say nothing about progress. At 0.3 a force with margin +0.5
+    # and 5 walk turns left is called off after about 17 checks without progress, and one with
+    # no margin and 2 walk turns after about 8; any progress starts the count again.
+    stall_weight: float = 0.3
     # Commit when the score is at least this. Below zero, so a force just big enough that is a
     # turn or two from the camp may go in; a thin margin with a long walk or hostiles about may not.
     commit_floor: float = -1.5
@@ -119,27 +126,47 @@ def commit_verdict(
 
 
 def abort_score(
-    have: float, need: float, walk_turns: float, risk: float, losses: int, s: MissionSettings
+    have: float,
+    need: float,
+    walk_turns: float,
+    risk: float,
+    losses: int,
+    s: MissionSettings,
+    stalled: int = 0,
+    supplying: bool = False,
 ) -> float:
-    m = margin(have, need)
+    """`stalled` counts checks without progress. `supplying` is a force still gathering, whose
+    shortfall production is building: a short margin is then no reason to call it off (floor 0),
+    only a stall is."""
+    m = clamp(margin(have, need))
+    if supplying:
+        m = max(m, 0.0)
     return (
-        s.margin_weight * clamp(m)
+        s.margin_weight * m
         - s.walk_weight * walk_turns
         - s.risk_weight * risk
         - s.loss_weight * losses
+        - s.stall_weight * stalled
     )
 
 
 def abort_verdict(
-    have: float, need: float, walk_turns: float, risk: float, losses: int, s: MissionSettings
+    have: float,
+    need: float,
+    walk_turns: float,
+    risk: float,
+    losses: int,
+    s: MissionSettings,
+    stalled: int = 0,
+    supplying: bool = False,
 ) -> Verdict:
-    """Call off the committed force? `go` is True to abort."""
-    score = abort_score(have, need, walk_turns, risk, losses, s)
+    """Call off the force? `go` is True to abort."""
+    score = abort_score(have, need, walk_turns, risk, losses, s, stalled, supplying)
     stop = score < s.abort_floor
     why = (
         f"margin {margin(have, need):+.2f}, walk {walk_turns:g} turns, risk {risk:.2f}, "
-        f"{losses} lost: score {score:.1f} {'is under' if stop else 'holds above'} "
-        f"{s.abort_floor:g}"
+        f"{losses} lost, {stalled} checks without progress: score {score:.1f} "
+        f"{'is under' if stop else 'holds above'} {s.abort_floor:g}"
     )
     return Verdict(stop, score, why)
 
@@ -152,6 +179,37 @@ def should_reopen(
     score = abort_score(have, need, walk_turns, risk, losses, s)
     go = score >= s.abort_floor + s.reopen_gain
     return Verdict(go, score, f"score {score:.1f}, reopens at {s.abort_floor + s.reopen_gain:g}")
+
+
+def progressed(
+    mean_cost: float,
+    last_cost: float | None,
+    rallied: int,
+    last_rallied: int,
+    units: int,
+    last_units: int,
+    hit: bool,
+    phase_changed: bool,
+    eps: float = 0.5,
+) -> bool:
+    """Did the force get anywhere since the last check? Its mean walk to the camp fell, more
+    units are rallied or have joined, a hit landed on the camp, or the phase just changed."""
+    return (
+        last_cost is None
+        or mean_cost < last_cost - eps
+        or rallied > last_rallied
+        or units > last_units
+        or hit
+        or phase_changed
+    )
+
+
+def facts_improved(
+    have: float, need: float, risk: float, then: tuple[float, float, float], eps: float = 0.5
+) -> bool:
+    """After a call-off for lack of progress: more force, a smaller need or less risk about than
+    when it was called off. The same facts reopen nothing."""
+    return have > then[0] + eps or need < then[1] - eps or risk < then[2] - eps
 
 
 # ----- discovery -----
@@ -295,6 +353,14 @@ class CampMission:
     outcome: str = ""  # cleared / by_other / aborted / no_camp, once DONE.
     aborted_at: tuple[float, float] | None = None  # (have, need) when it was called off.
     losses: int = 0
+    # Progress evidence (issue 398): the force's mean walk to the camp at the last check, how many
+    # were rallied and in the force, and the checks since any progress.
+    last_cost: float | None = None
+    last_rallied: int = 0
+    last_units: int = 0
+    stalled: int = 0
+    aborted_for_stall: bool = False
+    aborted_risk: float = 0.0
 
     def move_to(self, phase: Phase, turn: int, reason: str = "") -> bool:
         """Change phase. True if it changed. The reason is kept for the log line."""
@@ -325,6 +391,7 @@ class CampMission:
             "shortfall": self.shortfall,
             "score": None if self.score is None else round(self.score, 2),
             "outcome": self.outcome,
+            "stalled": self.stalled,
             "reason": self.reason,
         }
 

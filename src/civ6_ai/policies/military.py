@@ -68,8 +68,10 @@ from civ6_ai.camp_mission import (
     choose_discoverer,
     choose_muster,
     commit_verdict,
+    facts_improved,
     muster_candidates,
     muster_score,
+    progressed,
     should_reopen,
 )
 from civ6_ai.movement import Movement, MovementSettings, Trip, straight_line
@@ -326,8 +328,6 @@ class MilitarySettings:
     retake_gain: float = 4.0
     retake_min_score: float = 1.0
     retake_min_hp_after: float = 0.2
-    max_camp_turns: int = 8  # Turns spent assaulting one camp before it is set aside.
-    camp_travel_turns: int = 20  # Turns a force may take to reach the muster point first.
     camp_retry_turns: int = 30
     # Issue 279: defenders seen at a camp in this many turns are what the force is sized against
     # (the old slowly decaying peak kept a need of 150 thirty turns after the sighting).
@@ -344,7 +344,6 @@ class MilitarySettings:
     camp_urgent_radius: int = 3
     camp_max_build: int = 4  # Units asked of production for one camp at a time.
     camp_build_turns: int = 4  # Turns counted for each unit still to be built, in the ETA.
-    camp_idle_turns: int = 10  # A camp not advanced on for this long starts its count again.
     city_strike_range: int = 2  # civ6-mcp: "city attack range is 2".
     fallback_tiles: int = (
         2  # Other tiles tried for a unit whose move was refused, before it fortifies.
@@ -1003,10 +1002,6 @@ class MilitaryPolicy:
     _strike_refused: dict[int, int] = field(default_factory=dict, init=False, repr=False)
     _promotion_refused: dict[int, int] = field(default_factory=dict, init=False, repr=False)
     _promotion_asked: dict[int, int] = field(default_factory=dict, init=False, repr=False)
-    # Per camp tile: turns spent advancing on it and the last of them; and when it is set aside to.
-    _camp_turns: dict[tuple[tuple[int, int], bool], tuple[int, int]] = field(
-        default_factory=dict, init=False, repr=False
-    )
     _camp_aside: dict[tuple[int, int], int] = field(default_factory=dict, init=False, repr=False)
     _camps: dict[tuple[int, int], int] = field(default_factory=dict, init=False, repr=False)
     _sightings: dict[tuple[int, int], int] = field(default_factory=dict, init=False, repr=False)
@@ -1841,9 +1836,6 @@ class MilitaryPolicy:
         }
         self._promotion_asked = {k: v for k, v in self._promotion_asked.items() if k in by_id}
         self._camp_aside = {k: v for k, v in self._camp_aside.items() if v >= turn}
-        # A camp not advanced on for a while is gone or forgotten, so its count starts again.
-        stale = turn - self.settings.camp_idle_turns
-        self._camp_turns = {k: v for k, v in self._camp_turns.items() if v[1] >= stale}
 
     def _record(self, decision: MilitaryDecision) -> None:
         self.decisions.append(decision)
@@ -1863,9 +1855,10 @@ class MilitaryPolicy:
             t.turn, unit.unit_id, unit.x, unit.y, action, reason, target, **extra
         )
         if action in CITY_ROLES:
-            # A unit hurt or in danger leaves its mission (issue 398); any other city role waits
-            # for a unit the mission does not hold (`_held_off`).
-            if action in SAFETY_ROLES and t.roles.get(unit.unit_id) in MISSION_ROLES:
+            # A city role ordered for a unit the mission holds is the role it has now (issue 398):
+            # it got there because it was hurt, in danger or its city is short (`_held_off`), so
+            # it leaves the camp force this turn.
+            if t.roles.get(unit.unit_id) in MISSION_ROLES:
                 t.roles[unit.unit_id] = action
             else:
                 t.roles.setdefault(unit.unit_id, action)
@@ -2939,28 +2932,13 @@ class MilitaryPolicy:
                 t.map_use["camp_committed"] = 1
             else:
                 mission.reason = f"waiting to commit: {verdict.reason}"
-        if committed and self._abort_check(t, mission, force, defenders, where):
+        self._note_progress(t, mission, force, rallied, where, committed)
+        if self._abort_check(t, mission, force, defenders, where, committed):
             return
         if self.defence is not None and self.defence.camp_plan is not None:
             self.defence.camp_plan = replace(self.defence.camp_plan, committed=committed)
-        # Two limits. The walk to the muster point has its own, longer one (Run 18: a far camp's
-        # force took eight turns to arrive, which used up the assault's limit before anyone was
-        # there, and 4-9 spare units then sat idle for twenty turns). The assault keeps its own.
-        key = (where, committed)
-        limit = s.max_camp_turns if key[1] else s.camp_travel_turns
-        spent = self._camp_turns.get(key, (0, t.turn))[0] + 1
-        self._camp_turns[key] = (spent, t.turn)
         if not committed:
             self._log_hold(t, "gathering at the rally ring", where, plan, spare, rallied)
-        if spent > limit:
-            self._camp_aside[where] = t.turn + s.camp_retry_turns
-            self._camp_turns.pop((where, True), None)
-            self._camp_turns.pop((where, False), None)
-            self._committed.pop(where, None)
-            self._end_mission(
-                t, mission, f"set aside: {spent - 1} turns spent, over the limit of {limit}"
-            )
-            return
         occupied = any((b.x, b.y) == where for b in t.threats if b.hostile)
         if committed and any(self._adjacent(t, u, where) for u in force):
             mission.move_to(Phase.ASSAULT, t.turn, "a unit stands beside the camp")
@@ -3041,8 +3019,8 @@ class MilitaryPolicy:
                 )  # fmt: skip
 
             # Every option on one scale: advance, fight, hold, fall back (issue 380).
-            advance = [(g, weigh(g)) for g in goals]
-            advance = [(g, sc) for g, sc in advance if sc.net >= s.camp_step_min_net]
+            scored = [(g, weigh(g)) for g in goals]
+            advance = [(g, sc) for g, sc in scored if sc.net >= s.camp_step_min_net]
             advance.sort(key=lambda gs: -gs[1].net)  # The goal that won is the one tried first.
             options: dict[str, float] = {}
             if advance:
@@ -3109,7 +3087,7 @@ class MilitaryPolicy:
                 why = (
                     f"waiting for the force ({len(near)} of {len(force)} near)"
                     if waiting
-                    else "step unsafe, holding"
+                    else self._why_held(goals, scored, hold)
                 )
                 self._log(t, unit, "camp", why, where, odds={**numbers, **asdict(hold)})
                 continue
@@ -3357,8 +3335,6 @@ class MilitaryPolicy:
         elif not threatened and urgent:
             best, reason = urgent[0], "another camp now threatens a city"
             self._committed.pop(old, None)  # The force is called off the far camp.
-            self._camp_turns.pop((old, True), None)  # Its campaign clock starts over.
-            self._camp_turns.pop((old, False), None)
             for uid in [u for u, m in self._mission.items() if m[0] == old]:
                 del self._mission[uid]
         else:
@@ -3979,6 +3955,40 @@ class MilitaryPolicy:
         walk = max((self._walk_turns(u, where, self._pos(t, u)) for u in rallied), default=0)
         return commit_verdict(have, need, walk, self._force_risk(t, rallied, where), s.mission)
 
+    @staticmethod
+    def _why_held(goals: list, scored: list, hold: "StepScore") -> str:
+        """Why a unit that is not waiting for the force held: no step on its route (every tile
+        taken or refused), every step scoring under the minimum, or no risk either way."""
+        if not goals:
+            return "no free step on the route, holding"
+        if scored and hold.risk <= 0 and hold.exposure <= 0:
+            best = max(sc.net for _, sc in scored)
+            return f"no step scores better than holding (best {best:.1f}), holding"
+        return "step unsafe, holding"
+
+    def _note_progress(
+        self,
+        t: _Turn,
+        mission: CampMission,
+        force: list[Unit],
+        rallied: list[Unit],
+        where: tuple[int, int],
+        committed: bool,
+    ) -> None:
+        """Count the checks without progress (issue 398, replacing elapsed-turn cutoffs): the
+        force's mean walk to the camp fell, more units rallied or joined, a hit landed on the
+        camp's defenders, or the phase just changed."""
+        costs = [self._walk_cost(self._pos(t, u), where) for u in force]
+        costs = [c for c in costs if c != float("inf")]
+        mean = sum(costs) / len(costs) if costs else 0.0
+        moved = progressed(
+            mean, mission.last_cost, len(rallied), mission.last_rallied, len(force),
+            mission.last_units, committed and self._camp_hit.get(where) == t.turn,
+            mission.since == t.turn,
+        )  # fmt: skip
+        mission.stalled = 0 if moved else mission.stalled + 1
+        mission.last_cost, mission.last_rallied, mission.last_units = mean, len(rallied), len(force)
+
     def _abort_check(
         self,
         t: _Turn,
@@ -3986,9 +3996,11 @@ class MilitaryPolicy:
         force: list[Unit],
         defenders: list[Threat],
         where: tuple[int, int],
+        committed: bool = True,
     ) -> bool:
-        """Call the committed force off when its margin, less the walk, the risk and the units
-        lost, falls under the floor. True if it was called off."""
+        """Call the force off when its margin, less the walk, the risk, the units lost and the
+        checks without progress, falls under the floor. A gathering force whose shortfall is being
+        supplied is not called off for being short, only for a stall. True if called off."""
         s = self.settings
         need = camp_attacks_needed(force, defenders, s.weights)
         have = float(len(force) * s.weights.camp_strike_turns)
@@ -3998,13 +4010,16 @@ class MilitaryPolicy:
             else max((self._walk_turns(u, where, self._pos(t, u)) for u in force), default=0)
         )
         losses = len(self._losses.get(where, []))
+        risk = self._force_risk(t, force, where)
         verdict = abort_verdict(
-            have, need, walk, self._force_risk(t, force, where), losses, s.mission
+            have, need, walk, risk, losses, s.mission, mission.stalled, not committed
         )
         mission.score = verdict.score
         if not verdict.go:
             return False
         mission.available, mission.needed = have, need
+        mission.aborted_for_stall = mission.stalled > 0
+        mission.aborted_risk = risk
         self._committed.pop(where, None)
         self._end_mission(t, mission, f"called off: {verdict.reason}")
         return True
@@ -4013,20 +4028,27 @@ class MilitaryPolicy:
         self, t: _Turn, mission: CampMission, force: list[Unit], defenders: list[Threat]
     ) -> bool:
         """A called-off mission reopens when its facts have improved by enough: more force, a
-        smaller need, fewer losses, less risk about. No timer."""
+        smaller need, fewer losses, less risk about. No timer. One called off for lack of
+        progress needs the force, the need or the risk to differ from then."""
         s = self.settings
         need = camp_attacks_needed(force, defenders, s.weights)
         have = float(len(force) * s.weights.camp_strike_turns)
         walk = max((self._walk_turns(u, mission.camp, self._pos(t, u)) for u in force), default=0)
         losses = len(self._losses.get(mission.camp, []))
-        verdict = should_reopen(
-            have, need, walk, self._force_risk(t, force, mission.camp), losses, s.mission
-        )
+        risk = self._force_risk(t, force, mission.camp)
+        verdict = should_reopen(have, need, walk, risk, losses, s.mission)
         mission.score = verdict.score
-        if verdict.go:
+        go = verdict.go
+        if go and mission.aborted_for_stall and mission.aborted_at is not None:
+            then = (mission.aborted_at[0], mission.aborted_at[1], mission.aborted_risk)
+            go = facts_improved(have, need, risk, then)
+        if go:
             mission.outcome = ""
+            mission.stalled = 0
+            mission.last_cost = None
+            mission.aborted_for_stall = False
             mission.move_to(Phase.GATHER, t.turn, f"reopened: {verdict.reason}")
-        return verdict.go
+        return go
 
     def _pick_muster(
         self, t: _Turn, mission: CampMission, force: list[Unit], where: tuple[int, int]

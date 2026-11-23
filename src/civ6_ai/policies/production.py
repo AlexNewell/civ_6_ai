@@ -122,6 +122,19 @@ class ProductionWeights:
     # Issue 275: while a camp's force is short, at most this share of the cities (rounded down, at
     # least one) build units for it, so districts and settlers keep running in the rest.
     camp_share: float = 0.5
+    # Issue 416, slice 2: a camp unit is worth what the camp plan's readiness makes it,
+    # readiness^power, where readiness = min(1, (available + this unit and the camp units already
+    # building, `camp_unit_attacks` each) / needed). 0 turns it off (the old, flat worth).
+    # Live, 60 and 90 turns: STD_T1_01 built four camp units on T40 to T58 with the plan at need 19,
+    # have 3 and `units_available` never rose (readiness 0.32); readiness 0.9 on STD_T1_04 T26
+    # (need 10, have 6) is a build that did its job. Power 2 puts 0.32 at 0.1 and 0.9 at 0.8.
+    camp_readiness_power: float = 2.0
+    # Attacks one more unit adds to the plan's `available`: `MilitaryWeights.camp_strike_turns`
+    # (3), the scale `CampPlan.available` and `needed` are in.
+    camp_unit_attacks: float = 3.0
+    # Gold buys a camp unit only if its matchup value times that scale is at least this (not used
+    # with power 0). A perfect match (1.5) at readiness 0.58 clears it; at readiness 0.1, not.
+    camp_buy_min_worth: float = 0.5
     # Turns a one-city empire holds back builders to put the first settler first. 0 turns it off.
     builder_hold_turns: int = _FIRST_SETTLER_TURNS
     # Issue 299: score of a Monument in a city with no culture building and no threat, in place of
@@ -227,6 +240,10 @@ class ProductionContext:
     camp_defender: float = 0.0
     camp_defender_ranged: float = 0.0
     camp_building: int = 0
+    # The plan's attacks needed and available (`CampPlan`), for the readiness of a camp unit; a
+    # `needed` of 0 means no plan or an unknown need, and the old worth stands (issue 416).
+    camp_needed: float = 0.0
+    camp_available: float = 0.0
     # Issue 279: the strongest known hostile land unit near us (a camp's defender or a roaming
     # barbarian): melee and ranged strength. The army floor picks units by their match against it.
     hostile: float = 0.0
@@ -363,6 +380,8 @@ def build_context(
             camp_units=plan.units_wanted,
             camp_wants=plan.wants,
             camp_target=plan.target,
+            camp_needed=float(getattr(plan, "needed", 0.0) or 0.0),
+            camp_available=float(getattr(plan, "available", 0.0) or 0.0),
             camp_defender=getattr(plan, "defender", 0.0),
             camp_defender_ranged=getattr(plan, "defender_ranged", 0.0),
         )
@@ -824,6 +843,30 @@ def camp_unit_value(
     return min(odds, _CAMP_ODDS_CAP) / _CAMP_ODDS_CAP * min(1.5, _CAMP_COST_BASE / max(cost, 1.0))
 
 
+def camp_readiness(ctx: ProductionContext, w: ProductionWeights) -> float | None:
+    """How close the camp plan is to acting, 0 to 1, counting one more unit and the camp units
+    already building; None when the need is 0 or unknown."""
+    if ctx.camp_needed <= 0:
+        return None
+    have = ctx.camp_available + w.camp_unit_attacks * (1 + ctx.camp_building)
+    return min(1.0, have / ctx.camp_needed)
+
+
+def camp_scale(city: City, ctx: ProductionContext, w: ProductionWeights) -> float:
+    """The factor on a camp unit's worth (issue 416): readiness to the power. 1.0 when it is off,
+    when the camp blocks expansion, when the need is unknown, and in a city under threat or with
+    no garrison, whose scores come from other terms."""
+    if (
+        w.camp_readiness_power <= 0
+        or ctx.camp_blocks
+        or under_threat(city, ctx)
+        or city.garrison_unit is None
+    ):
+        return 1.0
+    ready = camp_readiness(ctx, w)
+    return 1.0 if ready is None else ready**w.camp_readiness_power
+
+
 def _camp_score(
     city: City,
     item: str,
@@ -862,12 +905,13 @@ def _camp_score(
         lift = 2.0
     elif ctx.camp_wants == "ranged":
         lift = 2.0 if ranged else -1.0
+    scale = camp_scale(city, ctx, w)
     worth = camp_unit_value(item, unit_class, float(COMBAT_UNITS[item][3]), ctx)
     if worth is not None:
         if worth <= 0:
             return 0.0  # It loses to the defender one-on-one, and the force does not need it.
-        return (_CAMP_UNIT_SCORE + lift + _CAMP_MATCHUP_SCORE * worth) * w.military
-    return (_CAMP_UNIT_SCORE + lift + strength / 10.0) * w.military
+        return (_CAMP_UNIT_SCORE + lift + _CAMP_MATCHUP_SCORE * worth) * w.military * scale
+    return (_CAMP_UNIT_SCORE + lift + strength / 10.0) * w.military * scale
 
 
 def wants_early_monument(city: City, ctx: ProductionContext, w: ProductionWeights) -> bool:
@@ -1360,9 +1404,12 @@ def _camp_demand_note(
         if best is None or value > best[0]:
             best = (value, o.item)
     shown = "none offered" if best is None else f"{best[1]} {best[0]:.1f}"
+    ready = camp_readiness(ctx, w)
     return (
         f" | camp demand: {shown}, {ctx.camp_units} wanted, {ctx.camp_building} building, "
-        f"blocks expansion={'yes' if ctx.camp_blocks else 'no'}"
+        f"blocks expansion={'yes' if ctx.camp_blocks else 'no'}, "
+        f"readiness={'unknown' if ready is None else f'{ready:.2f}'} "
+        f"scale={camp_scale(city, ctx, w):.2f}"
     )
 
 

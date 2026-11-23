@@ -70,6 +70,8 @@ from civ6_ai.policies.production import (
     ProductionContext,
     ProductionWeights,
     build_context,
+    camp_readiness,
+    camp_scale,
     camp_unit_value,
     canonical,
     defence_strength,
@@ -619,7 +621,11 @@ class GoldPolicy:
                 continue  # Only a melee unit takes the tile the force is short of.
             if value is None:
                 value = defence_strength(option.item) / 100.0  # No defender seen: by strength.
-            if value > 0:
+            value *= camp_scale(city, context, self.weights)  # Issue 416: by the plan's readiness.
+            floor = self.weights.camp_buy_min_worth if self.weights.camp_readiness_power > 0 else 0
+            if camp_readiness(context, self.weights) is None:
+                floor = 0  # Need unknown: today's worth.
+            if value > 0 and value >= floor:
                 found.append((value, option.gold_cost, city, option))
         if not found:
             why.append(

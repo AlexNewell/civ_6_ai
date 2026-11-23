@@ -31,10 +31,14 @@ def write_run(tmp_path: Path, name, rows, events=(), bot=()):
     return log
 
 
-def offense(turn, near, captured=0, recaptures=0):
-    payload = json.dumps({"turn": turn, "barb_near": near, "civilians_captured": captured,
-                          "recaptures": recaptures})  # fmt: skip
-    return f"2026-11-22 10:00:00,000 civ6_ai.policies.military INFO military_offense {payload}"
+def bot_line(logger, tag, payload):
+    return f"2026-11-22 10:00:00,000 civ6_ai.policies.{logger} INFO {tag} {json.dumps(payload)}"
+
+
+def offense(turn, near, captured=0, recaptures=0, units=3):
+    payload = {"turn": turn, "barb_near": near, "civilians_captured": captured,
+               "recaptures": recaptures, "combat_units": units}  # fmt: skip
+    return bot_line("military", "military_offense", payload)
 
 
 # Weighted yield of one default city: science 1.25 + culture 1 + faith 0.5 + production 2 = 4.75.
@@ -49,27 +53,60 @@ def test_yield_turns_per_city_and_empire(tmp_path):
     rows = [
         turn_row(1, [city(1, "A")]),
         turn_row(2, [city(1, "A"), city(2, "B")]),
-        turn_row(3, [city(1, "A"), city(2, "B")], detail="Your Warrior was killed by X"),
+        turn_row(3, [city(1, "A"), city(2, "B")]),
+        turn_row(4, [city(1, "A")]),  # City B is lost.
     ]
     log = write_run(
         tmp_path,
         "r",
         rows,
-        events=[{"kind": "city_lost", "turn": 3}, {"kind": "city_lost", "turn": 99}],
-        bot=[offense(1, 0), offense(2, 2, captured=1), offense(3, 1, captured=2, recaptures=1)],
+        bot=[
+            offense(1, 0, units=4),
+            offense(2, 2, captured=1, units=4),
+            offense(3, 1, captured=2, recaptures=1, units=2),  # Two combat units gone.
+            offense(4, 0, units=3),  # A rise is not a loss.
+            offense(5, 0, units=1),  # Past nothing: the window is T1-T60, so this counts.
+            bot_line("military", "military_camp_gone", {"turn": 2, "camp": [1, 1], "by": "us"}),
+            bot_line("military", "military_camp_gone", {"turn": 3, "camp": [2, 2], "by": "other"}),
+            bot_line("military", "military_camp_gone", {"turn": 70, "camp": [3, 3], "by": "us"}),
+            bot_line("builder", "builder_decision", {"turn": 1}),
+            bot_line("builder", "builder_lost", {"turn": 3, "unit_id": 9}),
+            bot_line("builder", "builder_lost", {"turn": 4, "unit_id": 10}),
+        ],
     )
     report = yr.analyse("r", log)
-    assert report.empire == pytest.approx(5 * ONE)
-    assert report.cities[1]["yield_turns"] == pytest.approx(3 * ONE)
+    assert report.empire == pytest.approx(6 * ONE)
+    assert report.cities[1]["yield_turns"] == pytest.approx(4 * ONE)
     assert report.cities[2]["founded"] == 2
-    assert report.city_turns == 5
-    assert report.per_city == pytest.approx(5 * ONE / (5 / 3))
+    assert report.city_turns == 6
+    assert report.per_city == pytest.approx(6 * ONE / (6 / 4))
     assert report.founding_turns == [1, 2]
     assert report.barb_near_turns == 2
-    assert (report.units_lost, report.cities_lost) == (1, 1)
-    assert (report.civilians_captured, report.recaptures) == (2, 1)
-    text = "\n".join(yr.format_single(report))
-    assert "ProductionWeights" in text and "A: T1" in text
+    assert report.cities_lost == 1
+    assert report.units_lost == 4  # 4 -> 2, then 3 -> 1.
+    assert report.builders_lost == 2
+    assert report.camps_cleared == 1
+    # The counters reset after each line, so the total is their sum.
+    assert (report.civilians_captured, report.recaptures) == (3, 1)
+    text = yr.format_single(report)
+    text = "\n".join(text)
+    assert "ProductionWeights" in text and "A: T1" in text and "lower bound" in text
+
+
+def test_sources_that_are_absent_are_not_measured(tmp_path):
+    rows = [turn_row(1, [city(1, "A")])]
+    log = write_run(tmp_path, "r", rows)  # No bot log at all.
+    report = yr.analyse("r", log)
+    assert report.cities_lost == 0  # Measured from the city count itself.
+    for name in ("units_lost", "builders_lost", "camps_cleared", "barb_near_turns"):
+        assert getattr(report, name) is None
+    assert "not measured" in "\n".join(yr.format_single(report))
+    # A bot log that has the policies' lines but no loss lines is a real zero.
+    log = write_run(
+        tmp_path, "z", rows, bot=[offense(1, 0), bot_line("builder", "builder_decision", {})]
+    )
+    report = yr.analyse("z", log)
+    assert (report.builders_lost, report.camps_cleared, report.units_lost) == (0, 0, 0)
 
 
 def test_checkpoints_stop_at_the_last_turn_reached(tmp_path):
@@ -85,9 +122,9 @@ def test_old_logs_without_yields_or_side_files_report_none(tmp_path):
     rows = [{"turn": t, "cities": 1 + t // 3} for t in range(1, 7)]
     report = yr.analyse("old", write_run(tmp_path, "old", rows))
     assert report.empire is None and report.per_city is None
-    assert report.barb_near_turns is None and report.cities_lost is None
+    assert report.barb_near_turns is None and report.cities_lost == 0
     assert report.founding_turns == [1, 3, 6]
-    assert "n/a" in "\n".join(yr.format_single(report))
+    assert "not measured" in "\n".join(yr.format_single(report))
 
 
 def test_turns_past_the_window_are_ignored(tmp_path):

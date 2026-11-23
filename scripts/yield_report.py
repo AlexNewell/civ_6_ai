@@ -65,7 +65,9 @@ class RunReport:
     checkpoints: dict[int, dict[str, float]] = field(default_factory=dict)
     founding_turns: list[int] = field(default_factory=list)
     barb_near_turns: int | None = None
-    units_lost: int = 0
+    units_lost: int | None = None  # Falls in combat units between lines: a lower bound.
+    builders_lost: int | None = None
+    camps_cleared: int | None = None
     cities_lost: int | None = None
     civilians_captured: int | None = None
     recaptures: int | None = None
@@ -92,19 +94,29 @@ def _jsonl(path: Path) -> list[dict]:
     return rows
 
 
-def _bot_lines(path: Path, tag: str) -> list[dict]:
-    out = []
+def _bot_lines(path: Path) -> dict[str, list[dict]]:
+    """The JSON payloads of every `<tag> {...}` bot-log line, by tag."""
+    out: dict[str, list[dict]] = {}
     if not path.exists():
         return out
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         m = BOT_LINE.match(line)
-        if not m or not m["msg"].startswith(tag + " "):
+        if not m:
             continue
+        tag, _, payload = m["msg"].partition(" ")
         try:
-            out.append(json.loads(m["msg"][len(tag) + 1 :]))
+            out.setdefault(tag, []).append(json.loads(payload))
         except json.JSONDecodeError:
             continue
     return out
+
+
+def _falls(values: list) -> int | None:
+    """The sum of the drops between consecutive counts, None when there are no counts."""
+    counts = [v for v in values if isinstance(v, int)]
+    if not counts:
+        return None
+    return sum(max(0, before - after) for before, after in zip(counts, counts[1:], strict=False))
 
 
 def analyse(label: str, turn_log: Path, last_turn: int = LAST_TURN) -> RunReport:
@@ -149,27 +161,30 @@ def analyse(label: str, turn_log: Path, last_turn: int = LAST_TURN) -> RunReport
         at = [t for t in by_turn if t <= mark and isinstance(by_turn[t].get("yields"), dict)]
         if at:
             report.checkpoints[mark] = {"turn": max(at), **by_turn[max(at)]["yields"]}
-    report.units_lost = sum(
-        1
-        for row in by_turn.values()
-        for line in (row.get("detail") or "").splitlines()
-        if KILLED.search(line)
-    )
-    events = turn_log.with_name(f"{turn_log.stem}_events.jsonl")
-    if events.exists():
-        report.cities_lost = sum(
-            1
-            for e in _jsonl(events)
-            if e.get("kind") == "city_lost" and (e.get("turn") or 0) <= last_turn
-        )
+    report.cities_lost = _falls([by_turn[t].get("cities") for t in sorted(by_turn)])
     bot = turn_log.with_name(f"{turn_log.stem}_bot.log")
-    offense = [d for d in _bot_lines(bot, "military_offense") if d.get("turn", 0) <= last_turn]
+    lines = _bot_lines(bot)
+    offense = [d for d in lines.get("military_offense", []) if d.get("turn", 0) <= last_turn]
     if offense:
+        offense.sort(key=lambda d: d["turn"])
         report.barb_near_turns = len({d["turn"] for d in offense if (d.get("barb_near") or 0) > 0})
-        # Cumulative counters: the newest line's figure is the total so far.
-        last = max(offense, key=lambda d: d["turn"])
-        report.civilians_captured = last.get("civilians_captured")
-        report.recaptures = last.get("recaptures")
+        # The counters reset after each line, so a total is the sum of the lines.
+        report.civilians_captured = sum(d.get("civilians_captured") or 0 for d in offense)
+        report.recaptures = sum(d.get("recaptures") or 0 for d in offense)
+        # A lower bound: a unit trained or bought the same turn hides a loss, and a turn with no
+        # combat unit writes no line.
+        report.units_lost = _falls([d.get("combat_units") for d in offense])
+    # A zero is only believed when the policy that writes the line logged something that run.
+    if "military_offense" in lines:
+        report.camps_cleared = sum(
+            1
+            for d in lines.get("military_camp_gone", [])
+            if d.get("by") == "us" and (d.get("turn") or 0) <= last_turn
+        )
+    if "builder_decision" in lines or "builder_lost" in lines:
+        report.builders_lost = sum(
+            1 for d in lines.get("builder_lost", []) if (d.get("turn") or 0) <= last_turn
+        )
     return report
 
 
@@ -180,7 +195,7 @@ def pct_change(base: float | None, new: float | None) -> float | None:
 
 
 def _num(value: float | int | None, spec: str = ".0f") -> str:
-    return "n/a" if value is None else format(value, spec)
+    return "not measured" if value is None else format(value, spec)
 
 
 def _pct(value: float | None) -> str:
@@ -212,7 +227,10 @@ def _confounders(report: RunReport) -> list[str]:
         "confounders:",
         f"  city founding turns: {report.founding_turns or 'none'}",
         f"  barbarian-near turns: {_num(report.barb_near_turns)}",
-        f"  units lost: {report.units_lost}, cities lost: {_num(report.cities_lost)}",
+        f"  combat units lost (lower bound): {_num(report.units_lost, spec='.0f')}, "
+        f"builders lost: {_num(report.builders_lost)}",
+        f"  cities lost (falls in the city count): {_num(report.cities_lost)}, "
+        f"camps cleared by us: {_num(report.camps_cleared)}",
         f"  civilians captured: {_num(report.civilians_captured)}, "
         f"recaptures: {_num(report.recaptures)}",
     ]
@@ -244,8 +262,10 @@ def format_pairs(reports: list[RunReport], last_turn: int = LAST_TURN) -> list[s
                 if x is not None or y is not None:
                     row(f"T{mark} empire {kind}", x, y)
         row("barbarian-near turns", a.barb_near_turns, b.barb_near_turns)
-        row("units lost", a.units_lost, b.units_lost)
-        row("cities lost", a.cities_lost, b.cities_lost)
+        row("combat units lost (lower bound)", a.units_lost, b.units_lost)
+        row("builders lost", a.builders_lost, b.builders_lost)
+        row("cities lost (count falls)", a.cities_lost, b.cities_lost)
+        row("camps cleared by us", a.camps_cleared, b.camps_cleared)
         row("civilians captured", a.civilians_captured, b.civilians_captured)
         row("recaptures", a.recaptures, b.recaptures)
         lines.append(f"{'city founding turns':34}{a.founding_turns!s:>14} {b.founding_turns!s}")

@@ -175,3 +175,28 @@ def test_main_prints_and_rejects_an_odd_count(tmp_path, capsys):
 def test_specs_take_labels():
     assert yr.parse_specs(["x=runs/a"]) == [("x", Path("runs/a.jsonl"))]
     assert yr.parse_specs(["runs/b_turns"])[0][0] == "b"
+
+
+def test_founding_turns_come_from_the_settle_log_when_it_exists(tmp_path):
+    # The city count rises on T2 and T4, but one rise was a capture: only T2 and T3 were foundings.
+    rows = [turn_row(1, [city(1, "A")]), turn_row(2, [city(1, "A"), city(2, "B")]),
+            turn_row(3, [city(1, "A"), city(2, "B")]),
+            turn_row(4, [city(1, "A"), city(2, "B"), city(3, "C")])]  # fmt: skip
+    log = write_run(tmp_path, "r", rows)
+    settle = [
+        {"action": "found", "turn": 1, "result": "FOUNDED|1,1"},
+        {"action": "found", "turn": 2, "result": "FOUNDED|2,2"},
+        {"action": "found", "turn": 3, "result": "refused"},
+        {"action": "wait", "turn": 3},
+        {"action": "found", "turn": 70, "result": "FOUNDED|3,3"},
+    ]
+    lines = [json.dumps(d) for d in settle]
+    (tmp_path / "r_settle.jsonl").write_text(chr(10).join(lines), encoding="utf-8")
+    report = yr.analyse("r", log)
+    assert report.founding_turns == [1, 2]
+    assert report.founding_source == "settle log"
+    assert "(settle log)" in chr(10).join(yr.format_single(report))
+    # Without the settle log it falls back to the count and says so.
+    bare = yr.analyse("b", write_run(tmp_path, "b", rows))
+    assert bare.founding_turns == [1, 2, 4]
+    assert bare.founding_source == "city-count rises"

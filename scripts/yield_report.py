@@ -64,6 +64,7 @@ class RunReport:
     cities: dict[int, dict] = field(default_factory=dict)  # id -> name, founded, yield_turns
     checkpoints: dict[int, dict[str, float]] = field(default_factory=dict)
     founding_turns: list[int] = field(default_factory=list)
+    founding_source: str = "none"  # "settle log", or "city-count rises" when it is absent.
     barb_near_turns: int | None = None
     units_lost: int | None = None  # Falls in combat units between lines: a lower bound.
     builders_lost: int | None = None
@@ -161,6 +162,20 @@ def analyse(label: str, turn_log: Path, last_turn: int = LAST_TURN) -> RunReport
         at = [t for t in by_turn if t <= mark and isinstance(by_turn[t].get("yields"), dict)]
         if at:
             report.checkpoints[mark] = {"turn": max(at), **by_turn[max(at)]["yields"]}
+    rises = report.founding_turns  # From the city count: also counts captured or gifted cities.
+    settle = turn_log.with_name(f"{turn_log.stem}_settle.jsonl")
+    if settle.exists():
+        report.founding_source = "settle log"
+        report.founding_turns = sorted(
+            d["turn"]
+            for d in _jsonl(settle)
+            if d.get("action") == "found"
+            and isinstance(d.get("turn"), int)
+            and d["turn"] <= last_turn
+            and str(d.get("result", "FOUNDED")).startswith("FOUNDED")
+        )
+    elif rises:
+        report.founding_source = "city-count rises"
     report.cities_lost = _falls([by_turn[t].get("cities") for t in sorted(by_turn)])
     bot = turn_log.with_name(f"{turn_log.stem}_bot.log")
     lines = _bot_lines(bot)
@@ -225,7 +240,7 @@ def format_single(report: RunReport, last_turn: int = LAST_TURN) -> list[str]:
 def _confounders(report: RunReport) -> list[str]:
     return [
         "confounders:",
-        f"  city founding turns: {report.founding_turns or 'none'}",
+        f"  city founding turns ({report.founding_source}): {report.founding_turns or 'none'}",
         f"  barbarian-near turns: {_num(report.barb_near_turns)}",
         f"  combat units lost (lower bound): {_num(report.units_lost, spec='.0f')}, "
         f"builders lost: {_num(report.builders_lost)}",
@@ -268,7 +283,10 @@ def format_pairs(reports: list[RunReport], last_turn: int = LAST_TURN) -> list[s
         row("camps cleared by us", a.camps_cleared, b.camps_cleared)
         row("civilians captured", a.civilians_captured, b.civilians_captured)
         row("recaptures", a.recaptures, b.recaptures)
-        lines.append(f"{'city founding turns':34}{a.founding_turns!s:>14} {b.founding_turns!s}")
+        lines.append(
+            f"city founding turns: {a.label} {a.founding_turns} ({a.founding_source}); "
+            f"{b.label} {b.founding_turns} ({b.founding_source})"
+        )
         if per_city is not None and total is not None and (per_city > 0) != (total > 0):
             lines.append(
                 f"FLAG: per-city ({_pct(per_city)}) and empire ({_pct(total)}) disagree in sign; "
